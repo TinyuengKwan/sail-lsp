@@ -1431,7 +1431,13 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
 
-        Ok(hover_for_symbol(state.all_files(), uri, &symbol_key))
+        Ok(hover_for_symbol(
+            state.all_files(),
+            uri,
+            file,
+            position,
+            &symbol_key,
+        ))
     }
 
     async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {

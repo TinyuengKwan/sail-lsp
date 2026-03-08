@@ -67,12 +67,6 @@ pub(crate) fn extract_symbol_decls(file: &File) -> Vec<SymbolDecl> {
         .collect()
 }
 
-pub(crate) fn find_symbol_decl(file: &File, name: &str) -> Option<SymbolDecl> {
-    extract_symbol_decls(file)
-        .into_iter()
-        .find(|decl| decl.name == name)
-}
-
 pub(crate) fn location_from_offset(uri: &Url, file: &File, offset: usize) -> Location {
     let position = file.source.position_at(offset);
     Location::new(uri.clone(), Range::new(position, position))
