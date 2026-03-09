@@ -1,4 +1,3 @@
-
 use super::*;
 use tower_lsp::lsp_types::Diagnostic;
 

@@ -539,31 +539,18 @@ let y = 2
 "#;
         let tokens = crate::lexer().parse(source).into_result().unwrap();
         let parsed = parse_tokens(&tokens);
-        assert!(parsed
-            .decls
-            .iter()
-            .any(|d| d.name == "foo"
-                && d.kind == DeclKind::Function
-                && d.role == DeclRole::Definition
-                && d.scope == Scope::TopLevel));
-        assert!(
-            parsed
-                .decls
-                .iter()
-                .any(|d| d.name == "x"
-                    && d.kind == DeclKind::Let
-                    && d.role == DeclRole::Definition
-                    && d.scope == Scope::Local)
-        );
-        assert!(
-            parsed
-                .decls
-                .iter()
-                .any(|d| d.name == "y"
-                    && d.kind == DeclKind::Let
-                    && d.role == DeclRole::Definition
-                    && d.scope == Scope::TopLevel)
-        );
+        assert!(parsed.decls.iter().any(|d| d.name == "foo"
+            && d.kind == DeclKind::Function
+            && d.role == DeclRole::Definition
+            && d.scope == Scope::TopLevel));
+        assert!(parsed.decls.iter().any(|d| d.name == "x"
+            && d.kind == DeclKind::Let
+            && d.role == DeclRole::Definition
+            && d.scope == Scope::Local));
+        assert!(parsed.decls.iter().any(|d| d.name == "y"
+            && d.kind == DeclKind::Let
+            && d.role == DeclRole::Definition
+            && d.scope == Scope::TopLevel));
     }
 
     #[test]
@@ -601,24 +588,15 @@ newtype register_index = Mk_index : bits(5)
 "#;
         let tokens = crate::lexer().parse(source).into_result().unwrap();
         let parsed = parse_tokens(&tokens);
-        assert!(parsed
-            .decls
-            .iter()
-            .any(|d| d.name == "my_u"
-                && d.kind == DeclKind::Union
-                && d.role == DeclRole::Declaration));
-        assert!(parsed
-            .decls
-            .iter()
-            .any(|d| d.name == "my_e"
-                && d.kind == DeclKind::Enum
-                && d.role == DeclRole::Declaration));
-        assert!(parsed
-            .decls
-            .iter()
-            .any(|d| d.name == "register_index"
-                && d.kind == DeclKind::Newtype
-                && d.role == DeclRole::Definition));
+        assert!(parsed.decls.iter().any(|d| d.name == "my_u"
+            && d.kind == DeclKind::Union
+            && d.role == DeclRole::Declaration));
+        assert!(parsed.decls.iter().any(|d| d.name == "my_e"
+            && d.kind == DeclKind::Enum
+            && d.role == DeclRole::Declaration));
+        assert!(parsed.decls.iter().any(|d| d.name == "register_index"
+            && d.kind == DeclKind::Newtype
+            && d.role == DeclRole::Definition));
     }
 
     #[test]

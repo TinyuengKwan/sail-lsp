@@ -20,7 +20,9 @@ pub fn add_definitions(
             continue;
         }
 
-        definitions.entry(decl.name.clone()).or_insert(decl.span.start);
+        definitions
+            .entry(decl.name.clone())
+            .or_insert(decl.span.start);
         if decl.kind == DeclKind::Bitfield {
             definitions
                 .entry(format!("Mk_{}", decl.name))
