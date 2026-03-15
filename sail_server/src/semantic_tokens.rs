@@ -1,4 +1,4 @@
-use crate::file::File;
+use crate::state::File;
 use tower_lsp::lsp_types::{
     Range, SemanticToken, SemanticTokenType, SemanticTokens, SemanticTokensDelta,
     SemanticTokensEdit, SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
@@ -292,7 +292,7 @@ pub(crate) fn compute_semantic_tokens_delta(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::file::File;
+    use crate::state::File;
 
     #[test]
     fn emits_non_empty_tokens() {

@@ -32,6 +32,11 @@ pub enum Token {
 
     // Operators and control characters.
     Dollar,
+    Directive {
+        name: String,
+        payload: Option<String>,
+    },
+    StructuredDirectiveStart(String),
     Hash,
     LeftBracket,        // (
     RightBracket,       // )
@@ -43,6 +48,7 @@ pub enum Token {
     LeftArrow,          // <-
     FatRightArrow,      // =>
     DoubleArrow,        // <->
+    ColonEqual,         // :=
     Comma,
     Colon,
     Semicolon,
@@ -84,6 +90,7 @@ pub enum Token {
     KwBy,
     KwCast,
     KwCatch,
+    KwCase,
     KwClause,
     KwConfiguration,
     KwConstant,
@@ -135,6 +142,7 @@ pub enum Token {
     KwScattered,
     KwSizeof,
     KwStruct,
+    KwSwitch,
     KwTerminationMeasure,
     KwThen,
     KwThrow,
@@ -173,6 +181,14 @@ impl fmt::Display for Token {
 
             // Operators and other control characters.
             Token::Dollar => write!(f, "$"),
+            Token::Directive { name, payload } => {
+                write!(f, "${name}")?;
+                if let Some(payload) = payload {
+                    write!(f, "{payload}")?;
+                }
+                Ok(())
+            }
+            Token::StructuredDirectiveStart(name) => write!(f, "${name}{{"),
             Token::Hash => write!(f, "#"),
             Token::LeftBracket => write!(f, "("),
             Token::RightBracket => write!(f, ")"),
@@ -184,6 +200,7 @@ impl fmt::Display for Token {
             Token::LeftArrow => write!(f, "<-"),
             Token::FatRightArrow => write!(f, "=>"),
             Token::DoubleArrow => write!(f, "<->"),
+            Token::ColonEqual => write!(f, ":="),
             Token::Comma => write!(f, ","),
             Token::Colon => write!(f, ":"),
             Token::Semicolon => write!(f, ";"),
@@ -225,6 +242,7 @@ impl fmt::Display for Token {
             Token::KwBy => write!(f, "by"),
             Token::KwCast => write!(f, "cast"),
             Token::KwCatch => write!(f, "catch"),
+            Token::KwCase => write!(f, "case"),
             Token::KwClause => write!(f, "clause"),
             Token::KwConfiguration => write!(f, "configuration"),
             Token::KwConstant => write!(f, "constant"),
@@ -276,6 +294,7 @@ impl fmt::Display for Token {
             Token::KwScattered => write!(f, "scattered"),
             Token::KwSizeof => write!(f, "sizeof"),
             Token::KwStruct => write!(f, "struct"),
+            Token::KwSwitch => write!(f, "switch"),
             Token::KwTerminationMeasure => write!(f, "termination_measure"),
             Token::KwThen => write!(f, "then"),
             Token::KwThrow => write!(f, "throw"),
@@ -366,14 +385,24 @@ pub fn lexer<'src>(
 
     // Hex number.
     let hex = just("0x")
-        .ignore_then(text::digits(16))
+        .ignore_then(
+            any()
+                .filter(|c: &char| c.is_ascii_hexdigit() || *c == '_')
+                .repeated()
+                .at_least(1),
+        )
         .to_slice()
         .map(|s: &str| Token::Hex(s.to_owned()))
         .boxed();
 
     // Binary number.
     let bin = just("0b")
-        .ignore_then(text::digits(2))
+        .ignore_then(
+            any()
+                .filter(|c: &char| matches!(c, '0' | '1' | '_'))
+                .repeated()
+                .at_least(1),
+        )
         .to_slice()
         .map(|s: &str| Token::Bin(s.to_owned()))
         .boxed();
@@ -419,6 +448,7 @@ pub fn lexer<'src>(
         just("==").to(Token::EqualTo),
         just("<=").to(Token::LessThanOrEqualTo),
         just("<->").to(Token::DoubleArrow),
+        just(":=").to(Token::ColonEqual),
         just("<-").to(Token::LeftArrow),
         just("{|").to(Token::LeftCurlyBar),
         just("[|").to(Token::LeftSquareBar),
@@ -463,18 +493,30 @@ pub fn lexer<'src>(
         .map(|s: &str| Token::TyVal(s.to_owned()))
         .boxed();
 
+    // Structured directives like `$foo{...}`. Consume the opening `{` so the parser can
+    // parse the payload from subsequent tokens, including nested objects and lists.
+    let structured_directive = just('$')
+        .ignore_then(ident())
+        .then_ignore(just('{'))
+        .map(|name: &str| Token::StructuredDirectiveStart(name.to_string()))
+        .boxed();
+
     // Sail directives like `$option ...`, `$start_module# C`, `$include_error ...`.
-    // Keep a single `$` token and consume directive payload until line end.
+    // Keep a single token and consume directive payload until line end.
     let directive = just('$')
         .ignore_then(ident())
-        .then(none_of('\n').repeated())
-        .to(Token::Dollar)
+        .then(none_of('\n').repeated().to_slice().or_not())
+        .map(|(name, payload): (&str, Option<&str>)| Token::Directive {
+            name: name.to_string(),
+            payload: payload.and_then(|payload| (!payload.is_empty()).then(|| payload.to_string())),
+        })
         .boxed();
 
     // A parser for identifiers and keywords.
     // '~' is a specially allowed identifier.
     let ident = ident()
         .map(|ident: &str| match ident {
+            "_" => Token::Underscore,
             "and" => Token::KwAnd,
             "as" => Token::KwAs,
             "assert" => Token::KwAssert,
@@ -487,6 +529,7 @@ pub fn lexer<'src>(
             "by" => Token::KwBy,
             "cast" => Token::KwCast,
             "catch" => Token::KwCatch,
+            "case" => Token::KwCase,
             "clause" => Token::KwClause,
             "configuration" => Token::KwConfiguration,
             "constant" => Token::KwConstant,
@@ -538,6 +581,7 @@ pub fn lexer<'src>(
             "scattered" => Token::KwScattered,
             "sizeof" => Token::KwSizeof,
             "struct" => Token::KwStruct,
+            "switch" => Token::KwSwitch,
             "termination_measure" => Token::KwTerminationMeasure,
             "then" => Token::KwThen,
             "throw" => Token::KwThrow,
@@ -561,9 +605,20 @@ pub fn lexer<'src>(
         .boxed();
 
     // A single token can be one of the above
-    let token = choice((directive, tyvar, hex, bin, real, num, string, ident, op))
-        .recover_with(skip_then_retry_until(any().ignored(), end()))
-        .boxed();
+    let token = choice((
+        structured_directive,
+        directive,
+        tyvar,
+        hex,
+        bin,
+        real,
+        num,
+        string,
+        ident,
+        op,
+    ))
+    .recover_with(skip_then_retry_until(any().ignored(), end()))
+    .boxed();
 
     let line_comment = just("//").then(none_of('\n').repeated()).padded().ignored();
     let block_comment = just("/*")
@@ -630,7 +685,8 @@ val __TraceMemoryWrite : forall 'n 'm. (atom('n), bits('m), bits(8 * 'n)) -> uni
 val __TraceMemoryRead  : forall 'n 'm. (atom('n), bits('m), bits(8 * 'n)) -> unit
 "#;
         let result = lexer().parse(code);
-        dbg!(result);
+        assert!(result.output().is_some());
+        assert!(result.errors().peekable().peek().is_none());
     }
 
     #[test]
@@ -638,7 +694,8 @@ val __TraceMemoryRead  : forall 'n 'm. (atom('n), bits('m), bits(8 * 'n)) -> uni
         // Check that the span is in bytes and works with unicode characters.
         let code = "/* 😊 */ foo";
         let result = lexer().parse(code);
-        dbg!(result);
+        assert!(result.output().is_some());
+        assert!(result.errors().peekable().peek().is_none());
     }
 
     #[test]
@@ -648,6 +705,56 @@ val __TraceMemoryRead  : forall 'n 'm. (atom('n), bits('m), bits(8 * 'n)) -> uni
         let errors: Vec<_> = result.errors().collect();
         assert!(result.output().is_some(), "lexer output should exist");
         assert!(errors.is_empty(), "unexpected lexer errors: {:?}", errors);
+        let tokens = result.output().expect("tokens");
+        assert!(matches!(
+            &tokens[0].0,
+            Token::Directive { name, payload }
+                if name == "start_module" && payload.as_deref() == Some("# C")
+        ));
+    }
+
+    #[test]
+    fn accepts_structured_directive_start() {
+        let code = "$pragma{enabled = true}\nval x : int";
+        let result = lexer().parse(code);
+        let errors: Vec<_> = result.errors().collect();
+        assert!(result.output().is_some(), "lexer output should exist");
+        assert!(errors.is_empty(), "unexpected lexer errors: {:?}", errors);
+        let tokens = result.output().expect("tokens");
+        assert!(matches!(
+            &tokens[0].0,
+            Token::StructuredDirectiveStart(name) if name == "pragma"
+        ));
+        assert!(matches!(&tokens[1].0, Token::Id(name) if name == "enabled"));
+    }
+
+    #[test]
+    fn accepts_underscored_binary_and_hex_literals() {
+        let code = "let x = 0xFFFF_FFFF\nlet y = 0b1010_0101";
+        let result = lexer().parse(code);
+        let errors: Vec<_> = result.errors().collect();
+        assert!(result.output().is_some(), "lexer output should exist");
+        assert!(errors.is_empty(), "unexpected lexer errors: {:?}", errors);
+        let tokens = result.output().expect("tokens");
+        assert!(tokens
+            .iter()
+            .any(|(token, _)| matches!(token, Token::Hex(text) if text == "0xFFFF_FFFF")));
+        assert!(tokens
+            .iter()
+            .any(|(token, _)| matches!(token, Token::Bin(text) if text == "0b1010_0101")));
+    }
+
+    #[test]
+    fn accepts_switch_case_and_colon_equal_tokens() {
+        let code = "switch x { case y -> z := ~(y) }";
+        let result = lexer().parse(code);
+        let errors: Vec<_> = result.errors().collect();
+        assert!(result.output().is_some(), "lexer output should exist");
+        assert!(errors.is_empty(), "unexpected lexer errors: {:?}", errors);
+        let tokens = result.output().expect("tokens");
+        assert!(tokens.iter().any(|(token, _)| *token == Token::KwSwitch));
+        assert!(tokens.iter().any(|(token, _)| *token == Token::KwCase));
+        assert!(tokens.iter().any(|(token, _)| *token == Token::ColonEqual));
     }
 
     #[test]
@@ -666,6 +773,16 @@ val __TraceMemoryRead  : forall 'n 'm. (atom('n), bits('m), bits(8 * 'n)) -> uni
         let errors: Vec<_> = result.errors().collect();
         assert!(result.output().is_some(), "lexer output should exist");
         assert!(errors.is_empty(), "unexpected lexer errors: {:?}", errors);
+        let tokens = result.output().expect("tokens");
+        assert!(matches!(
+            &tokens[0].0,
+            Token::Directive { name, payload }
+                if name == "include_error"
+                    && payload
+                        .as_deref()
+                        .map(|payload| payload.contains("default Order dec"))
+                        .unwrap_or(false)
+        ));
     }
 
     #[test]

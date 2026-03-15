@@ -1,22 +1,19 @@
-use crate::analysis::{extract_symbol_decls, is_definition_at, token_symbol_key};
-use crate::file::File;
+use super::analysis::extract_symbol_decls;
+use crate::state::File;
 use std::collections::HashMap;
 use tower_lsp::lsp_types::{CodeLens, Range, SymbolKind, Url};
 
 pub(crate) fn collect_reference_counts(files: &[(&Url, &File)]) -> HashMap<String, usize> {
     let mut counts = HashMap::<String, usize>::new();
     for (_, file) in files {
-        let Some(tokens) = file.tokens.as_ref() else {
+        let Some(parsed) = file.parsed() else {
             continue;
         };
-        for (token, span) in tokens {
-            let Some(key) = token_symbol_key(token) else {
-                continue;
-            };
-            if !key.starts_with('\'') && is_definition_at(file, &key, span.start) {
+        for occurrence in &parsed.symbol_occurrences {
+            if occurrence.role.is_some() || occurrence.scope != Some(sail_parser::Scope::TopLevel) {
                 continue;
             }
-            *counts.entry(key).or_insert(0) += 1;
+            *counts.entry(occurrence.name.clone()).or_insert(0) += 1;
         }
     }
     counts
@@ -25,31 +22,23 @@ pub(crate) fn collect_reference_counts(files: &[(&Url, &File)]) -> HashMap<Strin
 pub(crate) fn collect_implementation_counts(files: &[(&Url, &File)]) -> HashMap<String, usize> {
     let mut counts = HashMap::<String, usize>::new();
     for (_, file) in files {
-        let Some(tokens) = file.tokens.as_ref() else {
+        let Some(parsed) = file.parsed() else {
             continue;
         };
-        let mut i = 0usize;
-        while i + 1 < tokens.len() {
-            let (tok0, tok1) = (&tokens[i].0, &tokens[i + 1].0);
-            let name = match (tok0, tok1) {
-                (sail_parser::Token::KwFunction, sail_parser::Token::Id(n))
-                | (sail_parser::Token::KwMapping, sail_parser::Token::Id(n))
-                | (sail_parser::Token::KwOverload, sail_parser::Token::Id(n)) => Some(n.clone()),
-                (sail_parser::Token::KwFunction, sail_parser::Token::KwClause)
-                | (sail_parser::Token::KwMapping, sail_parser::Token::KwClause)
-                    if i + 2 < tokens.len() =>
-                {
-                    match &tokens[i + 2].0 {
-                        sail_parser::Token::Id(n) => Some(n.clone()),
-                        _ => None,
-                    }
-                }
-                _ => None,
-            };
-            if let Some(name) = name {
-                *counts.entry(name).or_insert(0) += 1;
+        for decl in &parsed.decls {
+            if decl.role != sail_parser::DeclRole::Definition
+                || decl.scope != sail_parser::Scope::TopLevel
+            {
+                continue;
             }
-            i += 1;
+            if matches!(
+                decl.kind,
+                sail_parser::DeclKind::Function
+                    | sail_parser::DeclKind::Mapping
+                    | sail_parser::DeclKind::Overload
+            ) {
+                *counts.entry(decl.name.clone()).or_insert(0) += 1;
+            }
         }
     }
     counts
@@ -113,6 +102,16 @@ pub(crate) fn code_lenses_for_file(
                     "name": decl.name,
                     "count": impls
                 })),
+            });
+
+            out.push(CodeLens {
+                range,
+                command: Some(tower_lsp::lsp_types::Command {
+                    title: "▶\u{fe0e} Run in Sail".to_string(),
+                    command: "sail.run".to_string(),
+                    arguments: Some(vec![serde_json::json!(decl.name)]),
+                }),
+                data: None,
             });
         }
     }

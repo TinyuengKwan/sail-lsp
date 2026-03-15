@@ -1,8 +1,8 @@
-use crate::analysis::{
+use super::analysis::{
     extract_symbol_decls, find_callable_signature, location_from_span, range_from_span,
     token_symbol_key,
 };
-use crate::file::File;
+use crate::state::File;
 use sail_parser::{DeclRole, Scope, Span};
 use std::cmp::Reverse;
 use std::collections::HashMap;
@@ -20,19 +20,18 @@ pub(crate) struct CallEdge {
 }
 
 pub(crate) fn call_edges_for_file(uri: &Url, file: &File) -> Vec<CallEdge> {
-    let Some(tokens) = file.tokens.as_ref() else {
+    let Some(parsed) = file.parsed() else {
         return Vec::new();
     };
-    let parsed = sail_parser::parse_tokens(tokens);
     parsed
         .call_sites
-        .into_iter()
+        .iter()
         .filter_map(|call| {
-            let caller = call.caller?;
+            let caller = call.caller.clone()?;
             Some(CallEdge {
                 caller,
                 caller_uri: uri.clone(),
-                callee: call.callee,
+                callee: call.callee.clone(),
                 call_range: Range::new(
                     file.source.position_at(call.callee_span.start),
                     file.source.position_at(call.callee_span.end),
@@ -93,10 +92,10 @@ where
 
 fn type_decls(file: &File) -> HashMap<String, usize> {
     let mut out = HashMap::new();
-    let Some(tokens) = file.tokens.as_ref() else {
+    let Some(parsed) = file.parsed() else {
         return out;
     };
-    for decl in sail_parser::parse_tokens(tokens).decls {
+    for decl in &parsed.decls {
         if decl.scope != sail_parser::Scope::TopLevel {
             continue;
         }
@@ -109,26 +108,26 @@ fn type_decls(file: &File) -> HashMap<String, usize> {
                 | sail_parser::DeclKind::Bitfield
                 | sail_parser::DeclKind::Newtype
         ) {
-            out.insert(decl.name, decl.span.start);
+            out.insert(decl.name.clone(), decl.span.start);
         }
     }
     out
 }
 
 fn symbol_definition_spans(file: &File, symbol_key: &str) -> Vec<Span> {
-    let Some(tokens) = file.tokens.as_ref() else {
+    let Some(parsed) = file.parsed() else {
         return Vec::new();
     };
-    let mut spans = sail_parser::parse_tokens(tokens)
+    let mut spans = parsed
         .decls
-        .into_iter()
+        .iter()
         .filter(|decl| {
             decl.name == symbol_key
                 && decl.role == DeclRole::Definition
                 && match decl.kind {
-                    sail_parser::DeclKind::Let | sail_parser::DeclKind::Var => {
-                        decl.scope == Scope::TopLevel
-                    }
+                    sail_parser::DeclKind::Let
+                    | sail_parser::DeclKind::Var
+                    | sail_parser::DeclKind::Parameter => decl.scope == Scope::TopLevel,
                     _ => true,
                 }
         })
@@ -141,10 +140,10 @@ fn symbol_definition_spans(file: &File, symbol_key: &str) -> Vec<Span> {
 
 fn type_decls_with_kind(file: &File) -> HashMap<String, (usize, SymbolKind)> {
     let mut out = HashMap::new();
-    let Some(tokens) = file.tokens.as_ref() else {
+    let Some(parsed) = file.parsed() else {
         return out;
     };
-    for decl in sail_parser::parse_tokens(tokens).decls {
+    for decl in &parsed.decls {
         if decl.scope != sail_parser::Scope::TopLevel {
             continue;
         }
@@ -159,19 +158,19 @@ fn type_decls_with_kind(file: &File) -> HashMap<String, (usize, SymbolKind)> {
         }) else {
             continue;
         };
-        out.insert(decl.name, (decl.span.start, kind));
+        out.insert(decl.name.clone(), (decl.span.start, kind));
     }
     out
 }
 
 pub(crate) fn type_alias_edges(file: &File) -> Vec<(String, String)> {
-    let Some(tokens) = file.tokens.as_ref() else {
+    let Some(parsed) = file.parsed() else {
         return Vec::new();
     };
-    sail_parser::parse_tokens(tokens)
+    parsed
         .type_aliases
-        .into_iter()
-        .map(|a| (a.sub, a.sup))
+        .iter()
+        .map(|a| (a.sub.clone(), a.sup.clone()))
         .collect()
 }
 
@@ -278,25 +277,17 @@ pub(crate) fn type_name_candidates_at_position(
 
 pub(crate) fn typed_bindings(file: &File) -> HashMap<String, String> {
     let mut out = HashMap::new();
-    let Some(tokens) = file.tokens.as_ref() else {
+    let Some(parsed) = file.parsed() else {
         return out;
     };
-    let mut i = 0usize;
-    while i + 3 < tokens.len() {
-        let (t0, t1, t2, t3) = (
-            &tokens[i].0,
-            &tokens[i + 1].0,
-            &tokens[i + 2].0,
-            &tokens[i + 3].0,
+    let text = file.source.text();
+    for binding in &parsed.typed_bindings {
+        out.insert(
+            binding.name.clone(),
+            text[binding.ty_span.start..binding.ty_span.end]
+                .trim()
+                .to_string(),
         );
-        if matches!(t0, sail_parser::Token::KwLet | sail_parser::Token::KwVar)
-            && matches!(t2, sail_parser::Token::Colon)
-        {
-            if let (sail_parser::Token::Id(name), sail_parser::Token::Id(ty)) = (t1, t3) {
-                out.insert(name.clone(), ty.clone());
-            }
-        }
-        i += 1;
     }
     out
 }
@@ -365,48 +356,28 @@ where
 {
     let mut locations = Vec::new();
     for (uri, file) in files {
-        let Some(tokens) = file.tokens.as_ref() else {
+        let Some(parsed) = file.parsed() else {
             continue;
         };
-        let mut i = 0usize;
-        while i + 1 < tokens.len() {
-            let (tok0, span0) = (&tokens[i].0, &tokens[i].1);
-            let tok1 = &tokens[i + 1].0;
-
-            let matches_impl = match (tok0, tok1) {
-                (sail_parser::Token::KwFunction, sail_parser::Token::Id(n))
-                | (sail_parser::Token::KwMapping, sail_parser::Token::Id(n))
-                | (sail_parser::Token::KwOverload, sail_parser::Token::Id(n)) => n == name,
-                (sail_parser::Token::KwFunction, sail_parser::Token::KwClause)
-                | (sail_parser::Token::KwMapping, sail_parser::Token::KwClause) => {
-                    if i + 2 < tokens.len() {
-                        matches!(&tokens[i + 2].0, sail_parser::Token::Id(n) if n == name)
-                    } else {
-                        false
-                    }
-                }
-                _ => false,
-            };
-
-            if matches_impl {
-                let name_span = match (tok0, tok1) {
-                    (sail_parser::Token::KwFunction, sail_parser::Token::KwClause)
-                    | (sail_parser::Token::KwMapping, sail_parser::Token::KwClause)
-                        if i + 2 < tokens.len() =>
-                    {
-                        tokens[i + 2].1
-                    }
-                    _ => *span0,
-                };
-                locations.push(Location::new(
-                    uri.clone(),
-                    Range::new(
-                        file.source.position_at(name_span.start),
-                        file.source.position_at(name_span.end),
-                    ),
-                ));
+        for decl in &parsed.decls {
+            if decl.name != name
+                || decl.role != DeclRole::Definition
+                || !matches!(
+                    decl.kind,
+                    sail_parser::DeclKind::Function
+                        | sail_parser::DeclKind::Mapping
+                        | sail_parser::DeclKind::Overload
+                )
+            {
+                continue;
             }
-            i += 1;
+            locations.push(Location::new(
+                uri.clone(),
+                Range::new(
+                    file.source.position_at(decl.span.start),
+                    file.source.position_at(decl.span.end),
+                ),
+            ));
         }
     }
 
@@ -460,12 +431,12 @@ where
     let mut declarations = files
         .into_iter()
         .flat_map(|(uri, file)| {
-            let Some(tokens) = file.tokens.as_ref() else {
+            let Some(parsed) = file.parsed() else {
                 return Vec::new().into_iter();
             };
-            sail_parser::parse_tokens(tokens)
+            parsed
                 .decls
-                .into_iter()
+                .iter()
                 .filter(move |decl| {
                     decl.name == symbol_key
                         && decl.scope == Scope::TopLevel

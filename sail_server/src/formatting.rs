@@ -1,6 +1,5 @@
-use crate::analysis::{token_is_close_bracket, token_is_open_bracket, token_symbol_key};
-use crate::file::File;
-use crate::text_document;
+use crate::state::{File, TextDocument};
+use crate::symbols::{token_is_close_bracket, token_is_open_bracket, token_symbol_key};
 use std::path::Path;
 use tower_lsp::lsp_types::{
     DocumentLink, FormattingOptions, LinkedEditingRanges, Range, SelectionRange, TextEdit, Url,
@@ -196,7 +195,7 @@ pub(crate) fn range_format_document_edits(
         .source
         .offset_at(&tower_lsp::lsp_types::Position::new(end_line_exclusive, 0));
 
-    let formatted_doc = text_document::TextDocument::new(formatted_full.clone());
+    let formatted_doc = TextDocument::new(formatted_full.clone());
     let formatted_start =
         formatted_doc.offset_at(&tower_lsp::lsp_types::Position::new(start_line, 0));
     let formatted_end =

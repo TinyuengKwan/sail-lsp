@@ -1,7 +1,7 @@
 // Initial implementation will just use walkdir to re-read all the files
 // every 30 seconds.
 
-use crate::file::File;
+use super::File;
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -36,7 +36,6 @@ pub fn scan_folders(folders: HashSet<Url>) -> HashMap<Url, File> {
                                     match path.to_str() {
                                         Some(path_str) => {
                                             let mut url = folder.clone();
-                                            dbg!(&url, &path_str);
                                             // TODO: This is a hack to get around Windows paths and
                                             // a bug in Url::set_path. https://github.com/servo/rust-url/issues/864
                                             let mut path_windows = path_str.replace("\\", "/");
