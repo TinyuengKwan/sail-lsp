@@ -1,4 +1,4 @@
-use file::File;
+use state::{scan_folders, File, Files};
 use std::collections::hash_map::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,55 +27,40 @@ use tower_lsp::lsp_types::{
     FoldingRangeKind, FoldingRangeParams, GlobPattern, GotoDefinitionParams,
     GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
     ImplementationProviderCapability, InitializeParams, InitializeResult, InitializedParams,
-    InlayHint, InlayHintKind, InlayHintOptions, InlayHintParams, InlayHintServerCapabilities,
-    InlayHintTooltip, LinkedEditingRangeParams, LinkedEditingRangeServerCapabilities,
-    LinkedEditingRanges, Location, MessageType, OneOf, PrepareRenameResponse, Range,
-    ReferenceParams, Registration, RenameFilesParams, RenameParams, SelectionRange,
-    SelectionRangeParams, SelectionRangeProviderCapability, SemanticTokens,
-    SemanticTokensDeltaParams, SemanticTokensFullDeltaResult, SemanticTokensParams,
-    SemanticTokensRangeParams, SemanticTokensRangeResult, SemanticTokensResult, ServerCapabilities,
-    SignatureHelp, SignatureHelpOptions, SignatureHelpParams, SymbolInformation,
-    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
-    TypeDefinitionProviderCapability, TypeHierarchyItem, TypeHierarchyOptions,
-    TypeHierarchyPrepareParams, TypeHierarchySubtypesParams, TypeHierarchySupertypesParams, Url,
-    WatchKind, WorkDoneProgressOptions, WorkspaceDiagnosticParams, WorkspaceDiagnosticReportResult,
+    InlayHint, InlayHintOptions, InlayHintParams, InlayHintServerCapabilities,
+    LinkedEditingRangeParams, LinkedEditingRangeServerCapabilities, LinkedEditingRanges, Location,
+    MessageType, OneOf, PrepareRenameResponse, Range, ReferenceParams, Registration,
+    RenameFilesParams, RenameParams, SelectionRange, SelectionRangeParams,
+    SelectionRangeProviderCapability, SemanticTokens, SemanticTokensDeltaParams,
+    SemanticTokensFullDeltaResult, SemanticTokensParams, SemanticTokensRangeParams,
+    SemanticTokensRangeResult, SemanticTokensResult, ServerCapabilities, SignatureHelp,
+    SignatureHelpOptions, SignatureHelpParams, SymbolInformation, TextDocumentPositionParams,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, TypeDefinitionProviderCapability,
+    TypeHierarchyItem, TypeHierarchyOptions, TypeHierarchyPrepareParams,
+    TypeHierarchySubtypesParams, TypeHierarchySupertypesParams, Url, WatchKind,
+    WorkDoneProgressOptions, WorkspaceDiagnosticParams, WorkspaceDiagnosticReportResult,
     WorkspaceEdit, WorkspaceFileOperationsServerCapabilities, WorkspaceFoldersServerCapabilities,
     WorkspaceServerCapabilities, WorkspaceSymbol, WorkspaceSymbolOptions, WorkspaceSymbolParams,
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
-mod text_document;
-
-mod analysis;
-mod code_action_utils;
-mod code_actions;
+mod actions;
 mod completion;
-mod definitions;
 mod diagnostics;
-mod file;
-mod files;
 mod formatting;
 mod hover;
-mod lenses;
-mod navigation;
-mod rename_utils;
+mod inlay_hints;
 mod semantic_tokens;
-mod signature;
+mod state;
+mod symbols;
 
 #[cfg(test)]
-use analysis::{collect_callable_signatures, function_snippet};
-use analysis::{
-    extract_symbol_decls, find_call_at_position, find_callable_signature, infer_binding_type,
-    inlay_param_name, is_definition_at, location_from_offset, token_is_close_bracket,
-    token_is_open_bracket, token_symbol_key,
-};
-use code_action_utils::{
+use actions::missing_semicolon_fix;
+use actions::{
     code_action_kind_allowed, default_code_action_format_options, lazy_code_action_data,
     resolve_code_action_edit_from_data, sail_source_fix_all_kind,
 };
-#[cfg(test)]
-use code_actions::missing_semicolon_fix;
-use code_actions::{extract_local_let_edits, organize_imports_edits, quick_fix_for_diagnostic};
+use actions::{extract_local_let_edits, organize_imports_edits, quick_fix_for_diagnostic};
 use completion::{
     build_completion_items, completion_prefix, completion_trigger_characters,
     resolve_completion_item,
@@ -88,23 +73,34 @@ use formatting::{
 #[cfg(test)]
 use formatting::{format_document_text, range_len};
 use hover::hover_for_symbol;
-use lenses::{
-    code_lens_title, code_lenses_for_file, collect_implementation_counts, collect_reference_counts,
+use inlay_hints::{inlay_hints_for_range, resolve_inlay_hint};
+use semantic_tokens::{
+    compute_semantic_tokens, compute_semantic_tokens_delta, compute_semantic_tokens_range,
+    semantic_tokens_options,
 };
-use navigation::{
+#[cfg(test)]
+use symbols::analysis::Parameter;
+use symbols::find_call_at_position;
+use symbols::normalize_validated_rename;
+use symbols::signature_help_for_position;
+use symbols::{
     call_edges, call_hierarchy_item, implementation_locations, parse_named_type,
     resolve_workspace_symbol, symbol_declaration_locations, symbol_definition_locations,
     type_definition_locations, type_hierarchy_item, type_name_candidates_at_position,
     type_subtypes, type_supertypes, typed_bindings, will_rename_file_edits,
 };
 #[cfg(test)]
-use navigation::{call_edges_for_file, type_alias_edges};
-use rename_utils::normalize_validated_rename;
-use semantic_tokens::{
-    compute_semantic_tokens, compute_semantic_tokens_delta, compute_semantic_tokens_range,
-    semantic_tokens_options,
+use symbols::{call_edges_for_file, type_alias_edges};
+use symbols::{
+    code_lens_title, code_lenses_for_file, collect_implementation_counts, collect_reference_counts,
 };
-use signature::signature_help_for_position;
+#[cfg(test)]
+use symbols::{collect_callable_signatures, function_snippet, infer_binding_type};
+use symbols::{
+    extract_symbol_decls, find_callable_signature, token_is_close_bracket, token_is_open_bracket,
+    token_symbol_key,
+};
+use symbols::{reference_locations, rename_edits, resolve_symbol_at, symbol_spans_for_file};
 #[cfg(test)]
 use tower_lsp::lsp_types::{
     DocumentDiagnosticReport, FormattingOptions, SymbolKind, WorkspaceLocation,
@@ -112,7 +108,7 @@ use tower_lsp::lsp_types::{
 
 #[derive(Default)]
 struct State {
-    disk_files: files::Files,
+    disk_files: Files,
     open_files: HashMap<Url, File>,
     diagnostic_versions: HashMap<Url, i32>,
     semantic_tokens_cache: HashMap<Url, SemanticTokens>,
@@ -225,7 +221,7 @@ impl Backend {
                 state_guard
                     .open_files
                     .get(&uri)
-                    .map(|file| file.diagnostics.clone())
+                    .map(|file| file.lsp_diagnostics())
             };
             if let Some(diagnostics) = diagnostics {
                 client.publish_diagnostics(uri, diagnostics, None).await;
@@ -249,7 +245,7 @@ impl LanguageServer for Backend {
         }
 
         let folders = state.disk_files.folders().clone();
-        state.disk_files.update(files::scan_folders(folders));
+        state.disk_files.update(scan_folders(folders));
 
         Ok(InitializeResult {
             server_info: None,
@@ -331,6 +327,10 @@ impl LanguageServer for Backend {
                     },
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
+                execute_command_provider: Some(tower_lsp::lsp_types::ExecuteCommandOptions {
+                    commands: vec!["sail.noop".to_string(), "sail.run".to_string()],
+                    ..Default::default()
+                }),
                 completion_provider: Some(CompletionOptions {
                     resolve_provider: Some(true),
                     trigger_characters: Some(completion_trigger_characters()),
@@ -810,44 +810,22 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
 
-        let Some((token, _)) = file.token_at(position) else {
+        let Some(symbol) = resolve_symbol_at(file, position) else {
             return Ok(None);
         };
 
-        let ident = match token {
-            sail_parser::Token::Id(ident) | sail_parser::Token::TyVal(ident) => ident,
-            _ => return Ok(None),
-        };
-
-        let Some(tokens) = file.tokens.as_ref() else {
-            return Ok(None);
-        };
-
-        let highlights = tokens
-            .iter()
-            .filter_map(|(tok, span)| {
-                let tok_ident = match tok {
-                    sail_parser::Token::Id(name) | sail_parser::Token::TyVal(name) => name,
-                    _ => return None,
-                };
-
-                if tok_ident != ident {
-                    return None;
-                }
-
-                let kind = if file.definitions.get(tok_ident).copied() == Some(span.start) {
-                    Some(DocumentHighlightKind::WRITE)
+        let highlights = symbol_spans_for_file(file, &symbol, true)
+            .into_iter()
+            .map(|(span, is_write)| DocumentHighlight {
+                range: Range::new(
+                    file.source.position_at(span.start),
+                    file.source.position_at(span.end),
+                ),
+                kind: Some(if is_write {
+                    DocumentHighlightKind::WRITE
                 } else {
-                    Some(DocumentHighlightKind::READ)
-                };
-
-                Some(DocumentHighlight {
-                    range: Range::new(
-                        file.source.position_at(span.start),
-                        file.source.position_at(span.end),
-                    ),
-                    kind,
-                })
+                    DocumentHighlightKind::READ
+                }),
             })
             .collect::<Vec<_>>();
 
@@ -867,40 +845,12 @@ impl LanguageServer for Backend {
         let Some(file) = file else {
             return Ok(None);
         };
-        let Some((token, _)) = file.token_at(position) else {
-            return Ok(None);
-        };
-        let Some(symbol_key) = token_symbol_key(token) else {
-            return Ok(None);
-        };
 
         let include_declaration = params.context.include_declaration;
-        let mut locations = Vec::new();
-        for (candidate_uri, candidate_file) in state.all_files() {
-            let Some(tokens) = candidate_file.tokens.as_ref() else {
-                continue;
-            };
-            for (candidate_token, span) in tokens {
-                let Some(candidate_key) = token_symbol_key(candidate_token) else {
-                    continue;
-                };
-                if candidate_key != symbol_key {
-                    continue;
-                }
-
-                if !include_declaration
-                    && !symbol_key.starts_with('\'')
-                    && is_definition_at(candidate_file, &symbol_key, span.start)
-                {
-                    continue;
-                }
-                locations.push(location_from_offset(
-                    candidate_uri,
-                    candidate_file,
-                    span.start,
-                ));
-            }
-        }
+        let Some(symbol) = resolve_symbol_at(file, position) else {
+            return Ok(None);
+        };
+        let locations = reference_locations(state.all_files(), uri, &symbol, include_declaration);
 
         Ok(Some(locations))
     }
@@ -1348,6 +1298,9 @@ impl LanguageServer for Backend {
         let all_files = state.all_files().collect::<Vec<_>>();
         let mut items = build_completion_items(
             all_files.iter().copied(),
+            uri,
+            file.source.text(),
+            offset,
             prefix,
             SAIL_KEYWORDS,
             SAIL_BUILTINS,
@@ -1361,7 +1314,9 @@ impl LanguageServer for Backend {
     }
 
     async fn completion_resolve(&self, mut item: CompletionItem) -> Result<CompletionItem> {
-        item = resolve_completion_item(item);
+        let state = self.state.lock().await;
+        let all_files = state.all_files().collect::<Vec<_>>();
+        item = resolve_completion_item(item, all_files.iter().copied());
         Ok(item)
     }
 
@@ -1474,179 +1429,17 @@ impl LanguageServer for Backend {
         let Some(file) = file else {
             return Ok(None);
         };
-        let Some(tokens) = file.tokens.as_ref() else {
-            return Ok(None);
-        };
+        let hints = inlay_hints_for_range(state.all_files(), uri, file, params.range);
 
-        let begin = file.source.offset_at(&params.range.start);
-        let end = file.source.offset_at(&params.range.end);
-        let mut hints = Vec::new();
-
-        for i in 0..tokens.len().saturating_sub(1) {
-            let token_0 = &tokens[i].0;
-            let token_1 = &tokens[i + 1].0;
-            let (sail_parser::Token::Id(callee), sail_parser::Token::LeftBracket) =
-                (token_0, token_1)
-            else {
-                continue;
-            };
-
-            let Some(sig) = find_callable_signature(state.all_files(), uri, callee) else {
-                continue;
-            };
-            if sig.params.is_empty() {
-                continue;
-            }
-
-            let mut j = i + 2;
-
-            let mut depth = 1_i32;
-            let mut arg_idx = 0_usize;
-            let mut next_arg_start = true;
-
-            while j < tokens.len() {
-                let (token, span) = (&tokens[j].0, &tokens[j].1);
-                if token_is_open_bracket(token) {
-                    depth += 1;
-                } else if token_is_close_bracket(token) {
-                    depth -= 1;
-                    if depth == 0 {
-                        break;
-                    }
-                } else if *token == sail_parser::Token::Comma && depth == 1 {
-                    arg_idx += 1;
-                    next_arg_start = true;
-                    j += 1;
-                    continue;
-                } else if depth == 1 && next_arg_start {
-                    next_arg_start = false;
-                    if arg_idx < sig.params.len() && span.start >= begin && span.start <= end {
-                        let param_name = inlay_param_name(&sig.params[arg_idx]);
-                        hints.push(InlayHint {
-                            position: file.source.position_at(span.start),
-                            label: format!("{param_name}:").into(),
-                            kind: Some(InlayHintKind::PARAMETER),
-                            text_edits: None,
-                            tooltip: None,
-                            padding_left: Some(true),
-                            padding_right: Some(true),
-                            data: Some(serde_json::json!({
-                                "kind": "parameter",
-                                "param": param_name,
-                            })),
-                        });
-                    }
-                }
-                j += 1;
-            }
+        if hints.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(hints))
         }
-
-        for i in 0..tokens.len().saturating_sub(1) {
-            let token_0 = &tokens[i].0;
-            let (token_1, span_1) = (&tokens[i + 1].0, &tokens[i + 1].1);
-            if !matches!(
-                token_0,
-                sail_parser::Token::KwLet | sail_parser::Token::KwVar
-            ) {
-                continue;
-            }
-            let sail_parser::Token::Id(_) = token_1 else {
-                continue;
-            };
-            if span_1.start < begin || span_1.end > end {
-                continue;
-            }
-
-            let mut j = i + 2;
-            let mut has_explicit_type = false;
-            let mut equal_index = None;
-            let mut depth = 0_i32;
-            while j < tokens.len() {
-                let token = &tokens[j].0;
-                if token_is_open_bracket(token) {
-                    depth += 1;
-                } else if token_is_close_bracket(token) {
-                    depth -= 1;
-                } else if *token == sail_parser::Token::Colon && depth == 0 {
-                    has_explicit_type = true;
-                    break;
-                } else if *token == sail_parser::Token::Equal && depth == 0 {
-                    equal_index = Some(j);
-                    break;
-                } else if *token == sail_parser::Token::Semicolon && depth == 0 {
-                    break;
-                }
-                j += 1;
-            }
-            if has_explicit_type {
-                continue;
-            }
-            let Some(eq_idx) = equal_index else {
-                continue;
-            };
-            if eq_idx + 1 >= tokens.len() {
-                continue;
-            }
-            let inferred = infer_binding_type(&tokens[eq_idx + 1].0)
-                .map(str::to_string)
-                .or_else(|| {
-                    if eq_idx + 2 < tokens.len() {
-                        match (&tokens[eq_idx + 1].0, &tokens[eq_idx + 2].0) {
-                            (sail_parser::Token::Id(callee), sail_parser::Token::LeftBracket) => {
-                                find_callable_signature(state.all_files(), uri, callee)
-                                    .and_then(|sig| sig.return_type)
-                            }
-                            _ => None,
-                        }
-                    } else {
-                        None
-                    }
-                });
-            let Some(inferred) = inferred else {
-                continue;
-            };
-
-            hints.push(InlayHint {
-                position: file.source.position_at(span_1.end),
-                label: format!(": {inferred}").into(),
-                kind: Some(InlayHintKind::TYPE),
-                text_edits: None,
-                tooltip: None,
-                padding_left: Some(true),
-                padding_right: Some(false),
-                data: Some(serde_json::json!({
-                    "kind": "type",
-                    "type": inferred,
-                })),
-            });
-        }
-
-        Ok(Some(hints))
     }
 
-    async fn inlay_hint_resolve(&self, mut params: InlayHint) -> Result<InlayHint> {
-        if params.tooltip.is_none() {
-            if let Some(data) = params.data.as_ref() {
-                let kind = data.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-                match kind {
-                    "parameter" => {
-                        if let Some(param) = data.get("param").and_then(|v| v.as_str()) {
-                            params.tooltip = Some(InlayHintTooltip::String(format!(
-                                "Parameter hint for `{param}`"
-                            )));
-                        }
-                    }
-                    "type" => {
-                        if let Some(ty) = data.get("type").and_then(|v| v.as_str()) {
-                            params.tooltip =
-                                Some(InlayHintTooltip::String(format!("Inferred type: `{ty}`")));
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        Ok(params)
+    async fn inlay_hint_resolve(&self, params: InlayHint) -> Result<InlayHint> {
+        Ok(resolve_inlay_hint(params))
     }
 
     async fn semantic_tokens_full(
@@ -1856,8 +1649,29 @@ impl LanguageServer for Backend {
 
     async fn execute_command(
         &self,
-        _params: ExecuteCommandParams,
+        params: ExecuteCommandParams,
     ) -> Result<Option<serde_json::Value>> {
+        match params.command.as_str() {
+            "sail.run" => {
+                let name = params
+                    .arguments
+                    .first()
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                self.client
+                    .log_message(MessageType::INFO, format!("Running Sail function: {name}"))
+                    .await;
+                // In a full implementation, this could spawn a process or trigger a task
+            }
+            _ => {
+                self.client
+                    .log_message(
+                        MessageType::LOG,
+                        format!("Executed command: {}", params.command),
+                    )
+                    .await;
+            }
+        }
         Ok(None)
     }
 
@@ -1890,49 +1704,15 @@ impl LanguageServer for Backend {
         let Some((token, _)) = file.token_at(position) else {
             return Ok(None);
         };
-        let Some(symbol_key) = token_symbol_key(token) else {
-            return Ok(None);
-        };
         let Some(validated_name) =
             normalize_validated_rename(token, &params.new_name, SAIL_KEYWORDS)?
         else {
             return Ok(None);
         };
-
-        let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
-        for (candidate_uri, candidate_file) in state.all_files() {
-            let Some(tokens) = candidate_file.tokens.as_ref() else {
-                continue;
-            };
-            for (candidate_token, span) in tokens {
-                let Some(candidate_key) = token_symbol_key(candidate_token) else {
-                    continue;
-                };
-                if candidate_key != symbol_key {
-                    continue;
-                }
-
-                let new_text = match candidate_token {
-                    sail_parser::Token::TyVal(_) => {
-                        if validated_name.starts_with('\'') {
-                            validated_name.clone()
-                        } else {
-                            format!("'{}", validated_name)
-                        }
-                    }
-                    _ => validated_name.clone(),
-                };
-
-                let range = Range::new(
-                    candidate_file.source.position_at(span.start),
-                    candidate_file.source.position_at(span.end),
-                );
-                changes
-                    .entry(candidate_uri.clone())
-                    .or_default()
-                    .push(TextEdit { range, new_text });
-            }
-        }
+        let Some(symbol) = resolve_symbol_at(file, position) else {
+            return Ok(None);
+        };
+        let changes = rename_edits(state.all_files(), uri, &symbol, &validated_name);
 
         Ok(Some(WorkspaceEdit {
             changes: Some(changes),

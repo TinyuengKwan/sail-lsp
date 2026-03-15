@@ -1,19 +1,107 @@
-use crate::file::File;
+pub mod semantic;
+
+pub(crate) use semantic::compute_semantic_diagnostics;
+
+use crate::state::File;
 use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::hash::{Hash, Hasher};
 use tower_lsp::lsp_types::{
-    DocumentDiagnosticReport, DocumentDiagnosticReportResult, FullDocumentDiagnosticReport,
+    Diagnostic as LspDiagnostic, DiagnosticSeverity, DocumentDiagnosticReport,
+    DocumentDiagnosticReportResult, FullDocumentDiagnosticReport, Range,
     RelatedFullDocumentDiagnosticReport, RelatedUnchangedDocumentDiagnosticReport,
     UnchangedDocumentDiagnosticReport, Url, WorkspaceDiagnosticReport,
     WorkspaceDiagnosticReportResult, WorkspaceDocumentDiagnosticReport,
     WorkspaceFullDocumentDiagnosticReport,
 };
 
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub enum Severity {
+    Error,
+    Warning,
+    WeakWarning,
+    Information,
+    Hint,
+}
+
+impl From<Severity> for DiagnosticSeverity {
+    fn from(severity: Severity) -> Self {
+        match severity {
+            Severity::Error => DiagnosticSeverity::ERROR,
+            Severity::Warning => DiagnosticSeverity::WARNING,
+            Severity::WeakWarning => DiagnosticSeverity::INFORMATION,
+            Severity::Information => DiagnosticSeverity::INFORMATION,
+            Severity::Hint => DiagnosticSeverity::HINT,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum DiagnosticCode {
+    DuplicateDefinition,
+    UnusedVariable,
+    UnreachableCode,
+    MismatchedArgCount,
+    ParseError,
+}
+
+impl DiagnosticCode {
+    pub fn as_str(&self) -> &str {
+        match self {
+            DiagnosticCode::DuplicateDefinition => "duplicate-definition",
+            DiagnosticCode::UnusedVariable => "unused-variable",
+            DiagnosticCode::UnreachableCode => "unreachable-code",
+            DiagnosticCode::MismatchedArgCount => "mismatched-arg-count",
+            DiagnosticCode::ParseError => "parse-error",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Diagnostic {
+    pub code: DiagnosticCode,
+    pub message: String,
+    pub range: Range,
+    pub severity: Severity,
+    pub tags: Option<Vec<tower_lsp::lsp_types::DiagnosticTag>>,
+}
+
+impl Diagnostic {
+    pub fn new(code: DiagnosticCode, message: String, range: Range, severity: Severity) -> Self {
+        Self {
+            code,
+            message,
+            range,
+            severity,
+            tags: None,
+        }
+    }
+
+    pub fn with_tags(mut self, tags: Vec<tower_lsp::lsp_types::DiagnosticTag>) -> Self {
+        self.tags = Some(tags);
+        self
+    }
+
+    pub fn to_proto(&self) -> LspDiagnostic {
+        LspDiagnostic {
+            range: self.range,
+            severity: Some(self.severity.into()),
+            code: Some(tower_lsp::lsp_types::NumberOrString::String(
+                self.code.as_str().to_string(),
+            )),
+            source: Some("Sail".to_string()),
+            message: self.message.clone(),
+            tags: self.tags.clone(),
+            ..Default::default()
+        }
+    }
+}
+
 fn file_diagnostic_result_id(file: &File) -> String {
     let mut hasher = DefaultHasher::new();
+    let lsp_diags = file.lsp_diagnostics();
     file.source.text().len().hash(&mut hasher);
-    file.diagnostics.len().hash(&mut hasher);
-    for diagnostic in &file.diagnostics {
+    lsp_diags.len().hash(&mut hasher);
+    for diagnostic in &lsp_diags {
         diagnostic.range.start.line.hash(&mut hasher);
         diagnostic.range.start.character.hash(&mut hasher);
         diagnostic.range.end.line.hash(&mut hasher);
@@ -43,7 +131,7 @@ pub(crate) fn document_diagnostic_report_for_file(
         related_documents: None,
         full_document_diagnostic_report: FullDocumentDiagnosticReport {
             result_id: Some(result_id),
-            items: file.diagnostics.clone(),
+            items: file.lsp_diagnostics(),
         },
     })
     .into()
@@ -78,7 +166,7 @@ where
                     version,
                     full_document_diagnostic_report: FullDocumentDiagnosticReport {
                         result_id: Some(result_id),
-                        items: file.diagnostics.clone(),
+                        items: file.lsp_diagnostics(),
                     },
                 },
             ));
