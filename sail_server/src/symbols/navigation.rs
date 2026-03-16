@@ -277,17 +277,33 @@ pub(crate) fn type_name_candidates_at_position(
 
 pub(crate) fn typed_bindings(file: &File) -> HashMap<String, String> {
     let mut out = HashMap::new();
+    if let (Some(parsed), Some(type_check)) = (file.parsed(), file.type_check()) {
+        for decl in &parsed.decls {
+            if !matches!(
+                decl.kind,
+                sail_parser::DeclKind::Parameter
+                    | sail_parser::DeclKind::Let
+                    | sail_parser::DeclKind::Var
+            ) {
+                continue;
+            }
+
+            if let Some(ty) = type_check.binding_type_text(decl.span) {
+                out.insert(decl.name.clone(), ty.to_string());
+            }
+        }
+    }
+
     let Some(parsed) = file.parsed() else {
         return out;
     };
     let text = file.source.text();
     for binding in &parsed.typed_bindings {
-        out.insert(
-            binding.name.clone(),
+        out.entry(binding.name.clone()).or_insert_with(|| {
             text[binding.ty_span.start..binding.ty_span.end]
                 .trim()
-                .to_string(),
-        );
+                .to_string()
+        });
     }
     out
 }

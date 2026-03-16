@@ -57,7 +57,7 @@ pub(crate) fn ast_call_at_position<'a>(
     position: Position,
 ) -> Option<sail_parser::CallAtOffset<'a>> {
     let offset = file.source.offset_at(&position);
-    let ast = file.ast()?;
+    let ast = file.core_ast()?;
     sail_parser::find_call_at_offset(ast, offset)
 }
 

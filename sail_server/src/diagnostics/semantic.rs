@@ -1,12 +1,17 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
+use crate::diagnostics::error_format::Message;
+use crate::diagnostics::reporting::{
+    diagnostic_for_error, unnecessary_warning, Error as ReportingError,
+};
+use crate::diagnostics::type_error::TypeError;
 use crate::diagnostics::{Diagnostic, DiagnosticCode, Severity};
 use crate::state::File;
-use crate::symbols::{call_arg_count, collect_callable_signatures};
 use sail_parser::{
+    core_ast::{DefinitionKind as CoreDefinitionKind, SourceFile as CoreSourceFile},
     BlockItem as AstBlockItem, Expr as AstExpr, FieldExpr as AstFieldExpr,
     FieldPattern as AstFieldPattern, MatchCase as AstMatchCase, Pattern as AstPattern,
-    TopLevelDef as AstTopLevelDef, VectorUpdate as AstVectorUpdate,
+    VectorUpdate as AstVectorUpdate,
 };
 
 #[derive(Debug)]
@@ -87,6 +92,7 @@ impl BindingTracker {
 struct AstSemanticAnalyzer<'a> {
     file: &'a File,
     diagnostics: Vec<Diagnostic>,
+    pattern_constants: HashSet<String>,
     tracker: BindingTracker,
 }
 
@@ -95,6 +101,20 @@ impl<'a> AstSemanticAnalyzer<'a> {
         Self {
             file,
             diagnostics: Vec::new(),
+            pattern_constants: file
+                .parsed()
+                .map(|parsed| {
+                    parsed
+                        .decls
+                        .iter()
+                        .filter(|decl| {
+                            decl.scope == sail_parser::Scope::TopLevel
+                                && decl.kind == sail_parser::DeclKind::EnumMember
+                        })
+                        .map(|decl| decl.name.clone())
+                        .collect()
+                })
+                .unwrap_or_default(),
             tracker: BindingTracker::default(),
         }
     }
@@ -103,10 +123,10 @@ impl<'a> AstSemanticAnalyzer<'a> {
         self.diagnostics
     }
 
-    fn analyze_source_file(&mut self, ast: &sail_parser::SourceFile) {
-        for (item, _) in &ast.items {
-            match item {
-                AstTopLevelDef::CallableDef(def) => {
+    fn analyze_source_file(&mut self, ast: &CoreSourceFile) {
+        for (item, _) in &ast.defs {
+            match &item.kind {
+                CoreDefinitionKind::Callable(def) => {
                     self.tracker.push_scope();
                     if let Some(rec_measure) = &def.rec_measure {
                         self.define_pattern_bindings(&rec_measure.0.pattern, false);
@@ -152,7 +172,7 @@ impl<'a> AstSemanticAnalyzer<'a> {
                     }
                     self.tracker.pop_scope(self.file, &mut self.diagnostics);
                 }
-                AstTopLevelDef::Named(def) => {
+                CoreDefinitionKind::Named(def) => {
                     let Some(value) = &def.value else {
                         continue;
                     };
@@ -160,8 +180,8 @@ impl<'a> AstSemanticAnalyzer<'a> {
                     self.analyze_expr(value);
                     self.tracker.pop_scope(self.file, &mut self.diagnostics);
                 }
-                AstTopLevelDef::Directive(_) => {}
-                AstTopLevelDef::TerminationMeasure(def) => {
+                CoreDefinitionKind::Directive(_) => {}
+                CoreDefinitionKind::TerminationMeasure(def) => {
                     self.tracker.push_scope();
                     match &def.kind {
                         sail_parser::TerminationMeasureKind::Function { pattern, body } => {
@@ -515,7 +535,11 @@ impl<'a> AstSemanticAnalyzer<'a> {
             AstPattern::Attribute { pattern: inner, .. } => {
                 self.define_pattern_bindings(inner, warn_unused);
             }
-            AstPattern::Ident(name) => self.tracker.define_binding(name, pattern.1, warn_unused),
+            AstPattern::Ident(name) => {
+                if !self.pattern_constants.contains(name) {
+                    self.tracker.define_binding(name, pattern.1, warn_unused);
+                }
+            }
             AstPattern::Typed(inner, _) | AstPattern::AsType(inner, _) => {
                 self.define_pattern_bindings(inner, warn_unused);
             }
@@ -576,32 +600,24 @@ impl<'a> AstSemanticAnalyzer<'a> {
     }
 
     fn push_unreachable_diagnostic(&mut self, span: sail_parser::Span) {
-        self.diagnostics.push(
-            Diagnostic::new(
-                DiagnosticCode::UnreachableCode,
-                "Unreachable code".to_string(),
-                tower_lsp::lsp_types::Range::new(
-                    self.file.source.position_at(span.start),
-                    self.file.source.position_at(span.end),
-                ),
-                Severity::Hint,
-            )
-            .with_tags(vec![tower_lsp::lsp_types::DiagnosticTag::UNNECESSARY]),
-        );
+        self.diagnostics.push(unnecessary_warning(
+            self.file,
+            DiagnosticCode::UnreachableCode,
+            span,
+            Message::line("Unreachable code"),
+            Severity::Hint,
+        ));
     }
 }
 
 fn unused_binding_diagnostic(file: &File, span: sail_parser::Span, name: &str) -> Diagnostic {
-    Diagnostic::new(
+    unnecessary_warning(
+        file,
         DiagnosticCode::UnusedVariable,
-        format!("Unused variable: `{}`", name),
-        tower_lsp::lsp_types::Range::new(
-            file.source.position_at(span.start),
-            file.source.position_at(span.end),
-        ),
+        span,
+        Message::line(format!("Unused variable: `{name}`")),
         Severity::Warning,
     )
-    .with_tags(vec![tower_lsp::lsp_types::DiagnosticTag::UNNECESSARY])
 }
 
 pub(crate) fn compute_semantic_diagnostics(file: &File) -> Vec<Diagnostic> {
@@ -627,18 +643,26 @@ pub(crate) fn compute_semantic_diagnostics(file: &File) -> Vec<Diagnostic> {
 
         if let Some(prev_span) = seen_defs.get(&decl.name) {
             if !is_scattered.contains(&decl.name) {
-                let start = file.source.position_at(decl.span.start);
-                let end = file.source.position_at(decl.span.end);
                 let prev_pos = file.source.position_at(prev_span.start);
-                diagnostics.push(Diagnostic::new(
-                    DiagnosticCode::DuplicateDefinition,
-                    format!(
+                let error = TypeError::Alternate {
+                    primary: Box::new(TypeError::other(format!(
                         "Duplicate definition of `{}` (previously defined at line {})",
                         decl.name,
                         prev_pos.line + 1
-                    ),
-                    tower_lsp::lsp_types::Range::new(start, end),
-                    Severity::Error,
+                    ))),
+                    reasons: vec![(
+                        "previous definition".to_string(),
+                        *prev_span,
+                        Box::new(TypeError::Hint("definition here".to_string())),
+                    )],
+                };
+                diagnostics.push(diagnostic_for_error(
+                    file,
+                    DiagnosticCode::DuplicateDefinition,
+                    ReportingError::Type {
+                        span: decl.span,
+                        error,
+                    },
                 ));
             }
         } else {
@@ -646,54 +670,10 @@ pub(crate) fn compute_semantic_diagnostics(file: &File) -> Vec<Diagnostic> {
         }
     }
 
-    if let Some(ast) = file.ast() {
+    if let Some(ast) = file.core_ast() {
         let mut analyzer = AstSemanticAnalyzer::new(file);
         analyzer.analyze_source_file(ast);
         diagnostics.extend(analyzer.finish());
-    }
-
-    let mut signatures: std::collections::HashMap<String, (usize, usize)> =
-        std::collections::HashMap::new();
-    for sig in collect_callable_signatures(file) {
-        let total = sig.params.len();
-        let required = sig.params.iter().filter(|p| !p.is_implicit).count();
-
-        let entry = signatures.entry(sig.name).or_insert((required, total));
-        let current_has_implicits = entry.0 < entry.1;
-        let new_has_implicits = required < total;
-
-        if new_has_implicits && !current_has_implicits {
-            *entry = (required, total);
-        } else if new_has_implicits == current_has_implicits {
-            if total > entry.1 || (total == entry.1 && required < entry.0) {
-                *entry = (required, total);
-            }
-        }
-    }
-
-    for call in &parsed.call_sites {
-        if let Some(&(required, total)) = signatures.get(&call.callee) {
-            let actual_args = call_arg_count(call);
-
-            if actual_args < required || actual_args > total {
-                let start = file.source.position_at(call.callee_span.start);
-                let end = file.source.position_at(call.callee_span.end);
-                let message = if required == total {
-                    format!("Expected {} arguments, found {}", total, actual_args)
-                } else {
-                    format!(
-                        "Expected {}-{} arguments, found {}",
-                        required, total, actual_args
-                    )
-                };
-                diagnostics.push(Diagnostic::new(
-                    DiagnosticCode::MismatchedArgCount,
-                    message,
-                    tower_lsp::lsp_types::Range::new(start, end),
-                    Severity::Error,
-                ));
-            }
-        }
     }
 
     diagnostics

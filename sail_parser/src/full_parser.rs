@@ -4702,6 +4702,7 @@ fn parse_source_tokens(tokens: &[(Token, Span)]) -> SourceFile {
     SourceFile { items }
 }
 
+#[cfg(test)]
 pub fn source_file_parser<'a>() -> impl Parser<'a, Input<'a>, SourceFile, ParseErr<'a>> {
     custom(|inp| {
         let start = inp.offset();
@@ -4714,19 +4715,41 @@ pub fn source_file_parser<'a>() -> impl Parser<'a, Input<'a>, SourceFile, ParseE
     })
 }
 
+pub fn core_source_file_parser<'a>(
+) -> impl Parser<'a, Input<'a>, crate::core_ast::SourceFile, ParseErr<'a>> {
+    custom(|inp| {
+        let start = inp.offset();
+        let tokens = inp.slice_from(start..);
+        let ast = crate::core_ast::SourceFile::from(&parse_source_tokens(tokens));
+        while inp.peek().is_some() {
+            inp.skip();
+        }
+        Ok(ast)
+    })
+}
+
+#[cfg(test)]
 pub fn parse_source(tokens: &[(Token, Span)]) -> ParseResult<SourceFile, Rich<'_, Token, Span>> {
     source_file_parser().parse(tokens.spanned(eoi_span(tokens)))
+}
+
+pub fn parse_core_source(
+    tokens: &[(Token, Span)],
+) -> ParseResult<crate::core_ast::SourceFile, Rich<'_, Token, Span>> {
+    core_source_file_parser().parse(tokens.spanned(eoi_span(tokens)))
 }
 
 pub fn parse_expr_fragment(
     tokens: &[(Token, Span)],
     start: usize,
     end: usize,
-) -> Option<Spanned<Expr>> {
+) -> Option<crate::core_ast::Spanned<crate::core_ast::Expr>> {
     if tokens.is_empty() || start > end || end >= tokens.len() {
         return None;
     }
-    Some(parse_expr(tokens, start, end))
+    Some(crate::core_ast::lower_expr_spanned(&parse_expr(
+        tokens, start, end,
+    )))
 }
 
 #[cfg(test)]

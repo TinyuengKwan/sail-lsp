@@ -1,19 +1,17 @@
-use tower_lsp::lsp_types::{
-    Diagnostic as LspDiagnostic, Position, Range, TextDocumentContentChangeEvent,
-};
+use tower_lsp::lsp_types::{Diagnostic as LspDiagnostic, Position, TextDocumentContentChangeEvent};
 
 use super::TextDocument;
-use crate::diagnostics::{compute_semantic_diagnostics, Diagnostic, DiagnosticCode, Severity};
+use crate::diagnostics::{compute_parse_diagnostics, compute_semantic_diagnostics, Diagnostic};
 use crate::symbols::add_parsed_definitions;
 use chumsky::Parser;
 use std::{cmp::Ordering, collections::HashMap};
 
 fn best_parsed(
     tokens: Option<&[(sail_parser::Token, sail_parser::Span)]>,
-    ast: Option<&sail_parser::SourceFile>,
+    core_ast: Option<&sail_parser::core_ast::SourceFile>,
 ) -> Option<sail_parser::ParsedFile> {
-    match (tokens, ast) {
-        (_, Some(ast)) => Some(sail_parser::ParsedFile::from_ast(ast)),
+    match (tokens, core_ast) {
+        (_, Some(ast)) => Some(sail_parser::ParsedFile::from_core_ast(ast)),
         (Some(tokens), None) => Some(sail_parser::parse_tokens(tokens)),
         (None, None) => None,
     }
@@ -27,11 +25,14 @@ pub struct File {
     // of a parse error.
     pub tokens: Option<Vec<(sail_parser::Token, sail_parser::Span)>>,
 
-    // Minimal AST for top-level declarations and callable heads.
-    pub ast: Option<sail_parser::SourceFile>,
+    // Lowered AST used for LSP analysis without depending on the upstream Sail binary.
+    pub core_ast: Option<sail_parser::core_ast::SourceFile>,
 
     // Cached semantic index derived from the best available parse.
     pub parsed: Option<sail_parser::ParsedFile>,
+
+    // Cached local type-check result inspired by Sail's type checker pipeline.
+    pub type_check: Option<crate::typecheck::TypeCheckResult>,
 
     // Go-to definition locations extracted from the file.
     pub definitions: HashMap<String, usize>,
@@ -45,8 +46,9 @@ impl File {
         let mut f = Self {
             source: TextDocument::new(source),
             tokens: None,
-            ast: None,
+            core_ast: None,
             parsed: None,
+            type_check: None,
             definitions: HashMap::new(),
             diagnostics: Vec::new(),
         };
@@ -65,36 +67,23 @@ impl File {
     pub fn parse(&mut self) {
         let text = self.source.text();
         let result = sail_parser::lexer().parse(text);
+        let lex_errors = result.errors().cloned().collect::<Vec<_>>();
         self.tokens = result.output().cloned();
-        self.ast = self
+        self.core_ast = self
             .tokens
             .as_ref()
-            .and_then(|tokens| sail_parser::parse_source(tokens).into_output());
-        self.parsed = best_parsed(self.tokens.as_deref(), self.ast.as_ref());
+            .and_then(|tokens| sail_parser::parse_core_source(tokens).into_output());
+        self.parsed = best_parsed(self.tokens.as_deref(), self.core_ast.as_ref());
+        self.type_check = crate::typecheck::check_file(self);
 
         let mut definitions = HashMap::with_capacity(self.definitions.len());
-        let mut diagnostics = Vec::new();
+        let mut diagnostics = compute_parse_diagnostics(self, &lex_errors);
+        if let Some(type_check) = &self.type_check {
+            diagnostics.extend(type_check.diagnostics().iter().cloned());
+        }
 
         if let Some(parsed) = &self.parsed {
             add_parsed_definitions(parsed, &mut definitions);
-        } else {
-            diagnostics.push(Diagnostic::new(
-                DiagnosticCode::ParseError,
-                "Error lexing file".to_string(),
-                Range::new(Position::new(0, 0), Position::new(0, 0)),
-                Severity::Error,
-            ));
-        }
-        for error in result.errors().into_iter() {
-            let span = error.span();
-            let start = self.source.position_at(span.start);
-            let end = self.source.position_at(span.end);
-            diagnostics.push(Diagnostic::new(
-                DiagnosticCode::ParseError,
-                error.to_string(),
-                Range::new(start, end),
-                Severity::Error,
-            ));
         }
 
         self.definitions = definitions;
@@ -109,8 +98,12 @@ impl File {
         self.parsed.as_ref()
     }
 
-    pub fn ast(&self) -> Option<&sail_parser::SourceFile> {
-        self.ast.as_ref()
+    pub fn core_ast(&self) -> Option<&sail_parser::core_ast::SourceFile> {
+        self.core_ast.as_ref()
+    }
+
+    pub fn type_check(&self) -> Option<&crate::typecheck::TypeCheckResult> {
+        self.type_check.as_ref()
     }
 
     pub fn lsp_diagnostics(&self) -> Vec<LspDiagnostic> {
@@ -156,10 +149,12 @@ mod tests {
     fn prefers_ast_index_when_available() {
         let source = "val f : bits('n) -> bits('n)\nfunction f(x) = x\n";
         let tokens = sail_parser::lexer().parse(source).into_result().unwrap();
-        let ast = sail_parser::parse_source(&tokens).into_result().unwrap();
+        let core_ast = sail_parser::parse_core_source(&tokens)
+            .into_result()
+            .unwrap();
 
-        let parsed = best_parsed(Some(&tokens), Some(&ast)).expect("parsed");
-        assert_eq!(parsed, sail_parser::ParsedFile::from_ast(&ast));
+        let parsed = best_parsed(Some(&tokens), Some(&core_ast)).expect("parsed");
+        assert_eq!(parsed, sail_parser::ParsedFile::from_core_ast(&core_ast));
     }
 
     #[test]

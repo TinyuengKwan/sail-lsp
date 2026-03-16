@@ -33,13 +33,14 @@ pub(crate) fn token_symbol_key(token: &sail_parser::Token) -> Option<String> {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn add_definitions(
     tokens: &[(sail_parser::Token, Span)],
     definitions: &mut HashMap<String, usize>,
 ) {
-    let parsed = sail_parser::parse_source(tokens)
+    let parsed = sail_parser::parse_core_source(tokens)
         .into_output()
-        .map(|ast| sail_parser::ParsedFile::from_ast(&ast))
+        .map(|ast| sail_parser::ParsedFile::from_core_ast(&ast))
         .unwrap_or_else(|| sail_parser::parse_tokens(tokens));
     add_parsed_definitions(&parsed, definitions);
 }
@@ -375,6 +376,7 @@ pub(crate) fn inlay_param_name(param: &str) -> &str {
         .unwrap_or(param)
 }
 
+#[cfg(test)]
 pub(crate) fn infer_binding_type(token: &sail_parser::Token) -> Option<&'static str> {
     match token {
         sail_parser::Token::Num(_) => Some("int"),

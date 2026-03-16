@@ -53,6 +53,7 @@ mod inlay_hints;
 mod semantic_tokens;
 mod state;
 mod symbols;
+mod typecheck;
 
 #[cfg(test)]
 use actions::missing_semicolon_fix;

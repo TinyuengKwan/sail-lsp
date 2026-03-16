@@ -1,6 +1,13 @@
 use super::Parameter;
 use super::*;
-use tower_lsp::lsp_types::Diagnostic;
+use tower_lsp::lsp_types::{Diagnostic, NumberOrString};
+
+fn diagnostic_code_str(diagnostic: &tower_lsp::lsp_types::Diagnostic) -> Option<&str> {
+    match diagnostic.code.as_ref()? {
+        NumberOrString::String(code) => Some(code.as_str()),
+        NumberOrString::Number(_) => None,
+    }
+}
 
 #[test]
 fn finds_call_and_argument_index() {
@@ -174,6 +181,127 @@ fn offers_missing_equal_fix() {
 }
 
 #[test]
+fn reports_lexical_errors_with_lexical_error_code() {
+    let file = File::new("let _ = ™;\n".to_string());
+    let diagnostics = file.lsp_diagnostics();
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic_code_str(diagnostic) == Some("lexical-error"))
+        .expect("missing lexical diagnostic");
+
+    assert_eq!(
+        diagnostic.severity,
+        Some(tower_lsp::lsp_types::DiagnosticSeverity::ERROR)
+    );
+}
+
+#[test]
+fn reports_missing_closing_paren_as_syntax_error() {
+    let source = "function f() = {\n  let x = (1 + 2\n}\n";
+    let file = File::new(source.to_string());
+    let diagnostics = file.lsp_diagnostics();
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| {
+            diagnostic_code_str(diagnostic) == Some("syntax-error")
+                && diagnostic.message.contains("expected ')'")
+        })
+        .expect("missing syntax diagnostic");
+
+    assert_eq!(
+        diagnostic.severity,
+        Some(tower_lsp::lsp_types::DiagnosticSeverity::ERROR)
+    );
+}
+
+#[test]
+fn reports_type_errors_from_typecheck() {
+    let source = "val f : bool -> unit\nfunction f(x) = ()\nfunction g() = f(1)\n";
+    let file = File::new(source.to_string());
+    let diagnostics = file.lsp_diagnostics();
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic_code_str(diagnostic) == Some("type-error"))
+        .expect("missing type diagnostic");
+
+    assert!(diagnostic.message.contains("bool"));
+}
+
+#[test]
+fn reports_mismatched_arg_count_from_typecheck() {
+    let source =
+        "val add : (int, int) -> int\nfunction add(x, y) = x + y\nfunction main() = add(1)\n";
+    let file = File::new(source.to_string());
+    let diagnostics = file.lsp_diagnostics();
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic_code_str(diagnostic) == Some("mismatched-arg-count"))
+        .expect("missing mismatched arg count diagnostic");
+
+    assert!(diagnostic.message.contains("Expected 2 arguments, found 1"));
+}
+
+#[test]
+fn warns_on_upstream_deprecated_effect_annotations() {
+    let source = "val write_ram : unit -> bool effect {wmv}\n";
+    let file = File::new(source.to_string());
+    let diagnostics = file.lsp_diagnostics();
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic_code_str(diagnostic) == Some("deprecated-effect-annotation"))
+        .expect("missing effect warning");
+
+    assert_eq!(
+        diagnostic.message,
+        "Explicit effect annotations are deprecated. They are no longer used and can be removed."
+    );
+    assert_eq!(
+        diagnostic.severity,
+        Some(tower_lsp::lsp_types::DiagnosticSeverity::WARNING)
+    );
+}
+
+#[test]
+fn warns_when_extern_purity_is_missing() {
+    let source = "val trace_name = {lem: \"trace_name\"} : unit -> unit\n";
+    let file = File::new(source.to_string());
+    let diagnostics = file.lsp_diagnostics();
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic_code_str(diagnostic) == Some("missing-extern-purity"))
+        .expect("missing extern purity warning");
+
+    assert_eq!(
+        diagnostic.message,
+        "All external bindings should be marked as either pure or impure"
+    );
+    assert_eq!(
+        diagnostic.severity,
+        Some(tower_lsp::lsp_types::DiagnosticSeverity::WARNING)
+    );
+}
+
+#[test]
+fn warns_on_upstream_deprecated_cast_annotations() {
+    let source = "function f(x) = x : int\n";
+    let file = File::new(source.to_string());
+    let diagnostics = file.lsp_diagnostics();
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic_code_str(diagnostic) == Some("deprecated-cast-annotation"))
+        .expect("missing cast warning");
+
+    assert_eq!(
+        diagnostic.message,
+        "Cast annotations are deprecated. They will be removed in a future version of the language."
+    );
+    assert_eq!(
+        diagnostic.severity,
+        Some(tower_lsp::lsp_types::DiagnosticSeverity::WARNING)
+    );
+}
+
+#[test]
 fn builds_selection_range_chain() {
     let source = "function f() = {\n  let x = (1 + 2);\n}\n";
     let file = File::new(source.to_string());
@@ -228,6 +356,13 @@ fn extracts_typed_var_bindings() {
 }
 
 #[test]
+fn infers_unannotated_binding_types_from_typecheck() {
+    let file = File::new("function f() = { let x = 1; x }".to_string());
+    let bindings = typed_bindings(&file);
+    assert_eq!(bindings.get("x"), Some(&"int".to_string()));
+}
+
+#[test]
 fn does_not_treat_types_as_function_parameter_names() {
     let source = "function f(x : bits(32), y : int) -> bits(32) = x\n";
     let file = File::new(source.to_string());
@@ -249,10 +384,10 @@ fn does_not_treat_types_as_function_parameter_names() {
 }
 
 #[test]
-fn caches_minimal_ast_for_file() {
+fn caches_core_ast_for_file() {
     let file = File::new("function f(x : bits(32)) -> int = x".to_string());
-    let ast = file.ast().expect("missing ast");
-    assert!(!ast.items.is_empty());
+    let core_ast = file.core_ast().expect("missing core ast");
+    assert!(!core_ast.defs.is_empty());
 }
 
 #[test]
@@ -474,6 +609,42 @@ fn detects_unused_shadowed_outer_binding() {
         .count();
 
     assert_eq!(unused_x, 1);
+}
+
+#[test]
+fn does_not_warn_for_enum_members_in_patterns() {
+    let source = "enum instr = VI_VRGATHER | VI_VADD\nfunction decode(instr) = match instr {\n  VI_VRGATHER => 1,\n  VI_VADD => 2\n}\n";
+    let file = File::new(source.to_string());
+    let lsp_diagnostics = file.lsp_diagnostics();
+
+    assert!(!lsp_diagnostics
+        .iter()
+        .any(|d| d.message.contains("Unused variable: `VI_VRGATHER`")));
+    assert!(!lsp_diagnostics
+        .iter()
+        .any(|d| d.message.contains("Unused variable: `VI_VADD`")));
+}
+
+#[test]
+fn resolves_enum_member_patterns_as_top_level_symbols() {
+    let source = "enum instr = VI_VRGATHER | VI_VADD\nfunction decode(instr) = match instr {\n  VI_VRGATHER => 1,\n  VI_VADD => 2\n}\n";
+    let file = File::new(source.to_string());
+    let pos = file
+        .source
+        .position_at(source.rfind("VI_VRGATHER =>").expect("pattern ref"));
+
+    let symbol = resolve_symbol_at(&file, pos).expect("resolved symbol");
+    assert_eq!(symbol.scope, Some(sail_parser::Scope::TopLevel));
+    assert_eq!(symbol.target_span, None);
+
+    let spans = symbol_spans_for_file(&file, &symbol, true);
+    assert_eq!(spans.len(), 2);
+    assert!(spans
+        .iter()
+        .any(|(span, is_write)| { *is_write && &source[span.start..span.end] == "VI_VRGATHER" }));
+    assert!(spans
+        .iter()
+        .any(|(span, is_write)| { !*is_write && &source[span.start..span.end] == "VI_VRGATHER" }));
 }
 
 #[test]
@@ -770,7 +941,7 @@ fn code_action_kind_filter_matches_custom_source_fix_all() {
 fn resolves_local_symbol_occurrences_without_crossing_shadowing_scopes() {
     let source = "function foo() = {\n  let x = 1;\n  let y = let x = 2 in x;\n  x + y\n}\n";
     let file = File::new(source.to_string());
-    assert!(file.ast().is_some());
+    assert!(file.core_ast().is_some());
     let pos = file
         .source
         .position_at(source.rfind("x + y").expect("outer x"));
@@ -795,7 +966,7 @@ fn resolves_local_symbol_occurrences_without_crossing_shadowing_scopes() {
 fn resolves_match_pattern_bindings_via_ast_symbol_occurrences() {
     let source = "function foo(xs) = match xs {\n  Some(x) => x,\n  None() => 0\n}\n";
     let file = File::new(source.to_string());
-    assert!(file.ast().is_some());
+    assert!(file.core_ast().is_some());
     let pos = file
         .source
         .position_at(source.rfind("=> x").expect("body x") + 3);
@@ -820,8 +991,8 @@ fn top_level_references_ignore_shadowed_local_bindings() {
     let source2 = "function bar() = {\n  let foo = 1;\n  foo\n}\n";
     let file1 = File::new(source1.to_string());
     let file2 = File::new(source2.to_string());
-    assert!(file1.ast().is_some());
-    assert!(file2.ast().is_some());
+    assert!(file1.core_ast().is_some());
+    assert!(file2.core_ast().is_some());
     let pos = file1
         .source
         .position_at(source1.find("foo() = 1").expect("foo definition"));
@@ -842,8 +1013,8 @@ fn renames_type_variables_within_their_own_scope_only() {
     let source2 = "val g : forall ('n). bits('n) -> bits('n)\n";
     let file1 = File::new(source1.to_string());
     let file2 = File::new(source2.to_string());
-    assert!(file1.ast().is_some());
-    assert!(file2.ast().is_some());
+    assert!(file1.core_ast().is_some());
+    assert!(file2.core_ast().is_some());
     let pos = file1
         .source
         .position_at(source1.find("'n").expect("type var"));

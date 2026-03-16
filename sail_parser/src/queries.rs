@@ -1,5 +1,9 @@
 use crate::{
-    ast::{BlockItem, Call, Expr, NamedDefKind, Pattern, SourceFile, Spanned, TopLevelDef},
+    core_ast::{
+        BlockItem, Call, DefinitionKind as CoreDefinitionKind, Expr, FieldExpr, FieldPattern,
+        NamedDefKind, Pattern, ScatteredClauseKind, SourceFile as CoreSourceFile, Spanned,
+        VectorUpdate,
+    },
     Span,
 };
 
@@ -95,12 +99,12 @@ fn visit_expr<'a>(
         Expr::Block(items) => {
             for item in items {
                 match &item.0 {
-                    crate::ast::BlockItem::Let(binding) => visit_expr(&binding.value, offset, best),
-                    crate::ast::BlockItem::Var { target, value } => {
+                    BlockItem::Let(binding) => visit_expr(&binding.value, offset, best),
+                    BlockItem::Var { target, value } => {
                         visit_expr(target, offset, best);
                         visit_expr(value, offset, best);
                     }
-                    crate::ast::BlockItem::Expr(expr) => visit_expr(expr, offset, best),
+                    BlockItem::Expr(expr) => visit_expr(expr, offset, best),
                 }
             }
         }
@@ -187,7 +191,7 @@ fn visit_expr<'a>(
         }
         Expr::Struct { fields, .. } => {
             for field in fields {
-                if let crate::ast::FieldExpr::Assignment { target, value } = &field.0 {
+                if let FieldExpr::Assignment { target, value } = &field.0 {
                     visit_expr(target, offset, best);
                     visit_expr(value, offset, best);
                 }
@@ -196,7 +200,7 @@ fn visit_expr<'a>(
         Expr::Update { base, fields } => {
             visit_expr(base, offset, best);
             for field in fields {
-                if let crate::ast::FieldExpr::Assignment { target, value } = &field.0 {
+                if let FieldExpr::Assignment { target, value } = &field.0 {
                     visit_expr(target, offset, best);
                     visit_expr(value, offset, best);
                 }
@@ -211,16 +215,16 @@ fn visit_expr<'a>(
             visit_expr(base, offset, best);
             for update in updates {
                 match &update.0 {
-                    crate::ast::VectorUpdate::Assignment { target, value } => {
+                    VectorUpdate::Assignment { target, value } => {
                         visit_expr(target, offset, best);
                         visit_expr(value, offset, best);
                     }
-                    crate::ast::VectorUpdate::RangeAssignment { start, end, value } => {
+                    VectorUpdate::RangeAssignment { start, end, value } => {
                         visit_expr(start, offset, best);
                         visit_expr(end, offset, best);
                         visit_expr(value, offset, best);
                     }
-                    crate::ast::VectorUpdate::Shorthand(_) => {}
+                    VectorUpdate::Shorthand(_) => {}
                 }
             }
         }
@@ -235,12 +239,12 @@ fn visit_expr<'a>(
     }
 }
 
-pub fn find_call_at_offset(ast: &SourceFile, offset: usize) -> Option<CallAtOffset<'_>> {
+pub fn find_call_at_offset_core(ast: &CoreSourceFile, offset: usize) -> Option<CallAtOffset<'_>> {
     let mut best = None;
 
-    for (item, _) in &ast.items {
-        match item {
-            TopLevelDef::CallableDef(def) => {
+    for (item, _) in &ast.defs {
+        match &item.kind {
+            CoreDefinitionKind::Callable(def) => {
                 if let Some(rec_measure) = &def.rec_measure {
                     visit_expr(&rec_measure.0.body, offset, &mut best);
                 }
@@ -274,21 +278,22 @@ pub fn find_call_at_offset(ast: &SourceFile, offset: usize) -> Option<CallAtOffs
                     }
                 }
             }
-            TopLevelDef::Named(def) => {
+            CoreDefinitionKind::Named(def) => {
                 if let Some(value) = &def.value {
                     visit_expr(value, offset, &mut best);
                 }
             }
-            TopLevelDef::Scattered(_)
-            | TopLevelDef::ScatteredClause(_)
-            | TopLevelDef::CallableSpec(_)
-            | TopLevelDef::TypeAlias(_)
-            | TopLevelDef::Default(_)
-            | TopLevelDef::Fixity(_)
-            | TopLevelDef::Instantiation(_)
-            | TopLevelDef::Directive(_)
-            | TopLevelDef::Constraint(_) => {}
-            TopLevelDef::End(_) | TopLevelDef::TerminationMeasure(_) => {}
+            CoreDefinitionKind::Scattered(_)
+            | CoreDefinitionKind::ScatteredClause(_)
+            | CoreDefinitionKind::CallableSpec(_)
+            | CoreDefinitionKind::TypeAlias(_)
+            | CoreDefinitionKind::Default(_)
+            | CoreDefinitionKind::Fixity(_)
+            | CoreDefinitionKind::Instantiation(_)
+            | CoreDefinitionKind::Directive(_)
+            | CoreDefinitionKind::End(_)
+            | CoreDefinitionKind::Constraint(_)
+            | CoreDefinitionKind::TerminationMeasure(_) => {}
         }
     }
 
@@ -333,15 +338,15 @@ fn pattern_binding_explicit_ty(
         Pattern::Struct { fields, .. } => {
             for field in fields {
                 match &field.0 {
-                    crate::ast::FieldPattern::Binding { pattern, .. } => {
+                    FieldPattern::Binding { pattern, .. } => {
                         if let Some(explicit_ty) = pattern_binding_explicit_ty(pattern, name_span) {
                             return Some(explicit_ty);
                         }
                     }
-                    crate::ast::FieldPattern::Shorthand(name) if name.1 == name_span => {
+                    FieldPattern::Shorthand(name) if name.1 == name_span => {
                         return Some(None);
                     }
-                    crate::ast::FieldPattern::Shorthand(_) | crate::ast::FieldPattern::Wild(_) => {}
+                    FieldPattern::Shorthand(_) | FieldPattern::Wild(_) => {}
                 }
             }
             None
@@ -521,7 +526,7 @@ fn find_binding_value_in_expr<'a>(
             .or_else(|| find_binding_value_in_expr(length, name_span)),
         Expr::Struct { fields, .. } => {
             for field in fields {
-                if let crate::ast::FieldExpr::Assignment { target, value } = &field.0 {
+                if let FieldExpr::Assignment { target, value } = &field.0 {
                     if let Some(binding) = find_binding_value_in_expr(target, name_span) {
                         return Some(binding);
                     }
@@ -535,7 +540,7 @@ fn find_binding_value_in_expr<'a>(
         Expr::Update { base, fields } => {
             find_binding_value_in_expr(base, name_span).or_else(|| {
                 for field in fields {
-                    if let crate::ast::FieldExpr::Assignment { target, value } = &field.0 {
+                    if let FieldExpr::Assignment { target, value } = &field.0 {
                         if let Some(binding) = find_binding_value_in_expr(target, name_span) {
                             return Some(binding);
                         }
@@ -559,7 +564,7 @@ fn find_binding_value_in_expr<'a>(
             .or_else(|| {
                 for update in updates {
                     match &update.0 {
-                        crate::ast::VectorUpdate::Assignment { target, value } => {
+                        VectorUpdate::Assignment { target, value } => {
                             if let Some(binding) = find_binding_value_in_expr(target, name_span) {
                                 return Some(binding);
                             }
@@ -567,7 +572,7 @@ fn find_binding_value_in_expr<'a>(
                                 return Some(binding);
                             }
                         }
-                        crate::ast::VectorUpdate::RangeAssignment { start, end, value } => {
+                        VectorUpdate::RangeAssignment { start, end, value } => {
                             if let Some(binding) = find_binding_value_in_expr(start, name_span) {
                                 return Some(binding);
                             }
@@ -578,7 +583,7 @@ fn find_binding_value_in_expr<'a>(
                                 return Some(binding);
                             }
                         }
-                        crate::ast::VectorUpdate::Shorthand(_) => {}
+                        VectorUpdate::Shorthand(_) => {}
                     }
                 }
                 None
@@ -594,13 +599,13 @@ fn find_binding_value_in_expr<'a>(
     }
 }
 
-pub fn find_binding_value_at_span(
-    ast: &SourceFile,
+pub fn find_binding_value_at_span_core(
+    ast: &CoreSourceFile,
     name_span: Span,
 ) -> Option<BindingValueAtSpan<'_>> {
-    for (item, _) in &ast.items {
-        match item {
-            TopLevelDef::CallableDef(def) => {
+    for (item, _) in &ast.defs {
+        match &item.kind {
+            CoreDefinitionKind::Callable(def) => {
                 if let Some(rec_measure) = &def.rec_measure {
                     if let Some(binding) =
                         find_binding_value_in_expr(&rec_measure.0.body, name_span)
@@ -659,7 +664,7 @@ pub fn find_binding_value_at_span(
                     }
                 }
             }
-            TopLevelDef::Named(def) => {
+            CoreDefinitionKind::Named(def) => {
                 if matches!(def.kind, NamedDefKind::Let | NamedDefKind::Var)
                     && def.name.1 == name_span
                 {
@@ -676,71 +681,79 @@ pub fn find_binding_value_at_span(
                     }
                 }
             }
-            TopLevelDef::Scattered(_)
-            | TopLevelDef::ScatteredClause(_)
-            | TopLevelDef::CallableSpec(_)
-            | TopLevelDef::TypeAlias(_)
-            | TopLevelDef::Default(_)
-            | TopLevelDef::Fixity(_)
-            | TopLevelDef::Instantiation(_)
-            | TopLevelDef::Directive(_)
-            | TopLevelDef::Constraint(_) => {}
-            TopLevelDef::End(_) | TopLevelDef::TerminationMeasure(_) => {}
+            CoreDefinitionKind::Scattered(_)
+            | CoreDefinitionKind::ScatteredClause(_)
+            | CoreDefinitionKind::CallableSpec(_)
+            | CoreDefinitionKind::TypeAlias(_)
+            | CoreDefinitionKind::Default(_)
+            | CoreDefinitionKind::Fixity(_)
+            | CoreDefinitionKind::Instantiation(_)
+            | CoreDefinitionKind::Directive(_)
+            | CoreDefinitionKind::End(_)
+            | CoreDefinitionKind::Constraint(_)
+            | CoreDefinitionKind::TerminationMeasure(_) => {}
         }
     }
     None
 }
 
-pub fn find_top_level_item_span(ast: &SourceFile, name_span: Span) -> Option<Span> {
-    ast.items.iter().find_map(|(item, item_span)| match item {
-        TopLevelDef::Scattered(def) if def.name.1 == name_span => Some(*item_span),
-        TopLevelDef::ScatteredClause(def)
-            if def.member.1 == name_span || def.name.1 == name_span =>
-        {
-            Some(*item_span)
-        }
-        TopLevelDef::CallableSpec(def) if def.name.1 == name_span => Some(*item_span),
-        TopLevelDef::CallableDef(def) if def.name.1 == name_span => Some(*item_span),
-        TopLevelDef::TypeAlias(def) if def.name.1 == name_span => Some(*item_span),
-        TopLevelDef::Named(def)
-            if def.name.1 == name_span
-                || def.members.iter().any(|member| member.1 == name_span) =>
-        {
-            Some(*item_span)
-        }
-        TopLevelDef::Default(def) if def.kind.1 == name_span => Some(*item_span),
-        TopLevelDef::Fixity(def) if def.operator.1 == name_span => Some(*item_span),
-        TopLevelDef::Instantiation(def) if def.name.1 == name_span => Some(*item_span),
-        TopLevelDef::Directive(def) if def.name.1 == name_span => Some(*item_span),
-        TopLevelDef::End(def) if def.name.1 == name_span => Some(*item_span),
-        TopLevelDef::TerminationMeasure(def) if def.name.1 == name_span => Some(*item_span),
-        _ => None,
-    })
+pub fn find_top_level_item_span_core(ast: &CoreSourceFile, name_span: Span) -> Option<Span> {
+    ast.defs
+        .iter()
+        .find_map(|(item, item_span)| match &item.kind {
+            CoreDefinitionKind::Scattered(def) if def.name.1 == name_span => Some(*item_span),
+            CoreDefinitionKind::ScatteredClause(def)
+                if def.member.1 == name_span || def.name.1 == name_span =>
+            {
+                Some(*item_span)
+            }
+            CoreDefinitionKind::CallableSpec(def) if def.name.1 == name_span => Some(*item_span),
+            CoreDefinitionKind::Callable(def) if def.name.1 == name_span => Some(*item_span),
+            CoreDefinitionKind::TypeAlias(def) if def.name.1 == name_span => Some(*item_span),
+            CoreDefinitionKind::Named(def)
+                if def.name.1 == name_span
+                    || def.members.iter().any(|member| member.1 == name_span) =>
+            {
+                Some(*item_span)
+            }
+            CoreDefinitionKind::Default(def) if def.kind.1 == name_span => Some(*item_span),
+            CoreDefinitionKind::Fixity(def) if def.operator.1 == name_span => Some(*item_span),
+            CoreDefinitionKind::Instantiation(def) if def.name.1 == name_span => Some(*item_span),
+            CoreDefinitionKind::Directive(def) if def.name.1 == name_span => Some(*item_span),
+            CoreDefinitionKind::End(def) if def.name.1 == name_span => Some(*item_span),
+            CoreDefinitionKind::TerminationMeasure(def) if def.name.1 == name_span => {
+                Some(*item_span)
+            }
+            _ => None,
+        })
 }
 
-pub fn find_named_members(
-    ast: &SourceFile,
+pub fn find_named_members_core(
+    ast: &CoreSourceFile,
     kind: NamedDefKind,
     name_span: Span,
 ) -> Option<&[Spanned<String>]> {
-    ast.items.iter().find_map(|(item, _)| match item {
-        TopLevelDef::Named(def) if def.kind == kind && def.name.1 == name_span => {
+    ast.defs.iter().find_map(|(item, _)| match &item.kind {
+        CoreDefinitionKind::Named(def) if def.kind == kind && def.name.1 == name_span => {
             Some(def.members.as_slice())
         }
         _ => None,
     })
 }
 
-pub fn find_enum_name_for_member<'a>(ast: &'a SourceFile, member: &str) -> Option<&'a str> {
-    ast.items.iter().find_map(|(item, _)| match item {
-        TopLevelDef::Named(def)
+pub fn find_enum_name_for_member_core<'a>(
+    ast: &'a CoreSourceFile,
+    member: &str,
+) -> Option<&'a str> {
+    ast.defs.iter().find_map(|(item, _)| match &item.kind {
+        CoreDefinitionKind::Named(def)
             if def.kind == NamedDefKind::Enum
                 && def.members.iter().any(|candidate| candidate.0 == member) =>
         {
             Some(def.name.0.as_str())
         }
-        TopLevelDef::ScatteredClause(def)
-            if def.kind == crate::ast::ScatteredClauseKind::Enum && def.member.0 == member =>
+        CoreDefinitionKind::ScatteredClause(def)
+            if def.kind == ScatteredClauseKind::Enum && def.member.0 == member =>
         {
             Some(def.name.0.as_str())
         }
@@ -757,10 +770,22 @@ mod tests {
     fn finds_smallest_nested_call_at_offset() {
         let source = "function foo(x) = outer(inner(x), x)";
         let tokens = crate::lexer().parse(source).into_result().unwrap();
-        let ast = crate::parse_source(&tokens).into_result().unwrap();
+        let ast = crate::parse_core_source(&tokens).into_result().unwrap();
         let offset = source.find("inner").unwrap() + 2;
 
-        let call = find_call_at_offset(&ast, offset).expect("call");
+        let call = find_call_at_offset_core(&ast, offset).expect("call");
+        assert_eq!(call.callee, "inner");
+        assert_eq!(call.args.len(), 1);
+    }
+
+    #[test]
+    fn finds_smallest_nested_call_at_offset_in_core_ast() {
+        let source = "function foo(x) = outer(inner(x), x)";
+        let tokens = crate::lexer().parse(source).into_result().unwrap();
+        let core_ast = crate::parse_core_source(&tokens).into_result().unwrap();
+        let offset = source.find("inner").unwrap() + 2;
+
+        let call = find_call_at_offset_core(&core_ast, offset).expect("call");
         assert_eq!(call.callee, "inner");
         assert_eq!(call.args.len(), 1);
     }
@@ -769,10 +794,10 @@ mod tests {
     fn finds_call_in_top_level_let_initializer() {
         let source = "let result = outer(inner(1))";
         let tokens = crate::lexer().parse(source).into_result().unwrap();
-        let ast = crate::parse_source(&tokens).into_result().unwrap();
+        let ast = crate::parse_core_source(&tokens).into_result().unwrap();
         let offset = source.find("inner").unwrap() + 2;
 
-        let call = find_call_at_offset(&ast, offset).expect("call");
+        let call = find_call_at_offset_core(&ast, offset).expect("call");
         assert_eq!(call.callee, "inner");
         assert_eq!(call.args.len(), 1);
     }
@@ -781,14 +806,15 @@ mod tests {
     fn finds_named_members_and_item_span() {
         let source = "overload foo = {bar, baz}\n";
         let tokens = crate::lexer().parse(source).into_result().unwrap();
-        let ast = crate::parse_source(&tokens).into_result().unwrap();
-        let name_span = match &ast.items[0].0 {
-            TopLevelDef::Named(def) => def.name.1,
+        let ast = crate::parse_core_source(&tokens).into_result().unwrap();
+        let name_span = match &ast.defs[0].0.kind {
+            CoreDefinitionKind::Named(def) => def.name.1,
             _ => panic!("expected named def"),
         };
 
-        let item_span = find_top_level_item_span(&ast, name_span).expect("item span");
-        let members = find_named_members(&ast, NamedDefKind::Overload, name_span).expect("members");
+        let item_span = find_top_level_item_span_core(&ast, name_span).expect("item span");
+        let members =
+            find_named_members_core(&ast, NamedDefKind::Overload, name_span).expect("members");
 
         assert_eq!(
             &source[item_span.start..item_span.end],
@@ -807,13 +833,14 @@ mod tests {
     fn finds_struct_members_via_named_members_query() {
         let source = "struct S = { field1 : int, field2 : bits(3) }\n";
         let tokens = crate::lexer().parse(source).into_result().unwrap();
-        let ast = crate::parse_source(&tokens).into_result().unwrap();
-        let name_span = match &ast.items[0].0 {
-            TopLevelDef::Named(def) => def.name.1,
+        let ast = crate::parse_core_source(&tokens).into_result().unwrap();
+        let name_span = match &ast.defs[0].0.kind {
+            CoreDefinitionKind::Named(def) => def.name.1,
             _ => panic!("expected named def"),
         };
 
-        let members = find_named_members(&ast, NamedDefKind::Struct, name_span).expect("members");
+        let members =
+            find_named_members_core(&ast, NamedDefKind::Struct, name_span).expect("members");
         assert_eq!(
             members
                 .iter()
@@ -827,21 +854,68 @@ mod tests {
     fn finds_enum_name_for_member() {
         let source = "enum color = { Red, Green, Blue }\n";
         let tokens = crate::lexer().parse(source).into_result().unwrap();
-        let ast = crate::parse_source(&tokens).into_result().unwrap();
+        let ast = crate::parse_core_source(&tokens).into_result().unwrap();
 
-        assert_eq!(find_enum_name_for_member(&ast, "Green"), Some("color"));
-        assert_eq!(find_enum_name_for_member(&ast, "Purple"), None);
+        assert_eq!(find_enum_name_for_member_core(&ast, "Green"), Some("color"));
+        assert_eq!(find_enum_name_for_member_core(&ast, "Purple"), None);
+    }
+
+    #[test]
+    fn finds_item_metadata_in_core_ast() {
+        let source = "overload foo = {bar, baz}\nenum color = { Red, Green, Blue }\n";
+        let tokens = crate::lexer().parse(source).into_result().unwrap();
+        let core_ast = crate::parse_core_source(&tokens).into_result().unwrap();
+        let overload_name_span = match &core_ast.defs[0].0.kind {
+            CoreDefinitionKind::Named(def) => def.name.1,
+            _ => panic!("expected named def"),
+        };
+
+        let item_span =
+            find_top_level_item_span_core(&core_ast, overload_name_span).expect("item span");
+        let members =
+            find_named_members_core(&core_ast, NamedDefKind::Overload, overload_name_span)
+                .expect("members");
+
+        assert_eq!(
+            &source[item_span.start..item_span.end],
+            "overload foo = {bar, baz}"
+        );
+        assert_eq!(
+            members
+                .iter()
+                .map(|member| member.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["bar", "baz"]
+        );
+        assert_eq!(
+            find_enum_name_for_member_core(&core_ast, "Green"),
+            Some("color")
+        );
+        assert_eq!(find_enum_name_for_member_core(&core_ast, "Purple"), None);
     }
 
     #[test]
     fn finds_binding_value_for_local_let() {
         let source = "function foo() = { let x = bar(1); x }\n";
         let tokens = crate::lexer().parse(source).into_result().unwrap();
-        let ast = crate::parse_source(&tokens).into_result().unwrap();
+        let ast = crate::parse_core_source(&tokens).into_result().unwrap();
         let start = source.find("x =").unwrap();
         let name_span = Span::new(start, start + 1);
 
-        let binding = find_binding_value_at_span(&ast, name_span).expect("binding");
+        let binding = find_binding_value_at_span_core(&ast, name_span).expect("binding");
+        assert_eq!(binding.explicit_ty, None);
+        assert!(matches!(binding.value.0, Expr::Call(_)));
+    }
+
+    #[test]
+    fn finds_binding_value_for_local_let_in_core_ast() {
+        let source = "function foo() = { let x = bar(1); x }\n";
+        let tokens = crate::lexer().parse(source).into_result().unwrap();
+        let core_ast = crate::parse_core_source(&tokens).into_result().unwrap();
+        let start = source.find("x =").unwrap();
+        let name_span = Span::new(start, start + 1);
+
+        let binding = find_binding_value_at_span_core(&core_ast, name_span).expect("binding");
         assert_eq!(binding.explicit_ty, None);
         assert!(matches!(binding.value.0, Expr::Call(_)));
     }

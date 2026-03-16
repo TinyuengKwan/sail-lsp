@@ -1,7 +1,10 @@
 use crate::hover::infer_expr_type_text;
 use crate::state::File;
 use crate::symbols::{find_callable_signature, inlay_param_name};
-use sail_parser::{BlockItem, Expr, NamedDefKind, Pattern, SourceFile, Span, TopLevelDef};
+use sail_parser::{
+    core_ast::{DefinitionKind, SourceFile},
+    BlockItem, Expr, NamedDefKind, Pattern, Span,
+};
 use tower_lsp::lsp_types::{
     InlayHint, InlayHintKind, InlayHintLabel, InlayHintTooltip, Range, Url,
 };
@@ -953,7 +956,7 @@ fn visit_expr_type_hints<'a>(
     }
 }
 
-fn collect_ast_inlay_hints<'a>(
+fn collect_core_inlay_hints<'a>(
     files: &[(&'a Url, &'a File)],
     current_uri: &Url,
     current_file: &File,
@@ -962,9 +965,9 @@ fn collect_ast_inlay_hints<'a>(
     end: usize,
     hints: &mut Vec<InlayHint>,
 ) {
-    for (item, _) in &ast.items {
-        match item {
-            TopLevelDef::CallableDef(def) => {
+    for (item, _) in &ast.defs {
+        match &item.kind {
+            DefinitionKind::Callable(def) => {
                 let has_clauses = !def.clauses.is_empty();
                 if let Some(rec_measure) = &def.rec_measure {
                     visit_expr_parameter_hints(
@@ -1177,7 +1180,7 @@ fn collect_ast_inlay_hints<'a>(
                     }
                 }
             }
-            TopLevelDef::Named(def) => {
+            DefinitionKind::Named(def) => {
                 if matches!(def.kind, NamedDefKind::Let | NamedDefKind::Var) && def.ty.is_none() {
                     if let Some(value) = &def.value {
                         maybe_push_type_hint(
@@ -1213,17 +1216,17 @@ fn collect_ast_inlay_hints<'a>(
                     );
                 }
             }
-            TopLevelDef::Scattered(_)
-            | TopLevelDef::ScatteredClause(_)
-            | TopLevelDef::CallableSpec(_)
-            | TopLevelDef::TypeAlias(_)
-            | TopLevelDef::Default(_)
-            | TopLevelDef::Fixity(_)
-            | TopLevelDef::Instantiation(_)
-            | TopLevelDef::Directive(_)
-            | TopLevelDef::End(_)
-            | TopLevelDef::Constraint(_)
-            | TopLevelDef::TerminationMeasure(_) => {}
+            DefinitionKind::Scattered(_)
+            | DefinitionKind::ScatteredClause(_)
+            | DefinitionKind::CallableSpec(_)
+            | DefinitionKind::TypeAlias(_)
+            | DefinitionKind::Default(_)
+            | DefinitionKind::Fixity(_)
+            | DefinitionKind::Instantiation(_)
+            | DefinitionKind::Directive(_)
+            | DefinitionKind::End(_)
+            | DefinitionKind::Constraint(_)
+            | DefinitionKind::TerminationMeasure(_) => {}
         }
     }
 }
@@ -1272,8 +1275,8 @@ where
     let end = current_file.source.offset_at(&range.end);
     let mut hints = Vec::new();
 
-    if let Some(ast) = current_file.ast() {
-        collect_ast_inlay_hints(
+    if let Some(ast) = current_file.core_ast() {
+        collect_core_inlay_hints(
             &all_files,
             current_uri,
             current_file,

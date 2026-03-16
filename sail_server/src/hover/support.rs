@@ -1,6 +1,7 @@
 use crate::state::File;
 use crate::symbols::{ast_call_at_position, find_callable_signature};
-use sail_parser::{Decl, Expr, Literal};
+use crate::typecheck;
+use sail_parser::{Decl, DeclKind, Expr, Literal};
 use tower_lsp::lsp_types::{Position, Url};
 
 fn span_text(file: &File, span: sail_parser::Span) -> String {
@@ -8,13 +9,30 @@ fn span_text(file: &File, span: sail_parser::Span) -> String {
 }
 
 fn binding_type_text_before_offset(file: &File, name: &str, offset: usize) -> Option<String> {
+    let type_check = file.type_check();
     let parsed = file.parsed()?;
     parsed
-        .typed_bindings
+        .decls
         .iter()
-        .filter(|binding| binding.name == name && binding.name_span.start <= offset)
-        .max_by_key(|binding| binding.name_span.start)
-        .map(|binding| span_text(file, binding.ty_span))
+        .filter(|decl| {
+            decl.name == name
+                && decl.span.start <= offset
+                && matches!(
+                    decl.kind,
+                    DeclKind::Parameter | DeclKind::Let | DeclKind::Var
+                )
+        })
+        .max_by_key(|decl| decl.span.start)
+        .and_then(|decl| type_check.and_then(|result| result.binding_type_text(decl.span)))
+        .map(ToString::to_string)
+        .or_else(|| {
+            parsed
+                .typed_bindings
+                .iter()
+                .filter(|binding| binding.name == name && binding.name_span.start <= offset)
+                .max_by_key(|binding| binding.name_span.start)
+                .map(|binding| span_text(file, binding.ty_span))
+        })
 }
 
 fn literal_type_text(literal: &Literal) -> Option<String> {
@@ -95,6 +113,14 @@ pub(crate) fn infer_expr_type_text<'a>(
     current_file: &File,
     expr: &(Expr, sail_parser::Span),
 ) -> Option<String> {
+    if let Some(ty) = typecheck::infer_expr_type_text_in_files(
+        files.iter().map(|(_, file)| *file),
+        current_file,
+        expr,
+    ) {
+        return Some(ty);
+    }
+
     match &expr.0 {
         Expr::Attribute { expr, .. }
         | Expr::Prefix { expr, .. }
@@ -178,6 +204,13 @@ pub(crate) fn binding_type_hint<'a>(
     file: &File,
     decl: &Decl,
 ) -> Option<String> {
+    if let Some(ty) = file
+        .type_check()
+        .and_then(|result| result.binding_type_text(decl.span))
+    {
+        return Some(ty.to_string());
+    }
+
     if let Some(parsed) = file.parsed() {
         if let Some(binding) = parsed
             .typed_bindings
@@ -188,7 +221,7 @@ pub(crate) fn binding_type_hint<'a>(
         }
     }
 
-    let ast = file.ast()?;
+    let ast = file.core_ast()?;
     let binding = sail_parser::find_binding_value_at_span(ast, decl.span)?;
     if let Some(ty_span) = binding.explicit_ty {
         return Some(span_text(file, ty_span));

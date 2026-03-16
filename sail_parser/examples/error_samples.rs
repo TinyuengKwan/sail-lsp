@@ -6,12 +6,16 @@ use std::{
 
 use chumsky::Parser;
 use sail_parser::{
+    core_ast::{
+        CallableDefinition, ConstraintDefinition, Definition, DefinitionKind, DirectiveDefinition,
+        NamedDefinition, ScatteredClauseDefinition, ScatteredDefinition, SourceFile,
+        TerminationMeasureDefinition, TypeAliasDefinition,
+    },
     Attribute, AttributeData, AttributeEntry, BitfieldField, BlockItem, CallableClause,
-    CallableDef, ConstraintDef, DirectiveDef, EnumFunction, EnumMember, Expr, ExternBinding,
-    ExternSpec, FieldExpr, FieldPattern, LetBinding, LoopMeasure, MappingBody, MatchCase, NamedDef,
-    NamedDefDetail, Pattern, RecMeasure, ScatteredClauseDef, ScatteredDef, SourceFile, Span,
-    TerminationMeasureDef, TerminationMeasureKind, TopLevelDef, TypeAliasDef, TypeExpr, TypeParam,
-    TypeParamSpec, TypeParamTail, TypedField, UnionPayload, UnionVariant, VectorUpdate,
+    DefModifiers, EnumFunction, EnumMember, Expr, ExternBinding, ExternSpec, FieldExpr,
+    FieldPattern, LetBinding, LoopMeasure, MappingBody, MatchCase, NamedDefDetail, Pattern,
+    RecMeasure, Span, TerminationMeasureKind, TypeExpr, TypeParam, TypeParamSpec, TypeParamTail,
+    TypedField, UnionPayload, UnionVariant, VectorUpdate,
 };
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -56,7 +60,7 @@ fn main() {
             lex_failures += 1;
             continue;
         };
-        let Ok(ast) = sail_parser::parse_source(&tokens).into_result() else {
+        let Ok(ast) = sail_parser::parse_core_source(&tokens).into_result() else {
             parse_failures += 1;
             continue;
         };
@@ -166,48 +170,59 @@ fn collect_source_file_errors(
     path: &Path,
     buckets: &mut BTreeMap<(ErrorKind, String), SampleBucket>,
 ) {
-    for (item, _) in &ast.items {
+    for (item, _) in &ast.defs {
         collect_top_level_errors(item, source, path, buckets);
     }
 }
 
 fn collect_top_level_errors(
-    item: &TopLevelDef,
+    item: &Definition,
     source: &str,
     path: &Path,
     buckets: &mut BTreeMap<(ErrorKind, String), SampleBucket>,
 ) {
-    match item {
-        TopLevelDef::Scattered(def) => collect_scattered_errors(def, source, path, buckets),
-        TopLevelDef::ScatteredClause(def) => {
+    collect_modifier_errors(
+        &DefModifiers {
+            is_private: item.meta.is_private,
+            attrs: item.meta.attrs.clone(),
+        },
+        source,
+        path,
+        buckets,
+    );
+
+    match &item.kind {
+        DefinitionKind::Scattered(def) => collect_scattered_errors(def, source, path, buckets),
+        DefinitionKind::ScatteredClause(def) => {
             collect_scattered_clause_errors(def, source, path, buckets)
         }
-        TopLevelDef::CallableSpec(spec) => {
+        DefinitionKind::CallableSpec(spec) => {
             collect_type_expr_errors(&spec.signature, source, path, buckets);
             if let Some(externs) = &spec.externs {
                 collect_extern_spec_errors(&externs.0, source, path, buckets);
             }
         }
-        TopLevelDef::CallableDef(def) => collect_callable_def_errors(def, source, path, buckets),
-        TopLevelDef::TypeAlias(def) => collect_type_alias_errors(def, source, path, buckets),
-        TopLevelDef::Named(def) => collect_named_def_errors(def, source, path, buckets),
-        TopLevelDef::Default(_) | TopLevelDef::Fixity(_) | TopLevelDef::Instantiation(_) => {}
-        TopLevelDef::Directive(def) => collect_directive_errors(def, source, path, buckets),
-        TopLevelDef::End(_) => {}
-        TopLevelDef::Constraint(def) => collect_constraint_errors(def, source, path, buckets),
-        TopLevelDef::TerminationMeasure(def) => {
+        DefinitionKind::Callable(def) => collect_callable_def_errors(def, source, path, buckets),
+        DefinitionKind::TypeAlias(def) => collect_type_alias_errors(def, source, path, buckets),
+        DefinitionKind::Named(def) => collect_named_def_errors(def, source, path, buckets),
+        DefinitionKind::Default(_)
+        | DefinitionKind::Fixity(_)
+        | DefinitionKind::Instantiation(_)
+        | DefinitionKind::End(_) => {}
+        DefinitionKind::Directive(def) => collect_directive_errors(def, source, path, buckets),
+        DefinitionKind::Constraint(def) => collect_constraint_errors(def, source, path, buckets),
+        DefinitionKind::TerminationMeasure(def) => {
             collect_termination_measure_errors(def, source, path, buckets)
         }
     }
 }
 
 fn collect_scattered_errors(
-    def: &ScatteredDef,
+    def: &ScatteredDefinition,
     source: &str,
     path: &Path,
     buckets: &mut BTreeMap<(ErrorKind, String), SampleBucket>,
 ) {
-    collect_modifiers_errors(&def.modifiers, source, path, buckets);
     if let Some(params) = &def.params {
         collect_type_param_spec_errors(&params.0, source, path, buckets);
     }
@@ -217,24 +232,22 @@ fn collect_scattered_errors(
 }
 
 fn collect_scattered_clause_errors(
-    def: &ScatteredClauseDef,
+    def: &ScatteredClauseDefinition,
     source: &str,
     path: &Path,
     buckets: &mut BTreeMap<(ErrorKind, String), SampleBucket>,
 ) {
-    collect_modifiers_errors(&def.modifiers, source, path, buckets);
     if let Some(ty) = &def.ty {
         collect_type_expr_errors(ty, source, path, buckets);
     }
 }
 
 fn collect_callable_def_errors(
-    def: &CallableDef,
+    def: &CallableDefinition,
     source: &str,
     path: &Path,
     buckets: &mut BTreeMap<(ErrorKind, String), SampleBucket>,
 ) {
-    collect_modifiers_errors(&def.modifiers, source, path, buckets);
     if let Some(signature) = &def.signature {
         collect_type_expr_errors(signature, source, path, buckets);
     }
@@ -264,7 +277,7 @@ fn collect_callable_clause_errors(
     path: &Path,
     buckets: &mut BTreeMap<(ErrorKind, String), SampleBucket>,
 ) {
-    collect_modifiers_errors(&clause.modifiers, source, path, buckets);
+    collect_modifier_errors(&clause.modifiers, source, path, buckets);
     for pattern in &clause.patterns {
         collect_pattern_errors(pattern, source, path, buckets);
     }
@@ -293,12 +306,11 @@ fn collect_callable_clause_errors(
 }
 
 fn collect_type_alias_errors(
-    def: &TypeAliasDef,
+    def: &TypeAliasDefinition,
     source: &str,
     path: &Path,
     buckets: &mut BTreeMap<(ErrorKind, String), SampleBucket>,
 ) {
-    collect_modifiers_errors(&def.modifiers, source, path, buckets);
     if let Some(params) = &def.params {
         collect_type_param_spec_errors(&params.0, source, path, buckets);
     }
@@ -308,12 +320,11 @@ fn collect_type_alias_errors(
 }
 
 fn collect_named_def_errors(
-    def: &NamedDef,
+    def: &NamedDefinition,
     source: &str,
     path: &Path,
     buckets: &mut BTreeMap<(ErrorKind, String), SampleBucket>,
 ) {
-    collect_modifiers_errors(&def.modifiers, source, path, buckets);
     if let Some(params) = &def.params {
         collect_type_param_spec_errors(&params.0, source, path, buckets);
     }
@@ -361,7 +372,7 @@ fn collect_named_detail_errors(
     }
 }
 
-fn collect_modifiers_errors(
+fn collect_modifier_errors(
     modifiers: &sail_parser::DefModifiers,
     source: &str,
     path: &Path,
@@ -525,34 +536,31 @@ fn collect_bitfield_field_errors(
 }
 
 fn collect_directive_errors(
-    def: &DirectiveDef,
+    def: &DirectiveDefinition,
     source: &str,
     path: &Path,
     buckets: &mut BTreeMap<(ErrorKind, String), SampleBucket>,
 ) {
-    collect_modifiers_errors(&def.modifiers, source, path, buckets);
     if let Some(payload) = &def.structured_payload {
         collect_attribute_data_errors(&payload.0, source, path, buckets);
     }
 }
 
 fn collect_constraint_errors(
-    def: &ConstraintDef,
+    def: &ConstraintDefinition,
     source: &str,
     path: &Path,
     buckets: &mut BTreeMap<(ErrorKind, String), SampleBucket>,
 ) {
-    collect_modifiers_errors(&def.modifiers, source, path, buckets);
     collect_type_expr_errors(&def.ty, source, path, buckets);
 }
 
 fn collect_termination_measure_errors(
-    def: &TerminationMeasureDef,
+    def: &TerminationMeasureDefinition,
     source: &str,
     path: &Path,
     buckets: &mut BTreeMap<(ErrorKind, String), SampleBucket>,
 ) {
-    collect_modifiers_errors(&def.modifiers, source, path, buckets);
     match &def.kind {
         TerminationMeasureKind::Function { pattern, body } => {
             collect_pattern_errors(pattern, source, path, buckets);

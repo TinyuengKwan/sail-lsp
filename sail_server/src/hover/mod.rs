@@ -162,7 +162,7 @@ where
 }
 
 fn overload_members(file: &File, decl: &Decl) -> Vec<String> {
-    if let Some(ast) = file.ast() {
+    if let Some(ast) = file.core_ast() {
         if let Some(members) = find_named_members(ast, NamedDefKind::Overload, decl.span) {
             return members.iter().map(|member| member.0.clone()).collect();
         }
@@ -282,7 +282,7 @@ fn token_starts_declaration(token: &Token) -> bool {
 
 fn decl_headline(file: &File, decl: &Decl) -> String {
     if decl.scope == Scope::TopLevel {
-        if let Some(ast) = file.ast() {
+        if let Some(ast) = file.core_ast() {
             if let Some(span) = find_top_level_item_span(ast, decl.span) {
                 return file.source.text()[span.start..span.end].trim().to_string();
             }
@@ -456,7 +456,7 @@ enum EnumInfo {
 }
 
 fn enum_info_for_symbol(file: &File, symbol: &str) -> Option<EnumInfo> {
-    if let Some(ast) = file.ast() {
+    if let Some(ast) = file.core_ast() {
         if let Some(enum_name) = find_enum_name_for_member(ast, symbol) {
             return Some(EnumInfo::Member {
                 enum_name: enum_name.to_string(),

@@ -1,5 +1,10 @@
+mod error_format;
+pub mod parse;
+pub(crate) mod reporting;
 pub mod semantic;
+pub(crate) mod type_error;
 
+pub(crate) use parse::compute_parse_diagnostics;
 pub(crate) use semantic::compute_semantic_diagnostics;
 
 use crate::state::File;
@@ -41,7 +46,12 @@ pub enum DiagnosticCode {
     UnusedVariable,
     UnreachableCode,
     MismatchedArgCount,
-    ParseError,
+    TypeError,
+    LexicalError,
+    SyntaxError,
+    DeprecatedEffectAnnotation,
+    DeprecatedCastAnnotation,
+    MissingExternPurity,
 }
 
 impl DiagnosticCode {
@@ -51,7 +61,12 @@ impl DiagnosticCode {
             DiagnosticCode::UnusedVariable => "unused-variable",
             DiagnosticCode::UnreachableCode => "unreachable-code",
             DiagnosticCode::MismatchedArgCount => "mismatched-arg-count",
-            DiagnosticCode::ParseError => "parse-error",
+            DiagnosticCode::TypeError => "type-error",
+            DiagnosticCode::LexicalError => "lexical-error",
+            DiagnosticCode::SyntaxError => "syntax-error",
+            DiagnosticCode::DeprecatedEffectAnnotation => "deprecated-effect-annotation",
+            DiagnosticCode::DeprecatedCastAnnotation => "deprecated-cast-annotation",
+            DiagnosticCode::MissingExternPurity => "missing-extern-purity",
         }
     }
 }

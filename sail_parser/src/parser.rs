@@ -1,18 +1,29 @@
 use crate::{
-    ast::{
-        BlockItem as AstBlockItem, Call as AstCall, CallableDef as AstCallableDef, CallableDefKind,
-        CallableSpec as AstCallableSpec, CallableSpecKind, Expr as AstExpr,
-        FieldExpr as AstFieldExpr, FieldPattern as AstFieldPattern, ForeachExpr as AstForeachExpr,
-        LoopMeasure as AstLoopMeasure, MappingBody as AstMappingBody, MatchCase as AstMatchCase,
-        NamedDef as AstNamedDef, NamedDefKind, Pattern as AstPattern,
-        ScatteredClauseDef as AstScatteredClauseDef, ScatteredClauseKind,
-        ScatteredDef as AstScatteredDef, ScatteredKind, SourceFile,
-        TerminationMeasureKind as AstTerminationMeasureKind, TopLevelDef,
-        TypeAliasDef as AstTypeAliasDef, TypeExpr as AstTypeExpr, VectorUpdate as AstVectorUpdate,
+    core_ast::{
+        BlockItem as AstBlockItem, Call as AstCall, CallableDefKind, CallableSpecKind,
+        Expr as AstExpr, FieldExpr as AstFieldExpr, FieldPattern as AstFieldPattern,
+        ForeachExpr as AstForeachExpr, LoopMeasure as AstLoopMeasure,
+        MappingBody as AstMappingBody, MatchCase as AstMatchCase,
+        NamedDefDetail as AstNamedDefDetail, NamedDefKind, Pattern as AstPattern,
+        ScatteredClauseKind, ScatteredKind, TerminationMeasureKind as AstTerminationMeasureKind,
+        TypeExpr as AstTypeExpr, TypeParamSpec as AstTypeParamSpec,
+        TypeParamTail as AstTypeParamTail, UnionPayload as AstUnionPayload,
+        VectorUpdate as AstVectorUpdate,
+    },
+    core_ast::{
+        CallableDefinition as CoreCallableDef, CallableSpecification as CoreCallableSpec,
+        DefinitionKind as CoreDefinitionKind, NamedDefinition as CoreNamedDef,
+        ScatteredClauseDefinition as CoreScatteredClauseDef,
+        ScatteredDefinition as CoreScatteredDef, SourceFile as CoreSourceFile,
+        TerminationMeasureDefinition as CoreTerminationMeasureDef,
+        TypeAliasDefinition as CoreTypeAliasDef,
     },
     Span, Token,
 };
 use std::collections::{HashMap, HashSet};
+
+#[cfg(test)]
+use crate::ast::SourceFile;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
@@ -1133,7 +1144,7 @@ fn unwrapped_type_expr<'a>(ty: &'a (AstTypeExpr, Span)) -> &'a (AstTypeExpr, Spa
     }
 }
 
-fn callable_head_from_spec(spec: &AstCallableSpec, label_start: usize) -> CallableHead {
+fn callable_head_from_core_spec(spec: &CoreCallableSpec, label_start: usize) -> CallableHead {
     callable_head_from_signature(
         &spec.name.0,
         match spec.kind {
@@ -1175,7 +1186,7 @@ fn callable_head_from_signature(
     }
 }
 
-fn callable_head_label_end(def: &AstCallableDef) -> usize {
+fn callable_head_label_end_core(def: &CoreCallableDef) -> usize {
     let mut end = def.name.1.end;
 
     if let Some(signature) = &def.signature {
@@ -1241,17 +1252,54 @@ fn callable_param_from_pattern(pattern: &(AstPattern, Span)) -> CallableParam {
     }
 }
 
+fn collect_top_level_pattern_constants_core(ast: &CoreSourceFile) -> HashSet<String> {
+    let mut constants = HashSet::new();
+
+    for (item, _) in &ast.defs {
+        match &item.kind {
+            CoreDefinitionKind::Named(CoreNamedDef {
+                kind: NamedDefKind::Enum,
+                members,
+                ..
+            }) => {
+                for member in members {
+                    constants.insert(member.0.clone());
+                }
+            }
+            CoreDefinitionKind::ScatteredClause(CoreScatteredClauseDef {
+                kind: ScatteredClauseKind::Enum,
+                member,
+                ..
+            }) => {
+                constants.insert(member.0.clone());
+            }
+            _ => {}
+        }
+    }
+
+    constants
+}
+
+fn pattern_ident_is_binding(name: &str, pattern_constants: &HashSet<String>) -> bool {
+    !pattern_constants.contains(name)
+}
+
 fn collect_typed_bindings_from_pattern(
     pattern: &(AstPattern, Span),
     scope: Scope,
+    pattern_constants: &HashSet<String>,
     parsed: &mut ParsedFile,
 ) {
     match &pattern.0 {
         AstPattern::Attribute { pattern: inner, .. } => {
-            collect_typed_bindings_from_pattern(inner, scope, parsed);
+            collect_typed_bindings_from_pattern(inner, scope, pattern_constants, parsed);
         }
         AstPattern::Typed(inner, ty) => {
             if let AstPattern::Ident(name) = &inner.0 {
+                if !pattern_ident_is_binding(name, pattern_constants) {
+                    collect_typed_bindings_from_pattern(inner, scope, pattern_constants, parsed);
+                    return;
+                }
                 parsed.typed_bindings.push(TypedBinding {
                     name: name.clone(),
                     name_span: inner.1,
@@ -1259,34 +1307,34 @@ fn collect_typed_bindings_from_pattern(
                     scope,
                 });
             }
-            collect_typed_bindings_from_pattern(inner, scope, parsed);
+            collect_typed_bindings_from_pattern(inner, scope, pattern_constants, parsed);
         }
         AstPattern::Tuple(items) | AstPattern::List(items) | AstPattern::Vector(items) => {
             for item in items {
-                collect_typed_bindings_from_pattern(item, scope, parsed);
+                collect_typed_bindings_from_pattern(item, scope, pattern_constants, parsed);
             }
         }
         AstPattern::App { args, .. } => {
             for arg in args {
-                collect_typed_bindings_from_pattern(arg, scope, parsed);
+                collect_typed_bindings_from_pattern(arg, scope, pattern_constants, parsed);
             }
         }
         AstPattern::AsBinding { pattern, .. } => {
-            collect_typed_bindings_from_pattern(pattern, scope, parsed);
+            collect_typed_bindings_from_pattern(pattern, scope, pattern_constants, parsed);
         }
         AstPattern::Struct { fields, .. } => {
             for field in fields {
                 if let AstFieldPattern::Binding { pattern, .. } = &field.0 {
-                    collect_typed_bindings_from_pattern(pattern, scope, parsed);
+                    collect_typed_bindings_from_pattern(pattern, scope, pattern_constants, parsed);
                 }
             }
         }
         AstPattern::Infix { lhs, rhs, .. } => {
-            collect_typed_bindings_from_pattern(lhs, scope, parsed);
-            collect_typed_bindings_from_pattern(rhs, scope, parsed);
+            collect_typed_bindings_from_pattern(lhs, scope, pattern_constants, parsed);
+            collect_typed_bindings_from_pattern(rhs, scope, pattern_constants, parsed);
         }
         AstPattern::AsType(inner, _) => {
-            collect_typed_bindings_from_pattern(inner, scope, parsed);
+            collect_typed_bindings_from_pattern(inner, scope, pattern_constants, parsed);
         }
         _ => {}
     }
@@ -1296,13 +1344,17 @@ fn collect_decl_names_from_pattern(
     pattern: &(AstPattern, Span),
     kind: DeclKind,
     scope: Scope,
+    pattern_constants: &HashSet<String>,
     parsed: &mut ParsedFile,
 ) {
     match &pattern.0 {
         AstPattern::Attribute { pattern: inner, .. } => {
-            collect_decl_names_from_pattern(inner, kind, scope, parsed);
+            collect_decl_names_from_pattern(inner, kind, scope, pattern_constants, parsed);
         }
         AstPattern::Ident(name) => {
+            if !pattern_ident_is_binding(name, pattern_constants) {
+                return;
+            }
             push_decl(
                 parsed,
                 kind,
@@ -1314,10 +1366,10 @@ fn collect_decl_names_from_pattern(
             );
         }
         AstPattern::Typed(inner, _) | AstPattern::AsType(inner, _) => {
-            collect_decl_names_from_pattern(inner, kind, scope, parsed);
+            collect_decl_names_from_pattern(inner, kind, scope, pattern_constants, parsed);
         }
         AstPattern::AsBinding { pattern, binding } => {
-            collect_decl_names_from_pattern(pattern, kind, scope, parsed);
+            collect_decl_names_from_pattern(pattern, kind, scope, pattern_constants, parsed);
             push_decl(
                 parsed,
                 kind,
@@ -1330,19 +1382,25 @@ fn collect_decl_names_from_pattern(
         }
         AstPattern::Tuple(items) | AstPattern::List(items) | AstPattern::Vector(items) => {
             for item in items {
-                collect_decl_names_from_pattern(item, kind, scope, parsed);
+                collect_decl_names_from_pattern(item, kind, scope, pattern_constants, parsed);
             }
         }
         AstPattern::App { args, .. } => {
             for arg in args {
-                collect_decl_names_from_pattern(arg, kind, scope, parsed);
+                collect_decl_names_from_pattern(arg, kind, scope, pattern_constants, parsed);
             }
         }
         AstPattern::Struct { fields, .. } => {
             for field in fields {
                 match &field.0 {
                     AstFieldPattern::Binding { pattern, .. } => {
-                        collect_decl_names_from_pattern(pattern, kind, scope, parsed);
+                        collect_decl_names_from_pattern(
+                            pattern,
+                            kind,
+                            scope,
+                            pattern_constants,
+                            parsed,
+                        );
                     }
                     AstFieldPattern::Shorthand(name) => {
                         push_decl(
@@ -1360,8 +1418,8 @@ fn collect_decl_names_from_pattern(
             }
         }
         AstPattern::Infix { lhs, rhs, .. } => {
-            collect_decl_names_from_pattern(lhs, kind, scope, parsed);
-            collect_decl_names_from_pattern(rhs, kind, scope, parsed);
+            collect_decl_names_from_pattern(lhs, kind, scope, pattern_constants, parsed);
+            collect_decl_names_from_pattern(rhs, kind, scope, pattern_constants, parsed);
         }
         _ => {}
     }
@@ -1393,28 +1451,30 @@ fn typed_var_target(expr: &(AstExpr, Span)) -> Option<(String, Span, Span)> {
 fn collect_field_expr_metadata(
     field: &(AstFieldExpr, Span),
     caller: Option<&str>,
+    pattern_constants: &HashSet<String>,
     parsed: &mut ParsedFile,
 ) {
     if let AstFieldExpr::Assignment { target, value } = &field.0 {
-        collect_expr_metadata(target, caller, parsed);
-        collect_expr_metadata(value, caller, parsed);
+        collect_expr_metadata(target, caller, pattern_constants, parsed);
+        collect_expr_metadata(value, caller, pattern_constants, parsed);
     }
 }
 
 fn collect_vector_update_metadata(
     update: &(AstVectorUpdate, Span),
     caller: Option<&str>,
+    pattern_constants: &HashSet<String>,
     parsed: &mut ParsedFile,
 ) {
     match &update.0 {
         AstVectorUpdate::Assignment { target, value } => {
-            collect_expr_metadata(target, caller, parsed);
-            collect_expr_metadata(value, caller, parsed);
+            collect_expr_metadata(target, caller, pattern_constants, parsed);
+            collect_expr_metadata(value, caller, pattern_constants, parsed);
         }
         AstVectorUpdate::RangeAssignment { start, end, value } => {
-            collect_expr_metadata(start, caller, parsed);
-            collect_expr_metadata(end, caller, parsed);
-            collect_expr_metadata(value, caller, parsed);
+            collect_expr_metadata(start, caller, pattern_constants, parsed);
+            collect_expr_metadata(end, caller, pattern_constants, parsed);
+            collect_expr_metadata(value, caller, pattern_constants, parsed);
         }
         AstVectorUpdate::Shorthand(_) => {}
     }
@@ -1423,17 +1483,29 @@ fn collect_vector_update_metadata(
 fn collect_case_metadata(
     case: &(AstMatchCase, Span),
     caller: Option<&str>,
+    pattern_constants: &HashSet<String>,
     parsed: &mut ParsedFile,
 ) {
-    collect_decl_names_from_pattern(&case.0.pattern, DeclKind::Let, Scope::Local, parsed);
-    collect_typed_bindings_from_pattern(&case.0.pattern, Scope::Local, parsed);
+    collect_decl_names_from_pattern(
+        &case.0.pattern,
+        DeclKind::Let,
+        Scope::Local,
+        pattern_constants,
+        parsed,
+    );
+    collect_typed_bindings_from_pattern(&case.0.pattern, Scope::Local, pattern_constants, parsed);
     if let Some(guard) = &case.0.guard {
-        collect_expr_metadata(guard, caller, parsed);
+        collect_expr_metadata(guard, caller, pattern_constants, parsed);
     }
-    collect_expr_metadata(&case.0.body, caller, parsed);
+    collect_expr_metadata(&case.0.body, caller, pattern_constants, parsed);
 }
 
-fn collect_call_metadata(call: &AstCall, caller: Option<&str>, parsed: &mut ParsedFile) {
+fn collect_call_metadata(
+    call: &AstCall,
+    caller: Option<&str>,
+    pattern_constants: &HashSet<String>,
+    parsed: &mut ParsedFile,
+) {
     if let Some((callee, callee_span)) = callee_name_and_span(&call.callee) {
         parsed.call_sites.push(CallSite {
             caller: caller.map(|name| name.to_string()),
@@ -1444,108 +1516,174 @@ fn collect_call_metadata(call: &AstCall, caller: Option<&str>, parsed: &mut Pars
             arg_separator_spans: call.arg_separator_spans.clone(),
         });
     }
-    collect_expr_metadata(&call.callee, caller, parsed);
+    collect_expr_metadata(&call.callee, caller, pattern_constants, parsed);
     for arg in &call.args {
-        collect_expr_metadata(arg, caller, parsed);
+        collect_expr_metadata(arg, caller, pattern_constants, parsed);
     }
 }
 
 fn collect_mapping_body_metadata(
     body: &AstMappingBody,
     caller: Option<&str>,
+    pattern_constants: &HashSet<String>,
     parsed: &mut ParsedFile,
 ) {
     for arm in &body.arms {
         if let Some(pattern) = &arm.0.lhs_pattern {
-            collect_decl_names_from_pattern(pattern, DeclKind::Let, Scope::Local, parsed);
-            collect_typed_bindings_from_pattern(pattern, Scope::Local, parsed);
+            collect_decl_names_from_pattern(
+                pattern,
+                DeclKind::Let,
+                Scope::Local,
+                pattern_constants,
+                parsed,
+            );
+            collect_typed_bindings_from_pattern(pattern, Scope::Local, pattern_constants, parsed);
         }
         if let Some(pattern) = &arm.0.rhs_pattern {
-            collect_decl_names_from_pattern(pattern, DeclKind::Let, Scope::Local, parsed);
-            collect_typed_bindings_from_pattern(pattern, Scope::Local, parsed);
+            collect_decl_names_from_pattern(
+                pattern,
+                DeclKind::Let,
+                Scope::Local,
+                pattern_constants,
+                parsed,
+            );
+            collect_typed_bindings_from_pattern(pattern, Scope::Local, pattern_constants, parsed);
         }
-        collect_expr_metadata(&arm.0.lhs, caller, parsed);
-        collect_expr_metadata(&arm.0.rhs, caller, parsed);
+        collect_expr_metadata(&arm.0.lhs, caller, pattern_constants, parsed);
+        collect_expr_metadata(&arm.0.rhs, caller, pattern_constants, parsed);
         if let Some(guard) = &arm.0.guard {
-            collect_expr_metadata(guard, caller, parsed);
+            collect_expr_metadata(guard, caller, pattern_constants, parsed);
         }
     }
 }
 
-fn collect_callable_clause_metadata(def: &AstCallableDef, caller: &str, parsed: &mut ParsedFile) {
+fn collect_core_callable_clause_metadata(
+    def: &CoreCallableDef,
+    caller: &str,
+    pattern_constants: &HashSet<String>,
+    parsed: &mut ParsedFile,
+) {
     if let Some(rec_measure) = &def.rec_measure {
         collect_decl_names_from_pattern(
             &rec_measure.0.pattern,
             DeclKind::Let,
             Scope::Local,
+            pattern_constants,
             parsed,
         );
-        collect_typed_bindings_from_pattern(&rec_measure.0.pattern, Scope::Local, parsed);
-        collect_expr_metadata(&rec_measure.0.body, Some(caller), parsed);
+        collect_typed_bindings_from_pattern(
+            &rec_measure.0.pattern,
+            Scope::Local,
+            pattern_constants,
+            parsed,
+        );
+        collect_expr_metadata(&rec_measure.0.body, Some(caller), pattern_constants, parsed);
     }
 
     if def.clauses.is_empty() {
         for param in &def.params {
-            collect_decl_names_from_pattern(param, DeclKind::Parameter, Scope::Local, parsed);
-            collect_typed_bindings_from_pattern(param, Scope::Local, parsed);
+            collect_decl_names_from_pattern(
+                param,
+                DeclKind::Parameter,
+                Scope::Local,
+                pattern_constants,
+                parsed,
+            );
+            collect_typed_bindings_from_pattern(param, Scope::Local, pattern_constants, parsed);
         }
         if let Some(body) = &def.body {
-            collect_expr_metadata(body, Some(caller), parsed);
+            collect_expr_metadata(body, Some(caller), pattern_constants, parsed);
         }
         if let Some(mapping_body) = &def.mapping_body {
-            collect_mapping_body_metadata(mapping_body, Some(caller), parsed);
+            collect_mapping_body_metadata(mapping_body, Some(caller), pattern_constants, parsed);
         }
         return;
     }
 
     for clause in &def.clauses {
         for pattern in &clause.0.patterns {
-            collect_decl_names_from_pattern(pattern, DeclKind::Parameter, Scope::Local, parsed);
-            collect_typed_bindings_from_pattern(pattern, Scope::Local, parsed);
+            collect_decl_names_from_pattern(
+                pattern,
+                DeclKind::Parameter,
+                Scope::Local,
+                pattern_constants,
+                parsed,
+            );
+            collect_typed_bindings_from_pattern(pattern, Scope::Local, pattern_constants, parsed);
         }
         if let Some(guard) = &clause.0.guard {
-            collect_expr_metadata(guard, Some(caller), parsed);
+            collect_expr_metadata(guard, Some(caller), pattern_constants, parsed);
         }
         if let Some(body) = &clause.0.body {
-            collect_expr_metadata(body, Some(caller), parsed);
+            collect_expr_metadata(body, Some(caller), pattern_constants, parsed);
         }
         if let Some(mapping_body) = &clause.0.mapping_body {
-            collect_mapping_body_metadata(mapping_body, Some(caller), parsed);
+            collect_mapping_body_metadata(mapping_body, Some(caller), pattern_constants, parsed);
         }
     }
 }
 
-fn collect_termination_measure_metadata(kind: &AstTerminationMeasureKind, parsed: &mut ParsedFile) {
+fn collect_termination_measure_metadata(
+    kind: &AstTerminationMeasureKind,
+    pattern_constants: &HashSet<String>,
+    parsed: &mut ParsedFile,
+) {
     match kind {
         AstTerminationMeasureKind::Function { pattern, body } => {
-            collect_decl_names_from_pattern(pattern, DeclKind::Let, Scope::Local, parsed);
-            collect_typed_bindings_from_pattern(pattern, Scope::Local, parsed);
-            collect_expr_metadata(body, None, parsed);
+            collect_decl_names_from_pattern(
+                pattern,
+                DeclKind::Let,
+                Scope::Local,
+                pattern_constants,
+                parsed,
+            );
+            collect_typed_bindings_from_pattern(pattern, Scope::Local, pattern_constants, parsed);
+            collect_expr_metadata(body, None, pattern_constants, parsed);
         }
         AstTerminationMeasureKind::Loop { measures } => {
             for measure in measures {
                 match &measure.0 {
                     AstLoopMeasure::Until(expr)
                     | AstLoopMeasure::Repeat(expr)
-                    | AstLoopMeasure::While(expr) => collect_expr_metadata(expr, None, parsed),
+                    | AstLoopMeasure::While(expr) => {
+                        collect_expr_metadata(expr, None, pattern_constants, parsed)
+                    }
                 }
             }
         }
     }
 }
 
-fn collect_expr_metadata(expr: &(AstExpr, Span), caller: Option<&str>, parsed: &mut ParsedFile) {
+fn collect_expr_metadata(
+    expr: &(AstExpr, Span),
+    caller: Option<&str>,
+    pattern_constants: &HashSet<String>,
+    parsed: &mut ParsedFile,
+) {
     match &expr.0 {
-        AstExpr::Attribute { expr, .. } => collect_expr_metadata(expr, caller, parsed),
+        AstExpr::Attribute { expr, .. } => {
+            collect_expr_metadata(expr, caller, pattern_constants, parsed)
+        }
         AstExpr::Assign { lhs, rhs } | AstExpr::Infix { lhs, rhs, .. } => {
-            collect_expr_metadata(lhs, caller, parsed);
-            collect_expr_metadata(rhs, caller, parsed);
+            collect_expr_metadata(lhs, caller, pattern_constants, parsed);
+            collect_expr_metadata(rhs, caller, pattern_constants, parsed);
         }
         AstExpr::Let { binding, body } => {
-            collect_decl_names_from_pattern(&binding.pattern, DeclKind::Let, Scope::Local, parsed);
-            collect_typed_bindings_from_pattern(&binding.pattern, Scope::Local, parsed);
-            collect_expr_metadata(&binding.value, caller, parsed);
-            collect_expr_metadata(body, caller, parsed);
+            collect_decl_names_from_pattern(
+                &binding.pattern,
+                DeclKind::Let,
+                Scope::Local,
+                pattern_constants,
+                parsed,
+            );
+            collect_typed_bindings_from_pattern(
+                &binding.pattern,
+                Scope::Local,
+                pattern_constants,
+                parsed,
+            );
+            collect_expr_metadata(&binding.value, caller, pattern_constants, parsed);
+            collect_expr_metadata(body, caller, pattern_constants, parsed);
         }
         AstExpr::Var {
             target,
@@ -1571,9 +1709,9 @@ fn collect_expr_metadata(expr: &(AstExpr, Span), caller: Option<&str>, parsed: &
                     scope: Scope::Local,
                 });
             }
-            collect_expr_metadata(target, caller, parsed);
-            collect_expr_metadata(value, caller, parsed);
-            collect_expr_metadata(body, caller, parsed);
+            collect_expr_metadata(target, caller, pattern_constants, parsed);
+            collect_expr_metadata(value, caller, pattern_constants, parsed);
+            collect_expr_metadata(body, caller, pattern_constants, parsed);
         }
         AstExpr::Block(items) => {
             for item in items {
@@ -1583,10 +1721,16 @@ fn collect_expr_metadata(expr: &(AstExpr, Span), caller: Option<&str>, parsed: &
                             &binding.pattern,
                             DeclKind::Let,
                             Scope::Local,
+                            pattern_constants,
                             parsed,
                         );
-                        collect_typed_bindings_from_pattern(&binding.pattern, Scope::Local, parsed);
-                        collect_expr_metadata(&binding.value, caller, parsed);
+                        collect_typed_bindings_from_pattern(
+                            &binding.pattern,
+                            Scope::Local,
+                            pattern_constants,
+                            parsed,
+                        );
+                        collect_expr_metadata(&binding.value, caller, pattern_constants, parsed);
                     }
                     AstBlockItem::Var { target, value } => {
                         if let Some((name, span)) = var_target_name(target) {
@@ -1608,10 +1752,12 @@ fn collect_expr_metadata(expr: &(AstExpr, Span), caller: Option<&str>, parsed: &
                                 scope: Scope::Local,
                             });
                         }
-                        collect_expr_metadata(target, caller, parsed);
-                        collect_expr_metadata(value, caller, parsed);
+                        collect_expr_metadata(target, caller, pattern_constants, parsed);
+                        collect_expr_metadata(value, caller, pattern_constants, parsed);
                     }
-                    AstBlockItem::Expr(expr) => collect_expr_metadata(expr, caller, parsed),
+                    AstBlockItem::Expr(expr) => {
+                        collect_expr_metadata(expr, caller, pattern_constants, parsed)
+                    }
                 }
             }
         }
@@ -1620,11 +1766,13 @@ fn collect_expr_metadata(expr: &(AstExpr, Span), caller: Option<&str>, parsed: &
         | AstExpr::Exit(Some(expr))
         | AstExpr::Prefix { expr, .. }
         | AstExpr::Cast { expr, .. }
-        | AstExpr::Field { expr, .. } => collect_expr_metadata(expr, caller, parsed),
+        | AstExpr::Field { expr, .. } => {
+            collect_expr_metadata(expr, caller, pattern_constants, parsed)
+        }
         AstExpr::Assert { condition, message } => {
-            collect_expr_metadata(condition, caller, parsed);
+            collect_expr_metadata(condition, caller, pattern_constants, parsed);
             if let Some(message) = message {
-                collect_expr_metadata(message, caller, parsed);
+                collect_expr_metadata(message, caller, pattern_constants, parsed);
             }
         }
         AstExpr::Exit(None) => {}
@@ -1633,20 +1781,20 @@ fn collect_expr_metadata(expr: &(AstExpr, Span), caller: Option<&str>, parsed: &
             then_branch,
             else_branch,
         } => {
-            collect_expr_metadata(cond, caller, parsed);
-            collect_expr_metadata(then_branch, caller, parsed);
+            collect_expr_metadata(cond, caller, pattern_constants, parsed);
+            collect_expr_metadata(then_branch, caller, pattern_constants, parsed);
             if let Some(else_branch) = else_branch {
-                collect_expr_metadata(else_branch, caller, parsed);
+                collect_expr_metadata(else_branch, caller, pattern_constants, parsed);
             }
         }
         AstExpr::Match { scrutinee, cases } | AstExpr::Try { scrutinee, cases } => {
-            collect_expr_metadata(scrutinee, caller, parsed);
+            collect_expr_metadata(scrutinee, caller, pattern_constants, parsed);
             for case in cases {
-                collect_case_metadata(case, caller, parsed);
+                collect_case_metadata(case, caller, pattern_constants, parsed);
             }
         }
         AstExpr::Foreach(AstForeachExpr { body, .. }) => {
-            collect_expr_metadata(body, caller, parsed);
+            collect_expr_metadata(body, caller, pattern_constants, parsed);
         }
         AstExpr::Repeat {
             measure,
@@ -1654,10 +1802,10 @@ fn collect_expr_metadata(expr: &(AstExpr, Span), caller: Option<&str>, parsed: &
             until,
         } => {
             if let Some(measure) = measure {
-                collect_expr_metadata(measure, caller, parsed);
+                collect_expr_metadata(measure, caller, pattern_constants, parsed);
             }
-            collect_expr_metadata(body, caller, parsed);
-            collect_expr_metadata(until, caller, parsed);
+            collect_expr_metadata(body, caller, pattern_constants, parsed);
+            collect_expr_metadata(until, caller, pattern_constants, parsed);
         }
         AstExpr::While {
             measure,
@@ -1665,50 +1813,50 @@ fn collect_expr_metadata(expr: &(AstExpr, Span), caller: Option<&str>, parsed: &
             body,
         } => {
             if let Some(measure) = measure {
-                collect_expr_metadata(measure, caller, parsed);
+                collect_expr_metadata(measure, caller, pattern_constants, parsed);
             }
-            collect_expr_metadata(cond, caller, parsed);
-            collect_expr_metadata(body, caller, parsed);
+            collect_expr_metadata(cond, caller, pattern_constants, parsed);
+            collect_expr_metadata(body, caller, pattern_constants, parsed);
         }
-        AstExpr::Call(call) => collect_call_metadata(call, caller, parsed),
+        AstExpr::Call(call) => collect_call_metadata(call, caller, pattern_constants, parsed),
         AstExpr::Index { expr, index } => {
-            collect_expr_metadata(expr, caller, parsed);
-            collect_expr_metadata(index, caller, parsed);
+            collect_expr_metadata(expr, caller, pattern_constants, parsed);
+            collect_expr_metadata(index, caller, pattern_constants, parsed);
         }
         AstExpr::Slice { expr, start, end } => {
-            collect_expr_metadata(expr, caller, parsed);
-            collect_expr_metadata(start, caller, parsed);
-            collect_expr_metadata(end, caller, parsed);
+            collect_expr_metadata(expr, caller, pattern_constants, parsed);
+            collect_expr_metadata(start, caller, pattern_constants, parsed);
+            collect_expr_metadata(end, caller, pattern_constants, parsed);
         }
         AstExpr::VectorSlice {
             expr,
             start,
             length,
         } => {
-            collect_expr_metadata(expr, caller, parsed);
-            collect_expr_metadata(start, caller, parsed);
-            collect_expr_metadata(length, caller, parsed);
+            collect_expr_metadata(expr, caller, pattern_constants, parsed);
+            collect_expr_metadata(start, caller, pattern_constants, parsed);
+            collect_expr_metadata(length, caller, pattern_constants, parsed);
         }
         AstExpr::Struct { fields, .. } => {
             for field in fields {
-                collect_field_expr_metadata(field, caller, parsed);
+                collect_field_expr_metadata(field, caller, pattern_constants, parsed);
             }
         }
         AstExpr::Update { base, fields } => {
-            collect_expr_metadata(base, caller, parsed);
+            collect_expr_metadata(base, caller, pattern_constants, parsed);
             for field in fields {
-                collect_field_expr_metadata(field, caller, parsed);
+                collect_field_expr_metadata(field, caller, pattern_constants, parsed);
             }
         }
         AstExpr::List(items) | AstExpr::Vector(items) | AstExpr::Tuple(items) => {
             for item in items {
-                collect_expr_metadata(item, caller, parsed);
+                collect_expr_metadata(item, caller, pattern_constants, parsed);
             }
         }
         AstExpr::VectorUpdate { base, updates } => {
-            collect_expr_metadata(base, caller, parsed);
+            collect_expr_metadata(base, caller, pattern_constants, parsed);
             for update in updates {
-                collect_vector_update_metadata(update, caller, parsed);
+                collect_vector_update_metadata(update, caller, pattern_constants, parsed);
             }
         }
         AstExpr::Literal(_)
@@ -1745,6 +1893,7 @@ fn decl_occurrence_kind(kind: DeclKind) -> Option<SymbolOccurrenceKind> {
 struct SymbolOccurrenceCollector {
     top_level_values: HashSet<String>,
     top_level_types: HashSet<String>,
+    pattern_constants: HashSet<String>,
     occurrences: Vec<SymbolOccurrence>,
     value_scopes: Vec<HashMap<String, Span>>,
     type_var_scopes: Vec<HashMap<String, Span>>,
@@ -1754,6 +1903,7 @@ impl SymbolOccurrenceCollector {
     fn new(parsed: &ParsedFile) -> Self {
         let mut top_level_values = HashSet::new();
         let mut top_level_types = HashSet::new();
+        let mut pattern_constants = HashSet::new();
         let mut occurrences = Vec::new();
 
         for decl in &parsed.decls {
@@ -1761,6 +1911,9 @@ impl SymbolOccurrenceCollector {
                 continue;
             };
             if decl.scope == Scope::TopLevel {
+                if decl.kind == DeclKind::EnumMember {
+                    pattern_constants.insert(decl.name.clone());
+                }
                 match kind {
                     SymbolOccurrenceKind::Value => {
                         top_level_values.insert(decl.name.clone());
@@ -1784,10 +1937,15 @@ impl SymbolOccurrenceCollector {
         Self {
             top_level_values,
             top_level_types,
+            pattern_constants,
             occurrences,
             value_scopes: Vec::new(),
             type_var_scopes: Vec::new(),
         }
+    }
+
+    fn is_pattern_constant(&self, name: &str) -> bool {
+        self.pattern_constants.contains(name)
     }
 
     fn push_value_scope(&mut self) {
@@ -1905,7 +2063,13 @@ fn collect_pattern_symbol_occurrences(
             collect_pattern_symbol_occurrences(pattern, collector, bindings);
         }
         AstPattern::Wild | AstPattern::Literal(_) | AstPattern::Error(_) => {}
-        AstPattern::Ident(name) => bindings.push((name.clone(), pattern.1)),
+        AstPattern::Ident(name) => {
+            if collector.is_pattern_constant(name) {
+                collector.record_value_ref(name, pattern.1);
+            } else {
+                bindings.push((name.clone(), pattern.1));
+            }
+        }
         AstPattern::TypeVar(name) => collector.record_type_var_ref(name, pattern.1),
         AstPattern::Typed(inner, ty) | AstPattern::AsType(inner, ty) => {
             collect_pattern_symbol_occurrences(inner, collector, bindings);
@@ -1974,16 +2138,13 @@ fn visit_var_target_symbol_occurrences(
     }
 }
 
-fn collect_type_param_defs(
-    params: &crate::ast::TypeParamSpec,
-    collector: &mut SymbolOccurrenceCollector,
-) {
+fn collect_type_param_defs(params: &AstTypeParamSpec, collector: &mut SymbolOccurrenceCollector) {
     for param in &params.params {
         collector.define_type_var(&param.name.0, param.name.1);
     }
     if let Some(tail) = &params.tail {
         match tail {
-            crate::ast::TypeParamTail::Type(ty) | crate::ast::TypeParamTail::Constraint(ty) => {
+            AstTypeParamTail::Type(ty) | AstTypeParamTail::Constraint(ty) => {
                 collect_type_symbol_occurrences(ty, collector);
             }
         }
@@ -2339,11 +2500,11 @@ fn collect_expr_symbol_occurrences(
 }
 
 fn collect_named_detail_symbol_occurrences(
-    detail: &crate::ast::NamedDefDetail,
+    detail: &AstNamedDefDetail,
     collector: &mut SymbolOccurrenceCollector,
 ) {
     match detail {
-        crate::ast::NamedDefDetail::Enum { members, functions } => {
+        AstNamedDefDetail::Enum { members, functions } => {
             for member in members {
                 if let Some(value) = &member.0.value {
                     collect_expr_symbol_occurrences(value, collector);
@@ -2353,18 +2514,16 @@ fn collect_named_detail_symbol_occurrences(
                 collect_type_symbol_occurrences(&function.0.ty, collector);
             }
         }
-        crate::ast::NamedDefDetail::Struct { fields } => {
+        AstNamedDefDetail::Struct { fields } => {
             for field in fields {
                 collect_type_symbol_occurrences(&field.0.ty, collector);
             }
         }
-        crate::ast::NamedDefDetail::Union { variants } => {
+        AstNamedDefDetail::Union { variants } => {
             for variant in variants {
                 match &variant.0.payload {
-                    crate::ast::UnionPayload::Type(ty) => {
-                        collect_type_symbol_occurrences(ty, collector)
-                    }
-                    crate::ast::UnionPayload::Struct { fields } => {
+                    AstUnionPayload::Type(ty) => collect_type_symbol_occurrences(ty, collector),
+                    AstUnionPayload::Struct { fields } => {
                         for field in fields {
                             collect_type_symbol_occurrences(&field.0.ty, collector);
                         }
@@ -2372,7 +2531,7 @@ fn collect_named_detail_symbol_occurrences(
                 }
             }
         }
-        crate::ast::NamedDefDetail::Bitfield { fields } => {
+        AstNamedDefDetail::Bitfield { fields } => {
             for field in fields {
                 collect_type_symbol_occurrences(&field.0.high, collector);
                 if let Some(low) = &field.0.low {
@@ -2383,15 +2542,15 @@ fn collect_named_detail_symbol_occurrences(
     }
 }
 
-fn collect_symbol_occurrences_from_ast(
-    ast: &SourceFile,
+fn collect_symbol_occurrences_from_core_ast(
+    ast: &CoreSourceFile,
     parsed: &ParsedFile,
 ) -> Vec<SymbolOccurrence> {
     let mut collector = SymbolOccurrenceCollector::new(parsed);
 
-    for (item, _) in &ast.items {
-        match item {
-            TopLevelDef::Scattered(def) => {
+    for (item, _) in &ast.defs {
+        match &item.kind {
+            CoreDefinitionKind::Scattered(def) => {
                 if let Some(params) = &def.params {
                     collector.push_type_var_scope();
                     collect_type_param_defs(&params.0, &mut collector);
@@ -2403,15 +2562,15 @@ fn collect_symbol_occurrences_from_ast(
                     collect_type_symbol_occurrences(signature, &mut collector);
                 }
             }
-            TopLevelDef::ScatteredClause(def) => {
+            CoreDefinitionKind::ScatteredClause(def) => {
                 if let Some(ty) = &def.ty {
                     collect_type_symbol_occurrences(ty, &mut collector);
                 }
             }
-            TopLevelDef::CallableSpec(spec) => {
+            CoreDefinitionKind::CallableSpec(spec) => {
                 collect_type_symbol_occurrences(&spec.signature, &mut collector);
             }
-            TopLevelDef::CallableDef(def) => {
+            CoreDefinitionKind::Callable(def) => {
                 if let Some(rec_measure) = &def.rec_measure {
                     let mut bindings = Vec::new();
                     collect_pattern_symbol_occurrences(
@@ -2490,7 +2649,7 @@ fn collect_symbol_occurrences_from_ast(
                     collector.pop_value_scope();
                 }
             }
-            TopLevelDef::TypeAlias(alias) => {
+            CoreDefinitionKind::TypeAlias(alias) => {
                 if let Some(params) = &alias.params {
                     collector.push_type_var_scope();
                     collect_type_param_defs(&params.0, &mut collector);
@@ -2502,7 +2661,7 @@ fn collect_symbol_occurrences_from_ast(
                     collect_type_symbol_occurrences(target, &mut collector);
                 }
             }
-            TopLevelDef::Named(def) => {
+            CoreDefinitionKind::Named(def) => {
                 let has_type_params = def.params.is_some();
                 if let Some(params) = &def.params {
                     collector.push_type_var_scope();
@@ -2526,15 +2685,15 @@ fn collect_symbol_occurrences_from_ast(
                     collector.pop_type_var_scope();
                 }
             }
-            TopLevelDef::Default(_)
-            | TopLevelDef::Fixity(_)
-            | TopLevelDef::Instantiation(_)
-            | TopLevelDef::Directive(_)
-            | TopLevelDef::End(_) => {}
-            TopLevelDef::Constraint(def) => {
+            CoreDefinitionKind::Default(_)
+            | CoreDefinitionKind::Fixity(_)
+            | CoreDefinitionKind::Instantiation(_)
+            | CoreDefinitionKind::Directive(_)
+            | CoreDefinitionKind::End(_) => {}
+            CoreDefinitionKind::Constraint(def) => {
                 collect_type_symbol_occurrences(&def.ty, &mut collector);
             }
-            TopLevelDef::TerminationMeasure(def) => match &def.kind {
+            CoreDefinitionKind::TerminationMeasure(def) => match &def.kind {
                 AstTerminationMeasureKind::Function { pattern, body } => {
                     let mut bindings = Vec::new();
                     collect_pattern_symbol_occurrences(pattern, &mut collector, &mut bindings);
@@ -2563,7 +2722,7 @@ fn collect_symbol_occurrences_from_ast(
     collector.occurrences
 }
 
-fn ast_alias_target_name(alias: &AstTypeAliasDef) -> Option<String> {
+fn core_alias_target_name(alias: &CoreTypeAliasDef) -> Option<String> {
     match &unwrapped_type_expr(alias.target.as_ref()?).0 {
         AstTypeExpr::Named(name) => Some(name.clone()),
         AstTypeExpr::App { callee, .. } => Some(callee.0.clone()),
@@ -2572,12 +2731,18 @@ fn ast_alias_target_name(alias: &AstTypeAliasDef) -> Option<String> {
 }
 
 impl ParsedFile {
-    pub fn from_ast(ast: &SourceFile) -> Self {
-        let mut parsed = ParsedFile::default();
+    #[cfg(test)]
+    fn from_ast(ast: &SourceFile) -> Self {
+        Self::from_core_ast(&crate::core_ast::SourceFile::from(ast))
+    }
 
-        for (item, item_span) in &ast.items {
-            match item {
-                TopLevelDef::Scattered(AstScatteredDef { kind, name, .. }) => {
+    pub fn from_core_ast(ast: &CoreSourceFile) -> Self {
+        let mut parsed = ParsedFile::default();
+        let pattern_constants = collect_top_level_pattern_constants_core(ast);
+
+        for (item, item_span) in &ast.defs {
+            match &item.kind {
+                CoreDefinitionKind::Scattered(CoreScatteredDef { kind, name, .. }) => {
                     push_decl(
                         &mut parsed,
                         decl_kind_for_scattered(*kind),
@@ -2588,7 +2753,7 @@ impl ParsedFile {
                         true,
                     );
                 }
-                TopLevelDef::ScatteredClause(AstScatteredClauseDef {
+                CoreDefinitionKind::ScatteredClause(CoreScatteredClauseDef {
                     kind: ScatteredClauseKind::Enum,
                     member,
                     ..
@@ -2603,8 +2768,8 @@ impl ParsedFile {
                         true,
                     );
                 }
-                TopLevelDef::ScatteredClause(_) => {}
-                TopLevelDef::CallableSpec(spec) => {
+                CoreDefinitionKind::ScatteredClause(_) => {}
+                CoreDefinitionKind::CallableSpec(spec) => {
                     let kind = match spec.kind {
                         CallableSpecKind::Value => DeclKind::Value,
                         CallableSpecKind::Mapping => DeclKind::Mapping,
@@ -2620,10 +2785,10 @@ impl ParsedFile {
                     );
                     parsed
                         .callable_heads
-                        .push(callable_head_from_spec(spec, item_span.start));
+                        .push(callable_head_from_core_spec(spec, item_span.start));
                 }
-                TopLevelDef::CallableDef(def) => {
-                    let AstCallableDef {
+                CoreDefinitionKind::Callable(def) => {
+                    let CoreCallableDef {
                         kind,
                         name,
                         signature,
@@ -2650,7 +2815,7 @@ impl ParsedFile {
                         name: name.0.clone(),
                         kind: decl_kind,
                         name_span: name.1,
-                        label_span: Span::new(item_span.start, callable_head_label_end(def)),
+                        label_span: Span::new(item_span.start, callable_head_label_end_core(def)),
                         params: params.iter().map(callable_param_from_pattern).collect(),
                         return_type_span: return_ty.as_ref().map(|ty| ty.1),
                     });
@@ -2666,9 +2831,14 @@ impl ParsedFile {
                             ));
                         }
                     }
-                    collect_callable_clause_metadata(def, &name.0, &mut parsed);
+                    collect_core_callable_clause_metadata(
+                        def,
+                        &name.0,
+                        &pattern_constants,
+                        &mut parsed,
+                    );
                 }
-                TopLevelDef::TypeAlias(alias) => {
+                CoreDefinitionKind::TypeAlias(alias) => {
                     push_decl(
                         &mut parsed,
                         DeclKind::Type,
@@ -2678,7 +2848,7 @@ impl ParsedFile {
                         alias.name.1,
                         false,
                     );
-                    if let Some(target) = ast_alias_target_name(alias) {
+                    if let Some(target) = core_alias_target_name(alias) {
                         parsed.type_aliases.push(TypeAlias {
                             sub: alias.name.0.clone(),
                             sup: target,
@@ -2686,7 +2856,7 @@ impl ParsedFile {
                         });
                     }
                 }
-                TopLevelDef::Named(AstNamedDef {
+                CoreDefinitionKind::Named(CoreNamedDef {
                     kind,
                     name,
                     members,
@@ -2728,22 +2898,24 @@ impl ParsedFile {
                         }
                     }
                     if let Some(value) = value {
-                        collect_expr_metadata(value, None, &mut parsed);
+                        collect_expr_metadata(value, None, &pattern_constants, &mut parsed);
                     }
                 }
-                TopLevelDef::Default(_)
-                | TopLevelDef::Fixity(_)
-                | TopLevelDef::Instantiation(_)
-                | TopLevelDef::Directive(_)
-                | TopLevelDef::End(_)
-                | TopLevelDef::Constraint(_) => {}
-                TopLevelDef::TerminationMeasure(def) => {
-                    collect_termination_measure_metadata(&def.kind, &mut parsed);
+                CoreDefinitionKind::Default(_)
+                | CoreDefinitionKind::Fixity(_)
+                | CoreDefinitionKind::Instantiation(_)
+                | CoreDefinitionKind::Directive(_)
+                | CoreDefinitionKind::End(_)
+                | CoreDefinitionKind::Constraint(_) => {}
+                CoreDefinitionKind::TerminationMeasure(CoreTerminationMeasureDef {
+                    kind, ..
+                }) => {
+                    collect_termination_measure_metadata(kind, &pattern_constants, &mut parsed);
                 }
             }
         }
 
-        parsed.symbol_occurrences = collect_symbol_occurrences_from_ast(ast, &parsed);
+        parsed.symbol_occurrences = collect_symbol_occurrences_from_core_ast(ast, &parsed);
         parsed
     }
 }
@@ -2847,7 +3019,9 @@ function foo(x : bits(32), y : int) -> int = x
 type child = parent
 "#;
         let tokens = crate::lexer().parse(source).into_result().unwrap();
-        let ast = crate::parse_source(&tokens).into_result().unwrap();
+        let ast = crate::full_parser::parse_source(&tokens)
+            .into_result()
+            .unwrap();
         let parsed = ParsedFile::from_ast(&ast);
 
         assert!(parsed.decls.iter().any(|d| {
@@ -2882,7 +3056,9 @@ type child = parent
 val write_ram : forall 'n, 0 < 'n <= max_mem_access . (write_kind, xlenbits, atom('n), bits(8 * 'n), mem_meta) -> bool effect {wmv, wmvt}
 "#;
         let tokens = crate::lexer().parse(source).into_result().unwrap();
-        let ast = crate::parse_source(&tokens).into_result().unwrap();
+        let ast = crate::full_parser::parse_source(&tokens)
+            .into_result()
+            .unwrap();
         let parsed = ParsedFile::from_ast(&ast);
 
         let head = parsed
@@ -2902,7 +3078,9 @@ termination_measure helper x = call(x)
 termination_measure loop until done(x), while guard(x)
 "#;
         let tokens = crate::lexer().parse(source).into_result().unwrap();
-        let ast = crate::parse_source(&tokens).into_result().unwrap();
+        let ast = crate::full_parser::parse_source(&tokens)
+            .into_result()
+            .unwrap();
         let parsed = ParsedFile::from_ast(&ast);
 
         assert!(parsed.call_sites.iter().any(|call| call.callee == "call"));
@@ -2918,7 +3096,9 @@ scattered enum extension
 enum clause extension = Ext_M
 "#;
         let tokens = crate::lexer().parse(source).into_result().unwrap();
-        let ast = crate::parse_source(&tokens).into_result().unwrap();
+        let ast = crate::full_parser::parse_source(&tokens)
+            .into_result()
+            .unwrap();
         let parsed = ParsedFile::from_ast(&ast);
 
         assert!(parsed
@@ -2943,7 +3123,9 @@ function match_cons_as(ys) = match ys {
 }
 "#;
         let tokens = crate::lexer().parse(source).into_result().unwrap();
-        let ast = crate::parse_source(&tokens).into_result().unwrap();
+        let ast = crate::full_parser::parse_source(&tokens)
+            .into_result()
+            .unwrap();
         let parsed = ParsedFile::from_ast(&ast);
 
         assert!(parsed.decls.iter().any(|decl| decl.name == "x"
@@ -2970,7 +3152,9 @@ function foo(x : int) = {
 }
 "#;
         let tokens = crate::lexer().parse(source).into_result().unwrap();
-        let ast = crate::parse_source(&tokens).into_result().unwrap();
+        let ast = crate::full_parser::parse_source(&tokens)
+            .into_result()
+            .unwrap();
         let parsed = ParsedFile::from_ast(&ast);
 
         assert!(parsed.decls.iter().any(|decl| {
@@ -3014,7 +3198,9 @@ register r : int = mk_reg(init())
 let result : int = wrap(read_reg(r))
 "#;
         let tokens = crate::lexer().parse(source).into_result().unwrap();
-        let ast = crate::parse_source(&tokens).into_result().unwrap();
+        let ast = crate::full_parser::parse_source(&tokens)
+            .into_result()
+            .unwrap();
         let parsed = ParsedFile::from_ast(&ast);
 
         assert!(parsed
@@ -3039,7 +3225,9 @@ let result : int = wrap(read_reg(r))
     fn derives_mapping_body_calls_from_ast() {
         let source = r#"mapping clause assembly = use_bits(0x12) <-> "ok""#;
         let tokens = crate::lexer().parse(source).into_result().unwrap();
-        let ast = crate::parse_source(&tokens).into_result().unwrap();
+        let ast = crate::full_parser::parse_source(&tokens)
+            .into_result()
+            .unwrap();
         let parsed = ParsedFile::from_ast(&ast);
 
         assert!(parsed.call_sites.iter().any(|call| {
@@ -3056,7 +3244,9 @@ mapping encdec_reg : regidx <-> bits(5) = {
 }
 "#;
         let tokens = crate::lexer().parse(source).into_result().unwrap();
-        let ast = crate::parse_source(&tokens).into_result().unwrap();
+        let ast = crate::full_parser::parse_source(&tokens)
+            .into_result()
+            .unwrap();
         let parsed = ParsedFile::from_ast(&ast);
 
         let callees = parsed
@@ -3077,7 +3267,9 @@ function { xs => dec(xs) } foo forall 'n. (x if guard(x)) -> bits('n) = body(x)
 and foo y = other(y)
 "#;
         let tokens = crate::lexer().parse(source).into_result().unwrap();
-        let ast = crate::parse_source(&tokens).into_result().unwrap();
+        let ast = crate::full_parser::parse_source(&tokens)
+            .into_result()
+            .unwrap();
         let parsed = ParsedFile::from_ast(&ast);
 
         let callees = parsed
