@@ -17,6 +17,7 @@ fn best_parsed(
     }
 }
 
+#[derive(Clone)]
 pub struct File {
     // The source code.
     pub source: TextDocument,
@@ -37,12 +38,28 @@ pub struct File {
     // Go-to definition locations extracted from the file.
     pub definitions: HashMap<String, usize>,
 
-    // Internal diagnostics.
-    pub diagnostics: Vec<Diagnostic>,
+    // Parse and semantic diagnostics that are available without type checking.
+    base_diagnostics: Vec<Diagnostic>,
+
+    // Disk-indexed files skip eager type checking to keep workspace scans shallow.
+    eager_type_check: bool,
 }
 
 impl File {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(source: String) -> Self {
+        Self::new_with_type_check(source, true)
+    }
+
+    pub fn new_lazy(source: String) -> Self {
+        Self::new_with_type_check(source, false)
+    }
+
+    pub fn new_indexed(source: String) -> Self {
+        Self::new_lazy(source)
+    }
+
+    fn new_with_type_check(source: String, eager_type_check: bool) -> Self {
         let mut f = Self {
             source: TextDocument::new(source),
             tokens: None,
@@ -50,7 +67,8 @@ impl File {
             parsed: None,
             type_check: None,
             definitions: HashMap::new(),
-            diagnostics: Vec::new(),
+            base_diagnostics: Vec::new(),
+            eager_type_check,
         };
         f.parse();
         f
@@ -74,24 +92,21 @@ impl File {
             .as_ref()
             .and_then(|tokens| sail_parser::parse_core_source(tokens).into_output());
         self.parsed = best_parsed(self.tokens.as_deref(), self.core_ast.as_ref());
-        self.type_check = crate::typecheck::check_file(self);
+        self.type_check = self
+            .eager_type_check
+            .then(|| crate::typecheck::check_file(self))
+            .flatten();
 
         let mut definitions = HashMap::with_capacity(self.definitions.len());
         let mut diagnostics = compute_parse_diagnostics(self, &lex_errors);
-        if let Some(type_check) = &self.type_check {
-            diagnostics.extend(type_check.diagnostics().iter().cloned());
-        }
 
         if let Some(parsed) = &self.parsed {
             add_parsed_definitions(parsed, &mut definitions);
         }
 
         self.definitions = definitions;
-        self.diagnostics = diagnostics;
-
-        // RA-style: Add semantic diagnostics
-        let semantic = compute_semantic_diagnostics(self);
-        self.diagnostics.extend(semantic);
+        diagnostics.extend(compute_semantic_diagnostics(self));
+        self.base_diagnostics = diagnostics;
     }
 
     pub fn parsed(&self) -> Option<&sail_parser::ParsedFile> {
@@ -106,8 +121,24 @@ impl File {
         self.type_check.as_ref()
     }
 
+    pub fn compute_type_check(&self) -> Option<crate::typecheck::TypeCheckResult> {
+        crate::typecheck::check_file(self)
+    }
+
+    pub fn set_type_check(&mut self, type_check: Option<crate::typecheck::TypeCheckResult>) {
+        self.type_check = type_check;
+    }
+
     pub fn lsp_diagnostics(&self) -> Vec<LspDiagnostic> {
-        self.diagnostics.iter().map(|d| d.to_proto()).collect()
+        self.base_diagnostics
+            .iter()
+            .chain(
+                self.type_check
+                    .iter()
+                    .flat_map(|type_check| type_check.diagnostics().iter()),
+            )
+            .map(|d| d.to_proto())
+            .collect()
     }
 
     fn token_at_offset(
@@ -164,5 +195,35 @@ mod tests {
 
         let parsed = best_parsed(Some(&tokens), None).expect("parsed");
         assert_eq!(parsed, sail_parser::parse_tokens(&tokens));
+    }
+
+    #[test]
+    fn indexed_files_skip_eager_type_check() {
+        let source = "function id(x) = x\n";
+        let file = super::File::new_indexed(source.to_string());
+
+        assert!(file.parsed().is_some());
+        assert!(file.type_check().is_none());
+    }
+
+    #[test]
+    fn lazy_type_check_results_extend_diagnostics() {
+        let source = "function f(x : bits(32)) -> int = x\n";
+        let mut file = super::File::new_lazy(source.to_string());
+
+        assert!(file.lsp_diagnostics().iter().all(|diagnostic| diagnostic
+            .code
+            .as_ref()
+            .map(|code| format!("{code:?}"))
+            != Some("String(\"type-error\")".to_string())));
+
+        let result = file.clone().compute_type_check();
+        file.set_type_check(result);
+
+        assert!(file.lsp_diagnostics().iter().any(|diagnostic| diagnostic
+            .code
+            .as_ref()
+            .map(|code| format!("{code:?}"))
+            == Some("String(\"type-error\")".to_string())));
     }
 }

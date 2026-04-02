@@ -9,6 +9,7 @@ type LineIndex = usize;
 // VSCode "characters" are UTF-16 code points.
 type CharIndexUTF16 = usize;
 
+#[derive(Clone)]
 pub struct TextDocument {
     // The text.
     content: String,

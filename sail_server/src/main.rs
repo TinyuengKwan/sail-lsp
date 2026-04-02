@@ -113,6 +113,7 @@ struct State {
     open_files: HashMap<Url, File>,
     diagnostic_versions: HashMap<Url, i32>,
     semantic_tokens_cache: HashMap<Url, SemanticTokens>,
+    disk_scan_generation: u64,
 }
 
 impl State {
@@ -200,6 +201,7 @@ const SAIL_BUILTINS: &[&str] = &[
 ];
 
 const DIAGNOSTIC_DEBOUNCE_MS: u64 = 250;
+const TYPECHECK_DEBOUNCE_MS: u64 = 250;
 
 impl Backend {
     pub fn new_with_client(client: Client) -> Self {
@@ -229,6 +231,86 @@ impl Backend {
             }
         });
     }
+
+    async fn schedule_workspace_scan(&self) {
+        let (generation, folders) = {
+            let mut state = self.state.lock().await;
+            state.disk_scan_generation += 1;
+            (
+                state.disk_scan_generation,
+                state.disk_files.folders().clone(),
+            )
+        };
+
+        let state = self.state.clone();
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            let files = match tokio::task::spawn_blocking(move || scan_folders(folders)).await {
+                Ok(files) => files,
+                Err(err) => {
+                    client
+                        .log_message(
+                            MessageType::ERROR,
+                            format!("workspace scan task failed: {err}"),
+                        )
+                        .await;
+                    return;
+                }
+            };
+
+            let applied = {
+                let mut state_guard = state.lock().await;
+                if state_guard.disk_scan_generation != generation {
+                    false
+                } else {
+                    state_guard.disk_files.update(files);
+                    true
+                }
+            };
+
+            if applied {
+                client
+                    .log_message(MessageType::INFO, "workspace scan completed")
+                    .await;
+            }
+        });
+    }
+
+    fn schedule_debounced_typecheck(&self, uri: Url, version: i32, file: File) {
+        let state = self.state.clone();
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(TYPECHECK_DEBOUNCE_MS)).await;
+
+            {
+                let state_guard = state.lock().await;
+                if state_guard.diagnostic_versions.get(&uri).copied() != Some(version) {
+                    return;
+                }
+            }
+
+            let type_check = tokio::task::spawn_blocking(move || file.compute_type_check())
+                .await
+                .ok()
+                .flatten();
+
+            let diagnostics = {
+                let mut state_guard = state.lock().await;
+                if state_guard.diagnostic_versions.get(&uri).copied() != Some(version) {
+                    return;
+                }
+                let Some(file) = state_guard.open_files.get_mut(&uri) else {
+                    return;
+                };
+                file.set_type_check(type_check);
+                Some(file.lsp_diagnostics())
+            };
+
+            if let Some(diagnostics) = diagnostics {
+                client.publish_diagnostics(uri, diagnostics, None).await;
+            }
+        });
+    }
 }
 
 #[tower_lsp::async_trait]
@@ -238,15 +320,15 @@ impl LanguageServer for Backend {
             .log_message(MessageType::INFO, "server initialized")
             .await;
 
-        let mut state = self.state.lock().await;
-        if let Some(workspace_folders) = params.workspace_folders {
-            for folder in workspace_folders {
-                state.disk_files.add_folder(folder.uri);
+        {
+            let mut state = self.state.lock().await;
+            if let Some(workspace_folders) = params.workspace_folders {
+                for folder in workspace_folders {
+                    state.disk_files.add_folder(folder.uri);
+                }
             }
         }
-
-        let folders = state.disk_files.folders().clone();
-        state.disk_files.update(scan_folders(folders));
+        self.schedule_workspace_scan().await;
 
         Ok(InitializeResult {
             server_info: None,
@@ -458,14 +540,18 @@ impl LanguageServer for Backend {
             .log_message(MessageType::INFO, "workspace folders changed")
             .await;
 
-        let mut state = self.state.lock().await;
+        {
+            let mut state = self.state.lock().await;
 
-        for folder in params.event.added.iter() {
-            state.disk_files.add_folder(folder.uri.clone());
+            for folder in params.event.added.iter() {
+                state.disk_files.add_folder(folder.uri.clone());
+            }
+            for folder in params.event.removed.iter() {
+                state.disk_files.remove_folder(&folder.uri);
+            }
         }
-        for folder in params.event.removed.iter() {
-            state.disk_files.remove_folder(&folder.uri);
-        }
+
+        self.schedule_workspace_scan().await;
     }
 
     async fn did_change_configuration(&self, _params: DidChangeConfigurationParams) {
@@ -498,7 +584,7 @@ impl LanguageServer for Backend {
                     if change.uri.scheme() == "file" {
                         if let Ok(path) = change.uri.to_file_path() {
                             if let Ok(source) = std::fs::read_to_string(path) {
-                                let file = File::new(source);
+                                let file = File::new_indexed(source);
                                 state.disk_files.add_file(change.uri.clone(), file);
                             }
                         }
@@ -519,13 +605,15 @@ impl LanguageServer for Backend {
 
         let uri = params.text_document.uri;
         let version = params.text_document.version;
-        let file = File::new(params.text_document.text /*, true*/);
+        let file = File::new_lazy(params.text_document.text);
+        let typecheck_file = file.clone();
         {
             let mut state = self.state.lock().await;
             state.diagnostic_versions.insert(uri.clone(), version);
             state.open_files.insert(uri.clone(), file);
         }
-        self.schedule_debounced_diagnostics(uri, version);
+        self.schedule_debounced_diagnostics(uri.clone(), version);
+        self.schedule_debounced_typecheck(uri, version, typecheck_file);
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
@@ -539,15 +627,20 @@ impl LanguageServer for Backend {
         let uri = &params.text_document.uri;
         let version = params.text_document.version;
 
-        let mut state = self.state.lock().await;
+        let typecheck_file = {
+            let mut state = self.state.lock().await;
 
-        let file = state
-            .open_files
-            .get_mut(uri)
-            .expect("document changed that isn't open");
-        file.update(params.content_changes);
-        state.diagnostic_versions.insert(uri.clone(), version);
+            let file = state
+                .open_files
+                .get_mut(uri)
+                .expect("document changed that isn't open");
+            file.update(params.content_changes);
+            let typecheck_file = file.clone();
+            state.diagnostic_versions.insert(uri.clone(), version);
+            typecheck_file
+        };
         self.schedule_debounced_diagnostics(uri.clone(), version);
+        self.schedule_debounced_typecheck(uri.clone(), version, typecheck_file);
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
