@@ -228,6 +228,24 @@ fn reports_type_errors_from_typecheck() {
 }
 
 #[test]
+fn infers_concat_chain_type_from_typecheck() {
+    let source = "function f(x : bits(3), y : bits(2), z : bits(1)) = x @ y @ z\n";
+    let file = File::new(source.to_string());
+    let ast = file.core_ast().expect("core ast");
+    let type_check = file.type_check().expect("typecheck result");
+    let body = ast
+        .defs
+        .iter()
+        .find_map(|(def, _)| match &def.kind {
+            sail_parser::core_ast::DefinitionKind::Callable(def) => def.body.as_ref(),
+            _ => None,
+        })
+        .expect("callable body");
+    assert_eq!(&source[body.1.start..body.1.end], "x @ y @ z");
+    assert_eq!(type_check.expr_type_text(body.1), Some("bits(6)"));
+}
+
+#[test]
 fn reports_mismatched_arg_count_from_typecheck() {
     let source =
         "val add : (int, int) -> int\nfunction add(x, y) = x + y\nfunction main() = add(1)\n";
@@ -544,6 +562,29 @@ fn reports_duplicate_pattern_bindings_from_typecheck() {
 #[test]
 fn binds_vector_subrange_patterns_like_upstream() {
     let source = "default Order dec\nfunction f(x : bits(8)) = match x { flag[7 .. 4] @ flag[3 .. 0] => if flag then () else () }\n";
+    let file = File::new(source.to_string());
+    let diagnostics = file.lsp_diagnostics();
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| {
+            diagnostic_code_str(diagnostic) == Some("type-error")
+                && diagnostic.message.contains("bits(8)")
+                && diagnostic.message.contains("bool")
+        })
+        .expect("missing vector subrange binding diagnostic");
+
+    assert_eq!(
+        diagnostic.severity,
+        Some(tower_lsp::lsp_types::DiagnosticSeverity::ERROR)
+    );
+    assert!(diagnostics
+        .iter()
+        .all(|diagnostic| !diagnostic.message.contains("Identifier flag is unbound")));
+}
+
+#[test]
+fn binds_multi_part_vector_subrange_patterns_like_upstream() {
+    let source = "default Order dec\nfunction f(x : bits(8)) = match x { flag[7 .. 6] @ flag[5 .. 2] @ flag[1 .. 0] => if flag then () else () }\n";
     let file = File::new(source.to_string());
     let diagnostics = file.lsp_diagnostics();
     let diagnostic = diagnostics

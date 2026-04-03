@@ -4,20 +4,20 @@ use sail_parser::Span;
 // This mirrors the relevant upstream Type_error surface; not every constructor
 // is emitted by the current local analyses yet.
 #[allow(dead_code)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum VectorOrder {
     Dec,
     Inc,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ModuleScope {
     pub name: String,
     pub span: Span,
 }
 
 #[allow(dead_code)]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum TypeError {
     NoOverloading {
         id: String,

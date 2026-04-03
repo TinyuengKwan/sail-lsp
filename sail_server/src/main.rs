@@ -2,7 +2,7 @@ use state::{scan_folders, File, Files};
 use std::collections::hash_map::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
+use tokio::sync::{oneshot, Mutex};
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::lsp_types::request::{
     GotoDeclarationParams, GotoDeclarationResponse, GotoImplementationParams,
@@ -202,6 +202,19 @@ const SAIL_BUILTINS: &[&str] = &[
 
 const DIAGNOSTIC_DEBOUNCE_MS: u64 = 250;
 const TYPECHECK_DEBOUNCE_MS: u64 = 250;
+const TYPECHECK_MAX_SOURCE_BYTES: usize = 128 * 1024;
+// Sail type inference still recurses much more deeply than the default async
+// worker stack, and even exceeded rust-analyzer's 8 MiB worker size on large
+// RISC-V model files. Use a larger dedicated stack until the checker is made
+// more iterative.
+const TYPECHECK_THREAD_STACK_SIZE: usize = 64 * 1024 * 1024;
+
+fn should_schedule_typecheck(file: &File) -> bool {
+    if std::env::var_os("SAIL_FORCE_TYPECHECK").is_some() {
+        return true;
+    }
+    file.source.text().len() <= TYPECHECK_MAX_SOURCE_BYTES
+}
 
 impl Backend {
     pub fn new_with_client(client: Client) -> Self {
@@ -289,10 +302,26 @@ impl Backend {
                 }
             }
 
-            let type_check = tokio::task::spawn_blocking(move || file.compute_type_check())
-                .await
-                .ok()
-                .flatten();
+            let (tx, rx) = oneshot::channel();
+            let spawn_result = std::thread::Builder::new()
+                .name("sail-typecheck".to_string())
+                .stack_size(TYPECHECK_THREAD_STACK_SIZE)
+                .spawn(move || {
+                    let _ = tx.send(file.compute_type_check());
+                });
+
+            let type_check = match spawn_result {
+                Ok(_handle) => rx.await.ok().flatten(),
+                Err(err) => {
+                    client
+                        .log_message(
+                            MessageType::ERROR,
+                            format!("failed to spawn typecheck worker: {err}"),
+                        )
+                        .await;
+                    None
+                }
+            };
 
             let diagnostics = {
                 let mut state_guard = state.lock().await;
@@ -613,7 +642,9 @@ impl LanguageServer for Backend {
             state.open_files.insert(uri.clone(), file);
         }
         self.schedule_debounced_diagnostics(uri.clone(), version);
-        self.schedule_debounced_typecheck(uri, version, typecheck_file);
+        if should_schedule_typecheck(&typecheck_file) {
+            self.schedule_debounced_typecheck(uri, version, typecheck_file);
+        }
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
@@ -640,7 +671,9 @@ impl LanguageServer for Backend {
             typecheck_file
         };
         self.schedule_debounced_diagnostics(uri.clone(), version);
-        self.schedule_debounced_typecheck(uri.clone(), version, typecheck_file);
+        if should_schedule_typecheck(&typecheck_file) {
+            self.schedule_debounced_typecheck(uri.clone(), version, typecheck_file);
+        }
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {

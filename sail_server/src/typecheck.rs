@@ -85,9 +85,20 @@ struct BitfieldInfo {
 #[derive(Clone, Debug, Default)]
 struct LocalEnv {
     scopes: Vec<HashMap<String, Ty>>,
-    constraint_marks: Vec<usize>,
     expected_return: Option<Ty>,
     constraints: Vec<ConstraintExpr>,
+    undo_log: Vec<LocalEnvUndo>,
+}
+
+#[derive(Clone, Debug)]
+enum LocalEnvUndo {
+    PushScope,
+    Define {
+        scope_index: usize,
+        name: String,
+        previous: Option<Ty>,
+    },
+    AddConstraint,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -253,35 +264,112 @@ impl Ty {
     }
 }
 
+fn expr_kind_name(expr: &Expr) -> &'static str {
+    match expr {
+        Expr::Attribute { .. } => "attribute",
+        Expr::Assign { .. } => "assign",
+        Expr::Let { .. } => "let",
+        Expr::Var { .. } => "var",
+        Expr::Block(_) => "block",
+        Expr::Return(_) => "return",
+        Expr::Throw(_) => "throw",
+        Expr::Assert { .. } => "assert",
+        Expr::Exit(_) => "exit",
+        Expr::If { .. } => "if",
+        Expr::Match { .. } => "match",
+        Expr::Try { .. } => "try",
+        Expr::Foreach(_) => "foreach",
+        Expr::Repeat { .. } => "repeat",
+        Expr::While { .. } => "while",
+        Expr::Infix { .. } => "infix",
+        Expr::Prefix { .. } => "prefix",
+        Expr::Cast { .. } => "cast",
+        Expr::Config(_) => "config",
+        Expr::Literal(_) => "literal",
+        Expr::Ident(_) => "ident",
+        Expr::TypeVar(_) => "type-var",
+        Expr::Ref(_) => "ref",
+        Expr::Call(_) => "call",
+        Expr::Field { .. } => "field",
+        Expr::SizeOf(_) => "sizeof",
+        Expr::Constraint(_) => "constraint",
+        Expr::Struct { .. } => "struct",
+        Expr::Update { .. } => "update",
+        Expr::List(_) => "list",
+        Expr::Vector(_) => "vector",
+        Expr::Tuple(_) => "tuple",
+        Expr::Error(_) => "error",
+    }
+}
+
 impl LocalEnv {
     fn new(expected_return: Option<Ty>) -> Self {
         Self {
             scopes: vec![HashMap::new()],
-            constraint_marks: vec![0],
             expected_return,
             constraints: Vec::new(),
+            undo_log: Vec::new(),
+        }
+    }
+
+    fn snapshot(&self) -> usize {
+        self.undo_log.len()
+    }
+
+    fn restore(&mut self, mark: usize) {
+        while self.undo_log.len() > mark {
+            match self.undo_log.pop().expect("undo log length checked") {
+                LocalEnvUndo::PushScope => {
+                    self.scopes.pop();
+                }
+                LocalEnvUndo::Define {
+                    scope_index,
+                    name,
+                    previous,
+                } => {
+                    if let Some(previous) = previous {
+                        self.scopes[scope_index].insert(name, previous);
+                    } else {
+                        self.scopes[scope_index].remove(&name);
+                    }
+                }
+                LocalEnvUndo::AddConstraint => {
+                    self.constraints.pop();
+                }
+            }
         }
     }
 
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
-        self.constraint_marks.push(self.constraints.len());
+        self.undo_log.push(LocalEnvUndo::PushScope);
     }
 
     fn pop_scope(&mut self) {
-        self.scopes.pop();
-        let mark = self.constraint_marks.pop().unwrap_or_default();
-        self.constraints.truncate(mark);
+        if let Some(mark) = self
+            .undo_log
+            .iter()
+            .rposition(|entry| matches!(entry, LocalEnvUndo::PushScope))
+        {
+            self.restore(mark);
+        }
     }
 
     fn define(&mut self, name: &str, ty: Ty) {
-        if let Some(scope) = self.scopes.last_mut() {
-            scope.insert(name.to_string(), ty);
+        if let Some(scope_index) = self.scopes.len().checked_sub(1) {
+            let name = name.to_string();
+            let previous = self.scopes[scope_index].insert(name.clone(), ty);
+            self.undo_log.push(LocalEnvUndo::Define {
+                scope_index,
+                name,
+                previous,
+            });
         }
     }
 
     fn add_constraint(&mut self, constraint: ConstraintExpr) {
         self.constraints.push(constraint);
+        self.undo_log.push(LocalEnvUndo::AddConstraint);
     }
 
     fn lookup(&self, name: &str) -> Option<Ty> {
@@ -870,6 +958,16 @@ impl TopLevelEnv {
             let mut out = self.functions.get(name).cloned().unwrap_or_default();
             out.extend(self.constructors.get(name).cloned().unwrap_or_default());
             out
+        }
+    }
+
+    fn has_function(&self, name: &str) -> bool {
+        if let Some(members) = self.overloads.get(name) {
+            members
+                .iter()
+                .any(|member| self.functions.contains_key(member))
+        } else {
+            self.functions.contains_key(name) || self.constructors.contains_key(name)
         }
     }
 
@@ -1644,7 +1742,7 @@ fn eval_numeric_expr_with_assumptions(
     visited: &mut HashSet<String>,
 ) -> Option<i64> {
     fn numeric_var_expr(name: &str, subst: &Subst) -> Option<NumericExpr> {
-        subst
+        let expr = subst
             .values
             .get(name)
             .and_then(|value| parse_numeric_expr_text(value))
@@ -1653,7 +1751,11 @@ fn eval_numeric_expr_with_assumptions(
                     let text = ty.text();
                     parse_numeric_expr_text(&text)
                 })
-            })
+            });
+        match expr {
+            Some(NumericExpr::Var(bound)) if bound == name => None,
+            other => other,
+        }
     }
 
     match expr {
@@ -1952,6 +2054,21 @@ fn normalized_value_text(text: &str) -> String {
     text.chars().filter(|ch| !ch.is_whitespace()).collect()
 }
 
+fn ty_contains_var(ty: &Ty, name: &str) -> bool {
+    match ty {
+        Ty::Unknown | Ty::Text(_) => false,
+        Ty::Var(var) => var == name,
+        Ty::Tuple(items) => items.iter().any(|item| ty_contains_var(item, name)),
+        Ty::Function { params, ret } => {
+            params.iter().any(|param| ty_contains_var(param, name)) || ty_contains_var(ret, name)
+        }
+        Ty::App { args, .. } => args.iter().any(|arg| match arg {
+            TyArg::Type(ty) => ty_contains_var(ty, name),
+            TyArg::Value(_) => false,
+        }),
+    }
+}
+
 fn unify_numeric_expr(expected: &NumericExpr, actual: &NumericExpr, subst: &mut Subst) -> bool {
     if let (Some(expected), Some(actual)) = (
         eval_numeric_expr(expected, subst, &[]),
@@ -2019,18 +2136,23 @@ fn numeric_expr_key(expr: &NumericExpr) -> String {
 fn subst_numeric_expr(expr: &NumericExpr, subst: &Subst) -> NumericExpr {
     match expr {
         NumericExpr::Const(value) => NumericExpr::Const(*value),
-        NumericExpr::Var(name) => subst
-            .values
-            .get(name)
-            .and_then(|value| parse_numeric_expr_text(value))
-            .or_else(|| {
-                subst.types.get(name).and_then(|ty| {
-                    let text = ty.text();
-                    parse_numeric_expr_text(&text)
-                })
-            })
-            .map(|expr| subst_numeric_expr(&expr, subst))
-            .unwrap_or_else(|| NumericExpr::Var(name.clone())),
+        NumericExpr::Var(name) => {
+            let resolved = subst
+                .values
+                .get(name)
+                .and_then(|value| parse_numeric_expr_text(value))
+                .or_else(|| {
+                    subst.types.get(name).and_then(|ty| {
+                        let text = ty.text();
+                        parse_numeric_expr_text(&text)
+                    })
+                });
+            match resolved {
+                Some(NumericExpr::Var(bound)) if &bound == name => NumericExpr::Var(name.clone()),
+                Some(expr) => subst_numeric_expr(&expr, subst),
+                None => NumericExpr::Var(name.clone()),
+            }
+        }
         NumericExpr::Symbol(name) => NumericExpr::Symbol(name.clone()),
         NumericExpr::Neg(inner) => NumericExpr::Neg(Box::new(subst_numeric_expr(inner, subst))),
         NumericExpr::Add(lhs, rhs) => NumericExpr::Add(
@@ -2470,6 +2592,10 @@ fn constraints_are_contradictory(constraints: &[ConstraintExpr], subst: &Subst) 
 }
 
 fn unify_value(expected: &str, actual: &str, subst: &mut Subst) -> bool {
+    if normalized_value_text(expected) == normalized_value_text(actual) {
+        return true;
+    }
+
     if expected.starts_with('\'') {
         match subst.values.get(expected) {
             Some(bound) => {
@@ -2536,13 +2662,21 @@ fn apply_subst(ty: &Ty, subst: &Subst) -> Ty {
 fn unify(expected: &Ty, actual: &Ty, subst: &mut Subst) -> bool {
     match expected {
         Ty::Unknown => true,
-        Ty::Var(name) => match subst.types.get(name).cloned() {
-            Some(bound) => unify(&bound, actual, subst),
-            None => {
-                subst.types.insert(name.clone(), actual.clone());
-                true
+        Ty::Var(name) => {
+            if matches!(actual, Ty::Var(actual_name) if actual_name == name) {
+                return true;
             }
-        },
+            if ty_contains_var(actual, name) {
+                return false;
+            }
+            match subst.types.get(name).cloned() {
+                Some(bound) => unify(&bound, actual, subst),
+                None => {
+                    subst.types.insert(name.clone(), actual.clone());
+                    true
+                }
+            }
+        }
         Ty::Text(expected) => expected == &actual.text(),
         Ty::Tuple(expected_items) => match actual {
             Ty::Tuple(actual_items) if expected_items.len() == actual_items.len() => expected_items
@@ -2608,7 +2742,13 @@ struct Checker<'a> {
     diagnostics: Vec<Diagnostic>,
     expr_types: HashMap<SpanKey, String>,
     binding_types: HashMap<SpanKey, String>,
-    seen_errors: HashSet<(DiagnosticCode, usize, usize, String)>,
+    seen_errors: HashSet<(DiagnosticCode, usize, usize, TypeError)>,
+}
+
+struct ConcatOperandInfo {
+    width: String,
+    elem: Ty,
+    is_vector: bool,
 }
 
 impl<'a> Checker<'a> {
@@ -2633,8 +2773,24 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn trace_typecheck(&self, kind: &str, name: &str, span: Option<Span>) {
+        if std::env::var_os("SAIL_TYPECHECK_TRACE").is_none() {
+            return;
+        }
+        if let Some(span) = span {
+            let pos = self.file.source.position_at(span.start);
+            eprintln!(
+                "[typecheck] {kind} {name} @ {}:{}",
+                pos.line + 1,
+                pos.character + 1
+            );
+        } else {
+            eprintln!("[typecheck] {kind} {name}");
+        }
+    }
+
     fn push_error(&mut self, code: DiagnosticCode, span: Span, error: TypeError) {
-        let key = (code.clone(), span.start, span.end, format!("{error:?}"));
+        let key = (code.clone(), span.start, span.end, error.clone());
         if !self.seen_errors.insert(key) {
             return;
         }
@@ -2683,13 +2839,10 @@ impl<'a> Checker<'a> {
         subst.values.contains_key(name) || subst.types.contains_key(name)
     }
 
-    fn assumptions_for<'b>(&'b self, locals: &'b LocalEnv) -> Vec<ConstraintExpr> {
-        self.env
-            .global_constraints
-            .iter()
-            .cloned()
-            .chain(locals.constraints.iter().cloned())
-            .collect()
+    fn fill_assumptions(&self, locals: &LocalEnv, out: &mut Vec<ConstraintExpr>) {
+        out.clear();
+        out.extend(self.env.global_constraints.iter().cloned());
+        out.extend(locals.constraints.iter().cloned());
     }
 
     fn evaluate_constraint(
@@ -2918,7 +3071,7 @@ impl<'a> Checker<'a> {
             self.record_binding_type(name.1, &ty);
             Some(ty)
         } else {
-            let have_function = !self.env.lookup_functions(&name.0).is_empty();
+            let have_function = self.env.has_function(&name.0);
             self.push_error(
                 DiagnosticCode::TypeError,
                 name.1,
@@ -3231,7 +3384,8 @@ impl<'a> Checker<'a> {
         text: String,
         locals: &LocalEnv,
     ) {
-        let assumptions = self.assumptions_for(locals);
+        let mut assumptions = Vec::new();
+        self.fill_assumptions(locals, &mut assumptions);
         if !matches!(
             self.evaluate_constraint(&constraint, &Subst::default(), &assumptions),
             ConstraintStatus::Satisfied
@@ -3947,17 +4101,19 @@ impl<'a> Checker<'a> {
         &mut self,
         pattern: &Spanned<Pattern>,
         expected_ty: Ty,
-        locals: &LocalEnv,
+        locals: &mut LocalEnv,
     ) -> HashMap<String, (Span, Ty)> {
-        let mut temp = locals.clone();
-        temp.push_scope();
-        self.bind_pattern(pattern, Some(expected_ty), &mut temp);
+        let mark = locals.snapshot();
+        locals.push_scope();
+        self.bind_pattern(pattern, Some(expected_ty), locals);
         let mut names = HashMap::new();
         self.collect_pattern_binding_name_spans(pattern, &mut names);
-        names
+        let bindings = names
             .into_iter()
-            .filter_map(|(name, span)| temp.lookup(&name).map(|ty| (name, (span, ty))))
-            .collect()
+            .filter_map(|(name, span)| locals.lookup(&name).map(|ty| (name, (span, ty))))
+            .collect();
+        locals.restore(mark);
+        bindings
     }
 
     fn define_captured_bindings(
@@ -4766,6 +4922,56 @@ impl<'a> Checker<'a> {
             return self.infer_expr(expr, locals);
         }
 
+        let mut current = expr;
+        let mut chain_mark = None;
+        let mut wrapper_spans = Vec::new();
+        loop {
+            match &current.0 {
+                Expr::Attribute { expr: inner, .. } => {
+                    wrapper_spans.push(current.1);
+                    current = inner;
+                }
+                Expr::Let { binding, body } => {
+                    wrapper_spans.push(current.1);
+                    let value_ty = if let Some(expected_bind) =
+                        pattern_annotation_type(self.source, &binding.pattern)
+                    {
+                        self.check_expr(&binding.value, &expected_bind, locals);
+                        expected_bind
+                    } else {
+                        self.infer_expr(&binding.value, locals)
+                    };
+                    if chain_mark.is_none() {
+                        chain_mark = Some(locals.snapshot());
+                    }
+                    locals.push_scope();
+                    self.bind_pattern(&binding.pattern, Some(value_ty), locals);
+                    current = body;
+                }
+                _ => break,
+            }
+        }
+
+        let ty = self.check_expr_dispatch(current, expected, locals);
+        if let Some(mark) = chain_mark {
+            locals.restore(mark);
+        }
+        for span in wrapper_spans {
+            self.record_expr_type(span, &ty);
+        }
+        ty
+    }
+
+    fn check_expr_dispatch(
+        &mut self,
+        expr: &Spanned<Expr>,
+        expected: &Ty,
+        locals: &mut LocalEnv,
+    ) -> Ty {
+        if expected.is_unknown() {
+            return self.infer_expr(expr, locals);
+        }
+
         let ty = match &expr.0 {
             Expr::Attribute { expr, .. } => self.check_expr(expr, expected, locals),
             Expr::Return(inner) => {
@@ -4807,6 +5013,21 @@ impl<'a> Checker<'a> {
                 locals.push_scope();
                 let mut last_ty = Ty::Text("unit".to_string());
                 for (index, item) in items.iter().enumerate() {
+                    match &item.0 {
+                        sail_parser::BlockItem::Let(binding) => {
+                            self.trace_typecheck("block-let", "_", Some(binding.value.1));
+                        }
+                        sail_parser::BlockItem::Var { value, .. } => {
+                            self.trace_typecheck("block-var", "_", Some(value.1));
+                        }
+                        sail_parser::BlockItem::Expr(inner) => {
+                            self.trace_typecheck(
+                                "block-expr",
+                                expr_kind_name(&inner.0),
+                                Some(inner.1),
+                            );
+                        }
+                    }
                     let is_last = index + 1 == items.len();
                     last_ty = match &item.0 {
                         sail_parser::BlockItem::Let(binding) => {
@@ -4861,13 +5082,15 @@ impl<'a> Checker<'a> {
                 } else {
                     Ty::Text("unit".to_string())
                 };
-                let mut then_locals = locals.clone();
-                self.add_expr_constraint(&mut then_locals, cond, true);
-                self.check_expr(then_branch, &branch_expected, &mut then_locals);
+                let then_mark = locals.snapshot();
+                self.add_expr_constraint(locals, cond, true);
+                self.check_expr(then_branch, &branch_expected, locals);
+                locals.restore(then_mark);
                 if let Some(else_branch) = else_branch {
-                    let mut else_locals = locals.clone();
-                    self.add_expr_constraint(&mut else_locals, cond, false);
-                    self.check_expr(else_branch, &branch_expected, &mut else_locals);
+                    let else_mark = locals.snapshot();
+                    self.add_expr_constraint(locals, cond, false);
+                    self.check_expr(else_branch, &branch_expected, locals);
+                    locals.restore(else_mark);
                     expected.clone()
                 } else {
                     let unit_ty = Ty::Text("unit".to_string());
@@ -4905,21 +5128,27 @@ impl<'a> Checker<'a> {
 
     fn check_source_file(mut self, ast: &SourceFile) -> TypeCheckResult {
         let mut global_constraints = Vec::new();
-        for (item, _) in &ast.defs {
+        for (item, span) in &ast.defs {
             match &item.kind {
-                DefinitionKind::Callable(def) => self.check_callable_definition(def),
+                DefinitionKind::Callable(def) => {
+                    self.trace_typecheck("callable", &def.name.0, Some(*span));
+                    self.check_callable_definition(def);
+                }
                 DefinitionKind::Named(def)
                     if matches!(
                         def.kind,
                         NamedDefKind::Register | NamedDefKind::Let | NamedDefKind::Var
                     ) =>
                 {
+                    self.trace_typecheck("binding", &def.name.0, Some(*span));
                     self.check_named_binding(def);
                 }
                 DefinitionKind::Named(def) if matches!(def.kind, NamedDefKind::Bitfield) => {
+                    self.trace_typecheck("bitfield", &def.name.0, Some(*span));
                     self.check_bitfield_definition(def);
                 }
                 DefinitionKind::Constraint(def) if !def.is_type_constraint => {
+                    self.trace_typecheck("constraint", "global", Some(*span));
                     global_constraints.push(constraint_expr_from_type_expr(self.source, &def.ty));
                     if constraints_are_contradictory(&global_constraints, &Subst::default()) {
                         self.push_error(
@@ -5097,16 +5326,36 @@ impl<'a> Checker<'a> {
         }
     }
 
+    fn collect_vector_concat_pattern_parts<'b>(
+        &self,
+        pattern: &'b Spanned<Pattern>,
+        parts: &mut Vec<&'b Spanned<Pattern>>,
+    ) {
+        let mut stack = vec![pattern];
+        while let Some(pattern) = stack.pop() {
+            match &pattern.0 {
+                Pattern::Infix { lhs, op, rhs } if op.0 == "@" => {
+                    stack.push(rhs);
+                    stack.push(lhs);
+                }
+                _ => parts.push(pattern),
+            }
+        }
+    }
+
     fn bind_vector_concat_pattern(
         &mut self,
-        lhs: &Spanned<Pattern>,
-        rhs: &Spanned<Pattern>,
+        pattern: &Spanned<Pattern>,
         expected_ty: Option<&Ty>,
         locals: &mut LocalEnv,
     ) {
+        let mut parts = Vec::new();
+        self.collect_vector_concat_pattern_parts(pattern, &mut parts);
+
         let Some(expected_ty) = expected_ty else {
-            self.bind_pattern_inner(lhs, None, locals);
-            self.bind_pattern_inner(rhs, None, locals);
+            for part in parts {
+                self.bind_pattern_inner(part, None, locals);
+            }
             return;
         };
 
@@ -5114,13 +5363,30 @@ impl<'a> Checker<'a> {
             .collection_length_text(expected_ty)
             .and_then(|text| parse_int_literal(&text))
         else {
-            self.bind_pattern_inner(lhs, None, locals);
-            self.bind_pattern_inner(rhs, None, locals);
+            for part in parts {
+                self.bind_pattern_inner(part, None, locals);
+            }
             return;
         };
 
-        let lhs_width = pattern_static_bit_width(self.source, lhs);
-        let rhs_width = pattern_static_bit_width(self.source, rhs);
+        let widths = parts
+            .iter()
+            .map(|part| pattern_static_bit_width(self.source, part))
+            .collect::<Vec<_>>();
+        let known_width = widths.iter().flatten().sum::<i64>();
+        if known_width > total_width {
+            for part in parts {
+                self.bind_pattern_inner(part, None, locals);
+            }
+            return;
+        }
+
+        let unknown_count = widths.iter().filter(|width| width.is_none()).count();
+        let inferred_unknown_width = match unknown_count {
+            0 if known_width == total_width => None,
+            1 => Some(total_width - known_width),
+            _ => None,
+        };
         let vector_elem_ty = self.collection_element_type(expected_ty);
         let expected_is_vector = matches!(expected_ty, Ty::App { name, .. } if name == "vector");
         let mk_expected = |width| {
@@ -5131,23 +5397,9 @@ impl<'a> Checker<'a> {
             }
         };
 
-        match (lhs_width, rhs_width) {
-            (Some(lhs_width), Some(rhs_width)) if lhs_width + rhs_width == total_width => {
-                self.bind_pattern_inner(lhs, Some(mk_expected(lhs_width)), locals);
-                self.bind_pattern_inner(rhs, Some(mk_expected(rhs_width)), locals);
-            }
-            (Some(lhs_width), None) if lhs_width <= total_width => {
-                self.bind_pattern_inner(lhs, Some(mk_expected(lhs_width)), locals);
-                self.bind_pattern_inner(rhs, Some(mk_expected(total_width - lhs_width)), locals);
-            }
-            (None, Some(rhs_width)) if rhs_width <= total_width => {
-                self.bind_pattern_inner(lhs, Some(mk_expected(total_width - rhs_width)), locals);
-                self.bind_pattern_inner(rhs, Some(mk_expected(rhs_width)), locals);
-            }
-            _ => {
-                self.bind_pattern_inner(lhs, None, locals);
-                self.bind_pattern_inner(rhs, None, locals);
-            }
+        for (part, width) in parts.into_iter().zip(widths.into_iter()) {
+            let expected = width.or(inferred_unknown_width).map(&mk_expected);
+            self.bind_pattern_inner(part, expected, locals);
         }
     }
 
@@ -5364,6 +5616,8 @@ impl<'a> Checker<'a> {
                 let expected_ty = expected_ty.unwrap_or(Ty::Unknown);
                 let candidates = self.env.lookup_constructors(&callee.0);
                 let mappings = self.env.lookup_mappings(&callee.0);
+                let mut assumptions = Vec::new();
+                self.fill_assumptions(locals, &mut assumptions);
                 if args.len() > 1 && (!candidates.is_empty() || !mappings.is_empty()) {
                     let tuple_pattern = (
                         Pattern::Tuple(args.clone()),
@@ -5403,7 +5657,7 @@ impl<'a> Checker<'a> {
                                         &mapping.quantifiers,
                                         &mapping.constraints,
                                         &backwards_subst,
-                                        &self.assumptions_for(locals),
+                                        &assumptions,
                                     ) {
                                         first_mapping_error.get_or_insert(error);
                                     } else {
@@ -5423,7 +5677,7 @@ impl<'a> Checker<'a> {
                                         &mapping.quantifiers,
                                         &mapping.constraints,
                                         &forwards_subst,
-                                        &self.assumptions_for(locals),
+                                        &assumptions,
                                     ) {
                                         first_mapping_error.get_or_insert(error);
                                     } else {
@@ -5486,7 +5740,7 @@ impl<'a> Checker<'a> {
                         &candidate.quantifiers,
                         &candidate.constraints,
                         &subst,
-                        &self.assumptions_for(locals),
+                        &assumptions,
                     ) {
                         first_candidate_error.get_or_insert(error);
                         continue;
@@ -5569,7 +5823,7 @@ impl<'a> Checker<'a> {
                     self.bind_pattern_inner(rhs, Some(string_ty), locals);
                 }
                 "@" => {
-                    self.bind_vector_concat_pattern(lhs, rhs, expected_ty.as_ref(), locals);
+                    self.bind_vector_concat_pattern(pattern, expected_ty.as_ref(), locals);
                 }
                 _ => {
                     self.bind_pattern_inner(lhs, None, locals);
@@ -5603,6 +5857,47 @@ impl<'a> Checker<'a> {
     }
 
     fn infer_expr(&mut self, expr: &Spanned<Expr>, locals: &mut LocalEnv) -> Ty {
+        let mut current = expr;
+        let mut chain_mark = None;
+        let mut wrapper_spans = Vec::new();
+        loop {
+            match &current.0 {
+                Expr::Attribute { expr: inner, .. } => {
+                    wrapper_spans.push(current.1);
+                    current = inner;
+                }
+                Expr::Let { binding, body } => {
+                    wrapper_spans.push(current.1);
+                    let value_ty = if let Some(expected_bind) =
+                        pattern_annotation_type(self.source, &binding.pattern)
+                    {
+                        self.check_expr(&binding.value, &expected_bind, locals);
+                        expected_bind
+                    } else {
+                        self.infer_expr(&binding.value, locals)
+                    };
+                    if chain_mark.is_none() {
+                        chain_mark = Some(locals.snapshot());
+                    }
+                    locals.push_scope();
+                    self.bind_pattern(&binding.pattern, Some(value_ty), locals);
+                    current = body;
+                }
+                _ => break,
+            }
+        }
+
+        let ty = self.infer_expr_dispatch(current, locals);
+        if let Some(mark) = chain_mark {
+            locals.restore(mark);
+        }
+        for span in wrapper_spans {
+            self.record_expr_type(span, &ty);
+        }
+        ty
+    }
+
+    fn infer_expr_dispatch(&mut self, expr: &Spanned<Expr>, locals: &mut LocalEnv) -> Ty {
         let ty = match &expr.0 {
             Expr::Attribute { expr, .. } => self.infer_expr(expr, locals),
             Expr::Assign { lhs, rhs } => {
@@ -5644,6 +5939,21 @@ impl<'a> Checker<'a> {
                 locals.push_scope();
                 let mut last_ty = Ty::Text("unit".to_string());
                 for item in items {
+                    match &item.0 {
+                        sail_parser::BlockItem::Let(binding) => {
+                            self.trace_typecheck("block-let", "_", Some(binding.value.1));
+                        }
+                        sail_parser::BlockItem::Var { value, .. } => {
+                            self.trace_typecheck("block-var", "_", Some(value.1));
+                        }
+                        sail_parser::BlockItem::Expr(expr) => {
+                            self.trace_typecheck(
+                                "block-expr",
+                                expr_kind_name(&expr.0),
+                                Some(expr.1),
+                            );
+                        }
+                    }
                     last_ty = match &item.0 {
                         sail_parser::BlockItem::Let(binding) => {
                             let value_ty = if let Some(expected_bind) =
@@ -5733,15 +6043,18 @@ impl<'a> Checker<'a> {
                         },
                     );
                 }
-                let mut then_locals = locals.clone();
-                self.add_expr_constraint(&mut then_locals, cond, true);
-                let then_ty = self.infer_expr(then_branch, &mut then_locals);
+                let then_mark = locals.snapshot();
+                self.add_expr_constraint(locals, cond, true);
+                let then_ty = self.infer_expr(then_branch, locals);
+                locals.restore(then_mark);
                 let else_ty = else_branch
                     .as_ref()
                     .map(|branch| {
-                        let mut else_locals = locals.clone();
-                        self.add_expr_constraint(&mut else_locals, cond, false);
-                        self.infer_expr(branch, &mut else_locals)
+                        let else_mark = locals.snapshot();
+                        self.add_expr_constraint(locals, cond, false);
+                        let else_ty = self.infer_expr(branch, locals);
+                        locals.restore(else_mark);
+                        else_ty
                     })
                     .unwrap_or_else(|| Ty::Text("unit".to_string()));
                 let mut subst = Subst::default();
@@ -5833,9 +6146,7 @@ impl<'a> Checker<'a> {
                 self.infer_expr(body, locals);
                 Ty::Text("unit".to_string())
             }
-            Expr::Infix { lhs, op, rhs } => {
-                self.infer_infix(expr.1, lhs, op.0.as_str(), rhs, locals)
-            }
+            Expr::Infix { lhs, op, rhs } => self.infer_infix(expr, lhs, op.0.as_str(), rhs, locals),
             Expr::Prefix { op, expr: inner } => {
                 let inner_ty = self.infer_expr(inner, locals);
                 match op.0.as_str() {
@@ -5864,7 +6175,7 @@ impl<'a> Checker<'a> {
             Expr::Ident(name) => {
                 if let Some(ty) = self.env.lookup_value(locals, name) {
                     ty
-                } else if self.env.lookup_functions(name).is_empty() {
+                } else if !self.env.has_function(name) {
                     self.push_error(
                         DiagnosticCode::TypeError,
                         expr.1,
@@ -5962,14 +6273,134 @@ impl<'a> Checker<'a> {
         ty
     }
 
+    fn concat_operand_info(&self, ty: &Ty) -> Option<ConcatOperandInfo> {
+        match ty {
+            Ty::Text(text) if text == "bit" => Some(ConcatOperandInfo {
+                width: "1".to_string(),
+                elem: Ty::Text("bit".to_string()),
+                is_vector: false,
+            }),
+            Ty::App { name, .. } if name == "bits" => Some(ConcatOperandInfo {
+                width: self.collection_length_text(ty)?,
+                elem: Ty::Text("bit".to_string()),
+                is_vector: false,
+            }),
+            Ty::App { name, .. } if name == "vector" => Some(ConcatOperandInfo {
+                width: self.collection_length_text(ty)?,
+                elem: self.collection_element_type(ty)?,
+                is_vector: true,
+            }),
+            _ => None,
+        }
+    }
+
+    fn concat_width_text(&self, lhs: &str, rhs: &str) -> String {
+        let lhs_value = parse_numeric_expr_text(lhs)
+            .and_then(|expr| eval_numeric_expr(&expr, &Subst::default(), &[]));
+        let rhs_value = parse_numeric_expr_text(rhs)
+            .and_then(|expr| eval_numeric_expr(&expr, &Subst::default(), &[]));
+        match (lhs_value, rhs_value) {
+            (Some(lhs), Some(rhs)) => (lhs + rhs).to_string(),
+            _ => format!("({lhs}) + ({rhs})"),
+        }
+    }
+
+    fn infer_concat_result_type(&mut self, span: Span, lhs_ty: &Ty, rhs_ty: &Ty) -> Ty {
+        if lhs_ty.is_unknown() || rhs_ty.is_unknown() {
+            return Ty::Unknown;
+        }
+
+        let Some(lhs) = self.concat_operand_info(lhs_ty) else {
+            self.push_error(
+                DiagnosticCode::TypeError,
+                span,
+                TypeError::other(format!(
+                    "Cannot concatenate non-vector type {}",
+                    lhs_ty.text()
+                )),
+            );
+            return Ty::Unknown;
+        };
+        let Some(rhs) = self.concat_operand_info(rhs_ty) else {
+            self.push_error(
+                DiagnosticCode::TypeError,
+                span,
+                TypeError::other(format!(
+                    "Cannot concatenate non-vector type {}",
+                    rhs_ty.text()
+                )),
+            );
+            return Ty::Unknown;
+        };
+
+        let mut subst = Subst::default();
+        if !unify(&lhs.elem, &rhs.elem, &mut subst) {
+            self.push_error(
+                DiagnosticCode::TypeError,
+                span,
+                TypeError::other(format!(
+                    "Cannot concatenate {} with {}",
+                    lhs_ty.text(),
+                    rhs_ty.text()
+                )),
+            );
+            return Ty::Unknown;
+        }
+
+        let elem_ty = apply_subst(&lhs.elem, &subst);
+        let width = self.concat_width_text(&lhs.width, &rhs.width);
+
+        if lhs.is_vector && rhs.is_vector {
+            vector_ty(width, elem_ty)
+        } else {
+            bits_ty(width)
+        }
+    }
+
+    fn infer_concat_expr(&mut self, expr: &Spanned<Expr>, locals: &mut LocalEnv) -> Ty {
+        enum Frame<'a> {
+            Visit(&'a Spanned<Expr>),
+            Reduce(Span),
+        }
+
+        let mut stack = vec![Frame::Visit(expr)];
+        let mut values = Vec::new();
+
+        while let Some(frame) = stack.pop() {
+            match frame {
+                Frame::Visit(expr) => match &expr.0 {
+                    Expr::Infix { lhs, op, rhs } if op.0 == "@" => {
+                        stack.push(Frame::Reduce(expr.1));
+                        stack.push(Frame::Visit(rhs));
+                        stack.push(Frame::Visit(lhs));
+                    }
+                    _ => values.push(self.infer_expr(expr, locals)),
+                },
+                Frame::Reduce(span) => {
+                    let rhs_ty = values.pop().unwrap_or(Ty::Unknown);
+                    let lhs_ty = values.pop().unwrap_or(Ty::Unknown);
+                    let ty = self.infer_concat_result_type(span, &lhs_ty, &rhs_ty);
+                    self.record_expr_type(span, &ty);
+                    values.push(ty);
+                }
+            }
+        }
+
+        values.pop().unwrap_or(Ty::Unknown)
+    }
+
     fn infer_infix(
         &mut self,
-        span: Span,
+        expr: &Spanned<Expr>,
         lhs: &Spanned<Expr>,
         op: &str,
         rhs: &Spanned<Expr>,
         locals: &mut LocalEnv,
     ) -> Ty {
+        if op == "@" {
+            return self.infer_concat_expr(expr, locals);
+        }
+
         let lhs_ty = self.infer_expr(lhs, locals);
         let rhs_ty = self.infer_expr(rhs, locals);
         match op {
@@ -5995,7 +6426,7 @@ impl<'a> Checker<'a> {
                 if !unify(&lhs_ty, &rhs_ty, &mut subst) {
                     self.push_error(
                         DiagnosticCode::TypeError,
-                        span,
+                        expr.1,
                         TypeError::Subtype {
                             lhs: rhs_ty.text(),
                             rhs: lhs_ty.text(),
@@ -6269,52 +6700,56 @@ impl<'a> Checker<'a> {
             let shared_bindings = self.merge_mapping_bindings(arm.1, &lhs_bindings, &rhs_bindings);
 
             if matches!(arm.0.direction, MappingArmDirection::Bidirectional) {
-                let mut left_locals = locals.clone();
-                left_locals.push_scope();
-                self.define_captured_bindings(&mut left_locals, &rhs_bindings);
+                let left_mark = locals.snapshot();
+                locals.push_scope();
+                self.define_captured_bindings(locals, &rhs_bindings);
                 if let Some(pattern) = &arm.0.lhs_pattern {
-                    self.bind_pattern(pattern, Some(input_ty.clone()), &mut left_locals);
+                    self.bind_pattern(pattern, Some(input_ty.clone()), locals);
                 } else {
-                    self.check_expr(&arm.0.lhs, &input_ty, &mut left_locals);
+                    self.check_expr(&arm.0.lhs, &input_ty, locals);
                 }
+                locals.restore(left_mark);
 
-                let mut right_locals = locals.clone();
-                right_locals.push_scope();
-                self.define_captured_bindings(&mut right_locals, &lhs_bindings);
+                let right_mark = locals.snapshot();
+                locals.push_scope();
+                self.define_captured_bindings(locals, &lhs_bindings);
                 if let Some(pattern) = &arm.0.rhs_pattern {
-                    self.bind_pattern(pattern, Some(output_ty.clone()), &mut right_locals);
+                    self.bind_pattern(pattern, Some(output_ty.clone()), locals);
                 } else {
-                    self.check_expr(&arm.0.rhs, &output_ty, &mut right_locals);
+                    self.check_expr(&arm.0.rhs, &output_ty, locals);
                 }
+                locals.restore(right_mark);
 
                 if let Some(guard) = &arm.0.guard {
-                    let mut guard_locals = locals.clone();
-                    guard_locals.push_scope();
-                    self.define_captured_bindings(&mut guard_locals, &shared_bindings);
-                    let guard_ty = self.infer_expr(guard, &mut guard_locals);
+                    let guard_mark = locals.snapshot();
+                    locals.push_scope();
+                    self.define_captured_bindings(locals, &shared_bindings);
+                    let guard_ty = self.infer_expr(guard, locals);
                     self.expect_type(guard.1, &guard_ty, &Ty::Text("bool".to_string()));
-                    self.add_expr_constraint(&mut guard_locals, guard, true);
+                    self.add_expr_constraint(locals, guard, true);
+                    locals.restore(guard_mark);
                 }
                 continue;
             }
 
-            let mut arm_locals = locals.clone();
-            arm_locals.push_scope();
+            let arm_mark = locals.snapshot();
+            locals.push_scope();
             if let Some(pattern) = &arm.0.lhs_pattern {
-                self.bind_pattern(pattern, Some(input_ty.clone()), &mut arm_locals);
+                self.bind_pattern(pattern, Some(input_ty.clone()), locals);
             } else {
-                self.check_expr(&arm.0.lhs, &input_ty, &mut arm_locals);
+                self.check_expr(&arm.0.lhs, &input_ty, locals);
             }
             if let Some(guard) = &arm.0.guard {
-                let guard_ty = self.infer_expr(guard, &mut arm_locals);
+                let guard_ty = self.infer_expr(guard, locals);
                 self.expect_type(guard.1, &guard_ty, &Ty::Text("bool".to_string()));
-                self.add_expr_constraint(&mut arm_locals, guard, true);
+                self.add_expr_constraint(locals, guard, true);
             }
             if let Some(pattern) = &arm.0.rhs_pattern {
-                self.bind_pattern(pattern, Some(output_ty), &mut arm_locals);
+                self.bind_pattern(pattern, Some(output_ty), locals);
             } else {
-                self.check_expr(&arm.0.rhs, &output_ty, &mut arm_locals);
+                self.check_expr(&arm.0.rhs, &output_ty, locals);
             }
+            locals.restore(arm_mark);
         }
     }
 
@@ -6391,7 +6826,8 @@ impl<'a> Checker<'a> {
             arg_types.insert(0, receiver_ty);
             arg_spans.insert(0, receiver_span);
         }
-        let assumptions = self.assumptions_for(locals);
+        let mut assumptions = Vec::new();
+        self.fill_assumptions(locals, &mut assumptions);
         if callee_name == "slice" {
             return self.infer_slice_builtin_call(call, &arg_types, locals, expected_ret);
         }
@@ -6650,5 +7086,27 @@ where
         None
     } else {
         Some(ty.text())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unify_value_skips_self_bindings() {
+        let mut subst = Subst::default();
+        assert!(unify_value("'n", "'n", &mut subst));
+        assert!(subst.values.is_empty());
+    }
+
+    #[test]
+    fn subst_numeric_expr_handles_self_referential_value_bindings() {
+        let mut subst = Subst::default();
+        subst.values.insert("'n".to_string(), "'n".to_string());
+        assert_eq!(
+            subst_numeric_expr(&NumericExpr::Var("'n".to_string()), &subst),
+            NumericExpr::Var("'n".to_string())
+        );
     }
 }
