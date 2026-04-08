@@ -13,9 +13,20 @@ pub(crate) struct State {
     pub(crate) diagnostic_versions: HashMap<Url, i32>,
     pub(crate) semantic_tokens_cache: HashMap<Url, SemanticTokens>,
     pub(crate) disk_scan_generation: u64,
+    /// Per-URI generation counter for typecheck tasks. Incremented each time a
+    /// new typecheck is scheduled so that stale in-flight workers can detect
+    /// they have been superseded and bail out early.
+    pub(crate) typecheck_generation: HashMap<Url, u64>,
 }
 
 impl State {
+    /// Bump the typecheck generation for `uri` and return the new value.
+    pub(crate) fn next_typecheck_generation(&mut self, uri: &Url) -> u64 {
+        let gen = self.typecheck_generation.entry(uri.clone()).or_insert(0);
+        *gen += 1;
+        *gen
+    }
+
     /// Look up a file by URI, preferring open files over disk files.
     pub(crate) fn get_file(&self, uri: &Url) -> Option<&File> {
         self.open_files
@@ -221,10 +232,22 @@ impl Backend {
         let state = self.state.clone();
         let client = self.client.clone();
         tokio::spawn(async move {
+            // Bump the generation counter so any previously-spawned typecheck
+            // for this URI knows it has been superseded.
+            let generation = {
+                let mut state_guard = state.write().await;
+                state_guard.next_typecheck_generation(&uri)
+            };
+
             tokio::time::sleep(Duration::from_millis(TYPECHECK_DEBOUNCE_MS)).await;
 
+            // After the debounce sleep, check whether a newer typecheck was
+            // scheduled (generation changed) or the document version moved on.
             {
                 let state_guard = state.read().await;
+                if state_guard.typecheck_generation.get(&uri).copied() != Some(generation) {
+                    return;
+                }
                 if state_guard.diagnostic_versions.get(&uri).copied() != Some(version) {
                     return;
                 }
@@ -251,8 +274,13 @@ impl Backend {
                 }
             };
 
+            // After typecheck completes, verify this task is still the latest
+            // before committing the result into state.
             let diagnostics = {
                 let mut state_guard = state.write().await;
+                if state_guard.typecheck_generation.get(&uri).copied() != Some(generation) {
+                    return;
+                }
                 if state_guard.diagnostic_versions.get(&uri).copied() != Some(version) {
                     return;
                 }
