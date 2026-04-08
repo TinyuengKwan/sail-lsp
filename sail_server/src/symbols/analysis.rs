@@ -1,7 +1,7 @@
 use crate::state::File;
 use sail_parser::Span;
 use std::collections::HashMap;
-use tower_lsp::lsp_types::{Location, Range, SymbolKind, Url};
+use tower_lsp::lsp_types::{DocumentSymbol, Location, Range, SymbolKind, Url};
 
 #[derive(Clone)]
 pub(crate) struct SymbolDecl {
@@ -118,6 +118,102 @@ pub(crate) fn extract_symbol_decls(file: &File) -> Vec<SymbolDecl> {
             })
         })
         .collect()
+}
+
+/// Build a hierarchical DocumentSymbol tree. Enum members become children of
+/// their parent enum; all other top-level decls are roots.
+#[allow(deprecated)] // DocumentSymbol.deprecated is deprecated in the LSP type
+pub(crate) fn document_symbol_tree(file: &File) -> Vec<DocumentSymbol> {
+    let Some(parsed) = file.parsed() else {
+        return Vec::new();
+    };
+
+    // First pass: collect top-level items and their full spans.
+    let item_spans: Vec<(usize, usize)> = if let Some(ast) = file.core_ast() {
+        ast.defs
+            .iter()
+            .map(|(_, span)| (span.start, span.end))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let mut roots: Vec<DocumentSymbol> = Vec::new();
+    // Track enum positions for parenting members.
+    let mut enum_indices: HashMap<String, usize> = HashMap::new();
+
+    for decl in &parsed.decls {
+        if decl.scope == sail_parser::Scope::Local
+            && !matches!(decl.kind, sail_parser::DeclKind::EnumMember)
+        {
+            continue;
+        }
+
+        let (kind, detail) = match decl.kind {
+            sail_parser::DeclKind::Function => (SymbolKind::FUNCTION, "function"),
+            sail_parser::DeclKind::Value => (SymbolKind::FUNCTION, "value"),
+            sail_parser::DeclKind::Mapping => (SymbolKind::FUNCTION, "mapping"),
+            sail_parser::DeclKind::Overload => (SymbolKind::FUNCTION, "overload"),
+            sail_parser::DeclKind::Register => (SymbolKind::VARIABLE, "register"),
+            sail_parser::DeclKind::Parameter => (SymbolKind::VARIABLE, "parameter"),
+            sail_parser::DeclKind::Type
+            | sail_parser::DeclKind::Struct
+            | sail_parser::DeclKind::Union
+            | sail_parser::DeclKind::Bitfield
+            | sail_parser::DeclKind::Newtype => (SymbolKind::STRUCT, "type"),
+            sail_parser::DeclKind::Enum => (SymbolKind::ENUM, "enum"),
+            sail_parser::DeclKind::EnumMember => (SymbolKind::ENUM_MEMBER, "enum member"),
+            sail_parser::DeclKind::Let | sail_parser::DeclKind::Var => {
+                (SymbolKind::VARIABLE, "binding")
+            }
+        };
+
+        let selection_range = Range::new(
+            file.source.position_at(decl.span.start),
+            file.source.position_at(decl.span.start + decl.name.len()),
+        );
+
+        // Find the full range from the core_ast item span (if available).
+        let full_range = item_spans
+            .iter()
+            .find(|(s, e)| *s <= decl.span.start && decl.span.end <= *e)
+            .map(|(s, e)| {
+                Range::new(file.source.position_at(*s), file.source.position_at(*e))
+            })
+            .unwrap_or(selection_range);
+
+        let symbol = DocumentSymbol {
+            name: decl.name.clone(),
+            detail: Some(detail.to_string()),
+            kind,
+            tags: None,
+            deprecated: None,
+            range: full_range,
+            selection_range,
+            children: Some(Vec::new()),
+        };
+
+        if decl.kind == sail_parser::DeclKind::EnumMember {
+            // Try to parent under the most recent enum.
+            let parented = enum_indices
+                .values()
+                .copied()
+                .max()
+                .and_then(|idx| roots.get_mut(idx))
+                .and_then(|parent| parent.children.as_mut());
+            if let Some(children) = parented {
+                children.push(symbol);
+                continue;
+            }
+        }
+
+        if decl.kind == sail_parser::DeclKind::Enum {
+            enum_indices.insert(decl.name.clone(), roots.len());
+        }
+        roots.push(symbol);
+    }
+
+    roots
 }
 
 pub(crate) fn range_from_span(file: &File, span: Span) -> Range {

@@ -388,3 +388,53 @@ pub(crate) fn make_selection_range(
         parent: None,
     })
 }
+
+/// On-enter edits: continue doc comments (`///`) and maintain indentation
+/// after opening brackets.
+pub(crate) fn on_enter_edits(
+    file: &File,
+    position: tower_lsp::lsp_types::Position,
+) -> Option<Vec<TextEdit>> {
+    if position.line == 0 {
+        return None;
+    }
+    let prev_line_idx = position.line - 1;
+    let prev_start = file
+        .source
+        .offset_at(&tower_lsp::lsp_types::Position::new(prev_line_idx, 0));
+    let prev_end = file
+        .source
+        .offset_at(&tower_lsp::lsp_types::Position::new(prev_line_idx + 1, 0))
+        .min(file.source.text().len());
+    let prev_line = &file.source.text()[prev_start..prev_end];
+    let prev_trimmed = prev_line.trim_end_matches(['\n', '\r']);
+
+    // Continue `///` doc comments.
+    let stripped = prev_trimmed.trim_start();
+    if stripped.starts_with("///") {
+        let indent: String = prev_trimmed
+            .chars()
+            .take_while(|ch| *ch == ' ' || *ch == '\t')
+            .collect();
+        let insert_pos = tower_lsp::lsp_types::Position::new(position.line, 0);
+        return Some(vec![TextEdit {
+            range: Range::new(insert_pos, position),
+            new_text: format!("{indent}/// "),
+        }]);
+    }
+
+    // Continue `//` line comments.
+    if stripped.starts_with("//") && !stripped.starts_with("///") {
+        let indent: String = prev_trimmed
+            .chars()
+            .take_while(|ch| *ch == ' ' || *ch == '\t')
+            .collect();
+        let insert_pos = tower_lsp::lsp_types::Position::new(position.line, 0);
+        return Some(vec![TextEdit {
+            range: Range::new(insert_pos, position),
+            new_text: format!("{indent}// "),
+        }]);
+    }
+
+    None
+}

@@ -54,7 +54,7 @@ use crate::completion::{
 use crate::diagnostics::{document_diagnostic_report_for_file, workspace_diagnostic_report};
 use crate::formatting::{
     document_links_for_file, format_document_edits, linked_editing_ranges_for_position,
-    make_selection_range, range_format_document_edits,
+    make_selection_range, on_enter_edits, range_format_document_edits,
 };
 use crate::hover::hover_for_symbol;
 use crate::inlay_hints::{inlay_hints_for_range, resolve_inlay_hint};
@@ -74,6 +74,49 @@ use crate::symbols::{
     type_hierarchy_item, type_name_candidates_at_position, type_subtypes, type_supertypes,
     typed_bindings, will_rename_file_edits,
 };
+
+/// Fuzzy match: each query character must appear in name (in order).
+/// Score rewards: consecutive matches, word-boundary matches, prefix matches.
+fn fuzzy_match_score(query: &str, name: &str) -> Option<i32> {
+    let mut score = 0i32;
+    let mut name_iter = name.char_indices().peekable();
+    let mut prev_matched = false;
+    let mut first = true;
+
+    for qch in query.chars() {
+        let mut found = false;
+        while let Some((idx, nch)) = name_iter.next() {
+            if nch == qch {
+                // Consecutive match bonus
+                if prev_matched {
+                    score += 5;
+                }
+                // Word boundary bonus (after '_' or uppercase)
+                if idx == 0
+                    || name.as_bytes().get(idx.wrapping_sub(1)) == Some(&b'_')
+                    || (nch.is_ascii_lowercase()
+                        && idx > 0
+                        && name.as_bytes()[idx - 1].is_ascii_uppercase())
+                {
+                    score += 3;
+                }
+                // Prefix match bonus
+                if first && idx == 0 {
+                    score += 10;
+                }
+                prev_matched = true;
+                first = false;
+                found = true;
+                break;
+            }
+            prev_matched = false;
+        }
+        if !found {
+            return None;
+        }
+    }
+    Some(score)
+}
 
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
@@ -134,8 +177,8 @@ impl LanguageServer for Backend {
                 document_formatting_provider: Some(OneOf::Left(true)),
                 document_range_formatting_provider: Some(OneOf::Left(true)),
                 document_on_type_formatting_provider: Some(DocumentOnTypeFormattingOptions {
-                    first_trigger_character: "}".to_string(),
-                    more_trigger_character: Some(vec![";".to_string()]),
+                    first_trigger_character: "\n".to_string(),
+                    more_trigger_character: Some(vec!["}".to_string(), ";".to_string()]),
                 }),
                 document_link_provider: Some(DocumentLinkOptions {
                     resolve_provider: Some(true),
@@ -685,7 +728,6 @@ impl LanguageServer for Backend {
         Ok(Some(locations))
     }
 
-    #[allow(deprecated)]
     async fn document_symbol(
         &self,
         params: DocumentSymbolParams,
@@ -696,25 +738,8 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
 
-        let symbols = extract_symbol_decls(file)
-            .into_iter()
-            .map(|decl| {
-                let range = Range::new(
-                    file.source.position_at(decl.offset),
-                    file.source.position_at(decl.offset + decl.name.len()),
-                );
-                SymbolInformation {
-                    name: decl.name,
-                    kind: decl.kind,
-                    tags: None,
-                    deprecated: None,
-                    location: Location::new(uri.clone(), range),
-                    container_name: Some(decl.detail.to_string()),
-                }
-            })
-            .collect::<Vec<_>>();
-
-        Ok(Some(DocumentSymbolResponse::Flat(symbols)))
+        let tree = crate::symbols::analysis::document_symbol_tree(file);
+        Ok(Some(DocumentSymbolResponse::Nested(tree)))
     }
 
     #[allow(deprecated)]
@@ -724,29 +749,39 @@ impl LanguageServer for Backend {
     ) -> Result<Option<Vec<SymbolInformation>>> {
         let query = params.query.to_ascii_lowercase();
         let state = self.state.read().await;
-        let mut symbols = Vec::new();
+        let mut scored: Vec<(i32, SymbolInformation)> = Vec::new();
 
         for (uri, file) in state.all_files() {
             for decl in extract_symbol_decls(file) {
-                if !query.is_empty() && !decl.name.to_ascii_lowercase().contains(&query) {
-                    continue;
-                }
+                let score = if query.is_empty() {
+                    0
+                } else {
+                    match fuzzy_match_score(&query, &decl.name.to_ascii_lowercase()) {
+                        Some(s) => s,
+                        None => continue,
+                    }
+                };
                 let range = Range::new(
                     file.source.position_at(decl.offset),
                     file.source.position_at(decl.offset + decl.name.len()),
                 );
-                symbols.push(SymbolInformation {
-                    name: decl.name,
-                    kind: decl.kind,
-                    tags: None,
-                    deprecated: None,
-                    location: Location::new(uri.clone(), range),
-                    container_name: Some(decl.detail.to_string()),
-                });
+                scored.push((
+                    score,
+                    SymbolInformation {
+                        name: decl.name,
+                        kind: decl.kind,
+                        tags: None,
+                        deprecated: None,
+                        location: Location::new(uri.clone(), range),
+                        container_name: Some(decl.detail.to_string()),
+                    },
+                ));
             }
         }
 
-        Ok(Some(symbols))
+        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        scored.truncate(200);
+        Ok(Some(scored.into_iter().map(|(_, sym)| sym).collect()))
     }
 
     async fn symbol_resolve(&self, params: WorkspaceSymbol) -> Result<WorkspaceSymbol> {
@@ -889,6 +924,64 @@ impl LanguageServer for Backend {
             });
         }
 
+        // Fold consecutive line comments (// ...) and consecutive $include directives.
+        let text = file.source.text();
+        let lines: Vec<&str> = text.split('\n').collect();
+        let mut group_start: Option<(u32, &str)> = None; // (line, kind)
+
+        for (line_idx, line) in lines.iter().enumerate() {
+            let trimmed = line.trim();
+            let kind = if trimmed.starts_with("//") {
+                Some("comment")
+            } else if trimmed.starts_with("$include") {
+                Some("import")
+            } else {
+                None
+            };
+
+            match (&group_start, kind) {
+                (Some((start, gk)), Some(k)) if *gk == k => {
+                    // Continue group — update end implicitly via line_idx.
+                    if line_idx == lines.len() - 1 && line_idx as u32 > *start {
+                        ranges.push(FoldingRange {
+                            start_line: *start,
+                            start_character: None,
+                            end_line: line_idx as u32,
+                            end_character: None,
+                            kind: Some(if *gk == "comment" {
+                                FoldingRangeKind::Comment
+                            } else {
+                                FoldingRangeKind::Imports
+                            }),
+                            collapsed_text: None,
+                        });
+                    }
+                }
+                (Some((start, gk)), _) => {
+                    let end = (line_idx as u32).saturating_sub(1);
+                    if end > *start {
+                        ranges.push(FoldingRange {
+                            start_line: *start,
+                            start_character: None,
+                            end_line: end,
+                            end_character: None,
+                            kind: Some(if *gk == "comment" {
+                                FoldingRangeKind::Comment
+                            } else {
+                                FoldingRangeKind::Imports
+                            }),
+                            collapsed_text: None,
+                        });
+                    }
+                    group_start = kind.map(|k| (line_idx as u32, k));
+                }
+                (None, Some(k)) => {
+                    group_start = Some((line_idx as u32, k));
+                }
+                (None, None) => {}
+            }
+        }
+
         Ok(Some(ranges))
     }
 
@@ -948,6 +1041,38 @@ impl LanguageServer for Backend {
                         is_preferred: Some(is_preferred),
                         disabled: None,
                         data: Some(lazy_code_action_data(uri, &[edit])),
+                    }));
+                }
+            }
+        }
+
+        // "Fix all X" actions: group fixes by diagnostic code.
+        if code_action_kind_allowed(&requested_kinds, &CodeActionKind::QUICKFIX) {
+            let mut by_code: HashMap<String, Vec<TextEdit>> = HashMap::new();
+            for diagnostic in &params.context.diagnostics {
+                let code_str = diagnostic.code.as_ref().and_then(|c| match c {
+                    tower_lsp::lsp_types::NumberOrString::String(s) => Some(s.clone()),
+                    _ => None,
+                });
+                let Some(code_str) = code_str else { continue };
+                let edit = quick_fix_for_diagnostic(file, diagnostic)
+                    .map(|(_, e, _)| e)
+                    .or_else(|| var_to_let_fix(file, diagnostic).map(|(_, e, _)| e));
+                if let Some(edit) = edit {
+                    by_code.entry(code_str).or_default().push(edit);
+                }
+            }
+            for (code, edits) in &by_code {
+                if edits.len() > 1 {
+                    actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                        title: format!("Fix all '{}' ({} fixes)", code, edits.len()),
+                        kind: Some(CodeActionKind::QUICKFIX),
+                        diagnostics: None,
+                        edit: None,
+                        command: None,
+                        is_preferred: Some(false),
+                        disabled: None,
+                        data: Some(lazy_code_action_data(uri, edits)),
                     }));
                 }
             }
@@ -1302,16 +1427,17 @@ impl LanguageServer for Backend {
         &self,
         params: DocumentOnTypeFormattingParams,
     ) -> Result<Option<Vec<TextEdit>>> {
-        if params.ch != "}" && params.ch != ";" {
-            return Ok(None);
-        }
-
         let uri = &params.text_document_position.text_document.uri;
         let state = self.state.read().await;
         let Some(file) = state.get_file(uri) else {
             return Ok(None);
         };
-        Ok(format_document_edits(file, &params.options))
+
+        match params.ch.as_str() {
+            "}" | ";" => Ok(format_document_edits(file, &params.options)),
+            "\n" => Ok(on_enter_edits(file, params.text_document_position.position)),
+            _ => Ok(None),
+        }
     }
 
     async fn range_formatting(
