@@ -32,7 +32,7 @@ pub fn scan_folders(folders: HashSet<Url>) -> HashMap<Url, File> {
                             let path = entry.path();
                             match fs::read_to_string(path) {
                                 Ok(source) => {
-                                    let file = File::new_indexed(source);
+                                    let file = File::new_lazy(source);
                                     match path.to_str() {
                                         Some(path_str) => {
                                             let mut url = folder.clone();

@@ -226,7 +226,7 @@ pub(crate) fn linked_editing_ranges_for_position(
     let Some(symbol_key) = token_symbol_key(token) else {
         return None;
     };
-    let Some(tokens) = file.tokens.as_ref() else {
+    let Some(tokens) = file.tokens.as_deref() else {
         return None;
     };
 
@@ -277,7 +277,7 @@ fn path_like_link_target(base_uri: &Url, text: &str) -> Option<Url> {
 pub(crate) fn document_links_for_file(uri: &Url, file: &File) -> Vec<DocumentLink> {
     let mut links = Vec::new();
 
-    if let Some(tokens) = file.tokens.as_ref() {
+    if let Some(tokens) = file.tokens.as_deref() {
         for (token, span) in tokens {
             let sail_parser::Token::String(content) = token else {
                 continue;
@@ -341,7 +341,7 @@ pub(crate) fn make_selection_range(
         }
     }
 
-    if let Some(tokens) = file.tokens.as_ref() {
+    if let Some(tokens) = file.tokens.as_deref() {
         let mut stack: Vec<usize> = Vec::new();
         for (idx, (token, span)) in tokens.iter().enumerate() {
             if token_is_open_bracket(token) {

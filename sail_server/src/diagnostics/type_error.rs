@@ -1,9 +1,8 @@
-use crate::diagnostics::error_format::{Message, MessageSeverity};
+use crate::diagnostics::reporting::{Message, MessageSeverity};
 use sail_parser::Span;
 
 // This mirrors the relevant upstream Type_error surface; not every constructor
 // is emitted by the current local analyses yet.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum VectorOrder {
     Dec,
@@ -16,7 +15,6 @@ pub struct ModuleScope {
     pub span: Span,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum TypeError {
     NoOverloading {
@@ -93,7 +91,6 @@ impl TypeError {
         Self::Other(message.into())
     }
 
-    #[allow(dead_code)]
     pub fn with_hint(hint: impl Into<String>, error: TypeError) -> Self {
         Self::WithHint {
             hint: hint.into(),

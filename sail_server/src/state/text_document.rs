@@ -1,13 +1,7 @@
-#![allow(unused)]
+use tower_lsp::lsp_types::{Position as LspPosition, TextDocumentContentChangeEvent};
 
-use tower_lsp::lsp_types::{
-    Position as LspPosition, Range as LspRange, TextDocumentContentChangeEvent,
-};
-
-type ByteIndex = usize;
-type LineIndex = usize;
-// VSCode "characters" are UTF-16 code points.
-type CharIndexUTF16 = usize;
+#[cfg(test)]
+use tower_lsp::lsp_types::Range as LspRange;
 
 #[derive(Clone)]
 pub struct TextDocument {
@@ -15,7 +9,7 @@ pub struct TextDocument {
     content: String,
     // The start of each line in bytes. These could be lazily calculated but
     // that is a bit tricky because of the borrow checker.
-    line_offsets: Vec<ByteIndex>,
+    line_offsets: Vec<usize>,
 }
 
 impl TextDocument {
@@ -86,7 +80,7 @@ impl TextDocument {
     }
 
     // Convert a row/column position to a byte index.
-    pub fn offset_at(&self, position: &LspPosition) -> ByteIndex {
+    pub fn offset_at(&self, position: &LspPosition) -> usize {
         let line_begin = self.line_start(position.line as usize);
         let line_end = self.line_start(position.line as usize + 1);
         let line = &self.content[line_begin..line_end];
@@ -121,7 +115,7 @@ impl TextDocument {
         }
     }
 
-    fn line_start(&self, line_index: LineIndex) -> ByteIndex {
+    fn line_start(&self, line_index: usize) -> usize {
         self.line_offsets
             .get(line_index)
             .copied()
@@ -129,7 +123,7 @@ impl TextDocument {
     }
 
     // Given a byte offset, what is the corresponding character?
-    fn position_at_line(&self, line: LineIndex, offset: usize) -> CharIndexUTF16 {
+    fn position_at_line(&self, line: usize, offset: usize) -> usize {
         let line_start = self.line_offsets[line];
 
         assert!(line_start <= offset);
@@ -142,7 +136,7 @@ impl TextDocument {
 
 // Given a UTF-16 codepoint offset in a bit of text, convert it to a byte offset.
 // Out-of-bounds offsets just return line.len().
-fn character_to_line_offset(line: &str, character: CharIndexUTF16) -> ByteIndex {
+fn character_to_line_offset(line: &str, character: usize) -> usize {
     let mut utf16_pos = 0;
 
     for (byte_pos, ch) in line.char_indices() {

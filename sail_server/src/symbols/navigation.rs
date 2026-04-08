@@ -5,7 +5,7 @@ use super::analysis::{
 use crate::state::File;
 use sail_parser::{DeclRole, Scope, Span};
 use std::cmp::Reverse;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tower_lsp::lsp_types::{
     CallHierarchyItem, Location, OneOf, Range, RenameFilesParams, SymbolKind, TextEdit,
     TypeHierarchyItem, Url, WorkspaceLocation, WorkspaceSymbol,
@@ -48,6 +48,60 @@ where
     let mut out = Vec::new();
     for (uri, file) in files {
         out.extend(call_edges_for_file(uri, file));
+    }
+    out
+}
+
+/// Collect call edges where the callee matches `target`, skipping unrelated edges.
+pub(crate) fn call_edges_to<'a, I>(files: I, target: &str) -> Vec<CallEdge>
+where
+    I: IntoIterator<Item = (&'a Url, &'a File)>,
+{
+    let mut out = Vec::new();
+    for (uri, file) in files {
+        let Some(parsed) = file.parsed() else { continue };
+        for call in &parsed.call_sites {
+            if call.callee != target {
+                continue;
+            }
+            if let Some(caller) = call.caller.clone() {
+                out.push(CallEdge {
+                    caller,
+                    caller_uri: uri.clone(),
+                    callee: call.callee.clone(),
+                    call_range: Range::new(
+                        file.source.position_at(call.callee_span.start),
+                        file.source.position_at(call.callee_span.end),
+                    ),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Collect call edges where the caller matches `source`, skipping unrelated edges.
+pub(crate) fn call_edges_from<'a, I>(files: I, source: &str) -> Vec<CallEdge>
+where
+    I: IntoIterator<Item = (&'a Url, &'a File)>,
+{
+    let mut out = Vec::new();
+    for (uri, file) in files {
+        let Some(parsed) = file.parsed() else { continue };
+        for call in &parsed.call_sites {
+            if call.caller.as_deref() != Some(source) {
+                continue;
+            }
+            out.push(CallEdge {
+                caller: source.to_string(),
+                caller_uri: uri.clone(),
+                callee: call.callee.clone(),
+                call_range: Range::new(
+                    file.source.position_at(call.callee_span.start),
+                    file.source.position_at(call.callee_span.end),
+                ),
+            });
+        }
     }
     out
 }
@@ -219,13 +273,11 @@ where
     I: IntoIterator<Item = (&'a Url, &'a File)>,
 {
     let files = files.into_iter().collect::<Vec<_>>();
-    let mut names = files
+    let names: HashSet<String> = files
         .iter()
         .flat_map(|(_, file)| type_alias_edges(file))
         .filter_map(|(sub, sup)| if sub == name { Some(sup) } else { None })
-        .collect::<Vec<_>>();
-    names.sort();
-    names.dedup();
+        .collect();
 
     names
         .into_iter()
@@ -238,13 +290,11 @@ where
     I: IntoIterator<Item = (&'a Url, &'a File)>,
 {
     let files = files.into_iter().collect::<Vec<_>>();
-    let mut names = files
+    let names: HashSet<String> = files
         .iter()
         .flat_map(|(_, file)| type_alias_edges(file))
         .filter_map(|(sub, sup)| if sup == name { Some(sub) } else { None })
-        .collect::<Vec<_>>();
-    names.sort();
-    names.dedup();
+        .collect();
 
     names
         .into_iter()
