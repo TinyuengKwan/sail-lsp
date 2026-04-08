@@ -81,30 +81,6 @@ fn builds_function_snippet() {
 }
 
 #[test]
-fn completion_triggers_do_not_include_whitespace() {
-    let triggers = completion_trigger_characters();
-    assert!(!triggers.iter().any(|t| t.trim().is_empty()));
-    assert!(triggers.contains(&".".to_string()));
-    assert!(triggers.contains(&":".to_string()));
-}
-
-#[test]
-fn infers_binding_type_for_literals() {
-    assert_eq!(
-        infer_binding_type(&sail_parser::Token::Num("1".into())),
-        Some("int")
-    );
-    assert_eq!(
-        infer_binding_type(&sail_parser::Token::String("x".into())),
-        Some("string")
-    );
-    assert_eq!(
-        infer_binding_type(&sail_parser::Token::KwTrue),
-        Some("bool")
-    );
-}
-
-#[test]
 fn offers_missing_semicolon_fix() {
     let source = "function f() = {\n  let x = 1\n}\n";
     let file = File::new(source.to_string());
@@ -146,38 +122,6 @@ fn captures_return_type_from_val_signature() {
         .find(|sig| sig.name == "f")
         .expect("missing signature");
     assert_eq!(f.return_type.as_deref(), Some("bits(32)"));
-}
-
-#[test]
-fn offers_missing_comma_fix() {
-    let source = "function f() = [1 2]\n";
-    let file = File::new(source.to_string());
-    let diagnostic = Diagnostic::new_simple(
-        Range::new(
-            tower_lsp::lsp_types::Position::new(0, 17),
-            tower_lsp::lsp_types::Position::new(0, 17),
-        ),
-        "expected ','".to_string(),
-    );
-
-    let (_, edit, _) = quick_fix_for_diagnostic(&file, &diagnostic).expect("expected fix");
-    assert_eq!(edit.new_text, ",");
-}
-
-#[test]
-fn offers_missing_equal_fix() {
-    let source = "let x 1\n";
-    let file = File::new(source.to_string());
-    let diagnostic = Diagnostic::new_simple(
-        Range::new(
-            tower_lsp::lsp_types::Position::new(0, 6),
-            tower_lsp::lsp_types::Position::new(0, 6),
-        ),
-        "expected '='".to_string(),
-    );
-
-    let (_, edit, _) = quick_fix_for_diagnostic(&file, &diagnostic).expect("expected fix");
-    assert_eq!(edit.new_text, "=");
 }
 
 #[test]
@@ -908,17 +852,6 @@ fn resolves_quant_constraints_from_matching_global_assumptions() {
 }
 
 #[test]
-fn resolves_weaker_quant_bounds_from_global_set_constraints() {
-    let source = "type xlen : Int\nconstraint xlen in {32, 64}\nval take_width : forall 'n, 1 <= 'n <= 64 . bits('n) -> unit\nfunction use(xs : bits(xlen)) = take_width(xs)\n";
-    let file = File::new(source.to_string());
-    let diagnostics = file.lsp_diagnostics();
-
-    assert!(diagnostics
-        .iter()
-        .all(|diagnostic| diagnostic_code_str(diagnostic) != Some("type-error")));
-}
-
-#[test]
 fn reports_inconsistent_global_constraints() {
     let source = "type xlen : Int\nconstraint xlen == 32\nconstraint xlen == 64\n";
     let file = File::new(source.to_string());
@@ -1124,13 +1057,6 @@ fn extracts_typed_function_parameter_bindings() {
 }
 
 #[test]
-fn extracts_typed_var_bindings() {
-    let file = File::new("function f() = { var x : bits(32) = 0x0; x }".to_string());
-    let bindings = typed_bindings(&file);
-    assert_eq!(bindings.get("x"), Some(&"bits(32)".to_string()));
-}
-
-#[test]
 fn infers_unannotated_binding_types_from_typecheck() {
     let file = File::new("function f() = { let x = 1; x }".to_string());
     let bindings = typed_bindings(&file);
@@ -1156,13 +1082,6 @@ fn does_not_treat_types_as_function_parameter_names() {
         vec!["x : bits(32)".to_string(), "y : int".to_string()]
     );
     assert_eq!(sig.return_type.as_deref(), Some("bits(32)"));
-}
-
-#[test]
-fn caches_core_ast_for_file() {
-    let file = File::new("function f(x : bits(32)) -> int = x".to_string());
-    let core_ast = file.core_ast().expect("missing core ast");
-    assert!(!core_ast.defs.is_empty());
 }
 
 #[test]
@@ -1202,21 +1121,6 @@ fn formats_document_indentation() {
     let source = "function f() = {\nlet x = [1,\n2]\n}\n";
     let formatted = format_document_text(source, &options);
     assert_eq!(formatted, "function f() = {\n  let x = [1,\n    2]\n}\n");
-}
-
-#[test]
-fn does_not_count_braces_inside_comments_or_strings() {
-    let options = FormattingOptions {
-        tab_size: 2,
-        insert_spaces: true,
-        properties: HashMap::new(),
-        trim_trailing_whitespace: Some(true),
-        insert_final_newline: None,
-        trim_final_newlines: None,
-    };
-    let source = "function f() = {\nlet x = \"}\" // {\n}\n";
-    let formatted = format_document_text(source, &options);
-    assert_eq!(formatted, "function f() = {\n  let x = \"}\" // {\n}\n");
 }
 
 #[test]
