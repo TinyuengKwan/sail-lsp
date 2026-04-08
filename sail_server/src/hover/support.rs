@@ -1,11 +1,12 @@
 use crate::state::File;
-use crate::symbols::{ast_call_at_position, find_callable_signature};
+use crate::symbols::calls::ast_call_at_position;
+use crate::symbols::find_callable_signature;
 use crate::typecheck;
 use sail_parser::{Decl, DeclKind, Expr, Literal};
 use tower_lsp::lsp_types::{Position, Url};
 
-fn span_text(file: &File, span: sail_parser::Span) -> String {
-    file.source.text()[span.start..span.end].trim().to_string()
+fn span_text<'a>(file: &'a File, span: sail_parser::Span) -> &'a str {
+    file.source.text()[span.start..span.end].trim()
 }
 
 fn binding_type_text_before_offset(file: &File, name: &str, offset: usize) -> Option<String> {
@@ -31,7 +32,7 @@ fn binding_type_text_before_offset(file: &File, name: &str, offset: usize) -> Op
                 .iter()
                 .filter(|binding| binding.name == name && binding.name_span.start <= offset)
                 .max_by_key(|binding| binding.name_span.start)
-                .map(|binding| span_text(file, binding.ty_span))
+                .map(|binding| span_text(file, binding.ty_span).to_string())
         })
 }
 
@@ -46,35 +47,24 @@ fn literal_type_text(literal: &Literal) -> Option<String> {
                 Some("int".to_string())
             }
         }
+        // Upstream Sail: bin_lit_length counts each binary digit as 1 bit.
         Literal::Binary(text) => {
-            let len = text
+            let bits = text
                 .trim_start_matches("0b")
                 .chars()
                 .filter(|ch| *ch != '_')
                 .count();
-            let ty = match len {
-                0..=8 => "bits(8)",
-                9..=16 => "bits(16)",
-                17..=32 => "bits(32)",
-                33..=64 => "bits(64)",
-                _ => "bits",
-            };
-            Some(ty.to_string())
+            Some(format!("bits({bits})"))
         }
+        // Upstream Sail: hex_lit_length counts each hex digit as 4 bits.
         Literal::Hex(text) => {
-            let len = text
+            let bits = text
                 .trim_start_matches("0x")
                 .chars()
                 .filter(|ch| *ch != '_')
-                .count();
-            let ty = match len {
-                0..=2 => "bits(8)",
-                3..=4 => "bits(16)",
-                5..=8 => "bits(32)",
-                9..=16 => "bits(64)",
-                _ => "bits",
-            };
-            Some(ty.to_string())
+                .count()
+                * 4;
+            Some(format!("bits({bits})"))
         }
         Literal::String(_) => Some("string".to_string()),
         Literal::Undefined | Literal::BitZero | Literal::BitOne => None,
@@ -128,7 +118,7 @@ pub(crate) fn infer_expr_type_text<'a>(
         | Expr::Exit(Some(expr)) => infer_expr_type_text(files, current_uri, current_file, expr),
         Expr::Assert { .. } => Some("unit".to_string()),
         Expr::Exit(None) => None,
-        Expr::Cast { ty, .. } => Some(span_text(current_file, ty.1)),
+        Expr::Cast { ty, .. } => Some(span_text(current_file, ty.1).to_string()),
         Expr::Literal(literal) => literal_type_text(literal),
         Expr::Ident(name) => binding_type_text_before_offset(current_file, name, expr.1.start)
             .or_else(|| {
@@ -163,7 +153,7 @@ pub(crate) fn infer_call_arg_types_at_position<'a>(
     }
 
     let offset = current_file.source.offset_at(&position);
-    let tokens = current_file.tokens.as_ref()?;
+    let tokens = current_file.tokens.as_deref()?;
     let parsed = current_file.parsed()?;
     let call = parsed.call_sites.iter().find(|call| {
         call.callee == callee && call.callee_span.start <= offset && offset <= call.callee_span.end
@@ -212,14 +202,14 @@ pub(crate) fn binding_type_hint<'a>(
             .iter()
             .find(|binding| binding.name_span == decl.span)
         {
-            return Some(span_text(file, binding.ty_span));
+            return Some(span_text(file, binding.ty_span).to_string());
         }
     }
 
     let ast = file.core_ast()?;
     let binding = sail_parser::find_binding_value_at_span(ast, decl.span)?;
     if let Some(ty_span) = binding.explicit_ty {
-        return Some(span_text(file, ty_span));
+        return Some(span_text(file, ty_span).to_string());
     }
 
     infer_expr_type_text(files, current_uri, file, binding.value)
