@@ -554,37 +554,6 @@ pub(crate) fn inlay_param_name(param: &str) -> &str {
 }
 
 #[cfg(test)]
-pub(crate) fn infer_binding_type(token: &sail_parser::Token) -> Option<&'static str> {
-    match token {
-        sail_parser::Token::Num(_) => Some("int"),
-        sail_parser::Token::Real(_) => Some("real"),
-        sail_parser::Token::String(_) => Some("string"),
-        sail_parser::Token::KwTrue | sail_parser::Token::KwFalse => Some("bool"),
-        sail_parser::Token::Bin(s) => {
-            let len = s.trim_start_matches("0b").len();
-            match len {
-                0..=8 => Some("bits(8)"),
-                9..=16 => Some("bits(16)"),
-                17..=32 => Some("bits(32)"),
-                33..=64 => Some("bits(64)"),
-                _ => Some("bits"),
-            }
-        }
-        sail_parser::Token::Hex(s) => {
-            let len = s.trim_start_matches("0x").len();
-            match len {
-                0..=2 => Some("bits(8)"),
-                3..=4 => Some("bits(16)"),
-                5..=8 => Some("bits(32)"),
-                9..=16 => Some("bits(64)"),
-                _ => Some("bits"),
-            }
-        }
-        _ => None,
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::state::File;

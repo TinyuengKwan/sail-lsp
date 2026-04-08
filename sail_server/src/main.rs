@@ -23,7 +23,7 @@ pub(crate) use actions::{
 #[cfg(test)]
 pub(crate) use backend::{SAIL_BUILTINS, SAIL_KEYWORDS};
 #[cfg(test)]
-pub(crate) use completion::{build_completion_items, completion_prefix, completion_trigger_characters};
+pub(crate) use completion::{build_completion_items, completion_prefix};
 #[cfg(test)]
 pub(crate) use diagnostics::{document_diagnostic_report_for_file, workspace_diagnostic_report};
 #[cfg(test)]
@@ -32,10 +32,6 @@ pub(crate) use formatting::{
     make_selection_range, range_format_document_edits, range_len,
 };
 #[cfg(test)]
-pub(crate) use hover::hover_for_symbol;
-#[cfg(test)]
-pub(crate) use inlay_hints::inlay_hints_for_range;
-#[cfg(test)]
 pub(crate) use state::File;
 #[cfg(test)]
 pub(crate) use symbols::analysis::Parameter;
@@ -43,12 +39,11 @@ pub(crate) use symbols::analysis::Parameter;
 pub(crate) use symbols::{
     code_lens_title, code_lenses_for_file, collect_callable_signatures,
     collect_implementation_counts, collect_reference_counts, find_call_at_position,
-    find_callable_signature, function_snippet, implementation_locations, infer_binding_type,
-    normalize_validated_rename, parse_named_type, reference_locations, rename_edits,
-    resolve_symbol_at, resolve_workspace_symbol, signature_help_for_position,
+    function_snippet, implementation_locations, parse_named_type, reference_locations,
+    rename_edits, resolve_symbol_at, resolve_workspace_symbol, signature_help_for_position,
     symbol_declaration_locations, symbol_definition_locations, symbol_spans_for_file,
-    token_symbol_key, type_alias_edges, type_name_candidates_at_position, type_subtypes,
-    type_supertypes, typed_bindings, will_rename_file_edits,
+    type_alias_edges, type_name_candidates_at_position, type_subtypes, type_supertypes,
+    typed_bindings, will_rename_file_edits,
 };
 #[cfg(test)]
 pub(crate) use std::collections::hash_map::HashMap;

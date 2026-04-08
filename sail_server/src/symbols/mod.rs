@@ -10,8 +10,6 @@ pub(crate) use analysis::{
     inlay_param_name, instantiate_signature, token_is_close_bracket, token_is_open_bracket,
     token_symbol_key, CallableSignature, Parameter,
 };
-#[cfg(test)]
-pub(crate) use analysis::infer_binding_type;
 pub(crate) use calls::{find_call_at_position, signature_help_for_position};
 pub(crate) use lenses::{
     code_lens_title, code_lenses_for_file, collect_implementation_counts, collect_reference_counts,
