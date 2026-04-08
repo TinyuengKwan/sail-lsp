@@ -16,7 +16,14 @@ pub(crate) fn call_arg_count(call: &sail_parser::CallSite) -> usize {
     if call.open_span.end == call.close_span.map(|span| span.start).unwrap_or(0) {
         0
     } else {
-        call.arg_separator_spans.len() + 1
+        let base = call.arg_separator_spans.len() + 1;
+        // Detect trailing comma: last separator is adjacent to close paren
+        if let (Some(last_sep), Some(close)) = (call.arg_separator_spans.last(), call.close_span) {
+            if call.arg_separator_spans.len() > 0 && last_sep.end >= close.start.saturating_sub(1) {
+                return base - 1;
+            }
+        }
+        base
     }
 }
 
@@ -114,7 +121,19 @@ where
         }
     }
 
-    let active_parameter = arg_index
+    // Map user-visible arg index to full param list index (skipping implicit params)
+    let mut visible_idx = 0;
+    let mut full_idx = 0;
+    for param in &sig.params {
+        if !param.is_implicit {
+            if visible_idx == arg_index {
+                break;
+            }
+            visible_idx += 1;
+        }
+        full_idx += 1;
+    }
+    let active_parameter = full_idx
         .min(sig.params.len().saturating_sub(1))
         .try_into()
         .unwrap_or(0);

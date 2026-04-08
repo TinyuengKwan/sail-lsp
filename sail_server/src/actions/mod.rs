@@ -145,6 +145,39 @@ pub(crate) fn quick_fix_for_diagnostic(
     Some((format!("Insert missing `{token}`"), edit, false))
 }
 
+pub(crate) fn var_to_let_fix(file: &File, diagnostic: &Diagnostic) -> Option<(String, TextEdit, bool)> {
+    let code_str = match diagnostic.code.as_ref()? {
+        tower_lsp::lsp_types::NumberOrString::String(s) => s.as_str(),
+        _ => return None,
+    };
+    if code_str != "unmodified-mutable-variable" {
+        return None;
+    }
+    // The diagnostic range points to the variable name. We need to find the `var` keyword before it.
+    let name_start = file.source.offset_at(&diagnostic.range.start);
+    let prefix = &file.source.text()[..name_start];
+    let var_start = prefix.rfind("var")?;
+    // Verify it's the keyword (preceded by whitespace or line start)
+    if var_start > 0 {
+        let before = file.source.text().as_bytes()[var_start - 1];
+        if before != b' ' && before != b'\t' && before != b'\n' && before != b'\r' && before != b'{' && before != b';' {
+            return None;
+        }
+    }
+    let var_end = var_start + 3; // "var".len()
+    Some((
+        "Change `var` to `let`".to_string(),
+        TextEdit {
+            range: tower_lsp::lsp_types::Range::new(
+                file.source.position_at(var_start),
+                file.source.position_at(var_end),
+            ),
+            new_text: "let".to_string(),
+        },
+        true,
+    ))
+}
+
 pub(crate) fn extract_local_let_edits(file: &File, range: Range) -> Option<Vec<TextEdit>> {
     let start = file.source.offset_at(&range.start);
     let end = file.source.offset_at(&range.end);

@@ -1,4 +1,3 @@
-mod error_format;
 pub mod parse;
 pub(crate) mod reporting;
 pub mod semantic;
@@ -52,6 +51,11 @@ pub enum DiagnosticCode {
     DeprecatedEffectAnnotation,
     DeprecatedCastAnnotation,
     MissingExternPurity,
+    UnmodifiedMutableVariable,
+    ScatteredNoClause,
+    OptionRegisterNoDefault,
+    UnionConstructorInPattern,
+    RedundantTypeAnnotation,
 }
 
 impl DiagnosticCode {
@@ -67,6 +71,11 @@ impl DiagnosticCode {
             DiagnosticCode::DeprecatedEffectAnnotation => "deprecated-effect-annotation",
             DiagnosticCode::DeprecatedCastAnnotation => "deprecated-cast-annotation",
             DiagnosticCode::MissingExternPurity => "missing-extern-purity",
+            DiagnosticCode::UnmodifiedMutableVariable => "unmodified-mutable-variable",
+            DiagnosticCode::ScatteredNoClause => "scattered-no-clause",
+            DiagnosticCode::OptionRegisterNoDefault => "option-register-no-default",
+            DiagnosticCode::UnionConstructorInPattern => "union-constructor-in-pattern",
+            DiagnosticCode::RedundantTypeAnnotation => "redundant-type-annotation",
         }
     }
 }

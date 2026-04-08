@@ -1,7 +1,5 @@
 use crate::state::File;
-use crate::symbols::{
-    builtin_docs, collect_callable_signatures, extract_comments, function_snippet, Parameter,
-};
+use crate::symbols::{builtin_docs, extract_comments, function_snippet, Parameter};
 use std::collections::{BTreeMap, HashMap};
 use tower_lsp::lsp_types::{CompletionItem, CompletionItemKind, InsertTextFormat, Url};
 
@@ -116,8 +114,10 @@ where
     let mut candidates: BTreeMap<String, CompletionCandidate> = BTreeMap::new();
     let mut call_signatures: HashMap<String, Vec<Parameter>> = HashMap::new();
     for (_, candidate_file) in &all_files {
-        for sig in collect_callable_signatures(candidate_file) {
-            call_signatures.entry(sig.name).or_insert(sig.params);
+        for sig in candidate_file.signature_index.values() {
+            call_signatures
+                .entry(sig.name.clone())
+                .or_insert_with(|| sig.params.clone());
         }
     }
 
@@ -135,13 +135,22 @@ where
             || (!is_top_level && is_local_kw)
             || (!is_top_level_kw && !is_local_kw)
         {
+            let snippet = match *keyword {
+                "foreach" if !is_top_level => Some("foreach (${1:i} from ${2:0} to ${3:n}) {\n\t$0\n}".to_string()),
+                "if" if !is_top_level => Some("if ${1:condition} then {\n\t$0\n}".to_string()),
+                "match" if !is_top_level => Some("match ${1:x} {\n\t${2:case} => $0\n}".to_string()),
+                "while" if !is_top_level => Some("while ${1:condition} do {\n\t$0\n}".to_string()),
+                "let" if !is_top_level => Some("let ${1:x} = $0".to_string()),
+                "var" if !is_top_level => Some("var ${1:x} = $0".to_string()),
+                _ => None,
+            };
             upsert_candidate(
                 &mut candidates,
                 (*keyword).to_string(),
                 CompletionCandidate {
                     kind: CompletionItemKind::KEYWORD,
                     detail: Some("keyword".to_string()),
-                    snippet: None,
+                    snippet,
                 },
             );
         }

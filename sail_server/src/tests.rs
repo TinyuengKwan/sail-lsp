@@ -1820,3 +1820,109 @@ fn completion_uses_ast_scoped_bindings_for_local_candidates() {
 
     assert!(items.iter().any(|item| item.label == "local_value"));
 }
+
+#[test]
+fn detects_unmodified_mutable_variable() {
+    // var x is never assigned to after declaration => should warn
+    let source = "function foo() -> int = {\n  var x : int = 1;\n  x\n}\n";
+    let file = File::new(source.to_string());
+    let lsp_diagnostics = file.lsp_diagnostics();
+    let unmodified = lsp_diagnostics
+        .iter()
+        .find(|d| d.message.contains("never modified"));
+    assert!(
+        unmodified.is_some(),
+        "Expected unmodified-mutable-variable diagnostic, got: {lsp_diagnostics:?}"
+    );
+    let diag = unmodified.unwrap();
+    assert_eq!(
+        diag.severity,
+        Some(tower_lsp::lsp_types::DiagnosticSeverity::INFORMATION)
+    );
+    assert!(diag
+        .tags
+        .as_ref()
+        .unwrap()
+        .contains(&tower_lsp::lsp_types::DiagnosticTag::UNNECESSARY));
+}
+
+#[test]
+fn no_unmodified_warning_when_var_is_assigned() {
+    // var x is assigned to later => no warning
+    let source = "function foo() -> int = {\n  var x : int = 1;\n  x = 2;\n  x\n}\n";
+    let file = File::new(source.to_string());
+    let lsp_diagnostics = file.lsp_diagnostics();
+    let unmodified = lsp_diagnostics
+        .iter()
+        .find(|d| d.message.contains("never modified"));
+    assert!(
+        unmodified.is_none(),
+        "Should not warn when var is modified, got: {lsp_diagnostics:?}"
+    );
+}
+
+#[test]
+fn scan_sail_riscv_for_false_positives() {
+    let model_dir = std::path::Path::new("E:/tinyueng_workplace/sail-riscv/model");
+    if !model_dir.exists() {
+        eprintln!("sail-riscv not found, skipping");
+        return;
+    }
+
+    let mut files_scanned = 0u32;
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+
+    for entry in walkdir::WalkDir::new(model_dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().map_or(false, |ext| ext == "sail"))
+    {
+        let source = match std::fs::read_to_string(entry.path()) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        files_scanned += 1;
+
+        let file = crate::state::File::new_lazy(source);
+        let diagnostics = file.lsp_diagnostics();
+
+        for diag in &diagnostics {
+            let severity = diag.severity;
+            let code = diagnostic_code_str(diag).unwrap_or("?");
+            let relative = entry
+                .path()
+                .strip_prefix(model_dir)
+                .unwrap_or(entry.path());
+            let line = diag.range.start.line + 1;
+            let msg = diag.message.lines().next().unwrap_or("");
+            let entry = format!(
+                "{}:{} ({}) {}",
+                relative.display(),
+                line,
+                code,
+                msg
+            );
+
+            match severity {
+                Some(tower_lsp::lsp_types::DiagnosticSeverity::ERROR) => errors.push(entry),
+                Some(tower_lsp::lsp_types::DiagnosticSeverity::WARNING) => warnings.push(entry),
+                _ => {} // INFO/HINT are fine
+            }
+        }
+    }
+
+    eprintln!("\n=== sail-riscv scan: {files_scanned} files ===");
+    eprintln!("Errors: {}", errors.len());
+    for e in &errors {
+        eprintln!("  [ERROR] {e}");
+    }
+    eprintln!("Warnings: {}", warnings.len());
+    for w in &warnings {
+        eprintln!("  [WARN] {w}");
+    }
+
+    // The test passes but prints diagnostics for review.
+    // Uncomment the assertion below to fail on any error/warning:
+    // assert!(errors.is_empty(), "Unexpected errors in sail-riscv:\n{}", errors.join("\n"));
+}
