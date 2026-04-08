@@ -256,7 +256,7 @@ fn visit_lexp<'a>(
     }
 }
 
-pub fn find_call_at_offset_core(ast: &CoreSourceFile, offset: usize) -> Option<CallAtOffset<'_>> {
+pub fn find_call_at_offset(ast: &CoreSourceFile, offset: usize) -> Option<CallAtOffset<'_>> {
     let mut best = None;
 
     for (item, _) in &ast.defs {
@@ -612,7 +612,7 @@ fn find_binding_value_in_expr<'a>(
     }
 }
 
-pub fn find_binding_value_at_span_core(
+pub fn find_binding_value_at_span(
     ast: &CoreSourceFile,
     name_span: Span,
 ) -> Option<BindingValueAtSpan<'_>> {
@@ -710,7 +710,7 @@ pub fn find_binding_value_at_span_core(
     None
 }
 
-pub fn find_top_level_item_span_core(ast: &CoreSourceFile, name_span: Span) -> Option<Span> {
+pub fn find_top_level_item_span(ast: &CoreSourceFile, name_span: Span) -> Option<Span> {
     ast.defs
         .iter()
         .find_map(|(item, item_span)| match &item.kind {
@@ -741,7 +741,7 @@ pub fn find_top_level_item_span_core(ast: &CoreSourceFile, name_span: Span) -> O
         })
 }
 
-pub fn find_named_members_core(
+pub fn find_named_members(
     ast: &CoreSourceFile,
     kind: NamedDefKind,
     name_span: Span,
@@ -754,7 +754,7 @@ pub fn find_named_members_core(
     })
 }
 
-pub fn find_enum_name_for_member_core<'a>(
+pub fn find_enum_name_for_member<'a>(
     ast: &'a CoreSourceFile,
     member: &str,
 ) -> Option<&'a str> {
@@ -786,7 +786,7 @@ mod tests {
         let ast = crate::parse_core_source(&tokens).into_result().unwrap();
         let offset = source.find("inner").unwrap() + 2;
 
-        let call = find_call_at_offset_core(&ast, offset).expect("call");
+        let call = find_call_at_offset(&ast, offset).expect("call");
         assert_eq!(call.callee, "inner");
         assert_eq!(call.args.len(), 1);
     }
@@ -798,7 +798,7 @@ mod tests {
         let core_ast = crate::parse_core_source(&tokens).into_result().unwrap();
         let offset = source.find("inner").unwrap() + 2;
 
-        let call = find_call_at_offset_core(&core_ast, offset).expect("call");
+        let call = find_call_at_offset(&core_ast, offset).expect("call");
         assert_eq!(call.callee, "inner");
         assert_eq!(call.args.len(), 1);
     }
@@ -810,7 +810,7 @@ mod tests {
         let ast = crate::parse_core_source(&tokens).into_result().unwrap();
         let offset = source.find("inner").unwrap() + 2;
 
-        let call = find_call_at_offset_core(&ast, offset).expect("call");
+        let call = find_call_at_offset(&ast, offset).expect("call");
         assert_eq!(call.callee, "inner");
         assert_eq!(call.args.len(), 1);
     }
@@ -822,7 +822,7 @@ mod tests {
         let ast = crate::parse_core_source(&tokens).into_result().unwrap();
         let offset = source.rfind('y').unwrap();
 
-        let call = find_call_at_offset_core(&ast, offset).expect("call");
+        let call = find_call_at_offset(&ast, offset).expect("call");
         assert_eq!(call.callee, "_mod_bar");
         assert_eq!(call.arg_index, 1);
         assert_eq!(call.args.len(), 2);
@@ -838,9 +838,9 @@ mod tests {
             _ => panic!("expected named def"),
         };
 
-        let item_span = find_top_level_item_span_core(&ast, name_span).expect("item span");
+        let item_span = find_top_level_item_span(&ast, name_span).expect("item span");
         let members =
-            find_named_members_core(&ast, NamedDefKind::Overload, name_span).expect("members");
+            find_named_members(&ast, NamedDefKind::Overload, name_span).expect("members");
 
         assert_eq!(
             &source[item_span.start..item_span.end],
@@ -866,7 +866,7 @@ mod tests {
         };
 
         let members =
-            find_named_members_core(&ast, NamedDefKind::Struct, name_span).expect("members");
+            find_named_members(&ast, NamedDefKind::Struct, name_span).expect("members");
         assert_eq!(
             members
                 .iter()
@@ -882,8 +882,8 @@ mod tests {
         let tokens = crate::lexer().parse(source).into_result().unwrap();
         let ast = crate::parse_core_source(&tokens).into_result().unwrap();
 
-        assert_eq!(find_enum_name_for_member_core(&ast, "Green"), Some("color"));
-        assert_eq!(find_enum_name_for_member_core(&ast, "Purple"), None);
+        assert_eq!(find_enum_name_for_member(&ast, "Green"), Some("color"));
+        assert_eq!(find_enum_name_for_member(&ast, "Purple"), None);
     }
 
     #[test]
@@ -897,9 +897,9 @@ mod tests {
         };
 
         let item_span =
-            find_top_level_item_span_core(&core_ast, overload_name_span).expect("item span");
+            find_top_level_item_span(&core_ast, overload_name_span).expect("item span");
         let members =
-            find_named_members_core(&core_ast, NamedDefKind::Overload, overload_name_span)
+            find_named_members(&core_ast, NamedDefKind::Overload, overload_name_span)
                 .expect("members");
 
         assert_eq!(
@@ -914,10 +914,10 @@ mod tests {
             vec!["bar", "baz"]
         );
         assert_eq!(
-            find_enum_name_for_member_core(&core_ast, "Green"),
+            find_enum_name_for_member(&core_ast, "Green"),
             Some("color")
         );
-        assert_eq!(find_enum_name_for_member_core(&core_ast, "Purple"), None);
+        assert_eq!(find_enum_name_for_member(&core_ast, "Purple"), None);
     }
 
     #[test]
@@ -928,7 +928,7 @@ mod tests {
         let start = source.find("x =").unwrap();
         let name_span = Span::new(start, start + 1);
 
-        let binding = find_binding_value_at_span_core(&ast, name_span).expect("binding");
+        let binding = find_binding_value_at_span(&ast, name_span).expect("binding");
         assert_eq!(binding.explicit_ty, None);
         assert!(matches!(binding.value.0, Expr::Call(_)));
     }
@@ -941,7 +941,7 @@ mod tests {
         let start = source.find("x =").unwrap();
         let name_span = Span::new(start, start + 1);
 
-        let binding = find_binding_value_at_span_core(&core_ast, name_span).expect("binding");
+        let binding = find_binding_value_at_span(&core_ast, name_span).expect("binding");
         assert_eq!(binding.explicit_ty, None);
         assert!(matches!(binding.value.0, Expr::Call(_)));
     }

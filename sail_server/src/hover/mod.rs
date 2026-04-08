@@ -3,7 +3,7 @@ pub(crate) mod support;
 use self::support::{binding_type_hint, infer_call_arg_types_at_position};
 use crate::state::File;
 use crate::symbols::{
-    builtin_docs, collect_implementation_counts, collect_reference_counts, extract_comments,
+    builtin_docs, extract_comments,
     find_call_at_position, find_callable_signature, instantiate_signature, token_is_close_bracket,
     token_is_open_bracket,
 };
@@ -57,10 +57,7 @@ where
         let name = &decl_ref.decl.name;
 
         // Item: Counts in Header (Plagiarism from RA)
-        let refs = collect_reference_counts(&files)
-            .get(name)
-            .copied()
-            .unwrap_or(0);
+        let refs = files.iter().map(|(_, f)| f.ref_counts.get(name).copied().unwrap_or(0)).sum::<usize>();
         let mut header = format!("**{label}** **{name}**");
         header.push_str(&format!(
             "  *({refs} {})*",
@@ -68,10 +65,7 @@ where
         ));
 
         if symbol_kind_for_decl(decl_ref.decl.kind) == SymbolKind::FUNCTION {
-            let impls = collect_implementation_counts(&files)
-                .get(name)
-                .copied()
-                .unwrap_or(0);
+            let impls = files.iter().map(|(_, f)| f.impl_counts.get(name).copied().unwrap_or(0)).sum::<usize>();
             header.push_str(&format!(
                 " • *({impls} {})*",
                 if impls == 1 { "impl" } else { "impls" }
@@ -168,7 +162,7 @@ fn overload_members(file: &File, decl: &Decl) -> Vec<String> {
         }
     }
 
-    let Some(tokens) = file.tokens.as_ref() else {
+    let Some(tokens) = file.tokens.as_deref() else {
         return Vec::new();
     };
     let Some(idx) = tokens
@@ -289,7 +283,7 @@ fn decl_headline(file: &File, decl: &Decl) -> String {
         }
     }
 
-    let Some(tokens) = file.tokens.as_ref() else {
+    let Some(tokens) = file.tokens.as_deref() else {
         return format!("{} {}", decl_kind_label(decl.kind), decl.name);
     };
     let Some(idx) = tokens
@@ -464,7 +458,7 @@ fn enum_info_for_symbol(file: &File, symbol: &str) -> Option<EnumInfo> {
         }
     }
 
-    let tokens = file.tokens.as_ref()?;
+    let tokens = file.tokens.as_deref()?;
     let mut i = 0usize;
 
     while i + 1 < tokens.len() {

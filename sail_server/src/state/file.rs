@@ -2,32 +2,25 @@ use tower_lsp::lsp_types::{Diagnostic as LspDiagnostic, Position, TextDocumentCo
 
 use super::TextDocument;
 use crate::diagnostics::{compute_parse_diagnostics, compute_semantic_diagnostics, Diagnostic};
-use crate::symbols::add_parsed_definitions;
+use crate::symbols::{add_parsed_definitions, CallableSignature};
 use chumsky::Parser;
-use std::{cmp::Ordering, collections::HashMap};
+use std::{cmp::Ordering, collections::HashMap, sync::Arc, sync::Mutex};
 
 fn best_parsed(
-    tokens: Option<&[(sail_parser::Token, sail_parser::Span)]>,
     core_ast: Option<&sail_parser::core_ast::SourceFile>,
 ) -> Option<sail_parser::ParsedFile> {
-    match (tokens, core_ast) {
-        (_, Some(ast)) => Some(sail_parser::ParsedFile::from_core_ast(ast)),
-        (Some(tokens), None) => Some(sail_parser::parse_tokens(tokens)),
-        (None, None) => None,
-    }
+    core_ast.map(sail_parser::ParsedFile::from_core_ast)
 }
 
-#[derive(Clone)]
 pub struct File {
     // The source code.
     pub source: TextDocument,
 
-    // The parse result if any. If there isn't one then that is because
-    // of a parse error.
-    pub tokens: Option<Vec<(sail_parser::Token, sail_parser::Span)>>,
+    // The parse result if any. Arc-wrapped for cheap cloning when passing to typecheck thread.
+    pub tokens: Option<Arc<Vec<(sail_parser::Token, sail_parser::Span)>>>,
 
     // Lowered AST used for LSP analysis without depending on the upstream Sail binary.
-    pub core_ast: Option<sail_parser::core_ast::SourceFile>,
+    pub core_ast: Option<Arc<sail_parser::core_ast::SourceFile>>,
 
     // Cached semantic index derived from the best available parse.
     pub parsed: Option<sail_parser::ParsedFile>,
@@ -38,11 +31,42 @@ pub struct File {
     // Go-to definition locations extracted from the file.
     pub definitions: HashMap<String, usize>,
 
+    // Cached callable signatures indexed by name for O(1) lookup.
+    pub signature_index: HashMap<String, CallableSignature>,
+
+    // Cached per-file reference and implementation counts for code lenses.
+    pub ref_counts: HashMap<String, usize>,
+    pub impl_counts: HashMap<String, usize>,
+
     // Parse and semantic diagnostics that are available without type checking.
     base_diagnostics: Vec<Diagnostic>,
 
+    // Cached LSP diagnostics to avoid repeated allocation.
+    cached_lsp_diagnostics: Mutex<Option<Vec<LspDiagnostic>>>,
+
     // Disk-indexed files skip eager type checking to keep workspace scans shallow.
     eager_type_check: bool,
+}
+
+impl Clone for File {
+    fn clone(&self) -> Self {
+        Self {
+            source: self.source.clone(),
+            tokens: self.tokens.clone(),
+            core_ast: self.core_ast.clone(),
+            parsed: self.parsed.clone(),
+            type_check: self.type_check.clone(),
+            definitions: self.definitions.clone(),
+            signature_index: self.signature_index.clone(),
+            ref_counts: self.ref_counts.clone(),
+            impl_counts: self.impl_counts.clone(),
+            base_diagnostics: self.base_diagnostics.clone(),
+            cached_lsp_diagnostics: Mutex::new(
+                self.cached_lsp_diagnostics.lock().unwrap().clone(),
+            ),
+            eager_type_check: self.eager_type_check,
+        }
+    }
 }
 
 impl File {
@@ -55,10 +79,6 @@ impl File {
         Self::new_with_type_check(source, false)
     }
 
-    pub fn new_indexed(source: String) -> Self {
-        Self::new_lazy(source)
-    }
-
     fn new_with_type_check(source: String, eager_type_check: bool) -> Self {
         let mut f = Self {
             source: TextDocument::new(source),
@@ -67,7 +87,11 @@ impl File {
             parsed: None,
             type_check: None,
             definitions: HashMap::new(),
+            signature_index: HashMap::new(),
+            ref_counts: HashMap::new(),
+            impl_counts: HashMap::new(),
             base_diagnostics: Vec::new(),
+            cached_lsp_diagnostics: Mutex::new(None),
             eager_type_check,
         };
         f.parse();
@@ -83,15 +107,17 @@ impl File {
     }
 
     pub fn parse(&mut self) {
+        *self.cached_lsp_diagnostics.lock().unwrap() = None;
         let text = self.source.text();
         let result = sail_parser::lexer().parse(text);
         let lex_errors = result.errors().cloned().collect::<Vec<_>>();
-        self.tokens = result.output().cloned();
+        self.tokens = result.output().cloned().map(Arc::new);
         self.core_ast = self
             .tokens
-            .as_ref()
-            .and_then(|tokens| sail_parser::parse_core_source(tokens).into_output());
-        self.parsed = best_parsed(self.tokens.as_deref(), self.core_ast.as_ref());
+            .as_deref()
+            .and_then(|tokens| sail_parser::parse_core_source(tokens).into_output())
+            .map(Arc::new);
+        self.parsed = best_parsed(self.core_ast.as_deref());
         self.type_check = self
             .eager_type_check
             .then(|| crate::typecheck::check_file(self))
@@ -105,8 +131,39 @@ impl File {
         }
 
         self.definitions = definitions;
+        self.signature_index = crate::symbols::build_signature_index(self);
+        self.build_count_caches();
         diagnostics.extend(compute_semantic_diagnostics(self));
         self.base_diagnostics = diagnostics;
+    }
+
+    fn build_count_caches(&mut self) {
+        self.ref_counts.clear();
+        self.impl_counts.clear();
+        let Some(parsed) = &self.parsed else { return };
+        for occurrence in &parsed.symbol_occurrences {
+            if occurrence.role.is_some()
+                || occurrence.scope != Some(sail_parser::Scope::TopLevel)
+            {
+                continue;
+            }
+            *self.ref_counts.entry(occurrence.name.clone()).or_insert(0) += 1;
+        }
+        for decl in &parsed.decls {
+            if decl.role != sail_parser::DeclRole::Definition
+                || decl.scope != sail_parser::Scope::TopLevel
+            {
+                continue;
+            }
+            if matches!(
+                decl.kind,
+                sail_parser::DeclKind::Function
+                    | sail_parser::DeclKind::Mapping
+                    | sail_parser::DeclKind::Overload
+            ) {
+                *self.impl_counts.entry(decl.name.clone()).or_insert(0) += 1;
+            }
+        }
     }
 
     pub fn parsed(&self) -> Option<&sail_parser::ParsedFile> {
@@ -114,7 +171,7 @@ impl File {
     }
 
     pub fn core_ast(&self) -> Option<&sail_parser::core_ast::SourceFile> {
-        self.core_ast.as_ref()
+        self.core_ast.as_deref()
     }
 
     pub fn type_check(&self) -> Option<&crate::typecheck::TypeCheckResult> {
@@ -126,11 +183,17 @@ impl File {
     }
 
     pub fn set_type_check(&mut self, type_check: Option<crate::typecheck::TypeCheckResult>) {
+        *self.cached_lsp_diagnostics.lock().unwrap() = None;
         self.type_check = type_check;
     }
 
     pub fn lsp_diagnostics(&self) -> Vec<LspDiagnostic> {
-        self.base_diagnostics
+        let mut cache = self.cached_lsp_diagnostics.lock().unwrap();
+        if let Some(ref cached) = *cache {
+            return cached.clone();
+        }
+        let diagnostics: Vec<LspDiagnostic> = self
+            .base_diagnostics
             .iter()
             .chain(
                 self.type_check
@@ -138,7 +201,9 @@ impl File {
                     .flat_map(|type_check| type_check.diagnostics().iter()),
             )
             .map(|d| d.to_proto())
-            .collect()
+            .collect();
+        *cache = Some(diagnostics.clone());
+        diagnostics
     }
 
     fn token_at_offset(
@@ -159,7 +224,7 @@ impl File {
 
     pub fn token_at(&self, position: Position) -> Option<&(sail_parser::Token, sail_parser::Span)> {
         let offset = self.source.offset_at(&position);
-        let tokens = self.tokens.as_ref()?;
+        let tokens = self.tokens.as_deref()?;
 
         // LSP cursors are often reported at token boundaries; try exact offset first,
         // then the preceding byte to keep identifier-based features stable.
@@ -177,30 +242,26 @@ mod tests {
     use chumsky::Parser;
 
     #[test]
-    fn prefers_ast_index_when_available() {
+    fn builds_parsed_from_core_ast() {
         let source = "val f : bits('n) -> bits('n)\nfunction f(x) = x\n";
         let tokens = sail_parser::lexer().parse(source).into_result().unwrap();
         let core_ast = sail_parser::parse_core_source(&tokens)
             .into_result()
             .unwrap();
 
-        let parsed = best_parsed(Some(&tokens), Some(&core_ast)).expect("parsed");
+        let parsed = best_parsed(Some(&core_ast)).expect("parsed");
         assert_eq!(parsed, sail_parser::ParsedFile::from_core_ast(&core_ast));
     }
 
     #[test]
-    fn falls_back_to_token_index_without_ast() {
-        let source = "function foo(x) = x\n";
-        let tokens = sail_parser::lexer().parse(source).into_result().unwrap();
-
-        let parsed = best_parsed(Some(&tokens), None).expect("parsed");
-        assert_eq!(parsed, sail_parser::parse_tokens(&tokens));
+    fn returns_none_without_core_ast() {
+        assert!(best_parsed(None).is_none());
     }
 
     #[test]
-    fn indexed_files_skip_eager_type_check() {
+    fn lazy_files_skip_eager_type_check() {
         let source = "function id(x) = x\n";
-        let file = super::File::new_indexed(source.to_string());
+        let file = super::File::new_lazy(source.to_string());
 
         assert!(file.parsed().is_some());
         assert!(file.type_check().is_none());

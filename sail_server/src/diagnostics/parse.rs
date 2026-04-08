@@ -2,9 +2,8 @@ use std::collections::HashSet;
 
 use chumsky::error::Rich;
 
-use crate::diagnostics::error_format::Message;
 use crate::diagnostics::reporting::{
-    diagnostic_for_error, Error as ReportingError, WarningEmitter,
+    diagnostic_for_error, Error as ReportingError, Message, WarningEmitter,
 };
 use crate::diagnostics::{Diagnostic, DiagnosticCode};
 use crate::state::File;
@@ -175,7 +174,7 @@ impl<'a> ParseDiagnosticCollector<'a> {
             .last()
             .map(|(_, span)| Span::new(span.end, span.end))
             .unwrap_or_else(|| Span::new(0, 0));
-        for (open_kind, _) in stack {
+        for (open_kind, _) in stack.into_iter().rev().take(5) {
             self.emit_error(
                 DiagnosticCode::SyntaxError,
                 eof,

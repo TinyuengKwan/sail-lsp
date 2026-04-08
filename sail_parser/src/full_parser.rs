@@ -49,7 +49,11 @@ fn token_is_close_bracket(token: &Token) -> bool {
 }
 
 fn token_is_private_modifier(token: &Token) -> bool {
-    matches!(token, Token::Id(name) if name == "Private" || name == "private")
+    match token {
+        Token::KwPrivate => true,
+        Token::Id(name) => name == "Private" || name == "private",
+        _ => false,
+    }
 }
 
 fn token_starts_declaration(token: &Token) -> bool {
@@ -512,7 +516,12 @@ fn token_as_ident(token: &Token) -> Option<String> {
         | Token::KwTypeUpper
         | Token::KwOrder
         | Token::KwDec
-        | Token::KwInc => Some(token.to_string()),
+        | Token::KwDownto
+        | Token::KwFrom
+        | Token::KwInc
+        | Token::KwPrivate
+        | Token::KwTo
+        | Token::KwWhen => Some(token.to_string()),
         _ => None,
     }
 }
@@ -2023,7 +2032,10 @@ fn parse_pattern(tokens: &[(Token, Span)], start: usize, end: usize) -> Spanned<
         return (Pattern::Error(String::new()), span);
     }
 
-    if let Some(as_idx) = find_top_level_token(tokens, start, end, |token| *token == Token::KwAs) {
+    // Upstream Sail allows both `pattern as Type` and `pattern match Type` (P_var).
+    if let Some(as_idx) = find_top_level_token(tokens, start, end, |token| {
+        *token == Token::KwAs || *token == Token::KwMatch
+    }) {
         if as_idx < end {
             if as_idx + 1 == end {
                 if let Some(binding) = token_as_ident(&tokens[end].0) {
@@ -3580,7 +3592,7 @@ fn parse_mapping_arm(
 
     let mut rhs_end = end;
     if let Some(when_idx) = find_top_level_token(tokens, arrow_idx + 1, end, |token| {
-        token_is_ident_name(token, "when")
+        *token == Token::KwWhen || token_is_ident_name(token, "when")
     }) {
         if when_idx < end && guard.is_none() {
             guard = Some(parse_expr(tokens, when_idx + 1, end));

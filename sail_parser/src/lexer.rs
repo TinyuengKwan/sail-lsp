@@ -30,6 +30,9 @@ pub enum Token {
     // String literal.
     String(String),
 
+    // Multiline string literal (triple-quoted).
+    MultilineString(String),
+
     // Operators and control characters.
     Dollar,
     Directive {
@@ -99,6 +102,7 @@ pub enum Token {
     KwDefault,
     KwDepend,
     KwDo,
+    KwDownto,
     KwEamem,
     KwEffect,
     KwElse,
@@ -111,6 +115,7 @@ pub enum Token {
     KwForall,
     KwForeach,
     KwForwards,
+    KwFrom,
     KwFunction,
     KwIf,
     KwImpl,
@@ -132,6 +137,7 @@ pub enum Token {
     KwOrder,
     KwOutcome,
     KwOverload,
+    KwPrivate,
     KwPure,
     KwRef,
     KwRegister,
@@ -146,6 +152,7 @@ pub enum Token {
     KwTerminationMeasure,
     KwThen,
     KwThrow,
+    KwTo,
     KwTrue,
     KwTry,
     KwType,      // type
@@ -157,6 +164,7 @@ pub enum Token {
     KwUntil,
     KwVal,
     KwVar,
+    KwWhen,
     KwWhile,
     KwWith,
     KwWmem,
@@ -178,6 +186,7 @@ impl fmt::Display for Token {
 
             // String literal.
             Token::String(s) => write!(f, "{}", s),
+            Token::MultilineString(s) => write!(f, "\"\"\"{}\"\"\"", s),
 
             // Operators and other control characters.
             Token::Dollar => write!(f, "$"),
@@ -251,6 +260,7 @@ impl fmt::Display for Token {
             Token::KwDefault => write!(f, "default"),
             Token::KwDepend => write!(f, "depend"),
             Token::KwDo => write!(f, "do"),
+            Token::KwDownto => write!(f, "downto"),
             Token::KwEamem => write!(f, "eamem"),
             Token::KwEffect => write!(f, "effect"),
             Token::KwElse => write!(f, "else"),
@@ -263,6 +273,7 @@ impl fmt::Display for Token {
             Token::KwForall => write!(f, "forall"),
             Token::KwForeach => write!(f, "foreach"),
             Token::KwForwards => write!(f, "forwards"),
+            Token::KwFrom => write!(f, "from"),
             Token::KwFunction => write!(f, "function"),
             Token::KwIf => write!(f, "if"),
             Token::KwImpl => write!(f, "impl"),
@@ -284,6 +295,7 @@ impl fmt::Display for Token {
             Token::KwOrder => write!(f, "Order"),
             Token::KwOutcome => write!(f, "outcome"),
             Token::KwOverload => write!(f, "overload"),
+            Token::KwPrivate => write!(f, "private"),
             Token::KwPure => write!(f, "pure"),
             Token::KwRef => write!(f, "ref"),
             Token::KwRegister => write!(f, "register"),
@@ -298,6 +310,7 @@ impl fmt::Display for Token {
             Token::KwTerminationMeasure => write!(f, "termination_measure"),
             Token::KwThen => write!(f, "then"),
             Token::KwThrow => write!(f, "throw"),
+            Token::KwTo => write!(f, "to"),
             Token::KwTrue => write!(f, "true"),
             Token::KwTry => write!(f, "try"),
             Token::KwType => write!(f, "type"),
@@ -309,6 +322,7 @@ impl fmt::Display for Token {
             Token::KwUntil => write!(f, "until"),
             Token::KwVal => write!(f, "val"),
             Token::KwVar => write!(f, "var"),
+            Token::KwWhen => write!(f, "when"),
             Token::KwWhile => write!(f, "while"),
             Token::KwWith => write!(f, "with"),
             Token::KwWmem => write!(f, "wmem"),
@@ -418,10 +432,11 @@ pub fn lexer<'src>(
             just('b').to('\x08'),
             just('r').to('\r'),
             just('\n').to(' '), // TODO: Handle this properly.
-            just('d').ignore_then(n_digits(10, 3).to_slice().try_map(|digits: &str, span| {
-                char::from_u32(u32::from_str_radix(&digits, 10).unwrap())
-                    .ok_or_else(|| Rich::custom(span, "invalid decimal unicode value"))
-            })),
+            // Upstream Sail: exactly 3 decimal digits (e.g. \067), no 'd' prefix.
+            n_digits(10, 3).to_slice().try_map(|digits: &str, span| {
+                char::from_u32(u32::from_str_radix(digits, 10).unwrap())
+                    .ok_or_else(|| Rich::custom(span, "invalid decimal escape value"))
+            }),
             just('x').ignore_then(n_digits(16, 2).to_slice().try_map(|digits: &str, span| {
                 char::from_u32(u32::from_str_radix(&digits, 16).unwrap())
                     .ok_or_else(|| Rich::custom(span, "invalid hex unicode value"))
@@ -429,11 +444,23 @@ pub fn lexer<'src>(
         )))
         .boxed();
 
-    let string = just('"')
-        .ignore_then(none_of(&['\\', '"', '\n', '\r']).or(escape).repeated())
-        .then_ignore(just('"'))
-        .to_slice()
-        .map(|s: &str| Token::String(s.to_owned()))
+    let multiline_string = just("\"\"\"")
+        .ignore_then(
+            any()
+                .and_is(just("\"\"\"").not())
+                .repeated()
+                .collect::<String>(),
+        )
+        .then_ignore(just("\"\"\""))
+        .map(Token::MultilineString)
+        .boxed();
+
+    let string = multiline_string
+        .or(just('"')
+            .ignore_then(none_of(&['\\', '"', '\n', '\r']).or(escape).repeated())
+            .then_ignore(just('"'))
+            .to_slice()
+            .map(|s: &str| Token::String(s.to_owned())))
         .boxed();
 
     // The order of these is important, e.g. <= must come before < otherwise
@@ -538,6 +565,7 @@ pub fn lexer<'src>(
             "default" => Token::KwDefault,
             "depend" => Token::KwDepend,
             "do" => Token::KwDo,
+            "downto" => Token::KwDownto,
             "eamem" => Token::KwEamem,
             "effect" => Token::KwEffect,
             "else" => Token::KwElse,
@@ -550,6 +578,7 @@ pub fn lexer<'src>(
             "forall" => Token::KwForall,
             "foreach" => Token::KwForeach,
             "forwards" => Token::KwForwards,
+            "from" => Token::KwFrom,
             "function" => Token::KwFunction,
             "if" => Token::KwIf,
             "impl" => Token::KwImpl,
@@ -571,6 +600,7 @@ pub fn lexer<'src>(
             "Order" => Token::KwOrder,
             "outcome" => Token::KwOutcome,
             "overload" => Token::KwOverload,
+            "private" => Token::KwPrivate,
             "pure" => Token::KwPure,
             "ref" => Token::KwRef,
             "register" => Token::KwRegister,
@@ -585,6 +615,7 @@ pub fn lexer<'src>(
             "termination_measure" => Token::KwTerminationMeasure,
             "then" => Token::KwThen,
             "throw" => Token::KwThrow,
+            "to" => Token::KwTo,
             "true" => Token::KwTrue,
             "try" => Token::KwTry,
             "type" => Token::KwType,
@@ -596,6 +627,7 @@ pub fn lexer<'src>(
             "until" => Token::KwUntil,
             "val" => Token::KwVal,
             "var" => Token::KwVar,
+            "when" => Token::KwWhen,
             "while" => Token::KwWhile,
             "with" => Token::KwWith,
             "wmem" => Token::KwWmem,

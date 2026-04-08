@@ -1,8 +1,8 @@
 use crate::state::File;
 use tower_lsp::lsp_types::{
-    Range, SemanticToken, SemanticTokenType, SemanticTokens, SemanticTokensDelta,
-    SemanticTokensEdit, SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
-    WorkDoneProgressOptions,
+    Range, SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokens,
+    SemanticTokensDelta, SemanticTokensEdit, SemanticTokensFullOptions, SemanticTokensLegend,
+    SemanticTokensOptions, WorkDoneProgressOptions,
 };
 
 const TOKEN_TYPES: &[SemanticTokenType] = &[
@@ -24,7 +24,10 @@ pub(crate) fn semantic_tokens_options() -> SemanticTokensOptions {
         },
         legend: SemanticTokensLegend {
             token_types: TOKEN_TYPES.to_vec(),
-            token_modifiers: Vec::new(),
+            token_modifiers: vec![
+                SemanticTokenModifier::DECLARATION,
+                SemanticTokenModifier::DEFINITION,
+            ],
         },
         range: Some(true),
         full: Some(SemanticTokensFullOptions::Delta { delta: Some(true) }),
@@ -111,6 +114,7 @@ fn token_is_keyword(token: &sail_parser::Token) -> bool {
             | sail_parser::Token::KwDefault
             | sail_parser::Token::KwDepend
             | sail_parser::Token::KwDo
+            | sail_parser::Token::KwDownto
             | sail_parser::Token::KwEamem
             | sail_parser::Token::KwEffect
             | sail_parser::Token::KwElse
@@ -123,6 +127,7 @@ fn token_is_keyword(token: &sail_parser::Token) -> bool {
             | sail_parser::Token::KwForall
             | sail_parser::Token::KwForeach
             | sail_parser::Token::KwForwards
+            | sail_parser::Token::KwFrom
             | sail_parser::Token::KwFunction
             | sail_parser::Token::KwIf
             | sail_parser::Token::KwImpl
@@ -144,6 +149,7 @@ fn token_is_keyword(token: &sail_parser::Token) -> bool {
             | sail_parser::Token::KwOrder
             | sail_parser::Token::KwOutcome
             | sail_parser::Token::KwOverload
+            | sail_parser::Token::KwPrivate
             | sail_parser::Token::KwPure
             | sail_parser::Token::KwRef
             | sail_parser::Token::KwRegister
@@ -157,6 +163,7 @@ fn token_is_keyword(token: &sail_parser::Token) -> bool {
             | sail_parser::Token::KwTerminationMeasure
             | sail_parser::Token::KwThen
             | sail_parser::Token::KwThrow
+            | sail_parser::Token::KwTo
             | sail_parser::Token::KwTrue
             | sail_parser::Token::KwTry
             | sail_parser::Token::KwType
@@ -168,6 +175,7 @@ fn token_is_keyword(token: &sail_parser::Token) -> bool {
             | sail_parser::Token::KwUntil
             | sail_parser::Token::KwVal
             | sail_parser::Token::KwVar
+            | sail_parser::Token::KwWhen
             | sail_parser::Token::KwWhile
             | sail_parser::Token::KwWith
             | sail_parser::Token::KwWmem
@@ -185,7 +193,7 @@ fn compute_semantic_tokens_filtered(file: &File, range: Option<&Range>) -> Seman
     let mut prev_start = 0_u32;
     let mut first = true;
 
-    let Some(tokens) = file.tokens.as_ref() else {
+    let Some(tokens) = file.tokens.as_deref() else {
         return SemanticTokens {
             result_id: None,
             data: result,
@@ -224,12 +232,23 @@ fn compute_semantic_tokens_filtered(file: &File, range: Option<&Range>) -> Seman
             start.character
         };
 
+        let is_decl = matches!(prev_token,
+            Some(sail_parser::Token::KwFunction) | Some(sail_parser::Token::KwVal)
+            | Some(sail_parser::Token::KwType) | Some(sail_parser::Token::KwEnum)
+            | Some(sail_parser::Token::KwStruct) | Some(sail_parser::Token::KwUnion)
+            | Some(sail_parser::Token::KwRegister) | Some(sail_parser::Token::KwLet)
+            | Some(sail_parser::Token::KwVar) | Some(sail_parser::Token::KwMapping)
+            | Some(sail_parser::Token::KwBitfield) | Some(sail_parser::Token::KwOverload)
+            | Some(sail_parser::Token::KwNewtype) | Some(sail_parser::Token::KwScattered)
+        );
+        let modifier = if is_decl && matches!(token, sail_parser::Token::Id(_)) { 1 } else { 0 };
+
         result.push(SemanticToken {
             delta_line,
             delta_start,
             length: end.character - start.character,
             token_type: tt,
-            token_modifiers_bitset: 0,
+            token_modifiers_bitset: modifier,
         });
         first = false;
         prev_line = start.line;

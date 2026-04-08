@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::diagnostics::error_format::Message;
 use crate::diagnostics::reporting::{
-    diagnostic_for_error, unnecessary_warning, Error as ReportingError,
+    diagnostic_for_error, diagnostic_for_warning, unnecessary_warning, Error as ReportingError,
+    Message,
 };
 use crate::diagnostics::type_error::TypeError;
 use crate::diagnostics::{Diagnostic, DiagnosticCode, Severity};
@@ -20,6 +20,8 @@ struct BindingRecord {
     span: sail_parser::Span,
     used: bool,
     warn_unused: bool,
+    mutable: bool,
+    modified: bool,
 }
 
 #[derive(Default)]
@@ -59,16 +61,28 @@ impl BindingTracker {
             if warn_unused && !used && !name.starts_with('_') {
                 diagnostics.push(unused_binding_diagnostic(file, span, &name));
             }
+
+            if warn_unused && binding.mutable && !binding.modified && !name.starts_with('_') {
+                diagnostics.push(unmodified_mutable_diagnostic(file, span, &name));
+            }
         }
     }
 
-    fn define_binding(&mut self, name: &str, span: sail_parser::Span, warn_unused: bool) {
+    fn define_binding(
+        &mut self,
+        name: &str,
+        span: sail_parser::Span,
+        warn_unused: bool,
+        mutable: bool,
+    ) {
         let idx = self.bindings.len();
         self.bindings.push(BindingRecord {
             name: name.to_string(),
             span,
             used: false,
             warn_unused,
+            mutable,
+            modified: false,
         });
         self.scopes.last_mut().expect("binding scope").push(idx);
         self.by_name.entry(name.to_string()).or_default().push(idx);
@@ -87,12 +101,36 @@ impl BindingTracker {
             binding.used = true;
         }
     }
+
+    fn is_mutable(&self, name: &str) -> bool {
+        self.by_name
+            .get(name)
+            .and_then(|stack| stack.last())
+            .and_then(|&idx| self.bindings.get(idx))
+            .is_some_and(|b| b.mutable)
+    }
+
+    fn mark_modified(&mut self, name: &str) {
+        let Some(idx) = self
+            .by_name
+            .get(name)
+            .and_then(|stack| stack.last())
+            .copied()
+        else {
+            return;
+        };
+        if let Some(binding) = self.bindings.get_mut(idx) {
+            binding.modified = true;
+        }
+    }
 }
 
 struct AstSemanticAnalyzer<'a> {
     file: &'a File,
     diagnostics: Vec<Diagnostic>,
     pattern_constants: HashSet<String>,
+    union_constructors: HashSet<String>,
+    registers: HashSet<String>,
     tracker: BindingTracker,
 }
 
@@ -110,6 +148,38 @@ impl<'a> AstSemanticAnalyzer<'a> {
                         .filter(|decl| {
                             decl.scope == sail_parser::Scope::TopLevel
                                 && decl.kind == sail_parser::DeclKind::EnumMember
+                        })
+                        .map(|decl| decl.name.clone())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            union_constructors: file
+                .core_ast()
+                .map(|ast| {
+                    let mut ctors = HashSet::new();
+                    for (item, _) in &ast.defs {
+                        if let CoreDefinitionKind::Named(def) = &item.kind {
+                            if let Some(sail_parser::NamedDefDetail::Union { variants, .. }) =
+                                &def.detail
+                            {
+                                for variant in variants {
+                                    ctors.insert(variant.0.name.0.clone());
+                                }
+                            }
+                        }
+                    }
+                    ctors
+                })
+                .unwrap_or_default(),
+            registers: file
+                .parsed()
+                .map(|parsed| {
+                    parsed
+                        .decls
+                        .iter()
+                        .filter(|decl| {
+                            decl.scope == sail_parser::Scope::TopLevel
+                                && decl.kind == sail_parser::DeclKind::Register
                         })
                         .map(|decl| decl.name.clone())
                         .collect()
@@ -150,6 +220,7 @@ impl<'a> AstSemanticAnalyzer<'a> {
                         }
                     } else {
                         for clause in &def.clauses {
+                            self.tracker.push_scope();
                             for pattern in &clause.0.patterns {
                                 self.define_pattern_bindings(pattern, false);
                             }
@@ -168,6 +239,7 @@ impl<'a> AstSemanticAnalyzer<'a> {
                                     self.analyze_expr(&arm.0.rhs);
                                 }
                             }
+                            self.tracker.pop_scope(self.file, &mut self.diagnostics);
                         }
                     }
                     self.tracker.pop_scope(self.file, &mut self.diagnostics);
@@ -398,11 +470,28 @@ impl<'a> AstSemanticAnalyzer<'a> {
 
     fn analyze_lexp(&mut self, lexp: &(AstLexp, sail_parser::Span)) -> bool {
         match &lexp.0 {
-            AstLexp::Attribute { lexp, .. } | AstLexp::Typed { lexp, .. } => {
-                self.analyze_lexp(lexp)
+            AstLexp::Attribute { lexp, .. } => self.analyze_lexp(lexp),
+            // B3: Upstream Sail warns about redundant type annotations on
+            // assignments to registers or mutable locals (type_check.ml:2040).
+            AstLexp::Typed { lexp: inner, .. } => {
+                if let AstLexp::Id(name) = &inner.0 {
+                    if self.registers.contains(name) || self.tracker.is_mutable(name) {
+                        self.diagnostics.push(diagnostic_for_warning(
+                            self.file,
+                            DiagnosticCode::RedundantTypeAnnotation,
+                            lexp.1,
+                            Message::line(format!(
+                                "Redundant type annotation on assignment to '{}'. Type is already known.",
+                                name
+                            )),
+                        ));
+                    }
+                }
+                self.analyze_lexp(inner)
             }
             AstLexp::Id(name) => {
                 self.tracker.mark_used(name);
+                self.tracker.mark_modified(name);
                 false
             }
             AstLexp::Deref(expr) => self.analyze_expr(expr),
@@ -549,8 +638,30 @@ impl<'a> AstSemanticAnalyzer<'a> {
                 self.define_pattern_bindings(inner, warn_unused);
             }
             AstPattern::Ident(name) => {
+                // B2: Upstream Sail warns when a bare identifier in a pattern
+                // is also a union constructor (type_check.ml:2821).
+                if self.union_constructors.contains(name) {
+                    self.diagnostics.push(diagnostic_for_warning(
+                        self.file,
+                        DiagnosticCode::UnionConstructorInPattern,
+                        pattern.1,
+                        Message::line(format!(
+                            "Identifier '{}' found in pattern is also a union constructor. \
+                             Did you mean '{}()'?",
+                            name, name
+                        )),
+                    ));
+                }
                 if !self.pattern_constants.contains(name) {
-                    self.tracker.define_binding(name, pattern.1, warn_unused);
+                    // In Sail, uppercase identifiers in patterns are typically
+                    // enum constructors from other files. Don't track them as
+                    // variable bindings to avoid false unused-variable warnings.
+                    let is_likely_constructor =
+                        name.starts_with(|c: char| c.is_ascii_uppercase());
+                    if !is_likely_constructor {
+                        self.tracker
+                            .define_binding(name, pattern.1, warn_unused, false);
+                    }
                 }
             }
             AstPattern::Typed(inner, _) | AstPattern::AsType(inner, _) => {
@@ -559,7 +670,7 @@ impl<'a> AstSemanticAnalyzer<'a> {
             AstPattern::AsBinding { pattern, binding } => {
                 self.define_pattern_bindings(pattern, warn_unused);
                 self.tracker
-                    .define_binding(&binding.0, binding.1, warn_unused);
+                    .define_binding(&binding.0, binding.1, warn_unused, false);
             }
             AstPattern::Tuple(items) | AstPattern::List(items) | AstPattern::Vector(items) => {
                 for item in items {
@@ -578,7 +689,8 @@ impl<'a> AstSemanticAnalyzer<'a> {
                             self.define_pattern_bindings(pattern, warn_unused);
                         }
                         AstFieldPattern::Shorthand(name) => {
-                            self.tracker.define_binding(&name.0, name.1, warn_unused);
+                            self.tracker
+                                .define_binding(&name.0, name.1, warn_unused, false);
                         }
                         AstFieldPattern::Wild(_) => {}
                     }
@@ -604,7 +716,8 @@ impl<'a> AstSemanticAnalyzer<'a> {
     ) -> bool {
         match &target.0 {
             AstLexp::Id(name) => {
-                self.tracker.define_binding(name, target.1, warn_unused);
+                self.tracker
+                    .define_binding(name, target.1, warn_unused, true);
                 true
             }
             AstLexp::Attribute { lexp, .. } | AstLexp::Typed { lexp, .. } => {
@@ -623,6 +736,18 @@ impl<'a> AstSemanticAnalyzer<'a> {
             Severity::Hint,
         ));
     }
+}
+
+fn unmodified_mutable_diagnostic(file: &File, span: sail_parser::Span, name: &str) -> Diagnostic {
+    unnecessary_warning(
+        file,
+        DiagnosticCode::UnmodifiedMutableVariable,
+        span,
+        Message::line(format!(
+            "Variable `{name}` is declared as `var` but never modified; consider using `let`"
+        )),
+        Severity::WeakWarning,
+    )
 }
 
 fn unused_binding_diagnostic(file: &File, span: sail_parser::Span, name: &str) -> Diagnostic {
@@ -648,15 +773,36 @@ pub(crate) fn compute_semantic_diagnostics(file: &File) -> Vec<Diagnostic> {
         }
     }
 
-    let mut seen_defs = std::collections::HashMap::<String, sail_parser::Span>::new();
+    // Sail allows the same name in different namespaces (e.g. `type X` and `let X`).
+    // Key on (name, kind_group) to avoid false positives.
+    let mut seen_defs =
+        std::collections::HashMap::<(String, u8), sail_parser::Span>::new();
     for decl in &parsed.decls {
         if decl.scope != sail_parser::Scope::TopLevel
             || decl.role != sail_parser::DeclRole::Definition
         {
             continue;
         }
+        // Overloads are designed to be extended across multiple declarations.
+        if decl.kind == sail_parser::DeclKind::Overload {
+            continue;
+        }
 
-        if let Some(prev_span) = seen_defs.get(&decl.name) {
+        // Sail allows the same name across different namespaces:
+        // - types vs values (e.g. `type flen` and `let flen`)
+        // - val spec vs function def (e.g. `val f : T` then `function f(...)`)
+        // - scattered definitions (handled above via is_scattered)
+        let kind_group = match decl.kind {
+            sail_parser::DeclKind::Type
+            | sail_parser::DeclKind::Enum
+            | sail_parser::DeclKind::Union
+            | sail_parser::DeclKind::Bitfield
+            | sail_parser::DeclKind::Newtype => 0, // type namespace
+            sail_parser::DeclKind::Value => 2,     // val specs (paired with function defs)
+            _ => 1,                                // value namespace
+        };
+
+        if let Some(prev_span) = seen_defs.get(&(decl.name.clone(), kind_group)) {
             if !is_scattered.contains(&decl.name) {
                 let prev_pos = file.source.position_at(prev_span.start);
                 let error = TypeError::Alternate {
@@ -681,11 +827,52 @@ pub(crate) fn compute_semantic_diagnostics(file: &File) -> Vec<Diagnostic> {
                 ));
             }
         } else {
-            seen_defs.insert(decl.name.clone(), decl.span);
+            seen_defs.insert((decl.name.clone(), kind_group), decl.span);
         }
     }
 
+    // B1: Scattered definitions with no clauses.
+    // NOTE: This check is disabled because scattered definitions and their
+    // clauses are typically spread across multiple files. In single-file
+    // analysis mode, we cannot reliably detect missing clauses without
+    // producing false positives. This should be re-enabled when multi-file
+    // analysis (workspace-level diagnostics) is implemented.
+
     if let Some(ast) = file.core_ast() {
+        // B4: Option register without default value.
+        for (item, _) in &ast.defs {
+            if let CoreDefinitionKind::Named(def) = &item.kind {
+                if def.kind == sail_parser::core_ast::NamedDefKind::Register && def.value.is_none()
+                {
+                    let is_option_type = match &def.ty {
+                        Some(ty) => match &ty.0 {
+                            sail_parser::core_ast::TypeExpr::App { callee, .. } => {
+                                callee.0 == "option" || callee.0 == "Option"
+                            }
+                            _ => false,
+                        },
+                        None => false,
+                    };
+                    if is_option_type {
+                        let span = def.name.1;
+                        let range = tower_lsp::lsp_types::Range::new(
+                            file.source.position_at(span.start),
+                            file.source.position_at(span.end),
+                        );
+                        diagnostics.push(Diagnostic::new(
+                            DiagnosticCode::OptionRegisterNoDefault,
+                            format!(
+                                "Register '{}' of type option should explicitly be given a default value",
+                                def.name.0
+                            ),
+                            range,
+                            Severity::WeakWarning,
+                        ));
+                    }
+                }
+            }
+        }
+
         let mut analyzer = AstSemanticAnalyzer::new(file);
         analyzer.analyze_source_file(ast);
         diagnostics.extend(analyzer.finish());

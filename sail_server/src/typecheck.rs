@@ -84,7 +84,8 @@ struct BitfieldInfo {
 
 #[derive(Clone, Debug, Default)]
 struct LocalEnv {
-    scopes: Vec<HashMap<String, Ty>>,
+    /// Flat binding map — single HashMap for O(1) lookup instead of O(scope_depth).
+    bindings: HashMap<String, Ty>,
     expected_return: Option<Ty>,
     constraints: Vec<ConstraintExpr>,
     undo_log: Vec<LocalEnvUndo>,
@@ -94,7 +95,6 @@ struct LocalEnv {
 enum LocalEnvUndo {
     PushScope,
     Define {
-        scope_index: usize,
         name: String,
         previous: Option<Ty>,
     },
@@ -305,7 +305,7 @@ fn expr_kind_name(expr: &Expr) -> &'static str {
 impl LocalEnv {
     fn new(expected_return: Option<Ty>) -> Self {
         Self {
-            scopes: vec![HashMap::new()],
+            bindings: HashMap::new(),
             expected_return,
             constraints: Vec::new(),
             undo_log: Vec::new(),
@@ -319,18 +319,12 @@ impl LocalEnv {
     fn restore(&mut self, mark: usize) {
         while self.undo_log.len() > mark {
             match self.undo_log.pop().expect("undo log length checked") {
-                LocalEnvUndo::PushScope => {
-                    self.scopes.pop();
-                }
-                LocalEnvUndo::Define {
-                    scope_index,
-                    name,
-                    previous,
-                } => {
+                LocalEnvUndo::PushScope => {}
+                LocalEnvUndo::Define { name, previous } => {
                     if let Some(previous) = previous {
-                        self.scopes[scope_index].insert(name, previous);
+                        self.bindings.insert(name, previous);
                     } else {
-                        self.scopes[scope_index].remove(&name);
+                        self.bindings.remove(&name);
                     }
                 }
                 LocalEnvUndo::AddConstraint => {
@@ -341,7 +335,6 @@ impl LocalEnv {
     }
 
     fn push_scope(&mut self) {
-        self.scopes.push(HashMap::new());
         self.undo_log.push(LocalEnvUndo::PushScope);
     }
 
@@ -356,15 +349,9 @@ impl LocalEnv {
     }
 
     fn define(&mut self, name: &str, ty: Ty) {
-        if let Some(scope_index) = self.scopes.len().checked_sub(1) {
-            let name = name.to_string();
-            let previous = self.scopes[scope_index].insert(name.clone(), ty);
-            self.undo_log.push(LocalEnvUndo::Define {
-                scope_index,
-                name,
-                previous,
-            });
-        }
+        let name = name.to_string();
+        let previous = self.bindings.insert(name.clone(), ty);
+        self.undo_log.push(LocalEnvUndo::Define { name, previous });
     }
 
     fn add_constraint(&mut self, constraint: ConstraintExpr) {
@@ -372,16 +359,13 @@ impl LocalEnv {
         self.undo_log.push(LocalEnvUndo::AddConstraint);
     }
 
-    fn lookup(&self, name: &str) -> Option<Ty> {
-        self.scopes
-            .iter()
-            .rev()
-            .find_map(|scope| scope.get(name).cloned())
+    fn lookup(&self, name: &str) -> Option<&Ty> {
+        self.bindings.get(name)
     }
 }
 
-fn span_text(source: &str, span: Span) -> String {
-    source[span.start..span.end].trim().to_string()
+fn span_text<'a>(source: &'a str, span: Span) -> &'a str {
+    source[span.start..span.end].trim()
 }
 
 fn type_arg_from_type_expr(source: &str, ty: &Spanned<TypeExpr>) -> TyArg {
@@ -395,7 +379,7 @@ fn type_arg_from_type_expr(source: &str, ty: &Spanned<TypeExpr>) -> TyArg {
         | TypeExpr::Effect { .. }
         | TypeExpr::Forall { .. }
         | TypeExpr::Existential { .. } => TyArg::Type(Box::new(type_from_type_expr(source, ty))),
-        _ => TyArg::Value(span_text(source, ty.1)),
+        _ => TyArg::Value(span_text(source, ty.1).to_string()),
     }
 }
 
@@ -422,17 +406,17 @@ fn type_from_type_expr(source: &str, ty: &Spanned<TypeExpr>) -> Ty {
                 .iter()
                 .map(|arg| type_arg_from_type_expr(source, arg))
                 .collect(),
-            text: span_text(source, ty.1),
+            text: span_text(source, ty.1).to_string(),
         },
         TypeExpr::Register(inner) => Ty::App {
             name: "register".to_string(),
             args: vec![TyArg::Type(Box::new(type_from_type_expr(source, inner)))],
-            text: span_text(source, ty.1),
+            text: span_text(source, ty.1).to_string(),
         },
         TypeExpr::Effect { ty: inner, .. } => type_from_type_expr(source, inner),
         TypeExpr::Forall { body, .. } => type_from_type_expr(source, body),
         TypeExpr::Existential { body, .. } => type_from_type_expr(source, body),
-        _ => Ty::Text(span_text(source, ty.1)),
+        _ => Ty::Text(span_text(source, ty.1).to_string()),
     }
 }
 
@@ -547,7 +531,7 @@ fn numeric_expr_from_type_expr(source: &str, ty: &Spanned<TypeExpr>) -> Option<N
             })
         }
         TypeExpr::Error(_) => None,
-        _ => Some(NumericExpr::Symbol(span_text(source, ty.1))),
+        _ => Some(NumericExpr::Symbol(span_text(source, ty.1).to_string())),
     }
 }
 
@@ -635,7 +619,7 @@ fn quant_constraint_from_type_expr(source: &str, ty: &Spanned<TypeExpr>) -> Quan
     let mut mentions = mentions.into_iter().collect::<Vec<_>>();
     mentions.sort();
     QuantConstraint {
-        text: span_text(source, ty.1),
+        text: span_text(source, ty.1).to_string(),
         mentions,
         expr: constraint_expr_from_type_expr(source, ty),
     }
@@ -920,6 +904,7 @@ impl TopLevelEnv {
     fn lookup_value(&self, locals: &LocalEnv, name: &str) -> Option<Ty> {
         locals
             .lookup(name)
+            .cloned()
             .or_else(|| self.values.get(name).cloned())
             .or_else(|| {
                 let schemes = self.functions.get(name)?;
@@ -3077,11 +3062,7 @@ impl<'a> Checker<'a> {
                 name.1,
                 TypeError::UnboundId {
                     id: name.0.clone(),
-                    locals: locals
-                        .scopes
-                        .iter()
-                        .flat_map(|scope| scope.keys().cloned())
-                        .collect(),
+                    locals: locals.bindings.keys().cloned().collect(),
                     have_function,
                 },
             );
@@ -3550,7 +3531,7 @@ impl<'a> Checker<'a> {
             collection_ty,
             self.expr_static_int(length)
                 .map(|value| value.to_string())
-                .unwrap_or_else(|| span_text(self.source, length.1)),
+                .unwrap_or_else(|| span_text(self.source, length.1).to_string()),
         );
         let Some(start_expr) = numeric_expr_from_expr(start) else {
             return slice_ty;
@@ -4110,7 +4091,7 @@ impl<'a> Checker<'a> {
         self.collect_pattern_binding_name_spans(pattern, &mut names);
         let bindings = names
             .into_iter()
-            .filter_map(|(name, span)| locals.lookup(&name).map(|ty| (name, (span, ty))))
+            .filter_map(|(name, span)| locals.lookup(&name).cloned().map(|ty| (name, (span, ty))))
             .collect();
         locals.restore(mark);
         bindings
@@ -6181,11 +6162,7 @@ impl<'a> Checker<'a> {
                         expr.1,
                         TypeError::UnboundId {
                             id: name.clone(),
-                            locals: locals
-                                .scopes
-                                .iter()
-                                .flat_map(|scope| scope.keys().cloned())
-                                .collect(),
+                            locals: locals.bindings.keys().cloned().collect(),
                             have_function: false,
                         },
                     );

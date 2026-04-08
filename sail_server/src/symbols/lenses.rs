@@ -6,14 +6,8 @@ use tower_lsp::lsp_types::{CodeLens, Range, SymbolKind, Url};
 pub(crate) fn collect_reference_counts(files: &[(&Url, &File)]) -> HashMap<String, usize> {
     let mut counts = HashMap::<String, usize>::new();
     for (_, file) in files {
-        let Some(parsed) = file.parsed() else {
-            continue;
-        };
-        for occurrence in &parsed.symbol_occurrences {
-            if occurrence.role.is_some() || occurrence.scope != Some(sail_parser::Scope::TopLevel) {
-                continue;
-            }
-            *counts.entry(occurrence.name.clone()).or_insert(0) += 1;
+        for (name, count) in &file.ref_counts {
+            *counts.entry(name.clone()).or_insert(0) += count;
         }
     }
     counts
@@ -22,23 +16,8 @@ pub(crate) fn collect_reference_counts(files: &[(&Url, &File)]) -> HashMap<Strin
 pub(crate) fn collect_implementation_counts(files: &[(&Url, &File)]) -> HashMap<String, usize> {
     let mut counts = HashMap::<String, usize>::new();
     for (_, file) in files {
-        let Some(parsed) = file.parsed() else {
-            continue;
-        };
-        for decl in &parsed.decls {
-            if decl.role != sail_parser::DeclRole::Definition
-                || decl.scope != sail_parser::Scope::TopLevel
-            {
-                continue;
-            }
-            if matches!(
-                decl.kind,
-                sail_parser::DeclKind::Function
-                    | sail_parser::DeclKind::Mapping
-                    | sail_parser::DeclKind::Overload
-            ) {
-                *counts.entry(decl.name.clone()).or_insert(0) += 1;
-            }
+        for (name, count) in &file.impl_counts {
+            *counts.entry(name.clone()).or_insert(0) += count;
         }
     }
     counts
