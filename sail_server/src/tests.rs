@@ -989,22 +989,18 @@ fn warns_when_extern_purity_is_missing() {
 }
 
 #[test]
-fn warns_on_upstream_deprecated_cast_annotations() {
+fn does_not_warn_on_type_ascription() {
+    // Sail's `expr : type` is type ascription (E_typ in upstream parser.mly),
+    // NOT a deprecated cast. Upstream only deprecates the `val cast f : ...`
+    // declaration form. We must not flag plain ascription as deprecated.
     let source = "function f(x) = x : int\n";
     let file = File::new(source.to_string());
     let diagnostics = file.lsp_diagnostics();
-    let diagnostic = diagnostics
-        .iter()
-        .find(|diagnostic| diagnostic_code_str(diagnostic) == Some("deprecated-cast-annotation"))
-        .expect("missing cast warning");
-
-    assert_eq!(
-        diagnostic.message,
-        "Cast annotations are deprecated. They will be removed in a future version of the language."
-    );
-    assert_eq!(
-        diagnostic.severity,
-        Some(tower_lsp::lsp_types::DiagnosticSeverity::WARNING)
+    assert!(
+        diagnostics
+            .iter()
+            .all(|d| diagnostic_code_str(d) != Some("deprecated-cast-annotation")),
+        "type ascription wrongly flagged as deprecated cast: {diagnostics:?}"
     );
 }
 
@@ -1765,3 +1761,309 @@ fn no_unmodified_warning_when_var_is_assigned() {
         "Should not warn when var is modified, got: {lsp_diagnostics:?}"
     );
 }
+
+/// Quick fix for `unused-variable`: should rename to `_<name>`.
+#[test]
+fn unused_variable_quickfix_renames_with_underscore() {
+    use crate::actions::unused_variable_fix;
+
+    let source = "function f(x : int) -> int = {\n  let unused = 42;\n  x + 1\n}\n";
+    let file = File::new(source.to_string());
+    let diagnostics = file.lsp_diagnostics();
+    let diag = diagnostics
+        .iter()
+        .find(|d| diagnostic_code_str(d) == Some("unused-variable"))
+        .expect("expected unused-variable diagnostic");
+
+    let (title, edit, _) = unused_variable_fix(&file, diag).expect("fix should be available");
+    assert!(title.contains("_unused"), "title was: {title}");
+    assert_eq!(edit.new_text, "_");
+    assert_eq!(edit.range.start, edit.range.end);
+    // The insertion should land at the start of the variable name.
+    let insert_offset = file.source.offset_at(&edit.range.start);
+    assert_eq!(&source[insert_offset..insert_offset + 6], "unused");
+}
+
+/// Quick fix should not double-prefix an already-`_`-prefixed name.
+#[test]
+fn unused_variable_quickfix_skips_already_underscored() {
+    use crate::actions::unused_variable_fix;
+    let source = "function f(x : int) -> int = {\n  let _already = 42;\n  x + 1\n}\n";
+    let file = File::new(source.to_string());
+    let diagnostics = file.lsp_diagnostics();
+    // _already should NOT be flagged as unused (semantic.rs respects `_` prefix),
+    // so this test just confirms the fix is None when no diagnostic is present.
+    if let Some(d) = diagnostics
+        .iter()
+        .find(|d| diagnostic_code_str(d) == Some("unused-variable"))
+    {
+        assert!(unused_variable_fix(&file, d).is_none());
+    }
+}
+
+/// Operator precedence: `==` should bind tighter than `|` so that
+/// `a == b | c == d` parses as `(a == b) | (c == d)` (both bool).
+#[test]
+fn parses_comparison_with_lower_precedence_or() {
+    let source = r#"
+val foo : (int, int, int) -> bool
+function foo(num_elem, group_size, elem_per_reg) =
+  num_elem == group_size * elem_per_reg | num_elem == 2 * group_size * elem_per_reg
+"#;
+    let file = File::new(source.to_string());
+    let diags = file.lsp_diagnostics();
+    let type_errors: Vec<_> = diags
+        .iter()
+        .filter(|d| diagnostic_code_str(d) == Some("type-error"))
+        .collect();
+    assert!(
+        type_errors.is_empty(),
+        "expected no type errors, got: {type_errors:?}"
+    );
+}
+
+/// Operator precedence: comparisons bind looser than arithmetic.
+/// `a + b > c ^ d - 1` should parse as `(a + b) > ((c ^ d) - 1)`.
+#[test]
+fn parses_arithmetic_tighter_than_comparison() {
+    let source = r#"
+val foo : (int, int, int) -> bool
+function foo(a, b, sew) = a + b > 2 ^ sew - 1
+"#;
+    let file = File::new(source.to_string());
+    let diags = file.lsp_diagnostics();
+    let type_errors: Vec<_> = diags
+        .iter()
+        .filter(|d| diagnostic_code_str(d) == Some("type-error"))
+        .collect();
+    assert!(
+        type_errors.is_empty(),
+        "expected no type errors, got: {type_errors:?}"
+    );
+}
+
+/// `int(N)` (parameterized atom type) should be treated as numeric and
+/// compatible with `int` for LSP purposes.
+#[test]
+fn parameterized_int_unifies_with_int() {
+    let source = r#"
+type myrange = { 'q, 'q > 0 & 'q <= 8. int('q) }
+val to_myrange : int -> myrange
+"#;
+    let file = File::new(source.to_string());
+    let diags = file.lsp_diagnostics();
+    let type_errors: Vec<_> = diags
+        .iter()
+        .filter(|d| diagnostic_code_str(d) == Some("type-error"))
+        .collect();
+    assert!(
+        type_errors.is_empty(),
+        "expected no type errors, got: {type_errors:?}"
+    );
+}
+
+/// Type aliases should be resolved when slicing: a slice of `xlenbits`
+/// (alias for `bits(64)`) should produce a `bits(N)` of the slice width,
+/// not propagate the alias name.
+#[test]
+fn slice_through_type_alias_returns_bits() {
+    let source = r#"
+type mybits = bits(64)
+val first16 : mybits -> bits(16)
+function first16(v) = v[15 .. 0]
+"#;
+    let file = File::new(source.to_string());
+    let diags = file.lsp_diagnostics();
+    let type_errors: Vec<_> = diags
+        .iter()
+        .filter(|d| diagnostic_code_str(d) == Some("type-error"))
+        .collect();
+    assert!(
+        type_errors.is_empty(),
+        "expected no type errors, got: {type_errors:?}"
+    );
+}
+
+/// `Sail` assignments are statements that always have type `unit`, not
+/// the rhs type. A unit-returning function whose body is an assignment
+/// should typecheck cleanly.
+#[test]
+fn assignment_expression_has_unit_type() {
+    let source = r#"
+register r : int
+val set_r : int -> unit
+function set_r(v) = {
+  r = v
+}
+"#;
+    let file = File::new(source.to_string());
+    let diags = file.lsp_diagnostics();
+    let type_errors: Vec<_> = diags
+        .iter()
+        .filter(|d| diagnostic_code_str(d) == Some("type-error"))
+        .collect();
+    assert!(
+        type_errors.is_empty(),
+        "expected no type errors, got: {type_errors:?}"
+    );
+}
+
+/// Match arms where one branch diverges via `exit()` should unify with
+/// any sibling branch type.
+#[test]
+fn diverging_branch_unifies_with_any_sibling() {
+    let source = r#"
+val tryit : int -> (int, int)
+function tryit(x) =
+  match x {
+    0 => (1, 2),
+    _ => exit()
+  }
+"#;
+    let file = File::new(source.to_string());
+    let diags = file.lsp_diagnostics();
+    let type_errors: Vec<_> = diags
+        .iter()
+        .filter(|d| diagnostic_code_str(d) == Some("type-error"))
+        .collect();
+    assert!(
+        type_errors.is_empty(),
+        "expected no type errors, got: {type_errors:?}"
+    );
+}
+
+/// Conditional types `bits(if cond then N else M)` cannot be evaluated
+/// without an SMT solver. The LSP should be permissive and not flag the
+/// branch return values as subtype violations.
+#[test]
+fn conditional_type_in_signature_does_not_flag_branches() {
+    let source = r#"
+val PPN_of : forall 'pte_size, 'pte_size in {32, 64}.
+  bits('pte_size) -> bits(if 'pte_size == 32 then 22 else 44)
+function PPN_of(pte) = if 'pte_size == 32 then pte[31 .. 10] else pte[53 .. 10]
+"#;
+    let file = File::new(source.to_string());
+    let diags = file.lsp_diagnostics();
+    let type_errors: Vec<_> = diags
+        .iter()
+        .filter(|d| diagnostic_code_str(d) == Some("type-error"))
+        .collect();
+    assert!(
+        type_errors.is_empty(),
+        "expected no type errors, got: {type_errors:?}"
+    );
+}
+
+#[test]
+fn foreach_loop_bounds_count_as_variable_usage() {
+    // Upstream `sail/src/lib/rewriter.ml::e_for` joins used-id sets from
+    // start, end, step AND body. Our previous analyzer only walked the
+    // body, so variables only referenced in the loop bounds were
+    // incorrectly flagged as unused.
+    let source = r#"
+val f : int -> unit
+function f(n) = {
+  let eg_start : int = 0;
+  let eg_len   : int = n;
+  foreach (i from eg_start to (eg_len - 1)) {
+    let _ = i;
+    ()
+  }
+}
+"#;
+    let file = File::new(source.to_string());
+    let unused: Vec<_> = file
+        .lsp_diagnostics()
+        .into_iter()
+        .filter(|d| diagnostic_code_str(d) == Some("unused-variable"))
+        .collect();
+    assert!(
+        unused.is_empty(),
+        "foreach-bound bindings wrongly flagged as unused: {unused:?}"
+    );
+}
+
+#[test]
+fn foreach_iterator_is_not_flagged_as_unused() {
+    // The loop iterator itself is never reported as unused, matching
+    // upstream (`lint.ml` never adds the `E_for` binder to the pattern
+    // set, so it's neither warned nor tracked).
+    let source = r#"
+function f() = {
+  foreach (i from 0 to 10) { () }
+}
+"#;
+    let file = File::new(source.to_string());
+    let unused: Vec<_> = file
+        .lsp_diagnostics()
+        .into_iter()
+        .filter(|d| diagnostic_code_str(d) == Some("unused-variable"))
+        .collect();
+    assert!(
+        unused.is_empty(),
+        "foreach iterator wrongly flagged as unused: {unused:?}"
+    );
+}
+
+#[test]
+fn function_clause_tuple_params_bind_all_names() {
+    // `val f : (A, B) -> C` paired with `function clause f(x, y) = ...`
+    // declares one tuple param but two clause patterns. The checker
+    // should flatten the tuple so both `x` and `y` enter the local
+    // environment — previously `y` was silently dropped and references
+    // to it were reported as "Unresolved identifier" under workspace mode.
+    let source = r#"
+val write_csr : (int, bits(32)) -> unit
+function clause write_csr(0x1, value) = { let _ = value; () }
+function clause write_csr(0x2, value) = { let _ = value; () }
+"#;
+    let mut file = File::new(source.to_string());
+    let snapshot = vec![file.clone()];
+    file.recompute_diagnostics_with_workspace(&snapshot);
+    let diagnostics = file.lsp_diagnostics();
+    let unresolved: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| {
+            diagnostic_code_str(d) == Some("type-error")
+                && d.message.contains("Unresolved identifier")
+        })
+        .collect();
+    assert!(
+        unresolved.is_empty(),
+        "expected no unresolved-identifier errors, got: {unresolved:?}"
+    );
+}
+
+#[test]
+fn let_typevar_binding_exposes_value_binding() {
+    // `let 'N = expr` in Sail introduces both the type variable `'N` and
+    // a value binding `N`. The checker should know about `N` so later
+    // references don't report it as unresolved, even under workspace-aware
+    // type checking (where the strict unresolved-identifier check runs).
+    let source = r#"
+val get_n : unit -> int
+function get_n() = 4
+function f() -> int = {
+  let 'N = get_n();
+  N + 1
+}
+"#;
+    let mut file = File::new(source.to_string());
+    let snapshot = vec![file.clone()];
+    file.recompute_diagnostics_with_workspace(&snapshot);
+
+    let diagnostics = file.lsp_diagnostics();
+    let unresolved: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| {
+            diagnostic_code_str(d) == Some("type-error")
+                && d.message.contains("Unresolved identifier")
+        })
+        .collect();
+    assert!(
+        unresolved.is_empty(),
+        "expected no unresolved-identifier errors, got: {unresolved:?}"
+    );
+}
+
+

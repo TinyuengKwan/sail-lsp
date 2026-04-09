@@ -145,6 +145,42 @@ pub(crate) fn quick_fix_for_diagnostic(
     Some((format!("Insert missing `{token}`"), edit, false))
 }
 
+/// Quick fix for `unused-variable`: prefix the variable name with `_`
+/// to silence the warning while preserving the binding's structural role.
+/// This matches both the upstream Sail convention (`_` prefix marks
+/// intentionally-unused identifiers) and rust-analyzer's suggestion.
+pub(crate) fn unused_variable_fix(
+    file: &File,
+    diagnostic: &Diagnostic,
+) -> Option<(String, TextEdit, bool)> {
+    let code_str = match diagnostic.code.as_ref()? {
+        tower_lsp::lsp_types::NumberOrString::String(s) => s.as_str(),
+        _ => return None,
+    };
+    if code_str != "unused-variable" {
+        return None;
+    }
+    // The diagnostic range is the variable name. Extract it from the source
+    // to make sure we're not double-prefixing an already-`_`-prefixed name.
+    let start_offset = file.source.offset_at(&diagnostic.range.start);
+    let end_offset = file.source.offset_at(&diagnostic.range.end);
+    let name = file.source.text().get(start_offset..end_offset)?;
+    if name.starts_with('_') {
+        return None;
+    }
+    Some((
+        format!("Rename `{name}` to `_{name}`"),
+        TextEdit {
+            range: tower_lsp::lsp_types::Range::new(
+                diagnostic.range.start,
+                diagnostic.range.start,
+            ),
+            new_text: "_".to_string(),
+        },
+        true,
+    ))
+}
+
 pub(crate) fn var_to_let_fix(file: &File, diagnostic: &Diagnostic) -> Option<(String, TextEdit, bool)> {
     let code_str = match diagnostic.code.as_ref()? {
         tower_lsp::lsp_types::NumberOrString::String(s) => s.as_str(),

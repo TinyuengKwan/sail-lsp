@@ -556,16 +556,13 @@ impl<'a> ParseDiagnosticCollector<'a> {
                 self.collect_expr_warnings(body);
             }
             Expr::Cast { expr: inner, ty } => {
-                self.warnings.warn(
-                    self.file,
-                    &mut self.diagnostics,
-                    DiagnosticCode::DeprecatedCastAnnotation,
-                    "Deprecated",
-                    expr.1,
-                    Message::line(
-                        "Cast annotations are deprecated. They will be removed in a future version of the language.",
-                    ),
-                );
+                // NOTE: our `Expr::Cast` actually represents Sail's `E_typ`
+                // (type ascription `expr : type`), which is NOT deprecated.
+                // Upstream Sail (`parser.mly:182`) only emits the "Cast
+                // annotations are deprecated" warning for the legacy
+                // `val cast f : type` declaration form, never for the
+                // ascription form. We previously misclassified all 134
+                // ascriptions in the sail-riscv corpus as deprecated.
                 self.collect_expr_warnings(inner);
                 self.collect_type_warnings(ty);
             }

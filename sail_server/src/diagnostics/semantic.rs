@@ -330,7 +330,27 @@ impl<'a> AstSemanticAnalyzer<'a> {
                 self.analyze_match_like(scrutinee, cases)
             }
             AstExpr::Foreach(foreach) => {
+                // Match upstream Sail's `E_for` handling in
+                // `sail/src/lib/rewriter.ml::e_for`, which joins used-id
+                // sets from start, end, step, AND body. Previously we
+                // only walked the body, so variables only referenced in
+                // the loop bounds (e.g. `foreach (i from eg_start to
+                // eg_len - 1)`) were incorrectly flagged as unused.
+                self.analyze_expr(&foreach.start);
+                self.analyze_expr(&foreach.end);
+                if let Some(step) = &foreach.step {
+                    self.analyze_expr(step);
+                }
+                // Introduce the loop iterator in its own scope so the
+                // body can reference it. Upstream's `lint.ml` never
+                // reports the iterator as unused (it's not collected via
+                // a pattern — `E_for`'s bound id is skipped entirely),
+                // so mark it as warn_unused=false.
+                self.tracker.push_scope();
+                self.tracker
+                    .define_binding(&foreach.iterator.0, foreach.iterator.1, false, false);
                 self.analyze_expr(&foreach.body);
+                self.tracker.pop_scope(self.file, &mut self.diagnostics);
                 false
             }
             AstExpr::Repeat {

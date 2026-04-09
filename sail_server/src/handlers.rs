@@ -48,7 +48,7 @@ use crate::actions::{
     guarded_return_edits, inline_variable_edits, invert_if_edits, lazy_code_action_data,
     line_to_block_comment_edits, organize_imports_edits, pull_assignment_up_edits,
     quick_fix_for_diagnostic, remove_unused_imports_edits, resolve_code_action_edit_from_data,
-    sail_source_fix_all_kind, sort_items_edits, toggle_doc_comment_edits,
+    sail_source_fix_all_kind, sort_items_edits, toggle_doc_comment_edits, unused_variable_fix,
     unwrap_block_edits, var_to_let_fix, bitfield_accessor_edits,
 };
 use crate::backend::{should_schedule_typecheck, Backend, SAIL_BUILTINS, SAIL_KEYWORDS};
@@ -1190,6 +1190,21 @@ impl LanguageServer for Backend {
                     }));
                 }
             }
+            if let Some((title, edit, is_preferred)) = unused_variable_fix(file, diagnostic) {
+                let kind = CodeActionKind::QUICKFIX;
+                if code_action_kind_allowed(&requested_kinds, &kind) {
+                    actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                        title,
+                        kind: Some(kind),
+                        diagnostics: Some(vec![diagnostic.clone()]),
+                        edit: None,
+                        command: None,
+                        is_preferred: Some(is_preferred),
+                        disabled: None,
+                        data: Some(lazy_code_action_data(uri, &[edit])),
+                    }));
+                }
+            }
         }
 
         // "Fix all X" actions: group fixes by diagnostic code.
@@ -1203,7 +1218,8 @@ impl LanguageServer for Backend {
                 let Some(code_str) = code_str else { continue };
                 let edit = quick_fix_for_diagnostic(file, diagnostic)
                     .map(|(_, e, _)| e)
-                    .or_else(|| var_to_let_fix(file, diagnostic).map(|(_, e, _)| e));
+                    .or_else(|| var_to_let_fix(file, diagnostic).map(|(_, e, _)| e))
+                    .or_else(|| unused_variable_fix(file, diagnostic).map(|(_, e, _)| e));
                 if let Some(edit) = edit {
                     by_code.entry(code_str).or_default().push(edit);
                 }
