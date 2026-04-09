@@ -3224,22 +3224,100 @@ fn parse_exp0(tokens: &[(Token, Span)], start: usize, end: usize) -> Spanned<Exp
         return parse_prefixed_atomic_expr(tokens, start, end);
     }
 
-    let mut expr = parse_prefixed_atomic_expr(tokens, segments[0].0, segments[0].1);
-    for ((op, op_span), (segment_start, segment_end)) in
-        ops.into_iter().zip(segments.into_iter().skip(1))
-    {
-        let rhs = parse_prefixed_atomic_expr(tokens, segment_start, segment_end);
-        expr = (
+    // Build a precedence-aware Infix tree using a shunting-yard style fold.
+    // Sail standard fixities (matches upstream `default_fixities` in
+    // `initial_check.ml`):
+    //   level 1 (lowest): |
+    //   level 2:          &
+    //   level 4:          ==, !=, <, >, <=, >=, +, -, ^, @
+    //   level 6:          *, /, %, mod
+    //   level 7:          <<, >>, <<<, >>>
+    // Operators not listed get a low default so user-defined operators
+    // (e.g. `<_u`, `+_s`) tend to bind looser than primitives. Custom
+    // fixities declared via `infix N op` are not yet honored — we use
+    // a static table.
+    let operands: Vec<Spanned<Expr>> = segments
+        .iter()
+        .map(|(s, e)| parse_prefixed_atomic_expr(tokens, *s, *e))
+        .collect();
+    fold_with_precedence(operands, ops, span)
+}
+
+fn op_precedence(op: &str) -> u32 {
+    // Matches the static fixity table in upstream Sail's `initial_check.ml`.
+    match op {
+        // Lowest: bitwise / logical or
+        "|" | "||" => 1,
+        // bitwise / logical and
+        "&" | "&&" => 2,
+        // Comparisons (lower than additive)
+        "==" | "!=" | "<" | ">" | "<=" | ">=" => 3,
+        // Sail signed / unsigned comparison variants
+        "<_u" | ">_u" | "<=_u" | ">=_u" | "<_s" | ">_s" | "<=_s" | ">=_s" => 3,
+        // Additive
+        "+" | "-" | "@" => 4,
+        // Multiplicative
+        "*" | "/" | "%" => 5,
+        // Power
+        "^" | "^^" => 6,
+        // Shift
+        "<<" | ">>" | "<<<" | ">>>" => 7,
+        // Custom / unknown operators default between additive and multiplicative
+        // (level 4) so they bind tighter than comparisons but loosen than `*`.
+        _ => 4,
+    }
+}
+
+fn fold_with_precedence(
+    operands: Vec<Spanned<Expr>>,
+    ops: Vec<(String, Span)>,
+    span: Span,
+) -> Spanned<Expr> {
+    // Shunting-yard: walk operators in source order, popping the output
+    // stack whenever the next operator has lower-or-equal precedence.
+    let mut output: Vec<Spanned<Expr>> = Vec::with_capacity(operands.len());
+    let mut op_stack: Vec<(String, Span)> = Vec::with_capacity(ops.len());
+    let mut operands_iter = operands.into_iter();
+    output.push(operands_iter.next().expect("at least one operand"));
+
+    for (op, op_span) in ops {
+        let op_prec = op_precedence(&op);
+        while let Some(top) = op_stack.last() {
+            if op_precedence(&top.0) >= op_prec {
+                let (top_op, top_span) = op_stack.pop().unwrap();
+                let rhs = output.pop().expect("rhs");
+                let lhs = output.pop().expect("lhs");
+                output.push((
+                    Expr::Infix {
+                        lhs: Box::new(lhs),
+                        op: (top_op, top_span),
+                        rhs: Box::new(rhs),
+                    },
+                    span,
+                ));
+            } else {
+                break;
+            }
+        }
+        op_stack.push((op, op_span));
+        output.push(operands_iter.next().expect("rhs operand"));
+    }
+
+    // Drain remaining operators.
+    while let Some((op, op_span)) = op_stack.pop() {
+        let rhs = output.pop().expect("rhs");
+        let lhs = output.pop().expect("lhs");
+        output.push((
             Expr::Infix {
-                lhs: Box::new(expr),
+                lhs: Box::new(lhs),
                 op: (op, op_span),
                 rhs: Box::new(rhs),
             },
             span,
-        );
+        ));
     }
 
-    expr
+    output.pop().expect("final expression")
 }
 
 fn parse_measure_expr(

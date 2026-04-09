@@ -2756,6 +2756,19 @@ fn unify_value(expected: &str, actual: &str, subst: &mut Subst) -> bool {
         return true;
     }
 
+    // Conditional types: `if cond then N else M` cannot be evaluated without
+    // knowing `cond`. The local LSP type checker has no SMT solver, so be
+    // permissive — accept any actual that COULD match either branch.
+    let is_conditional = |s: &str| {
+        let t = s.trim();
+        (t.starts_with("if ") || t.contains(" if "))
+            && t.contains(" then ")
+            && t.contains(" else ")
+    };
+    if is_conditional(expected) || is_conditional(actual) {
+        return true;
+    }
+
     if expected.starts_with('\'') {
         match subst.values.get(expected) {
             Some(bound) => {
@@ -2867,14 +2880,16 @@ fn unify(expected: &Ty, actual: &Ty, subst: &mut Subst) -> bool {
             {
                 return true;
             }
-            // Sail subtyping: int ↔ range(...) ↔ atom(...) ↔ nat are all
-            // numeric and the LSP can't verify exact constraints. Treat them
-            // as compatible to avoid false positives.
+            // Sail subtyping: int ↔ range(...) ↔ atom(...) ↔ nat ↔ int(N)
+            // are all numeric and the LSP can't verify exact constraints.
+            // Treat them as compatible to avoid false positives.
             let is_numeric = |t: &str| {
                 t == "int"
                     || t == "nat"
                     || t.starts_with("range(")
                     || t.starts_with("atom(")
+                    || t.starts_with("int(")
+                    || t.starts_with("nat(")
             };
             if is_numeric(expected.as_str()) && is_numeric(&actual_text) {
                 return true;
@@ -2939,16 +2954,20 @@ fn unify(expected: &Ty, actual: &Ty, subst: &mut Subst) -> bool {
             args: expected_args,
             ..
         } => {
-            // Sail subtyping: range/atom/nat/int are all numeric. Treat them
-            // as compatible without verifying constraints (no SMT in LSP).
+            // Sail subtyping: range/atom/nat/int and parameterized int(N) /
+            // atom(N) / nat(N) are all numeric. Treat them as compatible
+            // without verifying constraints (no SMT in LSP).
             let actual_text = actual.text();
-            let numeric_app =
-                |name: &str| name == "range" || name == "atom";
+            let numeric_app = |name: &str| {
+                name == "range" || name == "atom" || name == "int" || name == "nat"
+            };
             if numeric_app(expected_name)
                 && (actual_text == "int"
                     || actual_text == "nat"
                     || actual_text.starts_with("range(")
-                    || actual_text.starts_with("atom("))
+                    || actual_text.starts_with("atom(")
+                    || actual_text.starts_with("int(")
+                    || actual_text.starts_with("nat("))
             {
                 return true;
             }
@@ -3092,6 +3111,15 @@ impl<'a> Checker<'a> {
         if !ty.is_unknown() {
             self.binding_types.insert((span.start, span.end), ty.text());
         }
+    }
+
+    /// Unify two types, resolving cross-file type aliases on both sides first.
+    /// Use this instead of calling the bare `unify` free function whenever
+    /// you have access to a `Checker`.
+    fn unify_with_aliases(&self, expected: &Ty, actual: &Ty, subst: &mut Subst) -> bool {
+        let expected = self.env.resolve_alias(expected);
+        let actual = self.env.resolve_alias(actual);
+        unify(&expected, &actual, subst)
     }
 
     fn expect_type(&mut self, span: Span, actual: &Ty, expected: &Ty) -> bool {
@@ -3939,6 +3967,9 @@ impl<'a> Checker<'a> {
         }
 
         let base_ty = self.infer_expr(&call.args[0], locals);
+        // Resolve type aliases (e.g. xlenbits → bits(64)) so downstream
+        // checks can recognize the underlying form.
+        let base_ty = self.env.resolve_alias(&base_ty);
         let call_span = Span::new(call.args[0].1.start, call.close_span.end);
         if let Some((bitfield_name, _)) = self.bitfield_info_for_type(&base_ty) {
             match &call.args[1].0 {
@@ -3977,6 +4008,20 @@ impl<'a> Checker<'a> {
             }
         }
 
+        // If the base type isn't a recognized collection (bits/vector/list/etc.)
+        // it may be a cross-file bitfield we don't have info for. Return
+        // Unknown without trying to type-check the "index" — which might
+        // actually be a field name that looks like an enum member elsewhere.
+        let base_text = base_ty.text();
+        let is_recognized_collection = base_text.starts_with("bits(")
+            || base_text.starts_with("vector(")
+            || base_text.starts_with("list(")
+            || base_text == "bit";
+        if !is_recognized_collection && !matches!(base_ty, Ty::Unknown) {
+            self.infer_expr(&call.args[1], locals);
+            return Ty::Unknown;
+        }
+
         let index_ty = self.infer_expr(&call.args[1], locals);
         self.expect_int_type(call.args[1].1, &index_ty);
         self.check_collection_index_bounds(&call.args[1], &base_ty, locals);
@@ -4005,6 +4050,9 @@ impl<'a> Checker<'a> {
         }
 
         let base_ty = self.infer_expr(&call.args[0], locals);
+        // Resolve type aliases (e.g. flenbits → bits(flen)) so the slice
+        // width can be computed correctly.
+        let base_ty = self.env.resolve_alias(&base_ty);
         let start_ty = self.infer_expr(&call.args[1], locals);
         self.expect_int_type(call.args[1].1, &start_ty);
         let end_ty = self.infer_expr(&call.args[2], locals);
@@ -6400,7 +6448,7 @@ impl<'a> Checker<'a> {
                     else_ty
                 } else if matches!(else_ty, Ty::Unknown) {
                     then_ty
-                } else if unify(&then_ty, &else_ty, &mut subst) {
+                } else if self.unify_with_aliases(&then_ty, &else_ty, &mut subst) {
                     apply_subst(&then_ty, &subst)
                 } else {
                     self.push_error(
@@ -6496,7 +6544,9 @@ impl<'a> Checker<'a> {
                 match op.0.as_str() {
                     "not" => {
                         let mut subst = Subst::default();
-                        if !unify(&Ty::Text("bool".to_string()), &inner_ty, &mut subst) {
+                        if !matches!(inner_ty, Ty::Unknown)
+                            && !unify(&Ty::Text("bool".to_string()), &inner_ty, &mut subst)
+                        {
                             self.push_error(
                                 DiagnosticCode::TypeError,
                                 inner.1,
@@ -6509,7 +6559,8 @@ impl<'a> Checker<'a> {
                         }
                         Ty::Text("bool".to_string())
                     }
-                    "-" => inner_ty,
+                    // Negation and bitwise NOT preserve the inner type.
+                    "-" | "~" => inner_ty,
                     _ => Ty::Unknown,
                 }
             }
@@ -6778,17 +6829,41 @@ impl<'a> Checker<'a> {
                 }
                 Ty::Text("bool".to_string())
             }
-            "==" | "!=" | "<" | ">" | "<=" | ">=" => {
+            "==" | "!=" | "<" | ">" | "<=" | ">="
+            | "<_u" | ">_u" | "<=_u" | ">=_u"
+            | "<_s" | ">_s" | "<=_s" | ">=_s" => {
                 let mut subst = Subst::default();
                 // Comparisons in Sail allow comparing any two compatible types
                 // including bitvectors of polymorphic widths. Be permissive
-                // when either side involves Unknown or polymorphic types.
+                // when either side involves Unknown, polymorphic types, or
+                // a custom (non-primitive) type alias that the local checker
+                // can't fully resolve — Sail allows comparing bit-encodings
+                // against named types (e.g. `pmpAddrMatchType_encdec(x) == TOR`
+                // where the encoder returns `bits(2)` and TOR is an enum).
                 let lhs_text = lhs_ty.text();
                 let rhs_text = rhs_ty.text();
+                let primitives = [
+                    "int", "nat", "bool", "string", "unit", "real", "bit", "_",
+                ];
+                let is_primitive_or_collection = |ty: &Ty, text: &str| {
+                    primitives.contains(&text)
+                        || text.starts_with("bits(")
+                        || text.starts_with("vector(")
+                        || text.starts_with("list(")
+                        || text.starts_with("range(")
+                        || text.starts_with("atom(")
+                        || text.starts_with("int(")
+                        || text.starts_with("nat(")
+                        || matches!(ty, Ty::Tuple(_) | Ty::App { .. })
+                };
                 let has_polymorphism = lhs_text.contains('\'')
                     || rhs_text.contains('\'')
                     || matches!(lhs_ty, Ty::Unknown)
-                    || matches!(rhs_ty, Ty::Unknown);
+                    || matches!(rhs_ty, Ty::Unknown)
+                    || (matches!(lhs_ty, Ty::Text(_))
+                        && !is_primitive_or_collection(&lhs_ty, &lhs_text))
+                    || (matches!(rhs_ty, Ty::Text(_))
+                        && !is_primitive_or_collection(&rhs_ty, &rhs_text));
                 if !has_polymorphism && !unify(&lhs_ty, &rhs_ty, &mut subst) {
                     self.push_error(
                         DiagnosticCode::TypeError,
@@ -6827,19 +6902,29 @@ impl<'a> Checker<'a> {
             "+" | "-" | "*" | "/" => {
                 // Sail's arithmetic operators are heavily overloaded:
                 // int + int, real + real, bits + bits, range + range, etc.
-                // The local checker doesn't know all overloads or cross-file
-                // type aliases (like xlenbits). Skip the operand check
-                // entirely — only the result type needs to be inferred.
-                let lhs_text = lhs_ty.text();
-                let rhs_text = rhs_ty.text();
-                if lhs_text.starts_with("bits(") {
+                // The local checker doesn't know all overloads, so just pick
+                // a sensible result type from the operand types. Resolve type
+                // aliases (xlenbits → bits(64)) so we can recognize bitvector
+                // operands.
+                let lhs_resolved = self.env.resolve_alias(&lhs_ty);
+                let rhs_resolved = self.env.resolve_alias(&rhs_ty);
+                let lhs_text = lhs_resolved.text();
+                let rhs_text = rhs_resolved.text();
+                let is_bits = |t: &str| t.starts_with("bits(");
+                if is_bits(&lhs_text) {
                     lhs_ty
-                } else if rhs_text.starts_with("bits(") {
+                } else if is_bits(&rhs_text) {
                     rhs_ty
                 } else if lhs_text == "real" || rhs_text == "real" {
                     Ty::Text("real".to_string())
                 } else if matches!(lhs_ty, Ty::Unknown) && matches!(rhs_ty, Ty::Unknown) {
                     Ty::Unknown
+                } else if matches!(lhs_ty, Ty::Unknown) {
+                    // One side known, the other unknown — return the known
+                    // side (which may be a custom type alias).
+                    rhs_ty
+                } else if matches!(rhs_ty, Ty::Unknown) {
+                    lhs_ty
                 } else {
                     Ty::Text("int".to_string())
                 }
@@ -6889,7 +6974,7 @@ impl<'a> Checker<'a> {
                         continue;
                     }
                     let mut subst = Subst::default();
-                    if !unify(prev_ty, &body_ty, &mut subst) {
+                    if !self.unify_with_aliases(prev_ty, &body_ty, &mut subst) {
                         self.push_error(
                             DiagnosticCode::TypeError,
                             case.0.body.1,

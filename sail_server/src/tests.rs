@@ -1765,3 +1765,157 @@ fn no_unmodified_warning_when_var_is_assigned() {
         "Should not warn when var is modified, got: {lsp_diagnostics:?}"
     );
 }
+
+/// Operator precedence: `==` should bind tighter than `|` so that
+/// `a == b | c == d` parses as `(a == b) | (c == d)` (both bool).
+#[test]
+fn parses_comparison_with_lower_precedence_or() {
+    let source = r#"
+val foo : (int, int, int) -> bool
+function foo(num_elem, group_size, elem_per_reg) =
+  num_elem == group_size * elem_per_reg | num_elem == 2 * group_size * elem_per_reg
+"#;
+    let file = File::new(source.to_string());
+    let diags = file.lsp_diagnostics();
+    let type_errors: Vec<_> = diags
+        .iter()
+        .filter(|d| diagnostic_code_str(d) == Some("type-error"))
+        .collect();
+    assert!(
+        type_errors.is_empty(),
+        "expected no type errors, got: {type_errors:?}"
+    );
+}
+
+/// Operator precedence: comparisons bind looser than arithmetic.
+/// `a + b > c ^ d - 1` should parse as `(a + b) > ((c ^ d) - 1)`.
+#[test]
+fn parses_arithmetic_tighter_than_comparison() {
+    let source = r#"
+val foo : (int, int, int) -> bool
+function foo(a, b, sew) = a + b > 2 ^ sew - 1
+"#;
+    let file = File::new(source.to_string());
+    let diags = file.lsp_diagnostics();
+    let type_errors: Vec<_> = diags
+        .iter()
+        .filter(|d| diagnostic_code_str(d) == Some("type-error"))
+        .collect();
+    assert!(
+        type_errors.is_empty(),
+        "expected no type errors, got: {type_errors:?}"
+    );
+}
+
+/// `int(N)` (parameterized atom type) should be treated as numeric and
+/// compatible with `int` for LSP purposes.
+#[test]
+fn parameterized_int_unifies_with_int() {
+    let source = r#"
+type myrange = { 'q, 'q > 0 & 'q <= 8. int('q) }
+val to_myrange : int -> myrange
+"#;
+    let file = File::new(source.to_string());
+    let diags = file.lsp_diagnostics();
+    let type_errors: Vec<_> = diags
+        .iter()
+        .filter(|d| diagnostic_code_str(d) == Some("type-error"))
+        .collect();
+    assert!(
+        type_errors.is_empty(),
+        "expected no type errors, got: {type_errors:?}"
+    );
+}
+
+/// Type aliases should be resolved when slicing: a slice of `xlenbits`
+/// (alias for `bits(64)`) should produce a `bits(N)` of the slice width,
+/// not propagate the alias name.
+#[test]
+fn slice_through_type_alias_returns_bits() {
+    let source = r#"
+type mybits = bits(64)
+val first16 : mybits -> bits(16)
+function first16(v) = v[15 .. 0]
+"#;
+    let file = File::new(source.to_string());
+    let diags = file.lsp_diagnostics();
+    let type_errors: Vec<_> = diags
+        .iter()
+        .filter(|d| diagnostic_code_str(d) == Some("type-error"))
+        .collect();
+    assert!(
+        type_errors.is_empty(),
+        "expected no type errors, got: {type_errors:?}"
+    );
+}
+
+/// `Sail` assignments are statements that always have type `unit`, not
+/// the rhs type. A unit-returning function whose body is an assignment
+/// should typecheck cleanly.
+#[test]
+fn assignment_expression_has_unit_type() {
+    let source = r#"
+register r : int
+val set_r : int -> unit
+function set_r(v) = {
+  r = v
+}
+"#;
+    let file = File::new(source.to_string());
+    let diags = file.lsp_diagnostics();
+    let type_errors: Vec<_> = diags
+        .iter()
+        .filter(|d| diagnostic_code_str(d) == Some("type-error"))
+        .collect();
+    assert!(
+        type_errors.is_empty(),
+        "expected no type errors, got: {type_errors:?}"
+    );
+}
+
+/// Match arms where one branch diverges via `exit()` should unify with
+/// any sibling branch type.
+#[test]
+fn diverging_branch_unifies_with_any_sibling() {
+    let source = r#"
+val tryit : int -> (int, int)
+function tryit(x) =
+  match x {
+    0 => (1, 2),
+    _ => exit()
+  }
+"#;
+    let file = File::new(source.to_string());
+    let diags = file.lsp_diagnostics();
+    let type_errors: Vec<_> = diags
+        .iter()
+        .filter(|d| diagnostic_code_str(d) == Some("type-error"))
+        .collect();
+    assert!(
+        type_errors.is_empty(),
+        "expected no type errors, got: {type_errors:?}"
+    );
+}
+
+/// Conditional types `bits(if cond then N else M)` cannot be evaluated
+/// without an SMT solver. The LSP should be permissive and not flag the
+/// branch return values as subtype violations.
+#[test]
+fn conditional_type_in_signature_does_not_flag_branches() {
+    let source = r#"
+val PPN_of : forall 'pte_size, 'pte_size in {32, 64}.
+  bits('pte_size) -> bits(if 'pte_size == 32 then 22 else 44)
+function PPN_of(pte) = if 'pte_size == 32 then pte[31 .. 10] else pte[53 .. 10]
+"#;
+    let file = File::new(source.to_string());
+    let diags = file.lsp_diagnostics();
+    let type_errors: Vec<_> = diags
+        .iter()
+        .filter(|d| diagnostic_code_str(d) == Some("type-error"))
+        .collect();
+    assert!(
+        type_errors.is_empty(),
+        "expected no type errors, got: {type_errors:?}"
+    );
+}
+
