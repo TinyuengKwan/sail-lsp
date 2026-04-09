@@ -42,19 +42,25 @@ use tower_lsp::lsp_types::{
 use tower_lsp::LanguageServer;
 
 use crate::actions::{
-    code_action_kind_allowed, default_code_action_format_options, extract_local_let_edits,
-    lazy_code_action_data, organize_imports_edits, quick_fix_for_diagnostic,
-    resolve_code_action_edit_from_data, sail_source_fix_all_kind, var_to_let_fix,
+    add_missing_match_arms_edits, apply_demorgan_edits, block_to_line_comment_edits,
+    code_action_kind_allowed, default_code_action_format_options, extract_function_edits,
+    extract_local_let_edits, flip_binexpr_edits, generate_doc_template_edits,
+    guarded_return_edits, inline_variable_edits, invert_if_edits, lazy_code_action_data,
+    line_to_block_comment_edits, organize_imports_edits, pull_assignment_up_edits,
+    quick_fix_for_diagnostic, remove_unused_imports_edits, resolve_code_action_edit_from_data,
+    sail_source_fix_all_kind, sort_items_edits, toggle_doc_comment_edits,
+    unwrap_block_edits, var_to_let_fix, bitfield_accessor_edits,
 };
 use crate::backend::{should_schedule_typecheck, Backend, SAIL_BUILTINS, SAIL_KEYWORDS};
 use crate::completion::{
     build_completion_items, completion_prefix, completion_trigger_characters,
-    resolve_completion_item,
+    postfix_completions, pragma_completions, resolve_completion_item, snippet_completions,
 };
 use crate::diagnostics::{document_diagnostic_report_for_file, workspace_diagnostic_report};
 use crate::formatting::{
-    document_links_for_file, format_document_edits, linked_editing_ranges_for_position,
-    make_selection_range, on_enter_edits, range_format_document_edits,
+    document_links_for_file, format_document_edits, join_lines_edits,
+    linked_editing_ranges_for_position, make_selection_range, matching_brace_position,
+    move_item_edits, on_enter_edits, range_format_document_edits, MoveDirection,
 };
 use crate::hover::hover_for_symbol;
 use crate::inlay_hints::{inlay_hints_for_range, resolve_inlay_hint};
@@ -163,6 +169,7 @@ impl LanguageServer for Backend {
                             sail_source_fix_all_kind(),
                             CodeActionKind::REFACTOR_REWRITE,
                             CodeActionKind::REFACTOR_EXTRACT,
+                            CodeActionKind::REFACTOR_INLINE,
                             CodeActionKind::SOURCE_ORGANIZE_IMPORTS,
                         ]),
                         resolve_provider: Some(true),
@@ -178,7 +185,12 @@ impl LanguageServer for Backend {
                 document_range_formatting_provider: Some(OneOf::Left(true)),
                 document_on_type_formatting_provider: Some(DocumentOnTypeFormattingOptions {
                     first_trigger_character: "\n".to_string(),
-                    more_trigger_character: Some(vec!["}".to_string(), ";".to_string()]),
+                    more_trigger_character: Some(vec![
+                        "}".to_string(),
+                        ";".to_string(),
+                        "=".to_string(),
+                        ">".to_string(),
+                    ]),
                 }),
                 document_link_provider: Some(DocumentLinkOptions {
                     resolve_provider: Some(true),
@@ -216,7 +228,14 @@ impl LanguageServer for Backend {
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 execute_command_provider: Some(tower_lsp::lsp_types::ExecuteCommandOptions {
-                    commands: vec!["sail.noop".to_string(), "sail.run".to_string()],
+                    commands: vec![
+                        "sail.noop".to_string(),
+                        "sail.run".to_string(),
+                        "sail.matchingBrace".to_string(),
+                        "sail.joinLines".to_string(),
+                        "sail.moveItemUp".to_string(),
+                        "sail.moveItemDown".to_string(),
+                    ],
                     ..Default::default()
                 }),
                 completion_provider: Some(CompletionOptions {
@@ -688,6 +707,38 @@ impl LanguageServer for Backend {
             return Ok(None);
         };
 
+        // Check if the cursor is on a control-flow keyword for enhanced highlighting
+        if let Some((token, _span)) = file.token_at(position) {
+            let related = match token {
+                sail_parser::Token::KwReturn
+                | sail_parser::Token::KwThrow
+                | sail_parser::Token::KwExit => {
+                    // Highlight all exit points in the containing function
+                    highlight_exit_points(file, position)
+                }
+                sail_parser::Token::KwForeach
+                | sail_parser::Token::KwWhile
+                | sail_parser::Token::KwRepeat => {
+                    // Highlight loop keyword and all break-like expressions in the loop body
+                    highlight_loop_points(file, position)
+                }
+                sail_parser::Token::KwIf | sail_parser::Token::KwElse => {
+                    // Highlight all if/else keywords in the same if-else chain
+                    highlight_branch_points(file, position)
+                }
+                sail_parser::Token::KwMatch => {
+                    // Highlight match keyword and all case arrows
+                    highlight_match_arms(file, position)
+                }
+                _ => None,
+            };
+            if let Some(highlights) = related {
+                if !highlights.is_empty() {
+                    return Ok(Some(highlights));
+                }
+            }
+        }
+
         let Some(symbol) = resolve_symbol_at(file, position) else {
             return Ok(None);
         };
@@ -982,6 +1033,101 @@ impl LanguageServer for Backend {
             }
         }
 
+        // Fold /* ... */ block comments.
+        {
+            let mut block_start: Option<u32> = None;
+            for (line_idx, line) in lines.iter().enumerate() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("/*") && !trimmed.contains("*/") {
+                    block_start = Some(line_idx as u32);
+                } else if trimmed.contains("*/") {
+                    if let Some(start) = block_start {
+                        let end = line_idx as u32;
+                        if end > start {
+                            ranges.push(FoldingRange {
+                                start_line: start,
+                                start_character: None,
+                                end_line: end,
+                                end_character: None,
+                                kind: Some(FoldingRangeKind::Comment),
+                                collapsed_text: Some("/* ... */".to_string()),
+                            });
+                        }
+                        block_start = None;
+                    }
+                }
+            }
+        }
+
+        // Fold consecutive /// doc comment lines.
+        {
+            let mut doc_start: Option<u32> = None;
+            for (line_idx, line) in lines.iter().enumerate() {
+                let is_doc = line.trim().starts_with("///");
+                match (doc_start, is_doc) {
+                    (None, true) => doc_start = Some(line_idx as u32),
+                    (Some(start), false) => {
+                        let end = (line_idx as u32).saturating_sub(1);
+                        if end > start {
+                            ranges.push(FoldingRange {
+                                start_line: start,
+                                start_character: None,
+                                end_line: end,
+                                end_character: None,
+                                kind: Some(FoldingRangeKind::Comment),
+                                collapsed_text: Some("/// ...".to_string()),
+                            });
+                        }
+                        doc_start = None;
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(start) = doc_start {
+                let end = (lines.len() as u32).saturating_sub(1);
+                if end > start {
+                    ranges.push(FoldingRange {
+                        start_line: start,
+                        start_character: None,
+                        end_line: end,
+                        end_character: None,
+                        kind: Some(FoldingRangeKind::Comment),
+                        collapsed_text: Some("/// ...".to_string()),
+                    });
+                }
+            }
+        }
+
+        // AST-based structural folding: functions, match arms, definitions.
+        if let Some(core_ast) = file.core_ast.as_deref() {
+            for (def, def_span) in &core_ast.defs {
+                let start_line = file.source.position_at(def_span.start).line;
+                let end_line = file.source.position_at(def_span.end).line;
+                if end_line > start_line + 1 {
+                    ranges.push(FoldingRange {
+                        start_line,
+                        start_character: None,
+                        end_line,
+                        end_character: None,
+                        kind: Some(FoldingRangeKind::Region),
+                        collapsed_text: None,
+                    });
+                }
+
+                // Fold match arms within callable bodies
+                if let sail_parser::core_ast::DefinitionKind::Callable(c) = &def.kind {
+                    let bodies: Vec<&(sail_parser::core_ast::Expr, sail_parser::Span)> = c
+                        .body
+                        .iter()
+                        .chain(c.clauses.iter().filter_map(|(cl, _)| cl.body.as_ref()))
+                        .collect();
+                    for body in bodies {
+                        collect_match_fold_ranges(body, file, &mut ranges);
+                    }
+                }
+            }
+        }
+
         Ok(Some(ranges))
     }
 
@@ -1178,12 +1324,221 @@ impl LanguageServer for Backend {
                     data: Some(lazy_code_action_data(uri, &edits)),
                 }));
             }
+            if let Some(edits) = extract_function_edits(file, params.range) {
+                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                    title: "Extract selection to function".to_string(),
+                    kind: Some(CodeActionKind::REFACTOR_EXTRACT),
+                    diagnostics: None,
+                    edit: None,
+                    command: None,
+                    is_preferred: Some(false),
+                    disabled: None,
+                    data: Some(lazy_code_action_data(uri, &edits)),
+                }));
+            }
+        }
+
+        // Refactor: Invert If, Flip Binary Expression, De Morgan, Inline Variable, Generate Doc
+        if code_action_kind_allowed(&requested_kinds, &CodeActionKind::REFACTOR_REWRITE) {
+            if let Some(edits) = invert_if_edits(file, params.range) {
+                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                    title: "Invert if/else branches".to_string(),
+                    kind: Some(CodeActionKind::REFACTOR_REWRITE),
+                    diagnostics: None,
+                    edit: None,
+                    command: None,
+                    is_preferred: Some(false),
+                    disabled: None,
+                    data: Some(lazy_code_action_data(uri, &edits)),
+                }));
+            }
+            if let Some(edits) = flip_binexpr_edits(file, params.range) {
+                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                    title: "Flip binary expression operands".to_string(),
+                    kind: Some(CodeActionKind::REFACTOR_REWRITE),
+                    diagnostics: None,
+                    edit: None,
+                    command: None,
+                    is_preferred: Some(false),
+                    disabled: None,
+                    data: Some(lazy_code_action_data(uri, &edits)),
+                }));
+            }
+            if let Some(edits) = apply_demorgan_edits(file, params.range) {
+                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                    title: "Apply De Morgan's law".to_string(),
+                    kind: Some(CodeActionKind::REFACTOR_REWRITE),
+                    diagnostics: None,
+                    edit: None,
+                    command: None,
+                    is_preferred: Some(false),
+                    disabled: None,
+                    data: Some(lazy_code_action_data(uri, &edits)),
+                }));
+            }
+        }
+
+        if code_action_kind_allowed(&requested_kinds, &CodeActionKind::REFACTOR_INLINE) {
+            if let Some(edits) = inline_variable_edits(file, params.range) {
+                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                    title: "Inline variable".to_string(),
+                    kind: Some(CodeActionKind::REFACTOR_INLINE),
+                    diagnostics: None,
+                    edit: None,
+                    command: None,
+                    is_preferred: Some(false),
+                    disabled: None,
+                    data: Some(lazy_code_action_data(uri, &edits)),
+                }));
+            }
+        }
+
+        // New refactors: unwrap block, pull assignment up, guarded return, sort items,
+        // comment conversions, add missing match arms
+        if code_action_kind_allowed(&requested_kinds, &CodeActionKind::REFACTOR_REWRITE) {
+            if let Some(edits) = unwrap_block_edits(file, params.range) {
+                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                    title: "Unwrap block".to_string(),
+                    kind: Some(CodeActionKind::REFACTOR_REWRITE),
+                    diagnostics: None,
+                    edit: None,
+                    command: None,
+                    is_preferred: Some(false),
+                    disabled: None,
+                    data: Some(lazy_code_action_data(uri, &edits)),
+                }));
+            }
+            if let Some(edits) = pull_assignment_up_edits(file, params.range) {
+                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                    title: "Pull assignment up into expression".to_string(),
+                    kind: Some(CodeActionKind::REFACTOR_REWRITE),
+                    diagnostics: None,
+                    edit: None,
+                    command: None,
+                    is_preferred: Some(false),
+                    disabled: None,
+                    data: Some(lazy_code_action_data(uri, &edits)),
+                }));
+            }
+            if let Some(edits) = guarded_return_edits(file, params.range) {
+                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                    title: "Convert to guarded return".to_string(),
+                    kind: Some(CodeActionKind::REFACTOR_REWRITE),
+                    diagnostics: None,
+                    edit: None,
+                    command: None,
+                    is_preferred: Some(false),
+                    disabled: None,
+                    data: Some(lazy_code_action_data(uri, &edits)),
+                }));
+            }
+            if let Some(edits) = sort_items_edits(file, params.range) {
+                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                    title: "Sort members alphabetically".to_string(),
+                    kind: Some(CodeActionKind::REFACTOR_REWRITE),
+                    diagnostics: None,
+                    edit: None,
+                    command: None,
+                    is_preferred: Some(false),
+                    disabled: None,
+                    data: Some(lazy_code_action_data(uri, &edits)),
+                }));
+            }
+            if let Some(edits) = line_to_block_comment_edits(file, params.range) {
+                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                    title: "Convert to block comment".to_string(),
+                    kind: Some(CodeActionKind::REFACTOR_REWRITE),
+                    diagnostics: None,
+                    edit: None,
+                    command: None,
+                    is_preferred: Some(false),
+                    disabled: None,
+                    data: Some(lazy_code_action_data(uri, &edits)),
+                }));
+            }
+            if let Some(edits) = block_to_line_comment_edits(file, params.range) {
+                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                    title: "Convert to line comments".to_string(),
+                    kind: Some(CodeActionKind::REFACTOR_REWRITE),
+                    diagnostics: None,
+                    edit: None,
+                    command: None,
+                    is_preferred: Some(false),
+                    disabled: None,
+                    data: Some(lazy_code_action_data(uri, &edits)),
+                }));
+            }
+            if let Some(edits) = toggle_doc_comment_edits(file, params.range) {
+                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                    title: "Toggle doc comment".to_string(),
+                    kind: Some(CodeActionKind::REFACTOR_REWRITE),
+                    diagnostics: None,
+                    edit: None,
+                    command: None,
+                    is_preferred: Some(false),
+                    disabled: None,
+                    data: Some(lazy_code_action_data(uri, &edits)),
+                }));
+            }
+            if let Some(edits) =
+                add_missing_match_arms_edits(file, params.range, state.all_files())
+            {
+                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                    title: "Add missing match arms".to_string(),
+                    kind: Some(CodeActionKind::REFACTOR_REWRITE),
+                    diagnostics: None,
+                    edit: None,
+                    command: None,
+                    is_preferred: Some(false),
+                    disabled: None,
+                    data: Some(lazy_code_action_data(uri, &edits)),
+                }));
+            }
+        }
+
+        if code_action_kind_allowed(&requested_kinds, &CodeActionKind::SOURCE) {
+            if let Some(edits) = bitfield_accessor_edits(file, params.range) {
+                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                    title: "Generate bitfield accessor functions".to_string(),
+                    kind: Some(CodeActionKind::SOURCE),
+                    diagnostics: None,
+                    edit: None,
+                    command: None,
+                    is_preferred: Some(false),
+                    disabled: None,
+                    data: Some(lazy_code_action_data(uri, &edits)),
+                }));
+            }
+            if let Some(edits) = generate_doc_template_edits(file, params.range) {
+                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                    title: "Generate documentation template".to_string(),
+                    kind: Some(CodeActionKind::SOURCE),
+                    diagnostics: None,
+                    edit: None,
+                    command: None,
+                    is_preferred: Some(false),
+                    disabled: None,
+                    data: Some(lazy_code_action_data(uri, &edits)),
+                }));
+            }
         }
 
         if code_action_kind_allowed(&requested_kinds, &CodeActionKind::SOURCE_ORGANIZE_IMPORTS) {
             if let Some(edits) = organize_imports_edits(file) {
                 actions.push(CodeActionOrCommand::CodeAction(CodeAction {
                     title: "Organize $include directives".to_string(),
+                    kind: Some(CodeActionKind::SOURCE_ORGANIZE_IMPORTS),
+                    diagnostics: None,
+                    edit: None,
+                    command: None,
+                    is_preferred: Some(false),
+                    disabled: None,
+                    data: Some(lazy_code_action_data(uri, &edits)),
+                }));
+            }
+            if let Some(edits) = remove_unused_imports_edits(file) {
+                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                    title: "Remove unused $include directives".to_string(),
                     kind: Some(CodeActionKind::SOURCE_ORGANIZE_IMPORTS),
                     diagnostics: None,
                     edit: None,
@@ -1240,6 +1595,26 @@ impl LanguageServer for Backend {
             SAIL_KEYWORDS,
             SAIL_BUILTINS,
         );
+
+        // Add postfix completions (e.g. expr.if, expr.match, expr.let)
+        items.extend(postfix_completions(file.source.text(), offset, prefix));
+
+        // Add pragma completions (when after @ or $)
+        items.extend(pragma_completions(file.source.text(), offset));
+
+        // Add snippet completions (code templates)
+        let is_top_level = {
+            let mut depth = 0i32;
+            for b in file.source.text()[..offset].bytes() {
+                match b {
+                    b'{' => depth += 1,
+                    b'}' => depth -= 1,
+                    _ => {}
+                }
+            }
+            depth <= 0
+        };
+        items.extend(snippet_completions(prefix, is_top_level));
 
         if items.is_empty() {
             return Ok(None);
@@ -1436,6 +1811,34 @@ impl LanguageServer for Backend {
         match params.ch.as_str() {
             "}" | ";" => Ok(format_document_edits(file, &params.options)),
             "\n" => Ok(on_enter_edits(file, params.text_document_position.position)),
+            "=" => {
+                // After typing `=`, check if it completes `=>` (fat arrow) — auto-indent
+                let pos = params.text_document_position.position;
+                let offset = file.source.offset_at(&pos);
+                let text = file.source.text();
+                // If user just typed `>` after `=` forming `=>`, reformat the line
+                if offset >= 2 && text.as_bytes().get(offset - 2) == Some(&b'=') {
+                    Ok(format_document_edits(file, &params.options))
+                } else {
+                    Ok(None)
+                }
+            }
+            ">" => {
+                // After typing `>`, check if it forms `->` or `=>` — reformat
+                let pos = params.text_document_position.position;
+                let offset = file.source.offset_at(&pos);
+                let text = file.source.text();
+                if offset >= 2
+                    && matches!(
+                        text.as_bytes().get(offset - 2),
+                        Some(b'-') | Some(b'=')
+                    )
+                {
+                    Ok(format_document_edits(file, &params.options))
+                } else {
+                    Ok(None)
+                }
+            }
             _ => Ok(None),
         }
     }
@@ -1534,7 +1937,22 @@ impl LanguageServer for Backend {
                 self.client
                     .log_message(MessageType::INFO, format!("Running Sail function: {name}"))
                     .await;
-                // In a full implementation, this could spawn a process or trigger a task
+            }
+            "sail.matchingBrace" => {
+                if let Some(result) = self.handle_matching_brace(&params.arguments).await {
+                    return Ok(Some(result));
+                }
+            }
+            "sail.joinLines" => {
+                self.handle_join_lines(&params.arguments).await;
+            }
+            "sail.moveItemUp" => {
+                self.handle_move_item(&params.arguments, MoveDirection::Up)
+                    .await;
+            }
+            "sail.moveItemDown" => {
+                self.handle_move_item(&params.arguments, MoveDirection::Down)
+                    .await;
             }
             _ => {
                 self.client
@@ -1623,5 +2041,491 @@ impl LanguageServer for Backend {
             }
             _ => Ok(None),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Highlight Related helpers
+// ---------------------------------------------------------------------------
+
+use sail_parser::core_ast::{
+    BlockItem as CoreBlockItem, DefinitionKind as CoreDefinitionKind,
+    Expr as CoreExpr, SourceFile as CoreSourceFile,
+};
+
+fn highlight_exit_points(file: &File, position: tower_lsp::lsp_types::Position) -> Option<Vec<DocumentHighlight>> {
+    let offset = file.source.offset_at(&position);
+    let core_ast = file.core_ast.as_deref()?;
+
+    // Find the containing function body
+    let body = find_containing_function_body(core_ast, offset)?;
+    let mut spans = Vec::new();
+    collect_exit_spans(&body.0, &mut spans);
+
+    let highlights = spans
+        .into_iter()
+        .map(|span| DocumentHighlight {
+            range: Range::new(
+                file.source.position_at(span.start),
+                file.source.position_at(span.end),
+            ),
+            kind: Some(DocumentHighlightKind::TEXT),
+        })
+        .collect();
+    Some(highlights)
+}
+
+fn collect_exit_spans(expr: &CoreExpr, spans: &mut Vec<sail_parser::Span>) {
+    match expr {
+        CoreExpr::Return(e) => {
+            // Highlight just the "return" keyword area (first few chars of the span)
+            // We'll highlight the return expression span
+            spans.push(e.1);
+        }
+        CoreExpr::Throw(e) => {
+            spans.push(e.1);
+        }
+        CoreExpr::Exit(_) => {
+            // exit is an exit point
+        }
+        CoreExpr::Block(items) => {
+            for item in items {
+                match &item.0 {
+                    CoreBlockItem::Expr(e) | CoreBlockItem::Var { value: e, .. } => {
+                        collect_exit_spans(&e.0, spans);
+                    }
+                    CoreBlockItem::Let(lb) => collect_exit_spans(&lb.value.0, spans),
+                }
+            }
+        }
+        CoreExpr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            collect_exit_spans(&cond.0, spans);
+            collect_exit_spans(&then_branch.0, spans);
+            if let Some(e) = else_branch {
+                collect_exit_spans(&e.0, spans);
+            }
+        }
+        CoreExpr::Match { cases, .. } | CoreExpr::Try { cases, .. } => {
+            for case in cases {
+                if let Some(body) = &case.0.guard {
+                    collect_exit_spans(&body.0, spans);
+                }
+                collect_exit_spans(&case.0.body.0, spans);
+            }
+        }
+        CoreExpr::Let { body, .. } | CoreExpr::Var { body, .. } => {
+            collect_exit_spans(&body.0, spans);
+        }
+        CoreExpr::Foreach(f) => collect_exit_spans(&f.body.0, spans),
+        CoreExpr::While { body, .. } | CoreExpr::Repeat { body, .. } => {
+            collect_exit_spans(&body.0, spans);
+        }
+        _ => {}
+    }
+}
+
+fn find_containing_function_body<'a>(
+    ast: &'a CoreSourceFile,
+    offset: usize,
+) -> Option<&'a (CoreExpr, sail_parser::Span)> {
+    for (def, _) in &ast.defs {
+        match &def.kind {
+            CoreDefinitionKind::Callable(c) => {
+                if let Some(body) = &c.body {
+                    if body.1.start <= offset && offset <= body.1.end {
+                        return Some(body);
+                    }
+                }
+                for clause in &c.clauses {
+                    if let Some(body) = &clause.0.body {
+                        if body.1.start <= offset && offset <= body.1.end {
+                            return Some(body);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn highlight_loop_points(
+    file: &File,
+    position: tower_lsp::lsp_types::Position,
+) -> Option<Vec<DocumentHighlight>> {
+    // For now, highlight the loop keyword and its body brackets
+    let tokens = file.tokens.as_deref()?;
+    let offset = file.source.offset_at(&position);
+
+    // Find the loop keyword token
+    let (_token, span) = tokens
+        .iter()
+        .find(|(_, s)| s.start <= offset && offset < s.end)?;
+
+    let mut highlights = vec![DocumentHighlight {
+        range: Range::new(
+            file.source.position_at(span.start),
+            file.source.position_at(span.end),
+        ),
+        kind: Some(DocumentHighlightKind::TEXT),
+    }];
+
+    // Find the loop body in the core AST and highlight exit points within
+    let core_ast = file.core_ast.as_deref()?;
+    if let Some(body) = find_loop_body_at(core_ast, offset) {
+        let mut exit_spans = Vec::new();
+        collect_exit_spans(&body.0, &mut exit_spans);
+        for s in exit_spans {
+            highlights.push(DocumentHighlight {
+                range: Range::new(
+                    file.source.position_at(s.start),
+                    file.source.position_at(s.end),
+                ),
+                kind: Some(DocumentHighlightKind::TEXT),
+            });
+        }
+    }
+
+    Some(highlights)
+}
+
+fn find_loop_body_at<'a>(
+    ast: &'a CoreSourceFile,
+    offset: usize,
+) -> Option<&'a (CoreExpr, sail_parser::Span)> {
+    for (def, _) in &ast.defs {
+        if let CoreDefinitionKind::Callable(c) = &def.kind {
+            if let Some(body) = &c.body {
+                if let Some(r) = find_loop_in_expr(body, offset) {
+                    return Some(r);
+                }
+            }
+            for clause in &c.clauses {
+                if let Some(body) = &clause.0.body {
+                    if let Some(r) = find_loop_in_expr(body, offset) {
+                        return Some(r);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn find_loop_in_expr<'a>(
+    expr: &'a (CoreExpr, sail_parser::Span),
+    offset: usize,
+) -> Option<&'a (CoreExpr, sail_parser::Span)> {
+    if offset < expr.1.start || offset > expr.1.end {
+        return None;
+    }
+    match &expr.0 {
+        CoreExpr::Foreach(f) => Some(&f.body),
+        CoreExpr::While { body, .. } | CoreExpr::Repeat { body, .. } => Some(body),
+        CoreExpr::Block(items) => items.iter().find_map(|item| match &item.0 {
+            CoreBlockItem::Expr(e) | CoreBlockItem::Var { value: e, .. } => {
+                find_loop_in_expr(e, offset)
+            }
+            CoreBlockItem::Let(lb) => find_loop_in_expr(&*lb.value, offset),
+        }),
+        CoreExpr::If {
+            then_branch,
+            else_branch,
+            ..
+        } => find_loop_in_expr(then_branch, offset).or_else(|| {
+            else_branch
+                .as_ref()
+                .and_then(|e| find_loop_in_expr(e, offset))
+        }),
+        CoreExpr::Let { body, .. } | CoreExpr::Var { body, .. } => {
+            find_loop_in_expr(body, offset)
+        }
+        CoreExpr::Match { cases, .. } | CoreExpr::Try { cases, .. } => {
+            cases.iter().find_map(|c| {
+                find_loop_in_expr(&c.0.body, offset)
+            })
+        }
+        _ => None,
+    }
+}
+
+fn highlight_branch_points(
+    file: &File,
+    position: tower_lsp::lsp_types::Position,
+) -> Option<Vec<DocumentHighlight>> {
+    // Highlight all if/else keywords in the same chain
+    let offset = file.source.offset_at(&position);
+
+    let core_ast = file.core_ast.as_deref()?;
+    let body = find_containing_function_body(core_ast, offset)?;
+    let if_spans = find_if_chain_keyword_spans(&body.0, offset, file.source.text())?;
+
+    let highlights = if_spans
+        .into_iter()
+        .map(|span| DocumentHighlight {
+            range: Range::new(
+                file.source.position_at(span.start),
+                file.source.position_at(span.end),
+            ),
+            kind: Some(DocumentHighlightKind::TEXT),
+        })
+        .collect::<Vec<_>>();
+
+    if highlights.is_empty() {
+        None
+    } else {
+        Some(highlights)
+    }
+}
+
+fn find_if_chain_keyword_spans(
+    _expr: &CoreExpr,
+    _offset: usize,
+    _text: &str,
+) -> Option<Vec<sail_parser::Span>> {
+    None // TODO: requires keyword span tracking in core AST
+}
+
+fn highlight_match_arms(
+    file: &File,
+    position: tower_lsp::lsp_types::Position,
+) -> Option<Vec<DocumentHighlight>> {
+    let offset = file.source.offset_at(&position);
+    let core_ast = file.core_ast.as_deref()?;
+
+    // Find the match expression
+    let body = find_containing_function_body(core_ast, offset)?;
+    let match_expr = find_match_at(body, offset)?;
+
+    let cases = match &match_expr.0 {
+        CoreExpr::Match { cases, .. } | CoreExpr::Try { cases, .. } => cases,
+        _ => return None,
+    };
+
+    let mut highlights = Vec::new();
+    highlights.push(DocumentHighlight {
+        range: Range::new(
+            file.source.position_at(match_expr.1.start),
+            file.source.position_at(match_expr.1.start + 5), // "match" length
+        ),
+        kind: Some(DocumentHighlightKind::TEXT),
+    });
+
+    // Highlight each case body span
+    for case in cases {
+        highlights.push(DocumentHighlight {
+            range: Range::new(
+                file.source.position_at(case.0.pattern.1.start),
+                file.source.position_at(case.0.pattern.1.end),
+            ),
+            kind: Some(DocumentHighlightKind::TEXT),
+        });
+    }
+
+    Some(highlights)
+}
+
+fn find_match_at<'a>(
+    expr: &'a (CoreExpr, sail_parser::Span),
+    offset: usize,
+) -> Option<&'a (CoreExpr, sail_parser::Span)> {
+    if offset < expr.1.start || offset > expr.1.end {
+        return None;
+    }
+    match &expr.0 {
+        CoreExpr::Match { .. } | CoreExpr::Try { .. } => {
+            // Check if offset is near the start (on the keyword)
+            if offset < expr.1.start + 10 {
+                return Some(expr);
+            }
+            None
+        }
+        CoreExpr::Block(items) => items.iter().find_map(|item| match &item.0 {
+            CoreBlockItem::Expr(e) | CoreBlockItem::Var { value: e, .. } => {
+                find_match_at(e, offset)
+            }
+            CoreBlockItem::Let(lb) => find_match_at(&*lb.value, offset),
+        }),
+        CoreExpr::If {
+            then_branch,
+            else_branch,
+            ..
+        } => find_match_at(then_branch, offset).or_else(|| {
+            else_branch
+                .as_ref()
+                .and_then(|e| find_match_at(e, offset))
+        }),
+        CoreExpr::Let { body, .. } | CoreExpr::Var { body, .. } => {
+            find_match_at(body, offset)
+        }
+        CoreExpr::Foreach(f) => find_match_at(&f.body, offset),
+        CoreExpr::While { body, .. } | CoreExpr::Repeat { body, .. } => {
+            find_match_at(body, offset)
+        }
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Folding range helpers
+// ---------------------------------------------------------------------------
+
+fn collect_match_fold_ranges(
+    expr: &(CoreExpr, sail_parser::Span),
+    file: &File,
+    ranges: &mut Vec<FoldingRange>,
+) {
+    match &expr.0 {
+        CoreExpr::Match { cases, .. } | CoreExpr::Try { cases, .. } => {
+            for (case, case_span) in cases {
+                let start = file.source.position_at(case_span.start).line;
+                let end = file.source.position_at(case_span.end).line;
+                if end > start {
+                    ranges.push(FoldingRange {
+                        start_line: start,
+                        start_character: None,
+                        end_line: end,
+                        end_character: None,
+                        kind: Some(FoldingRangeKind::Region),
+                        collapsed_text: None,
+                    });
+                }
+                collect_match_fold_ranges(&case.body, file, ranges);
+            }
+        }
+        CoreExpr::Block(items) => {
+            for item in items {
+                match &item.0 {
+                    CoreBlockItem::Expr(e) | CoreBlockItem::Var { value: e, .. } => {
+                        collect_match_fold_ranges(e, file, ranges);
+                    }
+                    CoreBlockItem::Let(lb) => {
+                        collect_match_fold_ranges(&*lb.value, file, ranges);
+                    }
+                }
+            }
+        }
+        CoreExpr::If { then_branch, else_branch, .. } => {
+            collect_match_fold_ranges(then_branch, file, ranges);
+            if let Some(e) = else_branch {
+                collect_match_fold_ranges(e, file, ranges);
+            }
+        }
+        CoreExpr::Let { body, .. } | CoreExpr::Var { body, .. } => {
+            collect_match_fold_ranges(body, file, ranges);
+        }
+        CoreExpr::Foreach(f) => collect_match_fold_ranges(&f.body, file, ranges),
+        CoreExpr::While { body, .. } | CoreExpr::Repeat { body, .. } => {
+            collect_match_fold_ranges(body, file, ranges);
+        }
+        _ => {}
+    }
+}
+
+// Helper methods for custom commands
+impl Backend {
+    /// Parse a { uri, position } from command arguments.
+    fn parse_uri_position(
+        args: &[serde_json::Value],
+    ) -> Option<(Url, tower_lsp::lsp_types::Position)> {
+        let obj = args.first()?;
+        let uri_str = obj.get("uri")?.as_str()?;
+        let uri = Url::parse(uri_str).ok()?;
+        let pos = obj.get("position")?;
+        let line = pos.get("line")?.as_u64()? as u32;
+        let character = pos.get("character")?.as_u64()? as u32;
+        Some((uri, tower_lsp::lsp_types::Position::new(line, character)))
+    }
+
+    fn parse_uri_range(
+        args: &[serde_json::Value],
+    ) -> Option<(Url, Range)> {
+        let obj = args.first()?;
+        let uri_str = obj.get("uri")?.as_str()?;
+        let uri = Url::parse(uri_str).ok()?;
+        let start = obj.get("start").or_else(|| obj.get("position"))?;
+        let end = obj.get("end").unwrap_or(start);
+        let start_line = start.get("line")?.as_u64()? as u32;
+        let start_char = start.get("character")?.as_u64()? as u32;
+        let end_line = end.get("line")?.as_u64()? as u32;
+        let end_char = end.get("character")?.as_u64()? as u32;
+        Some((
+            uri,
+            Range::new(
+                tower_lsp::lsp_types::Position::new(start_line, start_char),
+                tower_lsp::lsp_types::Position::new(end_line, end_char),
+            ),
+        ))
+    }
+
+    async fn handle_matching_brace(
+        &self,
+        args: &[serde_json::Value],
+    ) -> Option<serde_json::Value> {
+        let (uri, position) = Self::parse_uri_position(args)?;
+        let state = self.state.read().await;
+        let file = state.get_file(&uri)?;
+        let pos = matching_brace_position(file, position)?;
+        Some(serde_json::json!({
+            "line": pos.line,
+            "character": pos.character,
+        }))
+    }
+
+    async fn handle_join_lines(&self, args: &[serde_json::Value]) {
+        let Some((uri, range)) = Self::parse_uri_range(args) else {
+            return;
+        };
+        let state = self.state.read().await;
+        let Some(file) = state.get_file(&uri) else {
+            return;
+        };
+        let Some(edits) = join_lines_edits(file, range) else {
+            return;
+        };
+        drop(state);
+        let mut changes = HashMap::new();
+        changes.insert(uri, edits);
+        let _ = self
+            .client
+            .apply_edit(WorkspaceEdit {
+                changes: Some(changes),
+                document_changes: None,
+                change_annotations: None,
+            })
+            .await;
+    }
+
+    async fn handle_move_item(
+        &self,
+        args: &[serde_json::Value],
+        direction: MoveDirection,
+    ) {
+        let Some((uri, position)) = Self::parse_uri_position(args) else {
+            return;
+        };
+        let state = self.state.read().await;
+        let Some(file) = state.get_file(&uri) else {
+            return;
+        };
+        let Some(edits) = move_item_edits(file, position, direction) else {
+            return;
+        };
+        drop(state);
+        let mut changes = HashMap::new();
+        changes.insert(uri, edits);
+        let _ = self
+            .client
+            .apply_edit(WorkspaceEdit {
+                changes: Some(changes),
+                document_changes: None,
+                change_annotations: None,
+            })
+            .await;
     }
 }

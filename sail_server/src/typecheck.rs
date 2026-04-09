@@ -66,6 +66,17 @@ struct TopLevelEnv {
     records: HashMap<String, RecordInfo>,
     bitfields: HashMap<String, BitfieldInfo>,
     constructors: HashMap<String, Vec<TypeScheme>>,
+    /// Map from type alias name to its underlying type. Used to resolve
+    /// cross-file aliases like `xlenbits = bits(64)` so the unify function
+    /// can compare textually-different but semantically-equal types.
+    type_aliases: HashMap<String, Ty>,
+    /// Names of functions defined in OTHER workspace files (no schemes).
+    /// Used by `infer_call` to suppress "function not found" errors when
+    /// the callee exists somewhere in the workspace.
+    cross_file_function_names: HashSet<String>,
+    /// Names of union/enum constructors defined in other files. Used to
+    /// recognize bare-identifier patterns as constructors.
+    cross_file_constructor_names: HashSet<String>,
     global_constraints: Vec<ConstraintExpr>,
     vector_order: VectorOrder,
 }
@@ -203,6 +214,9 @@ impl Default for TopLevelEnv {
             records: HashMap::new(),
             bitfields: HashMap::new(),
             constructors: HashMap::new(),
+            type_aliases: HashMap::new(),
+            cross_file_function_names: HashSet::new(),
+            cross_file_constructor_names: HashSet::new(),
             global_constraints: Vec::new(),
             vector_order: VectorOrder::Dec,
         }
@@ -726,8 +740,38 @@ fn mapping_from_type_expr(source: &str, ty: &Spanned<TypeExpr>) -> Option<Mappin
     }
 }
 
+/// Returns true only if `ty` is something we KNOW cannot be a record/bitfield
+/// (e.g. int, bool, bits(N), etc.). Returns false for cross-file type
+/// aliases or otherwise-unknown type names — those should NOT be flagged as
+/// "not a record" because we can't tell.
+fn is_known_non_record(ty: &Ty) -> bool {
+    match ty {
+        Ty::Unknown | Ty::Var(_) => false,
+        Ty::Function { .. } => true,
+        Ty::Tuple(_) => true,
+        Ty::Text(name) => matches!(
+            name.as_str(),
+            "int" | "nat" | "bool" | "string" | "unit" | "real" | "bit"
+        ),
+        Ty::App { name, .. } => matches!(
+            name.as_str(),
+            "bits" | "vector" | "list" | "range" | "atom"
+        ),
+    }
+}
+
 fn is_pattern_binding(name: &str, pattern_constants: &HashSet<String>) -> bool {
-    !pattern_constants.contains(name)
+    if pattern_constants.contains(name) {
+        return false;
+    }
+    // Identifiers starting with an uppercase letter are conventionally
+    // constructors in Sail (e.g. `Some`, `None`, `Data`, `ShadowStack`).
+    // Without cross-file type info, treat them as constructors rather than
+    // bindings to avoid false positives like "Duplicate binding for Data".
+    if name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+        return false;
+    }
+    true
 }
 
 impl TopLevelEnv {
@@ -894,11 +938,40 @@ impl TopLevelEnv {
                     env.global_constraints
                         .push(constraint_expr_from_type_expr(source, &def.ty));
                 }
+                DefinitionKind::TypeAlias(def) => {
+                    if let Some(target) = &def.target {
+                        let underlying = type_from_type_expr(source, target);
+                        env.type_aliases
+                            .insert(def.name.0.clone(), underlying);
+                    }
+                }
                 _ => {}
             }
         }
 
         (env, pattern_constants)
+    }
+
+    /// Resolve a type alias chain to its underlying type. Stops at the first
+    /// non-alias type or when a cycle is detected. Returns the original type
+    /// if it isn't an alias.
+    fn resolve_alias(&self, ty: &Ty) -> Ty {
+        let mut current = ty.clone();
+        let mut seen: HashSet<String> = HashSet::new();
+        loop {
+            let name_to_resolve = match &current {
+                Ty::Text(name) => name.clone(),
+                Ty::App { name, .. } => name.clone(),
+                _ => return current,
+            };
+            if !seen.insert(name_to_resolve.clone()) {
+                return current;
+            }
+            match self.type_aliases.get(&name_to_resolve) {
+                Some(underlying) => current = underlying.clone(),
+                None => return current,
+            }
+        }
     }
 
     fn lookup_value(&self, locals: &LocalEnv, name: &str) -> Option<Ty> {
@@ -943,16 +1016,6 @@ impl TopLevelEnv {
             let mut out = self.functions.get(name).cloned().unwrap_or_default();
             out.extend(self.constructors.get(name).cloned().unwrap_or_default());
             out
-        }
-    }
-
-    fn has_function(&self, name: &str) -> bool {
-        if let Some(members) = self.overloads.get(name) {
-            members
-                .iter()
-                .any(|member| self.functions.contains_key(member))
-        } else {
-            self.functions.contains_key(name) || self.constructors.contains_key(name)
         }
     }
 
@@ -1015,8 +1078,11 @@ fn scheme_from_union_variant(
         sail_parser::core_ast::UnionPayload::Type(ty) => Some(type_from_type_expr(source, ty)),
         sail_parser::core_ast::UnionPayload::Struct { .. } => Some(Ty::Unknown),
     };
+    // In Sail, ALL union constructors take an argument (even unit-payload
+    // ones are invoked as `Name()` with the unit value). Don't drop the
+    // param when payload is unit — that causes false-positive
+    // "Constructor X expects 0 arguments, found 1" errors.
     let params = match payload_ty {
-        Some(Ty::Text(text)) if text == "unit" => Vec::new(),
         Some(ty) => vec![ty],
         None => Vec::new(),
     };
@@ -2062,6 +2128,24 @@ fn unify_numeric_expr(expected: &NumericExpr, actual: &NumericExpr, subst: &mut 
         return expected == actual;
     }
 
+    // Polynomial-form equivalence: convert each side to a canonical sum of
+    // terms `coefficient * variable_product + constant`. Two expressions
+    // unify if their canonical polynomials are identical after substitution.
+    // This handles cases like:
+    //   `('m - i - 1) - ('m - i - 8) + 1` == 8
+    //   `(i + 7) - i + 1` == 8
+    // which require constant-folding across multiple variables.
+    let expected_subst = subst_numeric_expr(expected, subst);
+    let actual_subst = subst_numeric_expr(actual, subst);
+    if let (Some(expected_poly), Some(actual_poly)) = (
+        polynomial_from_numeric_expr(&expected_subst),
+        polynomial_from_numeric_expr(&actual_subst),
+    ) {
+        if expected_poly == actual_poly {
+            return true;
+        }
+    }
+
     let mut unresolved = HashSet::new();
     numeric_expr_collect_vars(expected, &mut unresolved);
     unresolved.retain(|name| !subst.values.contains_key(name) && !subst.types.contains_key(name));
@@ -2082,6 +2166,97 @@ fn unify_numeric_expr(expected: &NumericExpr, actual: &NumericExpr, subst: &mut 
     }
 
     false
+}
+
+/// A polynomial in canonical form: a sorted list of (variable_product, coeff)
+/// terms plus a constant. Used for algebraic equivalence checking of
+/// numeric expressions over multiple type variables.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Polynomial {
+    /// Map from sorted variable product (e.g. ["i", "n"]) to coefficient.
+    /// An empty Vec key represents the constant term.
+    terms: std::collections::BTreeMap<Vec<String>, i64>,
+}
+
+impl Polynomial {
+    fn constant(c: i64) -> Self {
+        let mut terms = std::collections::BTreeMap::new();
+        if c != 0 {
+            terms.insert(Vec::new(), c);
+        }
+        Self { terms }
+    }
+
+    fn variable(name: String) -> Self {
+        let mut terms = std::collections::BTreeMap::new();
+        terms.insert(vec![name], 1);
+        Self { terms }
+    }
+
+    fn add(&self, other: &Self) -> Self {
+        let mut result = self.terms.clone();
+        for (k, v) in &other.terms {
+            *result.entry(k.clone()).or_insert(0) += v;
+        }
+        result.retain(|_, v| *v != 0);
+        Self { terms: result }
+    }
+
+    fn neg(&self) -> Self {
+        let terms = self.terms.iter().map(|(k, v)| (k.clone(), -v)).collect();
+        Self { terms }
+    }
+
+    fn sub(&self, other: &Self) -> Self {
+        self.add(&other.neg())
+    }
+
+    fn mul(&self, other: &Self) -> Option<Self> {
+        let mut result: std::collections::BTreeMap<Vec<String>, i64> =
+            std::collections::BTreeMap::new();
+        for (lk, lv) in &self.terms {
+            for (rk, rv) in &other.terms {
+                let mut combined = lk.clone();
+                combined.extend(rk.iter().cloned());
+                combined.sort();
+                // Cap degree to avoid runaway expansion
+                if combined.len() > 4 {
+                    return None;
+                }
+                *result.entry(combined).or_insert(0) += lv * rv;
+            }
+        }
+        result.retain(|_, v| *v != 0);
+        Some(Self { terms: result })
+    }
+}
+
+fn polynomial_from_numeric_expr(expr: &NumericExpr) -> Option<Polynomial> {
+    match expr {
+        NumericExpr::Const(c) => Some(Polynomial::constant(*c)),
+        NumericExpr::Var(name) | NumericExpr::Symbol(name) => {
+            Some(Polynomial::variable(name.clone()))
+        }
+        NumericExpr::Neg(inner) => Some(polynomial_from_numeric_expr(inner)?.neg()),
+        NumericExpr::Add(lhs, rhs) => {
+            let l = polynomial_from_numeric_expr(lhs)?;
+            let r = polynomial_from_numeric_expr(rhs)?;
+            Some(l.add(&r))
+        }
+        NumericExpr::Sub(lhs, rhs) => {
+            let l = polynomial_from_numeric_expr(lhs)?;
+            let r = polynomial_from_numeric_expr(rhs)?;
+            Some(l.sub(&r))
+        }
+        NumericExpr::Mul(lhs, rhs) => {
+            let l = polynomial_from_numeric_expr(lhs)?;
+            let r = polynomial_from_numeric_expr(rhs)?;
+            l.mul(&r)
+        }
+        // Division and modulo aren't representable in linear polynomial form
+        // — bail out (caller will fall back to other unification strategies).
+        NumericExpr::Div(_, _) | NumericExpr::Mod(_, _) => None,
+    }
 }
 
 fn swapped_compare_op(op: CompareOp) -> CompareOp {
@@ -2594,6 +2769,20 @@ fn unify_value(expected: &str, actual: &str, subst: &mut Subst) -> bool {
                 true
             }
         }
+    } else if actual.starts_with('\'') {
+        // Symmetric: if actual is a type variable, try to bind it.
+        match subst.values.get(actual) {
+            Some(bound) => {
+                let bound = bound.clone();
+                bound == expected || unify_value(expected, &bound, subst)
+            }
+            None => {
+                subst
+                    .values
+                    .insert(actual.to_string(), expected.to_string());
+                true
+            }
+        }
     } else if let (Some(expected), Some(actual)) = (
         parse_numeric_expr_text(expected),
         parse_numeric_expr_text(actual),
@@ -2645,6 +2834,11 @@ fn apply_subst(ty: &Ty, subst: &Subst) -> Ty {
 }
 
 fn unify(expected: &Ty, actual: &Ty, subst: &mut Subst) -> bool {
+    // Symmetric early-out for Unknown: either side being Unknown means we
+    // can't verify types (typically a cross-file reference), so we accept.
+    if matches!(actual, Ty::Unknown) {
+        return true;
+    }
     match expected {
         Ty::Unknown => true,
         Ty::Var(name) => {
@@ -2662,7 +2856,61 @@ fn unify(expected: &Ty, actual: &Ty, subst: &mut Subst) -> bool {
                 }
             }
         }
-        Ty::Text(expected) => expected == &actual.text(),
+        Ty::Text(expected) => {
+            let actual_text = actual.text();
+            if expected == &actual_text {
+                return true;
+            }
+            // Sail equivalence: bit ≡ bits(1).
+            if (expected == "bit" && actual_text == "bits(1)")
+                || (expected == "bits(1)" && actual_text == "bit")
+            {
+                return true;
+            }
+            // Sail subtyping: int ↔ range(...) ↔ atom(...) ↔ nat are all
+            // numeric and the LSP can't verify exact constraints. Treat them
+            // as compatible to avoid false positives.
+            let is_numeric = |t: &str| {
+                t == "int"
+                    || t == "nat"
+                    || t.starts_with("range(")
+                    || t.starts_with("atom(")
+            };
+            if is_numeric(expected.as_str()) && is_numeric(&actual_text) {
+                return true;
+            }
+            // Cross-file type aliases (e.g. xlenbits = bits(64), regidx = bits(5))
+            // are unknown to the local type checker. If either side is a non-
+            // primitive type name we can't resolve, treat them as compatible.
+            let primitives = [
+                "int", "nat", "bool", "string", "unit", "real", "bit", "_",
+            ];
+            let is_expected_primitive = primitives.contains(&expected.as_str());
+            let is_actual_primitive = primitives.contains(&actual_text.as_str())
+                || actual_text.starts_with("bits(")
+                || actual_text.starts_with("range(")
+                || actual_text.starts_with("atom(");
+            if !is_expected_primitive || !is_actual_primitive {
+                // At least one side is a custom/aliased type — we can't be sure.
+                return true;
+            }
+            // Two different bitvector sizes — only error if BOTH widths are
+            // pure numeric literals. If either side mentions type variables
+            // (like 'n, 'm) or arithmetic, we can't compute equivalence
+            // without an SMT solver, so be permissive.
+            if expected.starts_with("bits(") && actual_text.starts_with("bits(") {
+                let expected_width = &expected["bits(".len()..expected.len() - 1];
+                let actual_width = &actual_text["bits(".len()..actual_text.len() - 1];
+                let expected_is_num = expected_width.parse::<i64>().is_ok();
+                let actual_is_num = actual_width.parse::<i64>().is_ok();
+                if !expected_is_num || !actual_is_num {
+                    return true;
+                }
+                return false;
+            }
+            // Two different primitives — also not equivalent (e.g. int vs bool).
+            false
+        }
         Ty::Tuple(expected_items) => match actual {
             Ty::Tuple(actual_items) if expected_items.len() == actual_items.len() => expected_items
                 .iter()
@@ -2690,32 +2938,80 @@ fn unify(expected: &Ty, actual: &Ty, subst: &mut Subst) -> bool {
             name: expected_name,
             args: expected_args,
             ..
-        } => match actual {
-            Ty::App {
-                name: actual_name,
-                args: actual_args,
-                ..
-            } if expected_name == actual_name && expected_args.len() == actual_args.len() => {
-                expected_args
-                    .iter()
-                    .zip(actual_args.iter())
-                    .all(|(expected, actual)| match (expected, actual) {
-                        (TyArg::Type(expected), TyArg::Type(actual)) => {
-                            unify(expected, actual, subst)
-                        }
-                        (TyArg::Value(expected), TyArg::Value(actual)) => {
-                            unify_value(expected, actual, subst)
-                        }
-                        (TyArg::Value(expected), TyArg::Type(actual)) => {
-                            unify_value(expected, &actual.text(), subst)
-                        }
-                        (TyArg::Type(expected), TyArg::Value(actual)) => {
-                            unify(expected, &Ty::Text(actual.clone()), subst)
-                        }
-                    })
+        } => {
+            // Sail subtyping: range/atom/nat/int are all numeric. Treat them
+            // as compatible without verifying constraints (no SMT in LSP).
+            let actual_text = actual.text();
+            let numeric_app =
+                |name: &str| name == "range" || name == "atom";
+            if numeric_app(expected_name)
+                && (actual_text == "int"
+                    || actual_text == "nat"
+                    || actual_text.starts_with("range(")
+                    || actual_text.starts_with("atom("))
+            {
+                return true;
             }
-            _ => false,
-        },
+            // bit ≡ bits(1) — accept either direction.
+            if expected_name == "bits" && actual_text == "bit" {
+                if let Some(TyArg::Value(width)) = expected_args.first() {
+                    if width == "1" || width.trim() == "1" {
+                        return true;
+                    }
+                }
+            }
+            // bits(N) ≡ vector(N, bit) (Sail equivalence).
+            if expected_name == "bits" && actual_text.starts_with("vector(") {
+                // Parse vector(N, bit) and check if elem is bit.
+                // Format is "vector(N, bit)" — strip the prefix and ", bit)" suffix.
+                let inner = &actual_text["vector(".len()..actual_text.len() - 1];
+                if inner.ends_with(", bit") {
+                    let actual_n = &inner[..inner.len() - ", bit".len()];
+                    if let Some(TyArg::Value(expected_n)) = expected_args.first() {
+                        return unify_value(expected_n, actual_n, subst);
+                    }
+                }
+            }
+            if expected_name == "vector" && actual_text.starts_with("bits(") {
+                let actual_n = &actual_text["bits(".len()..actual_text.len() - 1];
+                if let Some(TyArg::Value(expected_n)) = expected_args.first() {
+                    // Check second arg is bit
+                    if let Some(TyArg::Type(elem)) = expected_args.get(1) {
+                        if elem.text() == "bit" {
+                            return unify_value(expected_n, actual_n, subst);
+                        }
+                    }
+                }
+            }
+            match actual {
+                Ty::App {
+                    name: actual_name,
+                    args: actual_args,
+                    ..
+                } if expected_name == actual_name
+                    && expected_args.len() == actual_args.len() =>
+                {
+                    expected_args
+                        .iter()
+                        .zip(actual_args.iter())
+                        .all(|(expected, actual)| match (expected, actual) {
+                            (TyArg::Type(expected), TyArg::Type(actual)) => {
+                                unify(expected, actual, subst)
+                            }
+                            (TyArg::Value(expected), TyArg::Value(actual)) => {
+                                unify_value(expected, actual, subst)
+                            }
+                            (TyArg::Value(expected), TyArg::Type(actual)) => {
+                                unify_value(expected, &actual.text(), subst)
+                            }
+                            (TyArg::Type(expected), TyArg::Value(actual)) => {
+                                unify(expected, &Ty::Text(actual.clone()), subst)
+                            }
+                        })
+                }
+                _ => false,
+            }
+        }
     }
 }
 
@@ -2799,8 +3095,24 @@ impl<'a> Checker<'a> {
     }
 
     fn expect_type(&mut self, span: Span, actual: &Ty, expected: &Ty) -> bool {
+        // Skip checks involving Unknown — these come from cross-file references
+        // (functions, constants, registers) that the per-file type checker
+        // cannot resolve. Reporting subtype errors against Unknown produces
+        // thousands of false positives.
+        if matches!(actual, Ty::Unknown) || matches!(expected, Ty::Unknown) {
+            return true;
+        }
+        // Type variables (e.g. polymorphic 'm, 'n in `forall 'n. bits('n)`)
+        // should match any type for LSP purposes — we don't track kinds.
+        if matches!(actual, Ty::Var(_)) || matches!(expected, Ty::Var(_)) {
+            return true;
+        }
+        // Resolve type aliases on both sides (e.g. xlenbits → bits(64)) before
+        // unification so cross-file aliases compare correctly.
+        let actual_resolved = self.env.resolve_alias(actual);
+        let expected_resolved = self.env.resolve_alias(expected);
         let mut subst = Subst::default();
-        if unify(expected, actual, &mut subst) {
+        if unify(&expected_resolved, &actual_resolved, &mut subst) {
             true
         } else {
             self.push_error(
@@ -3056,16 +3368,7 @@ impl<'a> Checker<'a> {
             self.record_binding_type(name.1, &ty);
             Some(ty)
         } else {
-            let have_function = self.env.has_function(&name.0);
-            self.push_error(
-                DiagnosticCode::TypeError,
-                name.1,
-                TypeError::UnboundId {
-                    id: name.0.clone(),
-                    locals: locals.bindings.keys().cloned().collect(),
-                    have_function,
-                },
-            );
+            // Cross-file binding — silently skip.
             None
         }
     }
@@ -3367,9 +3670,13 @@ impl<'a> Checker<'a> {
     ) {
         let mut assumptions = Vec::new();
         self.fill_assumptions(locals, &mut assumptions);
-        if !matches!(
+        // Only report when the constraint is provably Failed. Without an SMT
+        // solver and without cross-file context, many valid constraints get
+        // ConstraintStatus::Unknown — reporting them as errors floods users
+        // with false positives on perfectly correct code.
+        if matches!(
             self.evaluate_constraint(&constraint, &Subst::default(), &assumptions),
-            ConstraintStatus::Satisfied
+            ConstraintStatus::Failed
         ) {
             self.push_error(
                 DiagnosticCode::TypeError,
@@ -3434,9 +3741,12 @@ impl<'a> Checker<'a> {
         }
         let start = span_text(self.source, start.1);
         let end = span_text(self.source, end.1);
+        // Wrap each operand in parentheses so a later parser doesn't misread
+        // `'m - i - 1 - 'm - i - 8 + 1` (which loses the original grouping
+        // from `('m - i - 1) - ('m - i - 8) + 1`).
         match self.env.vector_order {
-            VectorOrder::Dec => format!("({start} - {end} + 1)"),
-            VectorOrder::Inc => format!("({end} - {start} + 1)"),
+            VectorOrder::Dec => format!("(({start}) - ({end}) + 1)"),
+            VectorOrder::Inc => format!("(({end}) - ({start}) + 1)"),
         }
     }
 
@@ -4295,6 +4605,9 @@ impl<'a> Checker<'a> {
         let record_name = self.record_info_for_type(&base_ty).map(|(name, _, _)| name);
         let bitfield_name = self.bitfield_info_for_type(&base_ty).map(|(name, _)| name);
         if record_name.is_none() && bitfield_name.is_none() {
+            if !is_known_non_record(&base_ty) {
+                return Ty::Unknown;
+            }
             self.push_error(
                 DiagnosticCode::TypeError,
                 base.1,
@@ -4614,6 +4927,10 @@ impl<'a> Checker<'a> {
             .bitfield_info_for_type(&record_ty)
             .map(|(name, _)| name);
         if record_name.is_none() && bitfield_name.is_none() {
+            // Skip the error for cross-file type aliases / unknown types.
+            if !is_known_non_record(&record_ty) {
+                return Ty::Unknown;
+            }
             self.push_error(
                 DiagnosticCode::TypeError,
                 base.1,
@@ -5165,7 +5482,11 @@ impl<'a> Checker<'a> {
                 .is_some(),
             _ => false,
         };
-        if !width_is_known {
+        // If the underlying type is a non-`bits` type alias (e.g. xlenbits),
+        // we cannot resolve it without cross-file context. Be permissive.
+        let is_cross_file_alias = !matches!(&underlying,
+            Ty::App { name, .. } if name == "bits") && !matches!(&underlying, Ty::Unknown);
+        if !width_is_known && !is_cross_file_alias {
             self.push_error(
                 DiagnosticCode::TypeError,
                 ty.1,
@@ -5285,7 +5606,9 @@ impl<'a> Checker<'a> {
         if let Some(guard) = &clause.0.guard {
             let guard_ty = self.infer_expr(guard, &mut locals);
             let mut subst = Subst::default();
-            if !unify(&Ty::Text("bool".to_string()), &guard_ty, &mut subst) {
+            if !matches!(guard_ty, Ty::Unknown)
+                && !unify(&Ty::Text("bool".to_string()), &guard_ty, &mut subst)
+            {
                 self.push_error(
                     DiagnosticCode::TypeError,
                     guard.1,
@@ -5412,16 +5735,21 @@ impl<'a> Checker<'a> {
                     );
                 }
                 None => {
-                    self.push_error(
-                        DiagnosticCode::TypeError,
-                        name.1,
-                        TypeError::other(format!("Unknown record type {}", name.0)),
-                    );
+                    // Skip when the record might be defined in another file.
+                    if !self.env.cross_file_function_names.contains(&name.0) {
+                        // Heuristic: if the name appears as a constructor or
+                        // is otherwise visible cross-file, don't error.
+                        // For now, suppress all "Unknown record type" errors —
+                        // these are usually cross-file struct definitions.
+                    }
                 }
                 _ => {}
             }
         } else if let Some(expected) = &record_ty {
-            if record_info.is_none() && !expected.is_unknown() {
+            if record_info.is_none()
+                && !expected.is_unknown()
+                && is_known_non_record(expected)
+            {
                 self.push_error(
                     DiagnosticCode::TypeError,
                     pattern_span,
@@ -5531,7 +5859,10 @@ impl<'a> Checker<'a> {
                 let annotated = type_from_type_expr(self.source, ty);
                 if let Some(expected) = expected_ty {
                     let mut subst = Subst::default();
-                    if !unify(&annotated, &expected, &mut subst) {
+                    if !matches!(expected, Ty::Unknown)
+                        && !matches!(annotated, Ty::Unknown)
+                        && !unify(&annotated, &expected, &mut subst)
+                    {
                         self.push_error(
                             DiagnosticCode::TypeError,
                             ty.1,
@@ -5887,7 +6218,11 @@ impl<'a> Checker<'a> {
                 if !lhs_ty.is_unknown() {
                     self.expect_type(rhs.1, &rhs_ty, &lhs_ty);
                 }
-                rhs_ty
+                // Sail assignments are statements that always have type unit,
+                // not the rhs type. (Previously returned rhs_ty, which caused
+                // false-positive "X is not a subtype of unit" errors when the
+                // assignment was the last expression of a unit-returning fn.)
+                Ty::Text("unit".to_string())
             }
             Expr::Let { binding, body } => {
                 let value_ty = if let Some(expected_bind) =
@@ -5967,7 +6302,10 @@ impl<'a> Checker<'a> {
                 let value_ty = self.infer_expr(expr, locals);
                 if let Some(expected) = &locals.expected_return {
                     let mut subst = Subst::default();
-                    if !unify(expected, &value_ty, &mut subst) {
+                    if !matches!(value_ty, Ty::Unknown)
+                        && !matches!(expected, Ty::Unknown)
+                        && !unify(expected, &value_ty, &mut subst)
+                    {
                         self.push_error(
                             DiagnosticCode::TypeError,
                             expr.1,
@@ -5979,13 +6317,22 @@ impl<'a> Checker<'a> {
                         );
                     }
                 }
-                value_ty
+                // `return` is diverging — return Unknown so it unifies with
+                // any sibling branch type.
+                Ty::Unknown
             }
-            Expr::Throw(expr) => self.infer_expr(expr, locals),
+            Expr::Throw(expr) => {
+                self.infer_expr(expr, locals);
+                // `throw` is diverging — return Unknown so it unifies with any
+                // sibling branch type.
+                Ty::Unknown
+            }
             Expr::Assert { condition, message } => {
                 let cond_ty = self.infer_expr(condition, locals);
                 let mut subst = Subst::default();
-                if !unify(&Ty::Text("bool".to_string()), &cond_ty, &mut subst) {
+                if !matches!(cond_ty, Ty::Unknown)
+                    && !unify(&Ty::Text("bool".to_string()), &cond_ty, &mut subst)
+                {
                     self.push_error(
                         DiagnosticCode::TypeError,
                         condition.1,
@@ -6002,10 +6349,16 @@ impl<'a> Checker<'a> {
                 self.add_expr_constraint(locals, condition, true);
                 Ty::Text("unit".to_string())
             }
-            Expr::Exit(expr) => expr
-                .as_ref()
-                .map(|expr| self.infer_expr(expr, locals))
-                .unwrap_or(Ty::Text("unit".to_string())),
+            Expr::Exit(expr) => {
+                if let Some(inner) = expr.as_ref() {
+                    self.infer_expr(inner, locals);
+                }
+                // `exit` has the diverging type `forall 'a. _ -> 'a` — it
+                // never returns. In a match/if branch alongside other arms,
+                // its type should unify with any sibling. Return Unknown so
+                // our case-type unifier treats it as compatible.
+                Ty::Unknown
+            }
             Expr::If {
                 cond,
                 then_branch,
@@ -6013,7 +6366,9 @@ impl<'a> Checker<'a> {
             } => {
                 let cond_ty = self.infer_expr(cond, locals);
                 let mut subst = Subst::default();
-                if !unify(&Ty::Text("bool".to_string()), &cond_ty, &mut subst) {
+                if !matches!(cond_ty, Ty::Unknown)
+                    && !unify(&Ty::Text("bool".to_string()), &cond_ty, &mut subst)
+                {
                     self.push_error(
                         DiagnosticCode::TypeError,
                         cond.1,
@@ -6039,7 +6394,13 @@ impl<'a> Checker<'a> {
                     })
                     .unwrap_or_else(|| Ty::Text("unit".to_string()));
                 let mut subst = Subst::default();
-                if unify(&then_ty, &else_ty, &mut subst) {
+                // If either branch diverges (Unknown), return the OTHER branch's
+                // type since the Unknown branch never completes.
+                if matches!(then_ty, Ty::Unknown) {
+                    else_ty
+                } else if matches!(else_ty, Ty::Unknown) {
+                    then_ty
+                } else if unify(&then_ty, &else_ty, &mut subst) {
                     apply_subst(&then_ty, &subst)
                 } else {
                     self.push_error(
@@ -6090,7 +6451,9 @@ impl<'a> Checker<'a> {
                 self.infer_expr(body, locals);
                 let until_ty = self.infer_expr(until, locals);
                 let mut subst = Subst::default();
-                if !unify(&Ty::Text("bool".to_string()), &until_ty, &mut subst) {
+                if !matches!(until_ty, Ty::Unknown)
+                    && !unify(&Ty::Text("bool".to_string()), &until_ty, &mut subst)
+                {
                     self.push_error(
                         DiagnosticCode::TypeError,
                         until.1,
@@ -6156,18 +6519,10 @@ impl<'a> Checker<'a> {
             Expr::Ident(name) => {
                 if let Some(ty) = self.env.lookup_value(locals, name) {
                     ty
-                } else if !self.env.has_function(name) {
-                    self.push_error(
-                        DiagnosticCode::TypeError,
-                        expr.1,
-                        TypeError::UnboundId {
-                            id: name.clone(),
-                            locals: locals.bindings.keys().cloned().collect(),
-                            have_function: false,
-                        },
-                    );
-                    Ty::Unknown
                 } else {
+                    // Cross-file constants/registers/enum members aren't visible
+                    // to the local type-check environment. Silently return Unknown
+                    // to avoid false-positive "Identifier unbound" errors.
                     Ty::Unknown
                 }
             }
@@ -6176,11 +6531,7 @@ impl<'a> Checker<'a> {
                 if let Some(ty) = self.register_type_for_name(&name.0) {
                     register_ty(ty)
                 } else {
-                    self.push_error(
-                        DiagnosticCode::TypeError,
-                        name.1,
-                        TypeError::other(format!("{} is not a register", name.0)),
-                    );
+                    // Cross-file registers aren't visible — silently return Unknown.
                     Ty::Unknown
                 }
             }
@@ -6189,6 +6540,11 @@ impl<'a> Checker<'a> {
                 expr: inner, field, ..
             } => {
                 let base_ty = self.infer_expr(inner, locals);
+                // Field access on Unknown (typically from cross-file functions
+                // returning unresolved types) shouldn't produce errors.
+                if matches!(base_ty, Ty::Unknown) {
+                    return Ty::Unknown;
+                }
                 match self.record_field_type(&base_ty, &field.0) {
                     Some(field_ty) => field_ty,
                     None => match self.bitfield_field_type(&base_ty, &field.0) {
@@ -6216,6 +6572,13 @@ impl<'a> Checker<'a> {
                                     )),
                                 );
                             } else {
+                                // For unresolved cross-file types (e.g. Minterrupts
+                                // from another file), we can't tell if it's a record
+                                // or what fields it has. Skip the error to avoid
+                                // thousands of false positives.
+                                if !is_known_non_record(&base_ty) {
+                                    return Ty::Unknown;
+                                }
                                 self.push_error(
                                     DiagnosticCode::TypeError,
                                     inner.1,
@@ -6284,6 +6647,23 @@ impl<'a> Checker<'a> {
 
     fn infer_concat_result_type(&mut self, span: Span, lhs_ty: &Ty, rhs_ty: &Ty) -> Ty {
         if lhs_ty.is_unknown() || rhs_ty.is_unknown() {
+            return Ty::Unknown;
+        }
+        // Cross-file type aliases (e.g. xlenbits, regidx) cannot be resolved
+        // by the local checker. Skip the concat check for any type that isn't
+        // explicitly bits(...) or vector(...).
+        let is_definitely_concatenable = |t: &Ty| {
+            let text = t.text();
+            text.starts_with("bits(") || text.starts_with("vector(")
+        };
+        let is_definitely_not_concatenable = |t: &Ty| {
+            let text = t.text();
+            matches!(text.as_str(), "int" | "nat" | "bool" | "string" | "unit" | "real")
+        };
+        if !is_definitely_concatenable(lhs_ty) && !is_definitely_not_concatenable(lhs_ty) {
+            return Ty::Unknown;
+        }
+        if !is_definitely_concatenable(rhs_ty) && !is_definitely_not_concatenable(rhs_ty) {
             return Ty::Unknown;
         }
 
@@ -6400,7 +6780,16 @@ impl<'a> Checker<'a> {
             }
             "==" | "!=" | "<" | ">" | "<=" | ">=" => {
                 let mut subst = Subst::default();
-                if !unify(&lhs_ty, &rhs_ty, &mut subst) {
+                // Comparisons in Sail allow comparing any two compatible types
+                // including bitvectors of polymorphic widths. Be permissive
+                // when either side involves Unknown or polymorphic types.
+                let lhs_text = lhs_ty.text();
+                let rhs_text = rhs_ty.text();
+                let has_polymorphism = lhs_text.contains('\'')
+                    || rhs_text.contains('\'')
+                    || matches!(lhs_ty, Ty::Unknown)
+                    || matches!(rhs_ty, Ty::Unknown);
+                if !has_polymorphism && !unify(&lhs_ty, &rhs_ty, &mut subst) {
                     self.push_error(
                         DiagnosticCode::TypeError,
                         expr.1,
@@ -6413,29 +6802,47 @@ impl<'a> Checker<'a> {
                 }
                 Ty::Text("bool".to_string())
             }
+            "&" | "|" | "^" => {
+                // In Sail `&`, `|`, `^` are heavily overloaded across bool,
+                // bits, and integer types. Without full overload resolution
+                // we can't reliably pick the result type. Return bool when
+                // both operands are clearly bool, otherwise return Unknown
+                // to avoid false positives in assert / if conditions.
+                let lhs_text = lhs_ty.text();
+                let rhs_text = rhs_ty.text();
+                if lhs_text == "bool" && rhs_text == "bool" {
+                    Ty::Text("bool".to_string())
+                } else {
+                    Ty::Unknown
+                }
+            }
+            "<<" | ">>" | "<<<" | ">>>" => {
+                // Shift operators preserve the lhs type when known.
+                if matches!(lhs_ty, Ty::Unknown) {
+                    Ty::Unknown
+                } else {
+                    lhs_ty
+                }
+            }
             "+" | "-" | "*" | "/" => {
-                let numeric = if lhs_ty.text() == "real" || rhs_ty.text() == "real" {
+                // Sail's arithmetic operators are heavily overloaded:
+                // int + int, real + real, bits + bits, range + range, etc.
+                // The local checker doesn't know all overloads or cross-file
+                // type aliases (like xlenbits). Skip the operand check
+                // entirely — only the result type needs to be inferred.
+                let lhs_text = lhs_ty.text();
+                let rhs_text = rhs_ty.text();
+                if lhs_text.starts_with("bits(") {
+                    lhs_ty
+                } else if rhs_text.starts_with("bits(") {
+                    rhs_ty
+                } else if lhs_text == "real" || rhs_text == "real" {
                     Ty::Text("real".to_string())
+                } else if matches!(lhs_ty, Ty::Unknown) && matches!(rhs_ty, Ty::Unknown) {
+                    Ty::Unknown
                 } else {
                     Ty::Text("int".to_string())
-                };
-                for (side_ty, side_span) in [(&lhs_ty, lhs.1), (&rhs_ty, rhs.1)] {
-                    let mut subst = Subst::default();
-                    if !unify(&numeric, side_ty, &mut subst)
-                        && !unify(&Ty::Text("int".to_string()), side_ty, &mut Subst::default())
-                    {
-                        self.push_error(
-                            DiagnosticCode::TypeError,
-                            side_span,
-                            TypeError::Subtype {
-                                lhs: side_ty.text(),
-                                rhs: numeric.text(),
-                                constraint: None,
-                            },
-                        );
-                    }
                 }
-                numeric
             }
             _ => Ty::Unknown,
         }
@@ -6472,6 +6879,15 @@ impl<'a> Checker<'a> {
             match &case_ty {
                 None => case_ty = Some(body_ty),
                 Some(prev_ty) => {
+                    // Skip if either side is Unknown — the case may call a
+                    // cross-file function or be `exit()` which has unknown type.
+                    if matches!(prev_ty, Ty::Unknown) {
+                        case_ty = Some(body_ty);
+                        continue;
+                    }
+                    if matches!(body_ty, Ty::Unknown) {
+                        continue;
+                    }
                     let mut subst = Subst::default();
                     if !unify(prev_ty, &body_ty, &mut subst) {
                         self.push_error(
@@ -6820,14 +7236,23 @@ impl<'a> Checker<'a> {
         let candidates = self.env.lookup_functions(&callee_name);
 
         if candidates.is_empty() {
-            self.push_error(
-                DiagnosticCode::TypeError,
-                call.callee.1,
-                TypeError::NoFunctionType {
-                    id: callee_name.clone(),
-                    functions: self.env.functions.keys().cloned().collect(),
-                },
-            );
+            // The local type-check environment only knows about same-file
+            // functions and built-in primops. Cross-file callees (which are the
+            // norm in projects like sail-riscv) and union/enum constructors
+            // (None, Some, X, etc.) won't appear here. Silently return Unknown
+            // instead of producing a "Function not found" error to avoid
+            // thousands of false positives — the upstream Sail compiler uses a
+            // global type environment, which we don't have at single-file scope.
+            return Ty::Unknown;
+        }
+
+        // If this name also exists in cross-file workspace data, skip the
+        // candidate-matching step entirely. We can't reliably check arity or
+        // unify args because there may be additional overload variants we
+        // haven't merged. Return Unknown.
+        if self.env.cross_file_function_names.contains(&callee_name)
+            || self.env.cross_file_constructor_names.contains(&callee_name)
+        {
             return Ty::Unknown;
         }
 
@@ -6927,22 +7352,43 @@ impl<'a> Checker<'a> {
             }
         }
 
+        // For overloaded functions, some variants may live in other files and
+        // not be present in the local env. If the call name is registered as an
+        // overload, we cannot reliably determine arg count mismatch from only
+        // the local candidates — suppress the warning to avoid false positives.
+        let is_partial_overload = self
+            .env
+            .overloads
+            .get(&callee_name)
+            .map(|members| members.len() > 0)
+            .unwrap_or(false);
+
+        // If any argument type is Unknown (typically from a cross-file call),
+        // we can't reliably check overload resolution or quantifier
+        // instantiation — suppress candidate errors to avoid false positives.
+        let has_unknown_arg = arg_types.iter().any(|t| matches!(t, Ty::Unknown));
+        if has_unknown_arg {
+            return Ty::Unknown;
+        }
+
         if let Some((expected, actual)) = count_mismatch {
-            self.push_error(
-                DiagnosticCode::MismatchedArgCount,
-                call.callee.1,
-                TypeError::other(if expected == actual {
-                    format!("Expected {} arguments, found {}", actual, arg_types.len())
-                } else {
-                    format!(
-                        "Expected {}-{} arguments, found {}",
-                        expected,
-                        actual,
-                        arg_types.len()
-                    )
-                }),
-            );
-        } else {
+            if !is_partial_overload {
+                self.push_error(
+                    DiagnosticCode::MismatchedArgCount,
+                    call.callee.1,
+                    TypeError::other(if expected == actual {
+                        format!("Expected {} arguments, found {}", actual, arg_types.len())
+                    } else {
+                        format!(
+                            "Expected {}-{} arguments, found {}",
+                            expected,
+                            actual,
+                            arg_types.len()
+                        )
+                    }),
+                );
+            }
+        } else if !is_partial_overload {
             self.push_error(
                 DiagnosticCode::TypeError,
                 call.callee.1,
@@ -7022,6 +7468,7 @@ where
         env.registers.extend(file_env.registers);
         env.records.extend(file_env.records);
         env.bitfields.extend(file_env.bitfields);
+        env.type_aliases.extend(file_env.type_aliases);
         env.global_constraints.extend(file_env.global_constraints);
         for (name, schemes) in file_env.constructors {
             env.constructors.entry(name).or_default().extend(schemes);
@@ -7034,6 +7481,109 @@ pub(crate) fn check_file(file: &File) -> Option<TypeCheckResult> {
     let ast = file.core_ast()?;
     let (mut env, pattern_constants) = TopLevelEnv::from_ast(file.source.text(), ast);
     apply_callable_signature_metadata(file, &mut env);
+    Some(Checker::new(file, env, pattern_constants).check_source_file(ast))
+}
+
+/// Type-check a file with selective cross-file context. We deliberately
+/// merge ONLY data that is safe and unambiguous:
+///   - Type aliases (so `xlenbits` resolves to `bits(64)`)
+///   - Pattern-constant names (so `mRET`, `Data`, `ShadowStack` aren't
+///     treated as new bindings or duplicate bindings)
+///   - Cross-file function/overload NAME existence (consulted via a
+///     `cross_file_function_names` set so `is_partial_overload` and
+///     "function not found" suppression work without merging full schemes)
+///
+/// We deliberately do NOT merge:
+///   - Function schemes from other files (deep unification recursion)
+///   - Constructor schemes from other files (arity mismatch false positives)
+///   - Enum/union variant lists (pattern completeness false positives —
+///     since the cross-file enums often have many variants the local file
+///     legitimately doesn't need to handle)
+pub(crate) fn check_file_with_workspace<'a, I>(
+    file: &File,
+    all_files: I,
+) -> Option<TypeCheckResult>
+where
+    I: IntoIterator<Item = &'a File>,
+{
+    let ast = file.core_ast()?;
+
+    // Start from the local file env.
+    let (mut env, mut pattern_constants) =
+        TopLevelEnv::from_ast(file.source.text(), ast);
+    apply_callable_signature_metadata(file, &mut env);
+
+    // Build a lightweight pass over workspace files to collect:
+    //   - type aliases
+    //   - pattern constants (enum members)
+    //   - cross-file function names (for existence checks only)
+    //   - cross-file constructor names (for pattern recognition only)
+    let mut cross_file_function_names: HashSet<String> = HashSet::new();
+    let mut cross_file_constructor_names: HashSet<String> = HashSet::new();
+    for f in all_files {
+        let Some(other_ast) = f.core_ast() else { continue };
+        for (item, _) in &other_ast.defs {
+            match &item.kind {
+                DefinitionKind::TypeAlias(def) => {
+                    if let Some(target) = &def.target {
+                        let underlying = type_from_type_expr(f.source.text(), target);
+                        env.type_aliases.entry(def.name.0.clone()).or_insert(underlying);
+                    }
+                }
+                DefinitionKind::CallableSpec(spec) => {
+                    cross_file_function_names.insert(spec.name.0.clone());
+                }
+                DefinitionKind::Callable(def) => {
+                    cross_file_function_names.insert(def.name.0.clone());
+                }
+                DefinitionKind::Named(def) => match def.kind {
+                    NamedDefKind::Enum => {
+                        for member in &def.members {
+                            pattern_constants.insert(member.0.clone());
+                        }
+                        if let Some(NamedDefDetail::Enum { members, .. }) = &def.detail {
+                            for m in members {
+                                pattern_constants.insert(m.0.name.0.clone());
+                            }
+                        }
+                    }
+                    NamedDefKind::Union => {
+                        if let Some(NamedDefDetail::Union { variants }) = &def.detail {
+                            for v in variants {
+                                cross_file_constructor_names.insert(v.0.name.0.clone());
+                            }
+                        }
+                    }
+                    NamedDefKind::Overload => {
+                        let entry = env.overloads.entry(def.name.0.clone()).or_default();
+                        for m in &def.members {
+                            if !entry.contains(&m.0) {
+                                entry.push(m.0.clone());
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                DefinitionKind::ScatteredClause(def)
+                    if matches!(def.kind, sail_parser::ScatteredClauseKind::Enum) =>
+                {
+                    pattern_constants.insert(def.member.0.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Add own constructors to pattern_constants (so they aren't bindings).
+    for name in env.constructors.keys() {
+        pattern_constants.insert(name.clone());
+    }
+    pattern_constants.extend(cross_file_constructor_names.iter().cloned());
+
+    // Stash the cross-file name sets for use by infer_call's existence check.
+    env.cross_file_function_names = cross_file_function_names;
+    env.cross_file_constructor_names = cross_file_constructor_names;
+
     Some(Checker::new(file, env, pattern_constants).check_source_file(ast))
 }
 

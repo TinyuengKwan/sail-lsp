@@ -367,6 +367,11 @@ pub(crate) fn make_selection_range(
         }
     }
 
+    // AST-aware selection ranges: expressions, definitions, function bodies
+    if let Some(core_ast) = file.core_ast.as_deref() {
+        collect_ast_ranges(core_ast, offset, file, &mut ranges);
+    }
+
     let lr = line_range(position.line);
     if range_len(file, &lr) > 0 {
         ranges.push(lr);
@@ -423,18 +428,455 @@ pub(crate) fn on_enter_edits(
         }]);
     }
 
-    // Continue `//` line comments.
+    // Continue `//` line comments only if pressed Enter in the middle of the text
+    // or if followed by another comment.
     if stripped.starts_with("//") && !stripped.starts_with("///") {
-        let indent: String = prev_trimmed
-            .chars()
-            .take_while(|ch| *ch == ' ' || *ch == '\t')
-            .collect();
-        let insert_pos = tower_lsp::lsp_types::Position::new(position.line, 0);
-        return Some(vec![TextEdit {
-            range: Range::new(insert_pos, position),
-            new_text: format!("{indent}// "),
-        }]);
+        let comment_content = stripped.strip_prefix("//").unwrap_or("").trim_start();
+        // Continue if: (a) there's content after the //, or (b) next line is also a comment
+        let next_line_is_comment = {
+            let next_start = file
+                .source
+                .offset_at(&tower_lsp::lsp_types::Position::new(position.line + 1, 0));
+            let next_end = file
+                .source
+                .offset_at(&tower_lsp::lsp_types::Position::new(position.line + 2, 0))
+                .min(file.source.text().len());
+            if next_start < file.source.text().len() {
+                let next_line = &file.source.text()[next_start..next_end];
+                next_line.trim_start().starts_with("//")
+            } else {
+                false
+            }
+        };
+        if !comment_content.is_empty() || next_line_is_comment {
+            let indent: String = prev_trimmed
+                .chars()
+                .take_while(|ch| *ch == ' ' || *ch == '\t')
+                .collect();
+            let insert_pos = tower_lsp::lsp_types::Position::new(position.line, 0);
+            return Some(vec![TextEdit {
+                range: Range::new(insert_pos, position),
+                new_text: format!("{indent}// "),
+            }]);
+        }
+    }
+
+    // Smart brace indentation: if Enter pressed right after `{`, expand the block
+    if stripped.ends_with('{') {
+        let cur_start = file
+            .source
+            .offset_at(&tower_lsp::lsp_types::Position::new(position.line, 0));
+        let cur_end = file
+            .source
+            .offset_at(&tower_lsp::lsp_types::Position::new(position.line + 1, 0))
+            .min(file.source.text().len());
+        let cur_line = &file.source.text()[cur_start..cur_end];
+        let cur_trimmed = cur_line.trim();
+        // If the current (just-inserted) line contains only a closing brace, expand
+        if cur_trimmed == "}" || cur_trimmed.is_empty() {
+            let indent: String = prev_trimmed
+                .chars()
+                .take_while(|ch| *ch == ' ' || *ch == '\t')
+                .collect();
+            let inner_indent = format!("{indent}  ");
+            let insert_pos = tower_lsp::lsp_types::Position::new(position.line, 0);
+            return Some(vec![TextEdit {
+                range: Range::new(insert_pos, position),
+                new_text: format!("{inner_indent}"),
+            }]);
+        }
     }
 
     None
+}
+
+// ---------------------------------------------------------------------------
+// Join Lines
+// ---------------------------------------------------------------------------
+
+/// Join lines in a selection range: merge consecutive lines intelligently.
+pub(crate) fn join_lines_edits(file: &File, range: Range) -> Option<Vec<TextEdit>> {
+    let text = file.source.text();
+    let start_offset = file.source.offset_at(&range.start);
+    let end_offset = file.source.offset_at(&range.end);
+
+    // If no selection, join current line with the next one
+    let start_line = range.start.line;
+    let end_line = if start_offset == end_offset {
+        start_line + 1
+    } else {
+        range.end.line
+    };
+
+    if start_line >= end_line {
+        return None;
+    }
+
+    let mut edits = Vec::new();
+
+    for line in start_line..end_line {
+        let line_end_offset = file
+            .source
+            .offset_at(&tower_lsp::lsp_types::Position::new(line + 1, 0));
+        let next_line_end = file
+            .source
+            .offset_at(&tower_lsp::lsp_types::Position::new(line + 2, 0))
+            .min(text.len());
+
+        if line_end_offset >= text.len() {
+            break;
+        }
+
+        // Find the end of the current line (before newline)
+        let mut current_end = line_end_offset;
+        while current_end > 0 && matches!(text.as_bytes()[current_end - 1], b'\n' | b'\r') {
+            current_end -= 1;
+        }
+
+        // Find the start of the next line's content (after leading whitespace)
+        let next_line = &text[line_end_offset..next_line_end];
+        let next_content_start =
+            line_end_offset + next_line.len() - next_line.trim_start().len();
+
+        // Determine separator
+        let current_line_text = &text[file
+            .source
+            .offset_at(&tower_lsp::lsp_types::Position::new(line, 0))..current_end];
+        let next_trimmed = next_line.trim();
+
+        let separator = if current_line_text.trim_end().ends_with('{')
+            || current_line_text.trim_end().ends_with('(')
+            || current_line_text.trim_end().ends_with('[')
+            || next_trimmed.starts_with('}')
+            || next_trimmed.starts_with(')')
+            || next_trimmed.starts_with(']')
+            || next_trimmed.starts_with('.')
+        {
+            "" // No space before/after brackets or dot chains
+        } else if current_line_text.trim_end().ends_with(',') {
+            " " // Space after comma
+        } else if next_trimmed.starts_with("//") {
+            // Don't join comment lines
+            continue;
+        } else {
+            " " // Default: single space
+        };
+
+        // Remove trailing comma if joining with closing bracket
+        let mut actual_current_end = current_end;
+        if (next_trimmed.starts_with('}')
+            || next_trimmed.starts_with(')')
+            || next_trimmed.starts_with(']'))
+            && current_line_text.trim_end().ends_with(',')
+        {
+            actual_current_end -= 1;
+        }
+
+        edits.push(TextEdit {
+            range: Range::new(
+                file.source.position_at(actual_current_end),
+                file.source.position_at(next_content_start),
+            ),
+            new_text: separator.to_string(),
+        });
+    }
+
+    if edits.is_empty() {
+        None
+    } else {
+        Some(edits)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Matching Brace
+// ---------------------------------------------------------------------------
+
+/// Find the position of the matching brace for the bracket at the given position.
+pub(crate) fn matching_brace_position(
+    file: &File,
+    position: tower_lsp::lsp_types::Position,
+) -> Option<tower_lsp::lsp_types::Position> {
+    let tokens = file.tokens.as_deref()?;
+    let offset = file.source.offset_at(&position);
+
+    // Find the token at the cursor
+    let (idx, _) = tokens
+        .iter()
+        .enumerate()
+        .find(|(_, (_, span))| span.start <= offset && offset < span.end)?;
+
+    let (token, _span) = &tokens[idx];
+
+    // Define bracket pairs
+    let pairs: &[(sail_parser::Token, sail_parser::Token)] = &[
+        (
+            sail_parser::Token::LeftBracket,
+            sail_parser::Token::RightBracket,
+        ),
+        (
+            sail_parser::Token::LeftSquareBracket,
+            sail_parser::Token::RightSquareBracket,
+        ),
+        (
+            sail_parser::Token::LeftCurlyBracket,
+            sail_parser::Token::RightCurlyBracket,
+        ),
+        (
+            sail_parser::Token::LeftCurlyBar,
+            sail_parser::Token::RightCurlyBar,
+        ),
+        (
+            sail_parser::Token::LeftSquareBar,
+            sail_parser::Token::RightSquareBar,
+        ),
+    ];
+
+    // Check if token is an opening bracket
+    for (open, close) in pairs {
+        if token == open {
+            // Search forward for matching close
+            let mut depth = 1i32;
+            for (t, s) in &tokens[idx + 1..] {
+                if t == open {
+                    depth += 1;
+                } else if t == close {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(file.source.position_at(s.start));
+                    }
+                }
+            }
+            return None;
+        }
+        if token == close {
+            // Search backward for matching open
+            let mut depth = 1i32;
+            for (t, s) in tokens[..idx].iter().rev() {
+                if t == close {
+                    depth += 1;
+                } else if t == open {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(file.source.position_at(s.start));
+                    }
+                }
+            }
+            return None;
+        }
+    }
+
+    None
+}
+
+// ---------------------------------------------------------------------------
+// Move Item Up/Down
+// ---------------------------------------------------------------------------
+
+/// Move the definition or item at the given position up or down.
+/// Returns the text edits to apply, or None if the item can't be moved.
+pub(crate) fn move_item_edits(
+    file: &File,
+    position: tower_lsp::lsp_types::Position,
+    direction: MoveDirection,
+) -> Option<Vec<TextEdit>> {
+    let text = file.source.text();
+    let offset = file.source.offset_at(&position);
+    let core_ast = file.core_ast.as_deref()?;
+
+    // Find which top-level definition contains the cursor
+    let mut current_idx = None;
+    for (i, (_, def_span)) in core_ast.defs.iter().enumerate() {
+        if def_span.start <= offset && offset <= def_span.end {
+            current_idx = Some(i);
+            break;
+        }
+    }
+    let current_idx = current_idx?;
+
+    let swap_idx = match direction {
+        MoveDirection::Up => {
+            if current_idx == 0 {
+                return None;
+            }
+            current_idx - 1
+        }
+        MoveDirection::Down => {
+            if current_idx + 1 >= core_ast.defs.len() {
+                return None;
+            }
+            current_idx + 1
+        }
+    };
+
+    let (_, current_span) = &core_ast.defs[current_idx];
+    let (_, swap_span) = &core_ast.defs[swap_idx];
+
+    let current_text = text.get(current_span.start..current_span.end)?;
+    let swap_text = text.get(swap_span.start..swap_span.end)?;
+
+    // Build edits: replace both spans. Apply in reverse order to maintain offsets.
+    let (first_span, first_text, second_span, second_text) = if current_idx < swap_idx {
+        (current_span, swap_text, swap_span, current_text)
+    } else {
+        (swap_span, current_text, current_span, swap_text)
+    };
+
+    Some(vec![
+        TextEdit {
+            range: Range::new(
+                file.source.position_at(second_span.start),
+                file.source.position_at(second_span.end),
+            ),
+            new_text: second_text.to_string(),
+        },
+        TextEdit {
+            range: Range::new(
+                file.source.position_at(first_span.start),
+                file.source.position_at(first_span.end),
+            ),
+            new_text: first_text.to_string(),
+        },
+    ])
+}
+
+// ---------------------------------------------------------------------------
+// AST-aware selection ranges
+// ---------------------------------------------------------------------------
+
+fn collect_ast_ranges(
+    ast: &sail_parser::core_ast::SourceFile,
+    offset: usize,
+    file: &File,
+    ranges: &mut Vec<Range>,
+) {
+    use sail_parser::core_ast::DefinitionKind;
+
+    for (def, def_span) in &ast.defs {
+        if def_span.start <= offset && offset <= def_span.end {
+            // Definition range
+            let r = Range::new(
+                file.source.position_at(def_span.start),
+                file.source.position_at(def_span.end),
+            );
+            if range_len(file, &r) > 0 {
+                ranges.push(r);
+            }
+
+            // Recurse into callable body
+            if let DefinitionKind::Callable(c) = &def.kind {
+                if let Some(body) = &c.body {
+                    collect_expr_ranges(body, offset, file, ranges);
+                }
+                for clause in &c.clauses {
+                    if let Some(body) = &clause.0.body {
+                        collect_expr_ranges(body, offset, file, ranges);
+                    }
+                    // Clause span
+                    let cs = clause.1;
+                    if cs.start <= offset && offset <= cs.end {
+                        let cr = Range::new(
+                            file.source.position_at(cs.start),
+                            file.source.position_at(cs.end),
+                        );
+                        if range_len(file, &cr) > 0 {
+                            ranges.push(cr);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn collect_expr_ranges(
+    expr: &(sail_parser::core_ast::Expr, sail_parser::Span),
+    offset: usize,
+    file: &File,
+    ranges: &mut Vec<Range>,
+) {
+    use sail_parser::core_ast::{BlockItem, Expr};
+
+    if offset < expr.1.start || offset > expr.1.end {
+        return;
+    }
+
+    // Add this expression's range
+    let r = Range::new(
+        file.source.position_at(expr.1.start),
+        file.source.position_at(expr.1.end),
+    );
+    if range_len(file, &r) > 0 {
+        ranges.push(r);
+    }
+
+    // Recurse into sub-expressions
+    match &expr.0 {
+        Expr::If { cond, then_branch, else_branch, .. } => {
+            collect_expr_ranges(cond, offset, file, ranges);
+            collect_expr_ranges(then_branch, offset, file, ranges);
+            if let Some(e) = else_branch {
+                collect_expr_ranges(e, offset, file, ranges);
+            }
+        }
+        Expr::Block(items) => {
+            for item in items {
+                match &item.0 {
+                    BlockItem::Expr(e) | BlockItem::Var { value: e, .. } => {
+                        collect_expr_ranges(e, offset, file, ranges);
+                    }
+                    BlockItem::Let(lb) => collect_expr_ranges(&*lb.value, offset, file, ranges),
+                }
+            }
+        }
+        Expr::Match { scrutinee, cases, .. } | Expr::Try { scrutinee, cases, .. } => {
+            collect_expr_ranges(scrutinee, offset, file, ranges);
+            for (case, case_span) in cases {
+                if case_span.start <= offset && offset <= case_span.end {
+                    let cr = Range::new(
+                        file.source.position_at(case_span.start),
+                        file.source.position_at(case_span.end),
+                    );
+                    if range_len(file, &cr) > 0 {
+                        ranges.push(cr);
+                    }
+                    collect_expr_ranges(&case.body, offset, file, ranges);
+                }
+            }
+        }
+        Expr::Let { body, .. } | Expr::Var { body, .. } => {
+            collect_expr_ranges(body, offset, file, ranges);
+        }
+        Expr::Foreach(f) => collect_expr_ranges(&f.body, offset, file, ranges),
+        Expr::While { cond, body, .. } => {
+            collect_expr_ranges(cond, offset, file, ranges);
+            collect_expr_ranges(body, offset, file, ranges);
+        }
+        Expr::Repeat { body, until, .. } => {
+            collect_expr_ranges(body, offset, file, ranges);
+            collect_expr_ranges(until, offset, file, ranges);
+        }
+        Expr::Infix { lhs, rhs, .. } => {
+            collect_expr_ranges(lhs, offset, file, ranges);
+            collect_expr_ranges(rhs, offset, file, ranges);
+        }
+        Expr::Call(call) => {
+            collect_expr_ranges(&call.callee, offset, file, ranges);
+            for arg in &call.args {
+                collect_expr_ranges(arg, offset, file, ranges);
+            }
+        }
+        Expr::Return(e) | Expr::Throw(e) | Expr::Prefix { expr: e, .. } | Expr::Cast { expr: e, .. } => {
+            collect_expr_ranges(e, offset, file, ranges);
+        }
+        Expr::Assign { rhs, .. } => collect_expr_ranges(rhs, offset, file, ranges),
+        Expr::Field { expr: e, .. } => collect_expr_ranges(e, offset, file, ranges),
+        _ => {}
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MoveDirection {
+    Up,
+    Down,
 }

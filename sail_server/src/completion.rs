@@ -35,6 +35,8 @@ pub(crate) fn completion_trigger_characters() -> Vec<String> {
         "?".to_string(),
         "~".to_string(),
         "'".to_string(),
+        "@".to_string(),
+        "$".to_string(),
     ]
 }
 
@@ -343,6 +345,281 @@ where
             item
         })
         .collect()
+}
+
+/// Generate postfix completions (e.g. `expr.if` → `if expr then { }`)
+pub(crate) fn postfix_completions(
+    text: &str,
+    offset: usize,
+    prefix: &str,
+) -> Vec<CompletionItem> {
+    // Find the dot before the prefix
+    let prefix_start = offset - prefix.len();
+    if prefix_start == 0 {
+        return Vec::new();
+    }
+    let before = &text[..prefix_start];
+    if !before.ends_with('.') {
+        return Vec::new();
+    }
+
+    // Extract the receiver expression (text before the dot)
+    let dot_pos = prefix_start - 1;
+    let receiver = extract_receiver_expr(text, dot_pos);
+    if receiver.is_empty() {
+        return Vec::new();
+    }
+
+    let prefix_lower = prefix.to_ascii_lowercase();
+    let receiver_range_start = dot_pos - receiver.len();
+
+    let postfix_templates: &[(&str, &str, &str)] = &[
+        ("if", "if {} then {{\n\t$0\n}}", "Wrap in if-then"),
+        ("match", "match {} {{\n\t${{1:_}} => $0\n}}", "Wrap in match"),
+        ("let", "let ${{1:x}} = {}", "Bind to let"),
+        ("not", "~({})", "Negate expression"),
+        ("return", "return {}", "Return expression"),
+        ("dbg", "/* DBG */ {}", "Debug wrapper"),
+        (
+            "foreach",
+            "foreach (${{1:i}} from ${{2:0}} to {}) {{\n\t$0\n}}",
+            "Wrap in foreach",
+        ),
+        ("assert", "assert({}, ${{1:\"assertion failed\"}})", "Wrap in assert"),
+    ];
+
+    let mut items = Vec::new();
+    for (trigger, template, detail) in postfix_templates {
+        if !trigger.starts_with(&prefix_lower) && !prefix_lower.is_empty() {
+            continue;
+        }
+
+        let snippet = template.replace("{}", &receiver);
+
+        items.push(CompletionItem {
+            label: format!(".{trigger}"),
+            kind: Some(CompletionItemKind::SNIPPET),
+            detail: Some(detail.to_string()),
+            filter_text: Some(trigger.to_string()),
+            insert_text: Some(snippet),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            // The edit should replace from the receiver start through the current position
+            additional_text_edits: Some(vec![tower_lsp::lsp_types::TextEdit {
+                range: tower_lsp::lsp_types::Range::new(
+                    tower_lsp::lsp_types::Position::new(0, 0), // placeholder
+                    tower_lsp::lsp_types::Position::new(0, 0),
+                ),
+                new_text: String::new(),
+            }]),
+            data: Some(serde_json::json!({
+                "source": "sail-lsp",
+                "kind": "postfix",
+                "detail": detail,
+                "receiver_start": receiver_range_start,
+                "dot_pos": dot_pos,
+            })),
+            sort_text: Some(format!("0000_{trigger}")),
+            ..CompletionItem::default()
+        });
+    }
+    items
+}
+
+/// Extract the receiver expression text before a dot.
+fn extract_receiver_expr(text: &str, dot_pos: usize) -> &str {
+    let bytes = text.as_bytes();
+    let mut end = dot_pos;
+    // Skip whitespace before the dot
+    while end > 0 && bytes[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    if end == 0 {
+        return "";
+    }
+
+    // Handle closing brackets by finding the matching open
+    let last_byte = bytes[end - 1];
+    if last_byte == b')' || last_byte == b']' {
+        let open = if last_byte == b')' { b'(' } else { b'[' };
+        let mut depth = 1i32;
+        let mut pos = end - 2;
+        loop {
+            if bytes[pos] == last_byte {
+                depth += 1;
+            } else if bytes[pos] == open {
+                depth -= 1;
+                if depth == 0 {
+                    // Now also grab the identifier before the open paren
+                    let mut start = pos;
+                    while start > 0
+                        && (bytes[start - 1].is_ascii_alphanumeric()
+                            || bytes[start - 1] == b'_'
+                            || bytes[start - 1] == b'?')
+                    {
+                        start -= 1;
+                    }
+                    return &text[start..end];
+                }
+            }
+            if pos == 0 {
+                break;
+            }
+            pos -= 1;
+        }
+        return "";
+    }
+
+    // Otherwise, grab an identifier
+    let mut start = end;
+    while start > 0
+        && (bytes[start - 1].is_ascii_alphanumeric()
+            || bytes[start - 1] == b'_'
+            || bytes[start - 1] == b'?'
+            || bytes[start - 1] == b'\'')
+    {
+        start -= 1;
+    }
+    &text[start..end]
+}
+
+/// Pragma name completion: triggered when cursor is right after `@` or `$`.
+pub(crate) fn pragma_completions(text: &str, offset: usize) -> Vec<CompletionItem> {
+    if offset == 0 {
+        return Vec::new();
+    }
+    let bytes = text.as_bytes();
+
+    // Look back to find @ or $ that starts a pragma
+    let mut start = offset;
+    while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') {
+        start -= 1;
+    }
+    if start == 0 {
+        return Vec::new();
+    }
+
+    let trigger = bytes[start - 1];
+    if trigger != b'@' && trigger != b'$' {
+        return Vec::new();
+    }
+
+    let prefix = &text[start..offset];
+
+    crate::diagnostics::semantic::KNOWN_PRAGMAS
+        .iter()
+        .filter(|name| name.starts_with(prefix))
+        .map(|name| CompletionItem {
+            label: format!("{}{name}", trigger as char),
+            kind: Some(CompletionItemKind::KEYWORD),
+            detail: Some("Sail pragma".to_string()),
+            filter_text: Some(name.to_string()),
+            insert_text: Some(name.to_string()),
+            insert_text_format: Some(InsertTextFormat::PLAIN_TEXT),
+            sort_text: Some(format!("aaaa_{name}")),
+            data: Some(serde_json::json!({
+                "source": "sail-lsp",
+                "kind": "pragma",
+            })),
+            ..CompletionItem::default()
+        })
+        .collect()
+}
+
+/// Built-in Sail code snippet templates.
+pub(crate) fn snippet_completions(prefix: &str, is_top_level: bool) -> Vec<CompletionItem> {
+    let prefix_lower = prefix.to_ascii_lowercase();
+    let snippets: &[(&str, &str, &str, bool)] = &[
+        // (trigger, snippet, detail, top_level_only)
+        (
+            "funcdecl",
+            "val ${1:name} : (${2:args}) -> ${3:result}\nfunction ${1:name}(${4:params}) = {\n\t$0\n}",
+            "Function declaration + definition",
+            true,
+        ),
+        (
+            "scattered",
+            "scattered function ${1:name}\n\nclause ${1:name}(${2:pat}) = $0\n\nend ${1:name}",
+            "Scattered function definition",
+            true,
+        ),
+        (
+            "enumdef",
+            "enum ${1:Name} = {\n\t${2:A},\n\t${3:B}\n}",
+            "Enum definition",
+            true,
+        ),
+        (
+            "structdef",
+            "struct ${1:Name} = {\n\t${2:field} : ${3:type}\n}",
+            "Struct definition",
+            true,
+        ),
+        (
+            "uniondef",
+            "union ${1:Name} = {\n\t${2:Variant} : ${3:type}\n}",
+            "Union definition",
+            true,
+        ),
+        (
+            "bitfield",
+            "bitfield ${1:Name} : bits(${2:32}) = {\n\t${3:field} : ${4:7 .. 0}\n}",
+            "Bitfield definition",
+            true,
+        ),
+        (
+            "register",
+            "register ${1:name} : ${2:type}",
+            "Register definition",
+            true,
+        ),
+        (
+            "mapping",
+            "mapping ${1:name} : ${2:type1} <-> ${3:type2} = {\n\t${4:pat1} <-> ${5:pat2}\n}",
+            "Mapping definition",
+            true,
+        ),
+        (
+            "tryc",
+            "try {\n\t$0\n} catch {\n\t${1:_} => ()\n}",
+            "Try-catch block",
+            false,
+        ),
+        (
+            "matchopt",
+            "match ${1:x} {\n\tSome(${2:v}) => $3,\n\tNone() => $0\n}",
+            "Match on option",
+            false,
+        ),
+    ];
+
+    let mut items = Vec::new();
+    for (trigger, snippet, detail, top_only) in snippets {
+        if *top_only && !is_top_level {
+            continue;
+        }
+        if !top_only && is_top_level {
+            continue;
+        }
+        if !prefix_lower.is_empty() && !trigger.starts_with(&prefix_lower) {
+            continue;
+        }
+        items.push(CompletionItem {
+            label: trigger.to_string(),
+            kind: Some(CompletionItemKind::SNIPPET),
+            detail: Some(detail.to_string()),
+            filter_text: Some(trigger.to_string()),
+            insert_text: Some(snippet.to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            sort_text: Some(format!("zzzz_{trigger}")),
+            data: Some(serde_json::json!({
+                "source": "sail-lsp",
+                "kind": "snippet",
+                "detail": detail,
+            })),
+            ..CompletionItem::default()
+        });
+    }
+    items
 }
 
 pub(crate) fn resolve_completion_item<'a, I>(mut item: CompletionItem, files: I) -> CompletionItem

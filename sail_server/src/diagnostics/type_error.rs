@@ -34,15 +34,6 @@ pub enum TypeError {
         ty: String,
         error: Box<TypeError>,
     },
-    NoFunctionType {
-        id: String,
-        functions: Vec<String>,
-    },
-    UnboundId {
-        id: String,
-        locals: Vec<String>,
-        have_function: bool,
-    },
     VectorSubrange {
         first: String,
         second: String,
@@ -128,25 +119,6 @@ impl TypeError {
                     message,
                     hint.or_else(|| Some(format!("checking function argument has type {ty}"))),
                 )
-            }
-            TypeError::NoFunctionType { id, .. } => {
-                (Message::line(format!("Function {id} not found")), None)
-            }
-            TypeError::UnboundId {
-                id, have_function, ..
-            } => {
-                if *have_function {
-                    (
-                        Message::seq([
-                            Message::line(format!("Identifier {id} is unbound")),
-                            Message::line(""),
-                            Message::line(format!("There is also a function {id} in scope.")),
-                        ]),
-                        None,
-                    )
-                } else {
-                    (Message::line(format!("Identifier {id} is unbound")), None)
-                }
             }
             TypeError::VectorSubrange {
                 first,

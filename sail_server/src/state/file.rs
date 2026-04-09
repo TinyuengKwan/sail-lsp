@@ -40,6 +40,11 @@ pub struct File {
 
     // Parse and semantic diagnostics that are available without type checking.
     base_diagnostics: Vec<Diagnostic>,
+    // Number of leading entries in `base_diagnostics` that are parse-only
+    // (lex/syntax) diagnostics. Used by `recompute_diagnostics_with_workspace`
+    // to replace just the trailing semantic diagnostics with workspace-aware
+    // versions.
+    parse_diagnostics_len: usize,
 
     // Cached LSP diagnostics to avoid repeated allocation.
     cached_lsp_diagnostics: Mutex<Option<Vec<LspDiagnostic>>>,
@@ -61,6 +66,7 @@ impl Clone for File {
             ref_counts: self.ref_counts.clone(),
             impl_counts: self.impl_counts.clone(),
             base_diagnostics: self.base_diagnostics.clone(),
+            parse_diagnostics_len: self.parse_diagnostics_len,
             cached_lsp_diagnostics: Mutex::new(
                 self.cached_lsp_diagnostics.lock().unwrap().clone(),
             ),
@@ -91,6 +97,7 @@ impl File {
             ref_counts: HashMap::new(),
             impl_counts: HashMap::new(),
             base_diagnostics: Vec::new(),
+            parse_diagnostics_len: 0,
             cached_lsp_diagnostics: Mutex::new(None),
             eager_type_check,
         };
@@ -133,8 +140,40 @@ impl File {
         self.definitions = definitions;
         self.signature_index = crate::symbols::build_signature_index(self);
         self.build_count_caches();
+        // Record where parse diagnostics end and semantic diagnostics begin so
+        // we can later replace just the semantic portion with workspace-aware
+        // versions in `recompute_diagnostics_with_workspace`.
+        self.parse_diagnostics_len = diagnostics.len();
         diagnostics.extend(compute_semantic_diagnostics(self));
         self.base_diagnostics = diagnostics;
+    }
+
+    /// Re-run semantic diagnostics and typecheck with workspace context. Call
+    /// this after `parse_and_check` once all files in the workspace have been
+    /// parsed, so cross-file references can be resolved.
+    pub fn recompute_diagnostics_with_workspace<'a, I>(&mut self, all_files: I)
+    where
+        I: IntoIterator<Item = &'a File> + Clone,
+    {
+        // Recompute typecheck with workspace env so cross-file types resolve.
+        let new_type_check = crate::typecheck::check_file_with_workspace(
+            self,
+            all_files.clone(),
+        );
+
+        // Recompute semantic diagnostics with cross-file enum member context.
+        let semantic_diags =
+            crate::diagnostics::semantic::compute_semantic_diagnostics_with_workspace(
+                self, all_files,
+            );
+
+        // Replace just the semantic portion of base_diagnostics, preserving
+        // the parse diagnostics produced earlier.
+        self.base_diagnostics.truncate(self.parse_diagnostics_len);
+        self.base_diagnostics.extend(semantic_diags);
+
+        *self.cached_lsp_diagnostics.lock().unwrap() = None;
+        self.type_check = new_type_check;
     }
 
     fn build_count_caches(&mut self) {

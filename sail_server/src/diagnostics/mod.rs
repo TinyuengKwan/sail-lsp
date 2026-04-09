@@ -55,6 +55,14 @@ pub enum DiagnosticCode {
     OptionRegisterNoDefault,
     UnionConstructorInPattern,
     RedundantTypeAnnotation,
+    IncompleteMatch,
+    RedundantMatchArm,
+    IncompleteScattered,
+    UnknownDirective,
+    UnclosedDirective,
+    UnreachableAfterEscape,
+    PrivateAccess,
+    UnsupportedRegisterType,
 }
 
 impl DiagnosticCode {
@@ -74,6 +82,14 @@ impl DiagnosticCode {
             DiagnosticCode::OptionRegisterNoDefault => "option-register-no-default",
             DiagnosticCode::UnionConstructorInPattern => "union-constructor-in-pattern",
             DiagnosticCode::RedundantTypeAnnotation => "redundant-type-annotation",
+            DiagnosticCode::IncompleteMatch => "incomplete-match",
+            DiagnosticCode::RedundantMatchArm => "redundant-match-arm",
+            DiagnosticCode::IncompleteScattered => "incomplete-scattered",
+            DiagnosticCode::UnknownDirective => "unknown-directive",
+            DiagnosticCode::UnclosedDirective => "unclosed-directive",
+            DiagnosticCode::UnreachableAfterEscape => "unreachable-after-escape",
+            DiagnosticCode::PrivateAccess => "private-access",
+            DiagnosticCode::UnsupportedRegisterType => "unsupported-register-type",
         }
     }
 }

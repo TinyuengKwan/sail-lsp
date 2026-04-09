@@ -130,11 +130,43 @@ where
             }
         }
 
+        // Effect tracking: show side effects of functions
+        if matches!(
+            decl_ref.decl.kind,
+            DeclKind::Function | DeclKind::Value | DeclKind::Mapping
+        ) {
+            if let Some(ast) = decl_ref.file.core_ast() {
+                let effects = infer_effects_for_def(ast, &decl_ref.decl.name);
+                if !effects.is_empty() {
+                    markdown.push("___".to_string());
+                    markdown.push(format!("**effects:** {}", effects.join(", ")));
+                } else {
+                    markdown.push("___".to_string());
+                    markdown.push("**effects:** *pure*".to_string());
+                }
+            }
+        }
+
         if let Some(comments) =
             extract_comments(decl_ref.file.source.text(), decl_ref.decl.span.start)
         {
             markdown.push("___".to_string());
             markdown.push(comments);
+        }
+
+        // Constant folding: show computed value for let/var bindings
+        if matches!(decl_ref.decl.kind, DeclKind::Let | DeclKind::Var) {
+            if let Some(ast) = decl_ref.file.core_ast() {
+                if let Some(value_span) = find_binding_value_span(ast, &decl_ref.decl.name, decl_ref.decl.span) {
+                    let value_text = decl_ref.file.source.text().get(value_span.start..value_span.end);
+                    if let Some(value_text) = value_text {
+                        if let Some(folded) = crate::actions::try_fold_constant(value_text) {
+                            markdown.push("___".to_string());
+                            markdown.push(format!("**value:** `{folded}`"));
+                        }
+                    }
+                }
+            }
         }
 
         // Show path like RA (using simple relative path or filename)
@@ -753,5 +785,224 @@ overload op = {add, sub}
         let markdown = hover_markdown(hover);
         assert!(markdown.contains("instantiated as"));
         assert!(markdown.contains("bits(32) -> bits(32)"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Effect Tracking
+// ---------------------------------------------------------------------------
+
+fn find_binding_value_span(
+    ast: &sail_parser::core_ast::SourceFile,
+    name: &str,
+    decl_span: sail_parser::Span,
+) -> Option<sail_parser::Span> {
+    use sail_parser::core_ast::{BlockItem, DefinitionKind, Expr, Pattern};
+
+    fn search_expr(
+        expr: &(Expr, sail_parser::Span),
+        name: &str,
+        decl_span: sail_parser::Span,
+    ) -> Option<sail_parser::Span> {
+        match &expr.0 {
+            Expr::Let { binding, body } => {
+                if matches!(&binding.pattern.0, Pattern::Ident(n) if n == name)
+                    && binding.pattern.1.start == decl_span.start
+                {
+                    return Some(binding.value.1);
+                }
+                search_expr(body, name, decl_span)
+            }
+            Expr::Block(items) => {
+                for item in items {
+                    match &item.0 {
+                        BlockItem::Expr(e) | BlockItem::Var { value: e, .. } => {
+                            if let Some(r) = search_expr(e, name, decl_span) {
+                                return Some(r);
+                            }
+                        }
+                        BlockItem::Let(lb) => {
+                            if matches!(&lb.pattern.0, Pattern::Ident(n) if n == name)
+                                && lb.pattern.1.start == decl_span.start
+                            {
+                                return Some(lb.value.1);
+                            }
+                            if let Some(r) = search_expr(&*lb.value, name, decl_span) {
+                                return Some(r);
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            Expr::If { then_branch, else_branch, .. } => {
+                search_expr(then_branch, name, decl_span)
+                    .or_else(|| else_branch.as_ref().and_then(|e| search_expr(e, name, decl_span)))
+            }
+            Expr::Var { body, .. } => search_expr(body, name, decl_span),
+            Expr::Match { cases, .. } | Expr::Try { cases, .. } => {
+                cases.iter().find_map(|(c, _)| search_expr(&c.body, name, decl_span))
+            }
+            Expr::Foreach(f) => search_expr(&f.body, name, decl_span),
+            Expr::While { body, .. } | Expr::Repeat { body, .. } => search_expr(body, name, decl_span),
+            _ => None,
+        }
+    }
+
+    for (def, _) in &ast.defs {
+        match &def.kind {
+            DefinitionKind::Callable(c) => {
+                if let Some(body) = &c.body {
+                    if let Some(r) = search_expr(body, name, decl_span) {
+                        return Some(r);
+                    }
+                }
+                for (clause, _) in &c.clauses {
+                    if let Some(body) = &clause.body {
+                        if let Some(r) = search_expr(body, name, decl_span) {
+                            return Some(r);
+                        }
+                    }
+                }
+            }
+            DefinitionKind::Named(nd) => {
+                if nd.name.0 == name && nd.name.1.start == decl_span.start {
+                    if let Some(v) = &nd.value {
+                        return Some(v.1);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn infer_effects_for_def(
+    ast: &sail_parser::core_ast::SourceFile,
+    name: &str,
+) -> Vec<String> {
+    use sail_parser::core_ast::{
+        DefinitionKind,
+    };
+
+    let mut effects = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for (def, _) in &ast.defs {
+        if let DefinitionKind::Callable(c) = &def.kind {
+            if c.name.0 != name {
+                continue;
+            }
+            // Check the body for side effects
+            if let Some(body) = &c.body {
+                collect_effects(&body.0, &mut effects, &mut seen);
+            }
+            for (clause, _) in &c.clauses {
+                if let Some(body) = &clause.body {
+                    collect_effects(&body.0, &mut effects, &mut seen);
+                }
+            }
+        }
+    }
+
+    effects.sort();
+    effects.dedup();
+    effects
+}
+
+fn collect_effects(
+    expr: &sail_parser::core_ast::Expr,
+    effects: &mut Vec<String>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    use sail_parser::core_ast::{BlockItem, Expr};
+
+    match expr {
+        Expr::Return(_) => {
+            if seen.insert("return".to_string()) {
+                effects.push("return".to_string());
+            }
+        }
+        Expr::Throw(_) => {
+            if seen.insert("throw".to_string()) {
+                effects.push("throw".to_string());
+            }
+        }
+        Expr::Exit(_) => {
+            if seen.insert("exit".to_string()) {
+                effects.push("exit".to_string());
+            }
+        }
+        Expr::Assert { .. } => {
+            if seen.insert("assert".to_string()) {
+                effects.push("assert".to_string());
+            }
+        }
+        Expr::Assign { .. } => {
+            if seen.insert("mutation".to_string()) {
+                effects.push("mutation".to_string());
+            }
+        }
+        Expr::Ref(_) => {
+            if seen.insert("register".to_string()) {
+                effects.push("register".to_string());
+            }
+        }
+        // Recurse into sub-expressions
+        Expr::Block(items) => {
+            for item in items {
+                match &item.0 {
+                    BlockItem::Expr(e) | BlockItem::Var { value: e, .. } => {
+                        collect_effects(&e.0, effects, seen);
+                    }
+                    BlockItem::Let(lb) => collect_effects(&lb.value.0, effects, seen),
+                }
+            }
+        }
+        Expr::If { cond, then_branch, else_branch, .. } => {
+            collect_effects(&cond.0, effects, seen);
+            collect_effects(&then_branch.0, effects, seen);
+            if let Some(e) = else_branch {
+                collect_effects(&e.0, effects, seen);
+            }
+        }
+        Expr::Match { scrutinee, cases, .. } | Expr::Try { scrutinee, cases, .. } => {
+            collect_effects(&scrutinee.0, effects, seen);
+            for (case, _) in cases {
+                collect_effects(&case.body.0, effects, seen);
+            }
+        }
+        Expr::Let { binding, body } => {
+            collect_effects(&binding.value.0, effects, seen);
+            collect_effects(&body.0, effects, seen);
+        }
+        Expr::Var { value, body, .. } => {
+            collect_effects(&value.0, effects, seen);
+            collect_effects(&body.0, effects, seen);
+        }
+        Expr::Foreach(f) => collect_effects(&f.body.0, effects, seen),
+        Expr::While { cond, body, .. } => {
+            collect_effects(&cond.0, effects, seen);
+            collect_effects(&body.0, effects, seen);
+        }
+        Expr::Repeat { body, until, .. } => {
+            collect_effects(&body.0, effects, seen);
+            collect_effects(&until.0, effects, seen);
+        }
+        Expr::Call(call) => {
+            collect_effects(&call.callee.0, effects, seen);
+            for arg in &call.args {
+                collect_effects(&arg.0, effects, seen);
+            }
+        }
+        Expr::Infix { lhs, rhs, .. } => {
+            collect_effects(&lhs.0, effects, seen);
+            collect_effects(&rhs.0, effects, seen);
+        }
+        Expr::Prefix { expr: e, .. } | Expr::Cast { expr: e, .. } | Expr::Field { expr: e, .. } => {
+            collect_effects(&e.0, effects, seen);
+        }
+        _ => {}
     }
 }

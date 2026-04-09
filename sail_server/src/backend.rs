@@ -253,16 +253,28 @@ impl Backend {
                 }
             }
 
+            // Snapshot all files (open + disk) so the worker thread can do
+            // cross-file analysis without holding the state lock.
+            let workspace_files: Vec<File> = {
+                let state_guard = state.read().await;
+                state_guard.all_files().map(|(_, f)| f.clone()).collect()
+            };
+
+            // Run typecheck AND workspace-aware semantic recompute in the
+            // worker thread so they can both use the cross-file context.
             let (tx, rx) = oneshot::channel();
+            let workspace_for_thread = workspace_files;
             let spawn_result = std::thread::Builder::new()
                 .name("sail-typecheck".to_string())
                 .stack_size(TYPECHECK_THREAD_STACK_SIZE)
                 .spawn(move || {
-                    let _ = tx.send(file.compute_type_check());
+                    let mut file = file;
+                    file.recompute_diagnostics_with_workspace(&workspace_for_thread);
+                    let _ = tx.send(file);
                 });
 
-            let type_check = match spawn_result {
-                Ok(_handle) => rx.await.ok().flatten(),
+            let updated_file = match spawn_result {
+                Ok(_handle) => rx.await.ok(),
                 Err(err) => {
                     client
                         .log_message(
@@ -287,7 +299,9 @@ impl Backend {
                 let Some(file) = state_guard.open_files.get_mut(&uri) else {
                     return;
                 };
-                file.set_type_check(type_check);
+                if let Some(updated) = updated_file {
+                    *file = updated;
+                }
                 Some(file.lsp_diagnostics())
             };
 
