@@ -1,0 +1,21 @@
+[package]
+name = "vfs"
+version = "0.1.0"
+description = "A virtual file system for sail-lsp."
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+doctest = false
+
+[dependencies]
+rustc-hash.workspace = true
+indexmap.workspace = true
+paths.workspace = true
+crossbeam-channel.workspace = true
+url.workspace = true
+nohash-hasher.workspace = true
+tracing.workspace = true
+# ALIGN(ra): fst for O(log n) prefix-based file set classification
+fst = "0.4.7"

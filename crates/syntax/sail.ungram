@@ -1,0 +1,446 @@
+// Sail Grammar Specification
+//
+// This is the single source of truth for the Sail concrete syntax tree.
+// From this file, the following are generated:
+//   - `parser/src/syntax_kind/generated.rs`  (SyntaxKind enum)
+//   - `syntax/src/ast/generated/nodes.rs`    (typed AST node wrappers)
+//
+// Format: ungrammar DSL (https://crates.io/crates/ungrammar)
+//
+// Legend:
+//   Name =          rule definition (non-terminal → composite SyntaxKind)
+//   'keyword'       keyword or punctuation token (terminal)
+//   '#ident'        generic identifier token
+//   '#literal'      literal token
+//   A B             sequence
+//   A | B           alternation
+//   A*              zero or more
+//   A?              optional
+//   label:A         named field in AST node
+
+// ════════════════════════════════════════════════════════════════════
+// Top-Level Structure
+// ════════════════════════════════════════════════════════════════════
+
+SourceFile =
+  Definition*
+
+Definition =
+    CallableDef
+  | CallableSpec
+  | TypeAliasDef
+  | NamedDef
+  | ScatteredDef
+  | ScatteredClauseDef
+  | DefaultDef
+  | FixityDef
+  | InstantiationDef
+  | DirectiveDef
+  | EndDef
+  | ConstraintDef
+  | TerminationMeasureDef
+  | OutcomeDef
+
+// ════════════════════════════════════════════════════════════════════
+// Definitions
+// ════════════════════════════════════════════════════════════════════
+
+CallableDef =
+  Attribute*
+  Visibility?
+  ('function' | 'mapping')
+  name:Name
+  params:ParamList?
+  (':' return_type:Type)?
+  ('=' body:Expr)?
+
+CallableSpec =
+  Attribute*
+  Visibility?
+  ('val' | 'mapping')
+  name:Name
+  ':' signature:Type
+
+TypeAliasDef =
+  Attribute*
+  Visibility?
+  'type'
+  name:Name
+  TypeParamList?
+  ('=' target:Type)?
+
+NamedDef =
+  Attribute*
+  Visibility?
+  ('struct' | 'enum' | 'union' | 'bitfield' | 'newtype'
+  | 'register' | 'let' | 'var' | 'overload')
+  name:Name
+  TypeParamList?
+  (':' ty:Type)?
+  Body?
+
+ScatteredDef =
+  Attribute*
+  Visibility?
+  'scattered'
+  ('function' | 'mapping' | 'union' | 'enum')
+  name:Name
+  TypeParamList?
+  (':' signature:Type)?
+
+ScatteredClauseDef =
+  Attribute*
+  Visibility?
+  ('function' | 'union' | 'enum')
+  'clause'
+  name:Name
+
+DefaultDef =
+  Attribute*
+  'default'
+  kind:'#ident'
+  direction:'#ident'
+
+FixityDef =
+  Attribute*
+  ('infix' | 'infixl' | 'infixr')
+  precedence:'#literal'
+  operator:Name
+
+InstantiationDef =
+  Attribute*
+  'instantiation'
+  name:Name
+
+DirectiveDef =
+  Attribute*
+  '#directive'
+
+EndDef =
+  Attribute*
+  'end'
+  name:Name
+
+ConstraintDef =
+  Attribute*
+  ('constraint' | 'type')
+  constraint:Type
+
+TerminationMeasureDef =
+  Attribute*
+  'termination_measure'
+  name:Name
+
+OutcomeDef =
+  Attribute*
+  Visibility?
+  'outcome'
+  name:Name
+  ':' type_scheme:Type
+
+// ════════════════════════════════════════════════════════════════════
+// Expressions
+// ════════════════════════════════════════════════════════════════════
+
+Expr =
+    LiteralExpr
+  | IdentExpr
+  | TyvarExpr
+  | RefExpr
+  | BinExpr
+  | PrefixExpr
+  | CallExpr
+  | FieldAccessExpr
+  | IndexExpr
+  | SubrangeExpr
+  | VectorUpdateExpr
+  | IfExpr
+  | MatchExpr
+  | TryExpr
+  | BlockExpr
+  | LetExpr
+  | VarExpr
+  | ReturnExpr
+  | ThrowExpr
+  | ExitExpr
+  | AssertExpr
+  | AssignExpr
+  | CastExpr
+  | ForeachExpr
+  | WhileExpr
+  | RepeatExpr
+  | TupleExpr
+  | ListExpr
+  | VectorExpr
+  | StructExpr
+  | UpdateExpr
+  | SizeofExpr
+  | ConstraintExpr
+  | ConfigExpr
+
+LiteralExpr =
+  '#literal'
+
+IdentExpr =
+  '#ident'
+
+TyvarExpr =
+  '#ty_var'
+
+RefExpr =
+  'ref' '#ident'
+
+BinExpr =
+  lhs:Expr
+  op:'#operator'
+  rhs:Expr
+
+PrefixExpr =
+  op:'#operator'
+  expr:Expr
+
+CallExpr =
+  callee:Expr
+  arg_list:ArgList
+
+FieldAccessExpr =
+  base:Expr
+  '.'
+  field:'#ident'
+
+IndexExpr =
+  base:Expr
+  '[' index:Expr ']'
+
+SubrangeExpr =
+  base:Expr
+  '[' hi:Expr '..' lo:Expr ']'
+
+VectorUpdateExpr =
+  '[' base:Expr 'with' FieldInit* ']'
+
+IfExpr =
+  'if' condition:Expr
+  'then' then_branch:Expr
+  ('else' else_branch:Expr)?
+
+MatchExpr =
+  'match' scrutinee:Expr
+  '{' arms:MatchArm* '}'
+
+TryExpr =
+  'try' body:Expr
+  'catch' '{' arms:MatchArm* '}'
+
+BlockExpr =
+  '{' items:BlockItem* '}'
+
+LetExpr =
+  'let' pat:Pat '=' value:Expr
+  ('in' body:Expr)?
+
+VarExpr =
+  'var' target:Expr ':' ty:Type
+  ('=' init:Expr)?
+  ('in' body:Expr)?
+
+ReturnExpr =
+  'return' value:Expr?
+
+ThrowExpr =
+  'throw' value:Expr
+
+ExitExpr =
+  'exit' value:Expr?
+
+AssertExpr =
+  'assert' '(' condition:Expr (',' message:Expr)? ')'
+
+AssignExpr =
+  target:Expr ':=' value:Expr
+
+CastExpr =
+  expr:Expr ':' ty:Type
+
+ForeachExpr =
+  'foreach' '(' iterator:'#ident'
+  'from' start:Expr
+  'to' end_expr:Expr
+  ('by' step:Expr)?
+  ')' body:Expr
+
+WhileExpr =
+  'while' condition:Expr
+  'do' body:Expr
+
+RepeatExpr =
+  'repeat' body:Expr
+  'until' condition:Expr
+
+TupleExpr =
+  '(' Expr (',' Expr)* ')'
+
+ListExpr =
+  '[|' (Expr (',' Expr)*)? '|]'
+
+VectorExpr =
+  '[' (Expr (',' Expr)*)? ']'
+
+StructExpr =
+  name:Name? 'struct' '{' fields:FieldInit* '}'
+
+UpdateExpr =
+  '{' base:Expr 'with' fields:FieldInit* '}'
+
+SizeofExpr =
+  'sizeof' '(' ty:Type ')'
+
+ConstraintExpr =
+  'constraint' '(' constraint:Type ')'
+
+ConfigExpr =
+  'config' '#ident' ('.' '#ident')*
+
+// ════════════════════════════════════════════════════════════════════
+// Patterns
+// ════════════════════════════════════════════════════════════════════
+
+Pat =
+    WildPat
+  | LiteralPat
+  | IdentPat
+  | TyvarPat
+  | TypedPat
+  | TuplePat
+  | ListPat
+  | VectorPat
+  | AppPat
+  | StructPat
+  | BinPat
+  | IndexPat
+  | RangeIndexPat
+  | AsPat
+
+WildPat =
+  '_'
+
+LiteralPat =
+  '#literal'
+
+IdentPat =
+  name:'#ident'
+
+TyvarPat =
+  '#ty_var'
+
+TypedPat =
+  pat:Pat ':' ty:Type
+
+TuplePat =
+  '(' Pat (',' Pat)* ')'
+
+ListPat =
+  '[|' (Pat (',' Pat)*)? '|]'
+
+VectorPat =
+  '[' (Pat (',' Pat)*)? ']'
+
+AppPat =
+  ctor:'#ident' '(' (Pat (',' Pat)*)? ')'
+
+StructPat =
+  name:'#ident'? 'struct' '{' FieldPat* '}'
+
+BinPat =
+  lhs:Pat op:'#operator' rhs:Pat
+
+IndexPat =
+  name:'#ident' '[' index:Type ']'
+
+RangeIndexPat =
+  name:'#ident' '[' hi:Type '..' lo:Type ']'
+
+AsPat =
+  pat:Pat 'as' binding:'#ident'
+
+// ════════════════════════════════════════════════════════════════════
+// Type Expressions
+// ════════════════════════════════════════════════════════════════════
+
+Type =
+    TypeNamed
+  | TypeVar
+  | TypeApp
+  | TypeTuple
+  | TypeArrow
+  | TypeForall
+  | TypeExistential
+  | TypeEffect
+
+TypeNamed =
+  name:'#ident'
+
+TypeVar =
+  '#ty_var'
+
+TypeApp =
+  name:'#ident' '(' (Type (',' Type)*)? ')'
+
+TypeTuple =
+  '(' Type (',' Type)* ')'
+
+TypeArrow =
+  params:Type '->' ret:Type
+
+TypeForall =
+  'forall' TypeParamList '.' body:Type
+
+TypeExistential =
+  '{' TypeParamList (',' constraint:Type)? '.' body:Type '}'
+
+TypeEffect =
+  'effect' '{' '#ident'* '}' ty:Type
+
+// ════════════════════════════════════════════════════════════════════
+// Sub-structures
+// ════════════════════════════════════════════════════════════════════
+
+MatchArm =
+  pat:Pat ('if' guard:Expr)? '=>' body:Expr
+
+BlockItem =
+  LetExpr | VarExpr | Expr
+
+FieldInit =
+  name:'#ident' '=' value:Expr
+
+FieldPat =
+  name:'#ident' '=' pat:Pat
+
+ParamList =
+  '(' (Pat (',' Pat)*)? ')'
+
+ArgList =
+  '(' (Expr (',' Expr)*)? ')'
+
+TypeParamList =
+  (TypeParam (',' TypeParam)*)?
+
+TypeParam =
+  name:('#ident' | '#ty_var')
+  (':' kind:'#ident')?
+
+Quantifier =
+  'forall' TypeParamList (',' constraint:Type)?
+
+Attribute =
+  '@' name:'#ident' ('(' data:'#literal' ')')?
+
+Visibility =
+  'private'
+
+Name =
+  '#ident'
+
+Body =
+  '=' Expr

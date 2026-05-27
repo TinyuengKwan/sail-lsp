@@ -1,0 +1,25 @@
+# Typos configuration for sail-lsp.
+
+[default.extend-words]
+# Sail language keywords and identifiers that look like typos
+iff = "iff"
+nexp = "nexp"
+typ = "typ"
+inout = "inout"
+bitvec = "bitvec"
+bitv = "bitv"
+shl = "shl"
+shr = "shr"
+lsl = "lsl"
+lsr = "lsr"
+asr = "asr"
+
+[files]
+extend-exclude = [
+    # Generated code
+    "crates/syntax/src/ast/generated/",
+    # Test fixtures with intentional misspellings
+    "crates/*/src/tests/",
+    # Third-party vendored code
+    "lib/",
+]

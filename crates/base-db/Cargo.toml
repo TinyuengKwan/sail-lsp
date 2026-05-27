@@ -1,0 +1,19 @@
+[package]
+name = "base-db"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Salsa-backed source database for sail-lsp. Mirrors rust-analyzer's base-db."
+
+[lib]
+doctest = false
+
+[dependencies]
+salsa.workspace = true
+rowan.workspace = true
+rustc-hash.workspace = true
+dashmap.workspace = true
+paths.workspace = true
+parser.workspace = true
+vfs.workspace = true

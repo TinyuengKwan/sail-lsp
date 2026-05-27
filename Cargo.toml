@@ -1,0 +1,110 @@
+[workspace]
+members = ["lib/*", "crates/*"]
+exclude = ["lib/ungrammar/ungrammar2json"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+authors = ["sail-lsp contributors"]
+
+[workspace.lints]
+
+[profile.dev]
+debug = 1
+
+[profile.dev.package]
+# These speed up local tests.
+rowan.opt-level = 3
+rustc-hash.opt-level = 3
+smol_str.opt-level = 3
+text-size.opt-level = 3
+serde.opt-level = 3
+salsa.opt-level = 3
+
+[profile.release]
+incremental = true
+
+[patch.'crates-io']
+# Uncomment to use local copies for prototyping / patching.
+# la-arena = { path = "lib/la-arena" }
+# line-index = { path = "lib/line-index" }
+# lsp-server = { path = "lib/lsp-server" }
+# smol_str = { path = "lib/smol_str" }
+# text-size = { path = "lib/text-size" }
+# ungrammar = { path = "lib/ungrammar" }
+
+# salsa = { path = "../salsa" }
+# salsa-macros = { path = "../salsa/components/salsa-macros" }
+# rowan = { path = "../rowan" }
+
+[workspace.dependencies]
+# --- Internal crates (version 0.0.0, path-only) ---
+intern = { path = "crates/intern", version = "0.1.0" }
+stdx = { path = "crates/stdx", version = "0.1.0" }
+paths = { path = "crates/paths", version = "0.1.0" }
+profile = { path = "crates/profile", version = "0.1.0" }
+base-db = { path = "crates/base-db", version = "0.1.0" }
+parser = { path = "crates/parser", version = "0.1.0" }
+syntax = { path = "crates/syntax", version = "0.1.0" }
+hir-expand = { path = "crates/hir-expand", version = "0.1.0" }
+project-model = { path = "crates/project-model", version = "0.1.0" }
+hir-def = { path = "crates/hir-def", version = "0.1.0" }
+hir = { path = "crates/hir", version = "0.1.0" }
+hir-ty = { path = "crates/hir-ty", version = "0.1.0" }
+ide-db = { path = "crates/ide-db", version = "0.1.0" }
+ide = { path = "crates/ide", version = "0.1.0" }
+ide-assists = { path = "crates/ide-assists", version = "0.1.0" }
+ide-completion = { path = "crates/ide-completion", version = "0.1.0" }
+ide-diagnostics = { path = "crates/ide-diagnostics", version = "0.1.0" }
+ide-ssr = { path = "crates/ide-ssr", version = "0.1.0" }
+vfs = { path = "crates/vfs", version = "0.1.0" }
+vfs-notify = { path = "crates/vfs-notify", version = "0.1.0" }
+
+# --- Published library crates (in lib/, used from crates.io) ---
+la-arena = "0.3.1"
+line-index = "0.1.2"
+lsp-server = "0.7.9"
+smol_str = "0.3.2"
+text-size = "1.1.1"
+ungrammar = "1.16"
+
+ena = "0.14.3"
+
+either = "1.15"
+dissimilar = "1.0"
+
+# --- External dependencies (centralized version management) ---
+dashmap = { version = "=6.1.0", features = ["raw-api", "inline"] }
+# Must match dashmap's internal hashbrown version
+hashbrown = { version = "0.14", features = ["inline-more"], default-features = false }
+triomphe = { version = "0.1", default-features = false, features = ["std"] }
+salsa = { version = "0.25.2", default-features = false, features = ["macros", "inventory", "rayon", "salsa_unstable"] }
+rowan = "0.15"
+rustc-hash = "2"
+url = "2"
+indexmap = "2"
+smallvec = "1.13.2"
+crossbeam-channel = "0.5"
+serde = "1.0"
+serde_json = "1.0"
+log = "0.4"
+walkdir = "2.3.3"
+anyhow = "1"
+rayon = "1"
+lsp-types = "0.94.1"
+notify = "8"
+expect-test = "1.5"
+z3 = { version = "0.12" }
+camino = "1"
+cfg-if = "1"
+include_dir = "0.7"
+libc = "0.2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "ansi"] }
+tracing-tree = "0.4"
+nohash-hasher = "0.2.0"
+itertools = "0.12"
+jod-thread = "1.0.0"
+crossbeam-utils = "0.8.21"
+pulldown-cmark = { version = "0.12", default-features = false }

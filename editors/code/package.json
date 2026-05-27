@@ -1,0 +1,374 @@
+{
+  "name": "sail-lsp",
+  "displayName": "Sail Language Server",
+  "description": "Language support for Sail with navigation, diagnostics, hover, inlay hints, and bundled sail-lsp binaries",
+  "publisher": "sail-lsp",
+  "version": "0.2.0",
+  "type": "commonjs",
+  "license": "SEE LICENSE IN LICENSE",
+  "icon": "icon.png",
+  "preview": false,
+  "engines": {
+    "vscode": "^1.93.0"
+  },
+  "extensionKind": [
+    "workspace"
+  ],
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "sail",
+    "language server",
+    "lsp",
+    "isa",
+    "formal methods",
+    "risc-v",
+    "arm",
+    "semantics"
+  ],
+  "homepage": "https://github.com/TinyuengKwan/sail-lsp#readme",
+  "bugs": {
+    "url": "https://github.com/TinyuengKwan/sail-lsp/issues"
+  },
+  "galleryBanner": {
+    "color": "#132a43",
+    "theme": "dark"
+  },
+  "markdown": "github",
+  "qna": "https://github.com/TinyuengKwan/sail-lsp/discussions",
+  "activationEvents": [
+    "workspaceContains:**/*.sail",
+    "workspaceContains:*.sail_project",
+    "workspaceContains:sail.proj"
+  ],
+  "main": "./out/main",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "The extension can analyze Sail files in restricted mode, but launching the bundled server still executes a local binary."
+    },
+    "virtualWorkspaces": {
+      "supported": false,
+      "description": "The bundled sail-lsp server expects real filesystem access for indexing and $include resolution."
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TinyuengKwan/sail-lsp"
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build-base -- --minify",
+    "build": "npm run build-base -- --sourcemap",
+    "build-base": "esbuild ./src/main.ts --bundle --outfile=out/main.js --external:vscode --format=cjs --platform=node --target=node20",
+    "watch": "npm run build-base -- --sourcemap --watch",
+    "package": "npx @vscode/vsce package -o sail-lsp.vsix",
+    "package:local": "cargo build --release -p sail-lsp --target x86_64-unknown-linux-gnu --target-dir ../../target/vscode/linux-x64 && npm run package:server:linux-x64 && npm run package:vsix:linux-x64",
+    "package:vsix:linux-x64": "npx @vscode/vsce package -o sail-lsp-linux-x64.vsix --target linux-x64",
+    "package:vsix:linux-arm64": "npx @vscode/vsce package -o sail-lsp-linux-arm64.vsix --target linux-arm64",
+    "package:vsix:win32-x64": "npx @vscode/vsce package -o sail-lsp-win32-x64.vsix --target win32-x64",
+    "package:vsix:win32-arm64": "npx @vscode/vsce package -o sail-lsp-win32-arm64.vsix --target win32-arm64",
+    "package:vsix:darwin-x64": "npx @vscode/vsce package -o sail-lsp-darwin-x64.vsix --target darwin-x64",
+    "package:vsix:darwin-arm64": "npx @vscode/vsce package -o sail-lsp-darwin-arm64.vsix --target darwin-arm64",
+    "publish:vsix": "npx @vscode/vsce publish",
+    "deploy:marketplace:linux-x64": "npx @vscode/vsce publish --packagePath sail-lsp-linux-x64.vsix",
+    "deploy:marketplace:win32-x64": "npx @vscode/vsce publish --packagePath sail-lsp-win32-x64.vsix",
+    "deploy:marketplace:darwin-arm64": "npx @vscode/vsce publish --packagePath sail-lsp-darwin-arm64.vsix",
+    "package:server:linux-x64": "node ./scripts/package-server.mjs linux x64 x86_64-unknown-linux-gnu",
+    "package:server:linux-arm64": "node ./scripts/package-server.mjs linux arm64 aarch64-unknown-linux-gnu",
+    "package:server:win32-x64": "node ./scripts/package-server.mjs windows x64 x86_64-pc-windows-msvc",
+    "package:server:win32-arm64": "node ./scripts/package-server.mjs windows arm64 aarch64-pc-windows-msvc",
+    "package:server:darwin-x64": "node ./scripts/package-server.mjs darwin x64 x86_64-apple-darwin",
+    "package:server:darwin-arm64": "node ./scripts/package-server.mjs darwin arm64 aarch64-apple-darwin",
+    "typecheck": "tsc",
+    "lint": "tsc --noEmit",
+    "test": "npm run typecheck && node ./out/src/test/runTest.js",
+    "format": "prettier --write src/",
+    "format:check": "prettier --check src/"
+  },
+  "contributes": {
+    "languages": [
+      {
+        "id": "sail",
+        "aliases": [
+          "Sail",
+          "sail"
+        ],
+        "extensions": [
+          ".sail"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "sail",
+        "scopeName": "source.sail",
+        "path": "./syntaxes/sail.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "Sail Language Server",
+      "properties": {
+        "sail-lsp.server.path": {
+          "type": [
+            "null",
+            "string"
+          ],
+          "default": null,
+          "markdownDescription": "Path to the `sail-lsp` binary. If not set, the extension looks for `sail-lsp` in `$PATH` or the bundled server."
+        },
+        "sail-lsp.server.extraEnv": {
+          "type": [
+            "null",
+            "object"
+          ],
+          "default": null,
+          "markdownDescription": "Extra environment variables passed to the `sail-lsp` process. Example: `{ \"SAIL_DIR\": \"/path/to/sail\" }`."
+        },
+        "sail-lsp.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Traces the communication between VS Code and the sail-lsp server."
+        },
+        "sail-lsp.diagnostics.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable diagnostics (parse errors, type errors, etc.)."
+        },
+        "sail-lsp.diagnostics.effectMismatch": {
+          "type": "boolean",
+          "default": true,
+          "description": "Report effect mismatch diagnostics (e.g., impure call in pure function)."
+        },
+        "sail-lsp.diagnostics.disabled": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "List of diagnostic codes to disable (e.g., \"unused-variable\")."
+        },
+        "sail-lsp.diagnostics.disableExperimental": {
+          "type": "boolean",
+          "default": false,
+          "description": "Suppress experimental diagnostics."
+        },
+        "sail-lsp.diagnostics.warningsAsHint": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Diagnostic codes to show as hints instead of warnings."
+        },
+        "sail-lsp.diagnostics.warningsAsInfo": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Diagnostic codes to show as info instead of warnings."
+        },
+        "sail-lsp.diagnostics.maxDiagnosticsPerFile": {
+          "type": "integer",
+          "default": 128,
+          "minimum": 0,
+          "description": "Maximum diagnostics per file (0 = unlimited)."
+        },
+        "sail-lsp.inlayHints.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable inlay hints."
+        },
+        "sail-lsp.inlayHints.typeHints": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show type hints for let bindings."
+        },
+        "sail-lsp.inlayHints.parameterHints": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show parameter name hints in function calls."
+        },
+        "sail-lsp.inlayHints.effectHints": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show effect annotations on function calls."
+        },
+        "sail-lsp.inlayHints.maxLength": {
+          "type": [
+            "null",
+            "integer"
+          ],
+          "default": 25,
+          "description": "Maximum length of inlay hints before truncation."
+        },
+        "sail-lsp.inlayHints.closingBraceHintsMinLines": {
+          "type": [
+            "null",
+            "integer"
+          ],
+          "default": 6,
+          "description": "Minimum lines for closing brace hints to appear."
+        },
+        "sail-lsp.completion.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable code completion."
+        },
+        "sail-lsp.completion.addCallParenthesis": {
+          "type": "boolean",
+          "default": true,
+          "description": "Add parentheses when completing function calls."
+        },
+        "sail-lsp.completion.postfix": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable postfix completions."
+        },
+        "sail-lsp.completion.snippets": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable snippet completions."
+        },
+        "sail-lsp.completion.autoimport": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable auto-import ($include) on the fly."
+        },
+        "sail-lsp.completion.limit": {
+          "type": "integer",
+          "default": 200,
+          "description": "Maximum number of completion items returned."
+        },
+        "sail-lsp.completion.fullFunctionSignatures": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show full function signatures in completions."
+        },
+        "sail-lsp.codeLens.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable code lenses (references, implementations)."
+        },
+        "sail-lsp.codeLens.references": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show reference counts as code lenses."
+        },
+        "sail-lsp.codeLens.implementations": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show implementation counts as code lenses."
+        },
+        "sail-lsp.codeLens.runnables": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show run lenses for $[test] functions."
+        },
+        "sail-lsp.hover.docs": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show documentation in hover."
+        },
+        "sail-lsp.hover.keywords": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show keyword documentation in hover."
+        },
+        "sail-lsp.hover.actions": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show hover actions (go-to-definition, etc.)."
+        },
+        "sail-lsp.semanticTokens.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable semantic syntax highlighting."
+        },
+        "sail-lsp.z3.timeoutMs": {
+          "type": "integer",
+          "default": 1000,
+          "minimum": 100,
+          "maximum": 30000,
+          "description": "Z3 solver timeout in milliseconds for constraint checking."
+        },
+        "sail-lsp.workspace.maxFiles": {
+          "type": "integer",
+          "default": 10000,
+          "description": "Maximum number of .sail files to index in the workspace."
+        },
+        "sail-lsp.workspace.target": {
+          "type": [
+            "null",
+            "string"
+          ],
+          "default": null,
+          "description": "Compilation target for $iftarget directives (e.g., \"c\", \"ocaml\")."
+        },
+        "sail-lsp.workspace.includePaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Additional include paths for $include resolution."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "sail-lsp.reload",
+        "title": "Reload Workspace",
+        "category": "Sail"
+      },
+      {
+        "command": "sail-lsp.restartServer",
+        "title": "Restart Server",
+        "category": "Sail"
+      },
+      {
+        "command": "sail-lsp.showSyntaxTree",
+        "title": "Show Syntax Tree",
+        "category": "Sail"
+      },
+      {
+        "command": "sail-lsp.viewHir",
+        "title": "View HIR",
+        "category": "Sail"
+      },
+      {
+        "command": "sail-lsp.viewItemTree",
+        "title": "View Item Tree",
+        "category": "Sail"
+      },
+      {
+        "command": "sail-lsp.serverVersion",
+        "title": "Show Server Version",
+        "category": "Sail"
+      },
+      {
+        "command": "sail-lsp.toggleInlayHints",
+        "title": "Toggle Inlay Hints",
+        "category": "Sail"
+      }
+    ]
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "~22.13.4",
+    "@types/vscode": "~1.93.0",
+    "@vscode/test-electron": "^2.5.2",
+    "@vscode/vsce": "^3.2.0",
+    "esbuild": "^0.25.0",
+    "glob": "^11.0.3",
+    "mocha": "^11.1.0",
+    "prettier": "^3.5.0",
+    "typescript": "^5.7.0"
+  }
+}

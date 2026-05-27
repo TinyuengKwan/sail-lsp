@@ -1,0 +1,27 @@
+[package]
+name = "profile"
+version = "0.1.0"
+description = "A collection of tools for profiling sail-lsp."
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+doctest = false
+
+[dependencies]
+cfg-if.workspace = true
+jemalloc-ctl = { version = "0.5.4", package = "tikv-jemalloc-ctl", optional = true }
+
+[target.'cfg(all(target_os = "linux", not(target_env = "ohos"), any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")))'.dependencies]
+perf-event = "=0.4.8"
+
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+libc.workspace = true
+
+[features]
+cpu_profiler = []
+jemalloc = ["jemalloc-ctl"]
+
+# Uncomment to enable for the whole crate graph
+# default = [ "cpu_profiler" ]

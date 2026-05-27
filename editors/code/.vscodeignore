@@ -1,0 +1,13 @@
+# Mirrors RA .vscodeignore — only include essential files in .vsix.
+**/*
+!icon.png
+!language-configuration.json
+!syntaxes/*.json
+!out/main.js
+!server/**
+!server/sail-lsp
+!server/sail-lsp.exe
+!package.json
+!LICENSE
+!README.md
+!CHANGELOG.md

@@ -1,0 +1,218 @@
+# CI workflow for sail-lsp.
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  merge_group:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  CI: 1
+  RUST_BACKTRACE: short
+  RUSTUP_MAX_RETRIES: 10
+
+jobs:
+  rust:
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    env:
+      RUSTFLAGS: "-D warnings"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Codegen check
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test -p syntax -- codegen --nocapture 2>&1 | head -20 || true
+
+      - name: Test (default features, z3-solver enabled)
+        run: cargo nextest run --workspace --no-fail-fast --hide-progress-bar --status-level fail
+
+      - name: Test (no z3-solver)
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo nextest run --workspace --no-default-features --no-fail-fast --hide-progress-bar --status-level fail
+
+      - name: Build release binary
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo build --release -p sail-lsp
+
+  rustfmt:
+    name: Formatting
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt -- --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-D warnings"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run clippy
+        run: |
+          cargo clippy --workspace --all-targets -- \
+            -D clippy::dbg_macro \
+            -D clippy::todo \
+            -D clippy::print_stdout \
+            -D clippy::print_stderr
+
+  vscode:
+    name: VS Code Extension
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: editors/code
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Format check
+        run: npm run format:check
+
+      - name: Build (production)
+        run: npm run vscode:prepublish
+
+      - name: Run extension smoke tests
+        run: npm test
+
+      - name: Package extension
+        run: npx @vscode/vsce package -o sail-lsp.vsix --allow-missing-repository
+
+  vscode-bundles:
+    name: VSIX Bundles (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-x64
+            rust_target: x86_64-unknown-linux-gnu
+            server_script: package:server:linux-x64
+            vsix_script: package:vsix:linux-x64
+          - os: windows-latest
+            target: win32-x64
+            rust_target: x86_64-pc-windows-msvc
+            server_script: package:server:win32-x64
+            vsix_script: package:vsix:win32-x64
+          - os: macos-latest
+            target: darwin-arm64
+            rust_target: aarch64-apple-darwin
+            server_script: package:server:darwin-arm64
+            vsix_script: package:vsix:darwin-arm64
+    defaults:
+      run:
+        working-directory: editors/code
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build release server binary
+        run: cargo build --release -p sail-lsp --target ${{ matrix.rust_target }} --target-dir target/vscode/${{ matrix.target }}
+        working-directory: ${{ github.workspace }}
+
+      - name: Bundle server binary
+        run: npm run ${{ matrix.server_script }}
+
+      - name: Package target VSIX
+        run: npm run ${{ matrix.vsix_script }}
+
+      - name: Upload VSIX artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sail-lsp-${{ matrix.target }}
+          path: editors/code/sail-lsp-*.vsix
+
+  typos:
+    name: Typos
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check for typos
+        uses: crate-ci/typos@v1
+
+  conclusion:
+    name: Conclusion
+    if: always()
+    needs: [rust, rustfmt, clippy, vscode, vscode-bundles, typos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check job results
+        env:
+          RESULTS: ${{ toJson(needs.*.result) }}
+        run: |
+          echo "$RESULTS" | jq -e 'all(. == "success" or . == "skipped")' > /dev/null

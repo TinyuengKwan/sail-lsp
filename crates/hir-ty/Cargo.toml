@@ -1,0 +1,32 @@
+[package]
+name = "hir-ty"
+version = "0.1.0"
+authors = ["sail-lsp contributors"]
+edition = "2021"
+license = "MIT"
+publish = false
+
+[lib]
+
+[features]
+default = ["z3-solver"]
+z3-solver = ["dep:z3"]
+
+[dependencies]
+intern.workspace = true
+parser.workspace = true
+syntax.workspace = true
+hir-expand.workspace = true
+hir-def.workspace = true
+base-db.workspace = true
+salsa.workspace = true
+ena.workspace = true
+rowan.workspace = true
+la-arena.workspace = true
+rustc-hash.workspace = true
+smallvec.workspace = true
+tracing.workspace = true
+z3 = { workspace = true, optional = true }
+
+[dev-dependencies]
+expect-test.workspace = true

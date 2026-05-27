@@ -1,0 +1,23 @@
+[package]
+name = "ide-assists"
+version = "0.1.0"
+authors = ["sail-lsp contributors"]
+edition = "2021"
+license = "MIT"
+publish = false
+
+[lib]
+
+[dependencies]
+base-db.workspace = true
+parser.workspace = true
+syntax.workspace = true
+hir-def.workspace = true
+ide-db.workspace = true
+ide-diagnostics.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+expect-test.workspace = true
+ide-db = { workspace = true, features = ["test-utils"] }
+

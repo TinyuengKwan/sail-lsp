@@ -1,0 +1,34 @@
+[package]
+name = "ide"
+version = "0.1.0"
+authors = ["sail-lsp contributors"]
+edition = "2021"
+license = "MIT"
+publish = false
+
+[lib]
+
+[dependencies]
+base-db.workspace = true
+salsa.workspace = true
+parser.workspace = true
+syntax.workspace = true
+hir-expand.workspace = true
+hir.workspace = true
+hir-def.workspace = true
+hir-ty.workspace = true
+ide-db.workspace = true
+ide-assists.workspace = true
+ide-completion.workspace = true
+ide-diagnostics.workspace = true
+ide-ssr.workspace = true
+rowan.workspace = true
+serde_json.workspace = true
+url.workspace = true
+vfs.workspace = true
+pulldown-cmark.workspace = true
+
+[dev-dependencies]
+ide-db = { workspace = true, features = ["test-utils"] }
+expect-test.workspace = true
+rowan.workspace = true

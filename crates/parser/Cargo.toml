@@ -1,0 +1,13 @@
+[package]
+name = "parser"
+version = "0.1.0"
+authors = ["sail-lsp contributors"]
+edition = "2021"
+license = "MIT"
+publish = false
+
+[lib]
+
+[dependencies]
+rowan.workspace = true
+stdx.workspace = true

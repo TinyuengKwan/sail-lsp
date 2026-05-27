@@ -1,0 +1,20 @@
+[package]
+name = "syntax"
+version = "0.1.0"
+authors = ["sail-lsp contributors"]
+edition = "2021"
+license = "MIT"
+publish = false
+
+[lib]
+
+[dependencies]
+base-db.workspace = true
+stdx.workspace = true
+salsa.workspace = true
+parser.workspace = true
+rowan.workspace = true
+rustc-hash.workspace = true
+smol_str.workspace = true
+tracing.workspace = true
+ungrammar.workspace = true

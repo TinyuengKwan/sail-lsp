@@ -1,0 +1,26 @@
+[package]
+name = "ide-ssr"
+version = "0.1.0"
+authors = ["sail-lsp contributors"]
+edition = "2021"
+license = "MIT"
+publish = false
+
+[lib]
+
+[dependencies]
+base-db.workspace = true
+hir.workspace = true
+hir-expand.workspace = true
+hir-def.workspace = true
+parser.workspace = true
+syntax.workspace = true
+ide-db.workspace = true
+rowan.workspace = true
+salsa.workspace = true
+url.workspace = true
+rustc-hash.workspace = true
+smol_str.workspace = true
+
+[dev-dependencies]
+ide-db = { workspace = true, features = ["test-utils"] }

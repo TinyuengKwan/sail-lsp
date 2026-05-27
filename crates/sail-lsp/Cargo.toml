@@ -1,0 +1,52 @@
+[package]
+name = "sail-lsp"
+version = "0.2.0"
+authors = ["Tinyueng Kwan <kwantinyueng@gmail.com>"]
+edition = "2021"
+license = "MIT"
+
+[features]
+default = ["z3-solver"]
+z3-solver = ["hir-ty/z3-solver", "dep:z3"]
+
+[lib]
+name = "sail_lsp"
+
+[dependencies]
+anyhow.workspace = true
+base-db.workspace = true
+salsa.workspace = true
+lsp-server.workspace = true
+lsp-types.workspace = true
+crossbeam-channel.workspace = true
+walkdir.workspace = true
+log.workspace = true
+profile.workspace = true
+parser.workspace = true
+syntax.workspace = true
+url.workspace = true
+hir-expand.workspace = true
+hir-def.workspace = true
+project-model.workspace = true
+hir.workspace = true
+hir-ty.workspace = true
+ide-db.workspace = true
+ide.workspace = true
+ide-assists.workspace = true
+ide-diagnostics.workspace = true
+ide-ssr.workspace = true
+stdx.workspace = true
+vfs.workspace = true
+paths.workspace = true
+rustc-hash.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rayon.workspace = true
+z3 = { workspace = true, optional = true }
+include_dir.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-tree.workspace = true
+
+[dev-dependencies]
+ide-db = { workspace = true, features = ["test-utils"] }
