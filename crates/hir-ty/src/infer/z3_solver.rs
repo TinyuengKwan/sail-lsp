@@ -10,8 +10,8 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, OnceLock};
 
-use z3::ast::{Ast, Bool, Int};
-use z3::{Config, Context, SatResult, Solver};
+use z3::ast::{Bool, Int};
+use z3::SatResult;
 
 use super::{
     parse_numeric_expr_text, CompareOp, ConstraintExpr, ConstraintStatus, NumericExpr, Subst,
@@ -155,36 +155,33 @@ fn solve_with_z3_bounded_exp(
     subst: &Subst,
     assumptions: &[ConstraintExpr],
 ) -> ConstraintStatus {
-    let cfg = Config::new();
-    let ctx = Context::new(&cfg);
-
-    let mut env: HashMap<String, Int<'_>> = HashMap::new();
+    let mut env: HashMap<String, Int> = HashMap::new();
 
     // Translate assumptions.
-    let mut z3_assumptions: Vec<Bool<'_>> = Vec::new();
+    let mut z3_assumptions: Vec<Bool> = Vec::new();
     for assumption in assumptions {
-        match translate_constraint(&ctx, assumption, subst, &mut env) {
+        match translate_constraint(assumption, subst, &mut env) {
             Some(b) => z3_assumptions.push(b),
             None => return ConstraintStatus::Unknown,
         }
     }
 
-    let Some(z3_expr) = translate_constraint(&ctx, expr, subst, &mut env) else {
+    let Some(z3_expr) = translate_constraint(expr, subst, &mut env) else {
         return ConstraintStatus::Unknown;
     };
 
     // Collect all pow2:* and their exponent variables from the env.
-    let pow2_vars: Vec<(String, Int<'_>)> = env
+    let pow2_vars: Vec<(String, Int)> = env
         .iter()
         .filter(|(k, _)| k.starts_with("pow2:"))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
     // Build bounding assertions for each exponential variable.
-    let mut exp_bounds: Vec<Bool<'_>> = Vec::new();
-    let zero = Int::from_i64(&ctx, 0);
-    let one = Int::from_i64(&ctx, 1);
-    let max_exp = Int::from_i64(&ctx, 64);
+    let mut exp_bounds: Vec<Bool> = Vec::new();
+    let zero = Int::from_i64(0);
+    let one = Int::from_i64(1);
+    let max_exp = Int::from_i64(64);
 
     for (pow2_name, pow2_var) in &pow2_vars {
         // pow2(n) >= 1
@@ -212,10 +209,10 @@ fn solve_with_z3_bounded_exp(
             .cloned()
         {
             for k in 0..=64i64 {
-                let k_val = Int::from_i64(&ctx, k);
-                let pow_val = Int::from_i64(&ctx, 1i64.wrapping_shl(k as u32));
-                let eq_k = ev._eq(&k_val);
-                let eq_pow = pow2_var._eq(&pow_val);
+                let k_val = Int::from_i64(k);
+                let pow_val = Int::from_i64(1i64.wrapping_shl(k as u32));
+                let eq_k = ev.eq(&k_val);
+                let eq_pow = pow2_var.eq(&pow_val);
                 // k == exponent => pow2 == 2^k
                 exp_bounds.push(eq_k.implies(&eq_pow));
             }
@@ -223,8 +220,8 @@ fn solve_with_z3_bounded_exp(
     }
 
     // First query: assumptions + exp_bounds + !expr; if Unsat, expr is valid.
-    let solver = Solver::new(&ctx);
-    set_timeout(&ctx, &solver);
+    let solver = z3::Solver::new();
+    set_timeout(&solver);
     for a in &z3_assumptions {
         solver.assert(a);
     }
@@ -237,8 +234,8 @@ fn solve_with_z3_bounded_exp(
         SatResult::Unknown => ConstraintStatus::Unknown,
         SatResult::Sat => {
             // Not always implied; check if ever satisfied.
-            let solver2 = Solver::new(&ctx);
-            set_timeout(&ctx, &solver2);
+            let solver2 = z3::Solver::new();
+            set_timeout(&solver2);
             for a in &z3_assumptions {
                 solver2.assert(a);
             }
@@ -270,28 +267,25 @@ pub fn try_solve_unique(
         }
     }
 
-    let cfg = Config::new();
-    let ctx = Context::new(&cfg);
-
-    let mut env: HashMap<String, Int<'_>> = HashMap::new();
+    let mut env: HashMap<String, Int> = HashMap::new();
 
     // Translate assumptions.
-    let mut z3_assumptions: Vec<Bool<'_>> = Vec::new();
+    let mut z3_assumptions: Vec<Bool> = Vec::new();
     for assumption in assumptions {
-        match translate_constraint(&ctx, assumption, subst, &mut env) {
+        match translate_constraint(assumption, subst, &mut env) {
             Some(b) => z3_assumptions.push(b),
             None => return None,
         }
     }
 
-    let z3_expr = translate_constraint(&ctx, expr, subst, &mut env)?;
+    let z3_expr = translate_constraint(expr, subst, &mut env)?;
 
     // Ensure the target variable exists in the env.
-    let var_z3 = intern_var(&ctx, &format!("v:{}", var_name), &mut env);
+    let var_z3 = intern_var(&format!("v:{}", var_name), &mut env);
 
     // Step 1: Find a satisfying assignment.
-    let solver = Solver::new(&ctx);
-    set_timeout(&ctx, &solver);
+    let solver = z3::Solver::new();
+    set_timeout(&solver);
     for a in &z3_assumptions {
         solver.assert(a);
     }
@@ -306,14 +300,14 @@ pub fn try_solve_unique(
     let v = val_ast.as_i64()?;
 
     // Step 2: Assert var_name != v and check UNSAT (uniqueness).
-    let solver2 = Solver::new(&ctx);
-    set_timeout(&ctx, &solver2);
+    let solver2 = z3::Solver::new();
+    set_timeout(&solver2);
     for a in &z3_assumptions {
         solver2.assert(a);
     }
     solver2.assert(&z3_expr);
-    let v_const = Int::from_i64(&ctx, v);
-    solver2.assert(&var_z3._eq(&v_const).not());
+    let v_const = Int::from_i64(v);
+    solver2.assert(&var_z3.eq(&v_const).not());
 
     match solver2.check() {
         SatResult::Unsat => Some(v), // Unique!
@@ -326,28 +320,25 @@ fn solve_with_z3(
     subst: &Subst,
     assumptions: &[ConstraintExpr],
 ) -> ConstraintStatus {
-    let cfg = Config::new();
-    let ctx = Context::new(&cfg);
-
-    let mut env: HashMap<String, Int<'_>> = HashMap::new();
+    let mut env: HashMap<String, Int> = HashMap::new();
 
     // Translate assumptions.
-    let mut z3_assumptions: Vec<Bool<'_>> = Vec::new();
+    let mut z3_assumptions: Vec<Bool> = Vec::new();
     for assumption in assumptions {
-        match translate_constraint(&ctx, assumption, subst, &mut env) {
+        match translate_constraint(assumption, subst, &mut env) {
             Some(b) => z3_assumptions.push(b),
             None => return ConstraintStatus::Unknown,
         }
     }
 
-    let Some(z3_expr) = translate_constraint(&ctx, expr, subst, &mut env) else {
+    let Some(z3_expr) = translate_constraint(expr, subst, &mut env) else {
         return ConstraintStatus::Unknown;
     };
 
     // First query: is `expr` implied by assumptions?  Assert
     // assumptions + !expr; if Unsat, `expr` is valid.
-    let solver = Solver::new(&ctx);
-    set_timeout(&ctx, &solver);
+    let solver = z3::Solver::new();
+    set_timeout(&solver);
     for a in &z3_assumptions {
         solver.assert(a);
     }
@@ -358,8 +349,8 @@ fn solve_with_z3(
         SatResult::Sat => {
             // `expr` is not always implied; check whether it is
             // ever satisfied given the assumptions.
-            let solver2 = Solver::new(&ctx);
-            set_timeout(&ctx, &solver2);
+            let solver2 = z3::Solver::new();
+            set_timeout(&solver2);
             for a in &z3_assumptions {
                 solver2.assert(a);
             }
@@ -372,8 +363,8 @@ fn solve_with_z3(
     }
 }
 
-fn set_timeout(ctx: &Context, solver: &Solver<'_>) {
-    let mut params = z3::Params::new(ctx);
+fn set_timeout(solver: &z3::Solver) {
+    let mut params = z3::Params::new();
     params.set_u32("timeout", Z3_QUERY_TIMEOUT_MS);
     solver.set_params(&params);
 }
@@ -393,34 +384,29 @@ fn contains_unsupported(expr: &ConstraintExpr) -> bool {
     }
 }
 
-fn intern_var<'ctx>(
-    ctx: &'ctx Context,
-    name: &str,
-    env: &mut HashMap<String, Int<'ctx>>,
-) -> Int<'ctx> {
+fn intern_var(name: &str, env: &mut HashMap<String, Int>) -> Int {
     if let Some(existing) = env.get(name) {
         return existing.clone();
     }
     let mangled = format!("sail!{}", name);
-    let int = Int::new_const(ctx, mangled);
+    let int = Int::new_const(mangled);
     env.insert(name.to_string(), int.clone());
     int
 }
 
-fn translate_numeric<'ctx>(
-    ctx: &'ctx Context,
+fn translate_numeric(
     expr: &NumericExpr,
     subst: &Subst,
-    env: &mut HashMap<String, Int<'ctx>>,
-) -> Option<Int<'ctx>> {
+    env: &mut HashMap<String, Int>,
+) -> Option<Int> {
     match expr {
-        NumericExpr::Const(value) => Some(Int::from_i64(ctx, *value)),
+        NumericExpr::Const(value) => Some(Int::from_i64(*value)),
         NumericExpr::Var(name) => {
             // Try the substitution first: values (string form) then types.
             if let Some(text) = subst.values.get(name) {
                 if let Some(resolved) = parse_numeric_expr_text(text) {
                     if !matches!(&resolved, NumericExpr::Var(bound) if bound == name) {
-                        return translate_numeric(ctx, &resolved, subst, env);
+                        return translate_numeric(&resolved, subst, env);
                     }
                 }
             }
@@ -428,45 +414,45 @@ fn translate_numeric<'ctx>(
                 let text = ty.display_text();
                 if let Some(resolved) = parse_numeric_expr_text(&text) {
                     if !matches!(&resolved, NumericExpr::Var(bound) if bound == name) {
-                        return translate_numeric(ctx, &resolved, subst, env);
+                        return translate_numeric(&resolved, subst, env);
                     }
                 }
             }
-            Some(intern_var(ctx, &format!("v:{}", name), env))
+            Some(intern_var(&format!("v:{}", name), env))
         }
         NumericExpr::Symbol(name) => {
             if let Some(value) = super::parse_int_literal(name) {
-                return Some(Int::from_i64(ctx, value));
+                return Some(Int::from_i64(value));
             }
-            Some(intern_var(ctx, &format!("s:{}", name), env))
+            Some(intern_var(&format!("s:{}", name), env))
         }
         NumericExpr::Neg(inner) => {
-            let inner = translate_numeric(ctx, inner, subst, env)?;
+            let inner = translate_numeric(inner, subst, env)?;
             Some(inner.unary_minus())
         }
         NumericExpr::Add(lhs, rhs) => {
-            let lhs = translate_numeric(ctx, lhs, subst, env)?;
-            let rhs = translate_numeric(ctx, rhs, subst, env)?;
-            Some(Int::add(ctx, &[&lhs, &rhs]))
+            let lhs = translate_numeric(lhs, subst, env)?;
+            let rhs = translate_numeric(rhs, subst, env)?;
+            Some(Int::add(&[&lhs, &rhs]))
         }
         NumericExpr::Sub(lhs, rhs) => {
-            let lhs = translate_numeric(ctx, lhs, subst, env)?;
-            let rhs = translate_numeric(ctx, rhs, subst, env)?;
-            Some(Int::sub(ctx, &[&lhs, &rhs]))
+            let lhs = translate_numeric(lhs, subst, env)?;
+            let rhs = translate_numeric(rhs, subst, env)?;
+            Some(Int::sub(&[&lhs, &rhs]))
         }
         NumericExpr::Mul(lhs, rhs) => {
-            let lhs = translate_numeric(ctx, lhs, subst, env)?;
-            let rhs = translate_numeric(ctx, rhs, subst, env)?;
-            Some(Int::mul(ctx, &[&lhs, &rhs]))
+            let lhs = translate_numeric(lhs, subst, env)?;
+            let rhs = translate_numeric(rhs, subst, env)?;
+            Some(Int::mul(&[&lhs, &rhs]))
         }
         NumericExpr::Div(lhs, rhs) => {
-            let lhs = translate_numeric(ctx, lhs, subst, env)?;
-            let rhs = translate_numeric(ctx, rhs, subst, env)?;
+            let lhs = translate_numeric(lhs, subst, env)?;
+            let rhs = translate_numeric(rhs, subst, env)?;
             Some(lhs.div(&rhs))
         }
         NumericExpr::Mod(lhs, rhs) => {
-            let lhs = translate_numeric(ctx, lhs, subst, env)?;
-            let rhs = translate_numeric(ctx, rhs, subst, env)?;
+            let lhs = translate_numeric(lhs, subst, env)?;
+            let rhs = translate_numeric(rhs, subst, env)?;
             Some(lhs.modulo(&rhs))
         }
         NumericExpr::Exp(inner) => {
@@ -476,15 +462,15 @@ fn translate_numeric<'ctx>(
             // compute 2^n directly.
             if let NumericExpr::Const(n) = inner.as_ref() {
                 if *n >= 0 && *n <= 63 {
-                    return Some(Int::from_i64(ctx, 1i64 << n));
+                    return Some(Int::from_i64(1i64 << n));
                 }
             }
             // Strategy 2: Try to evaluate inner to constant via substitution.
-            let exp_z3 = translate_numeric(ctx, inner, subst, env)?;
+            let exp_z3 = translate_numeric(inner, subst, env)?;
 
             // Strategy 3: Use Z3's power function via the SMT-LIB `^`
             // operator. The z3 Rust crate exposes this as `Int::power`.
-            let _base = Int::from_i64(ctx, 2);
+            let _base = Int::from_i64(2);
             // z3::ast::Int::power takes a u32 exponent for concrete values;
             // for symbolic exponents we use an uninterpreted function with
             // bounding constraints that Z3 can reason about.
@@ -493,16 +479,16 @@ fn translate_numeric<'ctx>(
             // - pow2(n) >= 1 (2^n >= 1 for n >= 0)
             // - pow2(n) >= 2 * pow2(n-1) when n > 0 (monotonicity)
             // - 0 <= n <= 64 (bounded exponent, per upstream)
-            let result_var = intern_var(ctx, &format!("pow2:{}", inner_display(inner)), env);
+            let result_var = intern_var(&format!("pow2:{}", inner_display(inner)), env);
 
             // Bound: pow2(n) >= 1
-            let one = Int::from_i64(ctx, 1);
+            let one = Int::from_i64(1);
             let _ge_one = result_var.ge(&one);
 
             // Bound: 0 <= exp <= 64
-            let zero = Int::from_i64(ctx, 0);
-            let max_exp = Int::from_i64(ctx, 64);
-            let _bounds = z3::ast::Bool::and(ctx, &[&exp_z3.ge(&zero), &exp_z3.le(&max_exp)]);
+            let zero = Int::from_i64(0);
+            let max_exp = Int::from_i64(64);
+            let _bounds = z3::ast::Bool::and(&[&exp_z3.ge(&zero), &exp_z3.le(&max_exp)]);
 
             Some(result_var)
         }
@@ -510,20 +496,20 @@ fn translate_numeric<'ctx>(
             // Fall back to a fresh Z3 variable named after the application.
             // We still recurse to intern any sub-vars.
             for a in args {
-                let _ = translate_numeric(ctx, a, subst, env);
+                let _ = translate_numeric(a, subst, env);
             }
-            Some(intern_var(ctx, &format!("app:{}", name), env))
+            Some(intern_var(&format!("app:{}", name), env))
         }
         NumericExpr::If { cond, then_expr, else_expr } => {
-            let then_z3 = translate_numeric(ctx, then_expr, subst, env)?;
-            let else_z3 = translate_numeric(ctx, else_expr, subst, env)?;
+            let then_z3 = translate_numeric(then_expr, subst, env)?;
+            let else_z3 = translate_numeric(else_expr, subst, env)?;
             // Translate the condition ConstraintExpr directly to Z3.
-            let bool_cond = translate_constraint(ctx, cond, subst, env);
+            let bool_cond = translate_constraint(cond, subst, env);
             match bool_cond {
                 Some(b) => Some(b.ite(&then_z3, &else_z3)),
                 None => {
                     // Fall back to a fresh uninterpreted variable.
-                    Some(intern_var(ctx, &format!("ite:{}", cond.to_text()), env))
+                    Some(intern_var(&format!("ite:{}", cond.to_text()), env))
                 }
             }
         }
@@ -540,20 +526,19 @@ fn inner_display(expr: &NumericExpr) -> String {
     }
 }
 
-fn translate_constraint<'ctx>(
-    ctx: &'ctx Context,
+fn translate_constraint(
     expr: &ConstraintExpr,
     subst: &Subst,
-    env: &mut HashMap<String, Int<'ctx>>,
-) -> Option<Bool<'ctx>> {
+    env: &mut HashMap<String, Int>,
+) -> Option<Bool> {
     match expr {
-        ConstraintExpr::Bool(value) => Some(Bool::from_bool(ctx, *value)),
+        ConstraintExpr::Bool(value) => Some(Bool::from_bool(*value)),
         ConstraintExpr::Compare { lhs, op, rhs } => {
-            let lhs = translate_numeric(ctx, lhs, subst, env)?;
-            let rhs = translate_numeric(ctx, rhs, subst, env)?;
+            let lhs = translate_numeric(lhs, subst, env)?;
+            let rhs = translate_numeric(rhs, subst, env)?;
             Some(match op {
-                CompareOp::Eq => lhs._eq(&rhs),
-                CompareOp::Neq => lhs._eq(&rhs).not(),
+                CompareOp::Eq => lhs.eq(&rhs),
+                CompareOp::Neq => lhs.eq(&rhs).not(),
                 CompareOp::Lt => lhs.lt(&rhs),
                 CompareOp::Lte => lhs.le(&rhs),
                 CompareOp::Gt => lhs.gt(&rhs),
@@ -561,42 +546,42 @@ fn translate_constraint<'ctx>(
             })
         }
         ConstraintExpr::InSet { value, items } => {
-            let value = translate_numeric(ctx, value, subst, env)?;
-            let mut disjuncts: Vec<Bool<'ctx>> = Vec::with_capacity(items.len());
+            let value = translate_numeric(value, subst, env)?;
+            let mut disjuncts: Vec<Bool> = Vec::with_capacity(items.len());
             for item in items {
-                let item = translate_numeric(ctx, item, subst, env)?;
-                disjuncts.push(value._eq(&item));
+                let item = translate_numeric(item, subst, env)?;
+                disjuncts.push(value.eq(&item));
             }
             if disjuncts.is_empty() {
-                return Some(Bool::from_bool(ctx, false));
+                return Some(Bool::from_bool(false));
             }
-            let refs: Vec<&Bool<'ctx>> = disjuncts.iter().collect();
-            Some(Bool::or(ctx, &refs))
+            let refs: Vec<&Bool> = disjuncts.iter().collect();
+            Some(Bool::or(&refs))
         }
         ConstraintExpr::And(items) => {
-            let mut parts: Vec<Bool<'ctx>> = Vec::with_capacity(items.len());
+            let mut parts: Vec<Bool> = Vec::with_capacity(items.len());
             for item in items {
-                parts.push(translate_constraint(ctx, item, subst, env)?);
+                parts.push(translate_constraint(item, subst, env)?);
             }
             if parts.is_empty() {
-                return Some(Bool::from_bool(ctx, true));
+                return Some(Bool::from_bool(true));
             }
-            let refs: Vec<&Bool<'ctx>> = parts.iter().collect();
-            Some(Bool::and(ctx, &refs))
+            let refs: Vec<&Bool> = parts.iter().collect();
+            Some(Bool::and(&refs))
         }
         ConstraintExpr::Or(items) => {
-            let mut parts: Vec<Bool<'ctx>> = Vec::with_capacity(items.len());
+            let mut parts: Vec<Bool> = Vec::with_capacity(items.len());
             for item in items {
-                parts.push(translate_constraint(ctx, item, subst, env)?);
+                parts.push(translate_constraint(item, subst, env)?);
             }
             if parts.is_empty() {
-                return Some(Bool::from_bool(ctx, false));
+                return Some(Bool::from_bool(false));
             }
-            let refs: Vec<&Bool<'ctx>> = parts.iter().collect();
-            Some(Bool::or(ctx, &refs))
+            let refs: Vec<&Bool> = parts.iter().collect();
+            Some(Bool::or(&refs))
         }
         ConstraintExpr::Not(inner) => {
-            let inner = translate_constraint(ctx, inner, subst, env)?;
+            let inner = translate_constraint(inner, subst, env)?;
             Some(inner.not())
         }
         ConstraintExpr::Unsupported => None,
