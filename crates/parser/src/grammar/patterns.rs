@@ -170,9 +170,7 @@ impl<'t> Parser<'t> {
             }
             let checkpoint = self.pos();
             let fm = self.start();
-            if self.at(SK::IDENT) {
-                self.bump_any();
-            } else if self.at(T![_]) {
+            if self.at(SK::IDENT) || self.at(T![_]) {
                 self.bump_any();
             }
             if self.at(T![=]) {

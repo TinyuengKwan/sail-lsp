@@ -394,10 +394,9 @@ fn try_multi_char_op(bytes: &[u8], pos: usize, len: usize) -> Option<(Token, usi
 
     // Match known structural tokens (longest first).
     // These need dedicated token variants for the parser grammar.
-    match op_text {
-        // 3-char
-        b"<->" => return Some((Token::DoubleArrow, 3)),
-        _ => {}
+    // 3-char
+    if op_text == b"<->" {
+        return Some((Token::DoubleArrow, 3));
     }
 
     // For 2-char known tokens, only match if the full oper_char sequence

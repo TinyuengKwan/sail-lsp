@@ -97,17 +97,16 @@ impl<'t> Parser<'t> {
                 }
 
                 // Detect missing `=` when unparsed content remains.
-                if !found_eq && self.pos() < end_pos {
-                    if self.pos() < end_pos
-                        && !self.at_end()
-                        && !self.at_set(&DEF_RECOVERY_SET)
-                        && !matches!(
-                            self.current(),
-                            T!['{'] | T!['}'] | T![;] | T![<->] | T![->] | T![:] | T![<]
-                        )
-                    {
-                        self.error("expected `=` before function body".to_string());
-                    }
+                if !found_eq
+                    && self.pos() < end_pos
+                    && !self.at_end()
+                    && !self.at_set(&DEF_RECOVERY_SET)
+                    && !matches!(
+                        self.current(),
+                        T!['{'] | T!['}'] | T![;] | T![<->] | T![->] | T![:] | T![<]
+                    )
+                {
+                    self.error("expected `=` before function body".to_string());
                 }
             }
             SK::CALLABLE_SPEC => {
@@ -223,6 +222,7 @@ impl<'t> Parser<'t> {
                 self.parse_param_list(end_pos);
 
                 // Skip remaining tokens before `=`
+                #[allow(clippy::nonminimal_bool)]
                 while self.pos() < end_pos
                     && !self.at_end()
                     && !(self.at(T![=]) && self.nth(1) != T![=] && self.nth(1) != T![>])
