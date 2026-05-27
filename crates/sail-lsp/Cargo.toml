@@ -8,7 +8,7 @@ license = "MIT"
 [features]
 default = ["z3-solver"]
 z3-solver = ["hir-ty/z3-solver", "dep:z3"]
-
+vendored = ["z3/vendored"]
 [lib]
 name = "sail_lsp"
 

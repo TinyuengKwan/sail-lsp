@@ -212,7 +212,7 @@ jobs:
         run: npm ci
 
       - name: Build release server binary
-        run: cargo build --release -p sail-lsp --target ${{ matrix.rust_target }} --target-dir target/vscode/${{ matrix.target }}
+        run: cargo build --features vendored --release -p sail-lsp --target ${{ matrix.rust_target }} --target-dir target/vscode/${{ matrix.target }}
         working-directory: ${{ github.workspace }}
 
       - name: Bundle server binary
