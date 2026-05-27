@@ -59,8 +59,23 @@ fn types_plausibly_compatible(param: &Ty, arg: &Ty) -> bool {
     }
     // Non-primitive types (user-defined) are always plausible
     // (could be type aliases for compatible types).
-    let primitives = ["int", "nat", "bool", "string", "unit", "real", "bit", "bits",
-                       "atom", "range", "vector", "list", "option", "implicit", "atom_bool"];
+    let primitives = [
+        "int",
+        "nat",
+        "bool",
+        "string",
+        "unit",
+        "real",
+        "bit",
+        "bits",
+        "atom",
+        "range",
+        "vector",
+        "list",
+        "option",
+        "implicit",
+        "atom_bool",
+    ];
     if !primitives.contains(&p) || !primitives.contains(&a) {
         return true;
     }
@@ -928,9 +943,8 @@ impl<'db> InferenceContext<'db> {
         let args = [lhs_ty.clone(), rhs_ty.clone()];
         for scheme in plausible {
             let (freshened, _) = self.freshen_scheme(scheme);
-            let mut mrc = crate::method_resolution::MethodResolutionContext {
-                table: &mut self.table,
-            };
+            let mut mrc =
+                crate::method_resolution::MethodResolutionContext { table: &mut self.table };
             if mrc.try_candidate(&freshened.params, &args) {
                 drop(mrc);
                 return Some(self.table.resolve(&freshened.ret));
@@ -1397,27 +1411,34 @@ impl<'db> InferenceContext<'db> {
                 if let Some(members) = self.env.overloads.get(&callee_name) {
                     if !members.is_empty() {
                         let members = members.clone();
-                        let mut cross_candidates: SmallVec<[std::sync::Arc<TypeScheme>; 4]> = SmallVec::new();
+                        let mut cross_candidates: SmallVec<[std::sync::Arc<TypeScheme>; 4]> =
+                            SmallVec::new();
                         for member in &members {
                             if let Some((file, _)) = self.env.symbol_index.get(member) {
                                 let env_data = crate::query::top_level_env(db, file);
-                                if let Some(schemes) = env_data.0.env.functions.get(member.as_str()) {
+                                if let Some(schemes) = env_data.0.env.functions.get(member.as_str())
+                                {
                                     cross_candidates.extend(schemes.iter().cloned());
                                 }
                             }
                         }
                         // filter_overload_tree: arity + plausibility
-                        let plausible: Vec<_> = cross_candidates.iter()
+                        let plausible: Vec<_> = cross_candidates
+                            .iter()
                             .filter(|c| {
                                 let required = c.implicit_params.iter().filter(|im| !**im).count();
                                 if arg_types.len() < required || arg_types.len() > c.params.len() {
                                     return false;
                                 }
-                                let non_implicit: Vec<&Ty> = c.params.iter()
+                                let non_implicit: Vec<&Ty> = c
+                                    .params
+                                    .iter()
                                     .zip(c.implicit_params.iter())
                                     .filter_map(|(p, im)| (!im).then_some(p))
                                     .collect();
-                                non_implicit.iter().zip(arg_types.iter())
+                                non_implicit
+                                    .iter()
+                                    .zip(arg_types.iter())
                                     .all(|(p, a)| types_plausibly_compatible(p, a))
                             })
                             .collect();
@@ -1467,9 +1488,7 @@ impl<'db> InferenceContext<'db> {
                 return ms.rhs.clone();
             }
             // No function, no mapping — genuinely undefined
-            if self.env.has_workspace_context
-                && !is_likely_external_or_generated(&callee_name)
-            {
+            if self.env.has_workspace_context && !is_likely_external_or_generated(&callee_name) {
                 self.push_inference_diagnostic(InferenceDiagnostic::NoOverloading {
                     call_expr: callee_id,
                     name: callee_name,
@@ -1506,13 +1525,16 @@ impl<'db> InferenceContext<'db> {
                     if arg_types.len() < required || arg_types.len() > c.params.len() {
                         return true; // arity mismatch → keep for diagnostics
                     }
-                    let params_to_check: Vec<&Ty> = c.params.iter()
+                    let params_to_check: Vec<&Ty> = c
+                        .params
+                        .iter()
                         .zip(c.implicit_params.iter())
                         .filter_map(|(p, im)| (!im).then_some(p))
                         .collect();
-                    params_to_check.iter().zip(arg_types.iter()).all(|(param, arg)| {
-                        types_plausibly_compatible(param, arg)
-                    })
+                    params_to_check
+                        .iter()
+                        .zip(arg_types.iter())
+                        .all(|(param, arg)| types_plausibly_compatible(param, arg))
                 })
                 .collect()
         };
@@ -1583,9 +1605,8 @@ impl<'db> InferenceContext<'db> {
             // Collect owned copies of expected params for try_candidate's &[Ty].
             let params_owned: Vec<Ty> = expected_params.iter().map(|p| (*p).clone()).collect();
             let table_ok = {
-                let mut mrc = crate::method_resolution::MethodResolutionContext {
-                    table: &mut self.table,
-                };
+                let mut mrc =
+                    crate::method_resolution::MethodResolutionContext { table: &mut self.table };
                 mrc.try_candidate(&params_owned, &arg_types)
             };
             // MRC dropped — self.table accessible again.
@@ -1635,10 +1656,7 @@ impl<'db> InferenceContext<'db> {
                 let resolved = self.table.resolve(&entry.infer_ty);
                 if !matches!(resolved.kind(), TyKind::Infer(_)) {
                     subst.types.insert(entry.fresh_name.clone(), resolved.clone());
-                    subst.values.insert(
-                        entry.fresh_name.clone(),
-                        resolved.display_text(),
-                    );
+                    subst.values.insert(entry.fresh_name.clone(), resolved.display_text());
                 }
             }
             // Extract value bindings from param/arg App type args directly.
@@ -1945,9 +1963,7 @@ impl<'db> InferenceContext<'db> {
                 // 6b. Auto-generated names or names that appear as pattern
                 //     bindings elsewhere in the source (scattered clause
                 //     cross-body references, funcl as-bindings, etc.)
-                else if name.starts_with("__")
-                    || self.name_likely_pattern_binding(name)
-                {
+                else if name.starts_with("__") || self.name_likely_pattern_binding(name) {
                     Ty::error()
                 }
                 // 7. Genuinely unresolved — emit diagnostic.
@@ -2060,7 +2076,11 @@ impl<'db> InferenceContext<'db> {
                             ret_ty
                         } else if lhs_ty.is_bits_like() || rhs_ty.is_bits_like() {
                             // Bitwise operation on bitvectors.
-                            if !lhs_ty.is_error() { lhs_ty } else { rhs_ty }
+                            if !lhs_ty.is_error() {
+                                lhs_ty
+                            } else {
+                                rhs_ty
+                            }
                         } else if !lhs_ty.is_error() {
                             lhs_ty
                         } else {
@@ -2657,18 +2677,10 @@ impl<'db> InferenceContext<'db> {
                 // sizeof('n) has type atom('n).
                 // Parse the nexp text to a NumericExpr and construct atom(nexp).
                 if let Some(parsed) = crate::ty::NumericExpr::parse(nexp) {
-                    Ty::app(
-                        "atom",
-                        vec![TyArg::Nexp(parsed)],
-                        format!("atom({nexp})"),
-                    )
+                    Ty::app("atom", vec![TyArg::Nexp(parsed)], format!("atom({nexp})"))
                 } else {
                     // Complex nexp — use TyArg::Value fallback.
-                    Ty::app(
-                        "atom",
-                        vec![TyArg::numeric(nexp.clone())],
-                        format!("atom({nexp})"),
-                    )
+                    Ty::app("atom", vec![TyArg::numeric(nexp.clone())], format!("atom({nexp})"))
                 }
             }
 
@@ -2832,7 +2844,11 @@ impl<'db> InferenceContext<'db> {
                         });
                     }
                     let width = if h >= l { h - l + 1 } else { l - h + 1 };
-                    Ty::app("bits", vec![TyArg::numeric(width.to_string())], format!("bits({width})"))
+                    Ty::app(
+                        "bits",
+                        vec![TyArg::numeric(width.to_string())],
+                        format!("bits({width})"),
+                    )
                 } else if !base_ty.is_error() {
                     // Dynamic subrange: width unknown statically.
                     // Return bits(?N) — fresh inference var is permissive,
@@ -2869,15 +2885,13 @@ impl<'db> InferenceContext<'db> {
             let local = self.env.functions.get(name).and_then(|schemes| schemes.first().cloned());
             // If local scheme has error return type (scattered clause without
             // inline return type), try cross-file val spec lookup.
-            let needs_cross_file = local.as_ref()
-                .map(|s| s.ret.is_error())
-                .unwrap_or(true);
+            let needs_cross_file = local.as_ref().map(|s| s.ret.is_error()).unwrap_or(true);
             if needs_cross_file {
                 if let Some(db) = self.db {
                     if let Some(file) = self.env.symbol_index.get_file(name) {
                         let env_data = crate::query::top_level_env(db, file);
-                        if let Some(cross) = env_data.0.env.functions.get(name)
-                            .and_then(|s| s.first().cloned())
+                        if let Some(cross) =
+                            env_data.0.env.functions.get(name).and_then(|s| s.first().cloned())
                         {
                             if !cross.ret.is_error() {
                                 Some(cross)
@@ -3133,5 +3147,4 @@ impl<'db> InferenceContext<'db> {
             _ => {}
         }
     }
-
 }

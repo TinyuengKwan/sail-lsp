@@ -298,15 +298,11 @@ fn symbol_index_to_nav_targets(
     // Prefer definitions (Function, Struct, etc.) over declarations (ValSpec)
     let definitions: Vec<_> = entries
         .iter()
-        .filter(|e| {
-            !matches!(
-                e.kind,
-                ItemKind::ValSpec | ItemKind::MappingSpec
-            )
-        })
+        .filter(|e| !matches!(e.kind, ItemKind::ValSpec | ItemKind::MappingSpec))
         .collect();
 
-    let chosen = if definitions.is_empty() { entries.iter().collect::<Vec<_>>() } else { definitions };
+    let chosen =
+        if definitions.is_empty() { entries.iter().collect::<Vec<_>>() } else { definitions };
 
     // Prefer entries from the same file
     let mut sorted = chosen;
@@ -342,11 +338,7 @@ fn symbol_index_to_nav_targets(
 /// doesn't find a result in the current file.
 ///
 /// Mirrors the legacy API (kept for backward compatibility).
-pub fn goto_definition(
-    index: &SymbolIndex,
-    symbol_key: &str,
-    uri_hint: &Url,
-) -> Vec<FileLocation> {
+pub fn goto_definition(index: &SymbolIndex, symbol_key: &str, uri_hint: &Url) -> Vec<FileLocation> {
     crate::navigation::definition_locations_indexed(index, symbol_key, uri_hint)
 }
 

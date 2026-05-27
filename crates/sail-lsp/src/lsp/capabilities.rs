@@ -108,9 +108,8 @@ impl ClientCapabilities {
     /// Whether the client supports `workspace/willRenameFiles`.
     #[allow(dead_code)]
     pub(crate) fn will_rename_support(&self) -> bool {
-        (|| -> Option<bool> {
-            self.0.workspace.as_ref()?.file_operations.as_ref()?.will_rename
-        })() == Some(true)
+        (|| -> Option<bool> { self.0.workspace.as_ref()?.file_operations.as_ref()?.will_rename })()
+            == Some(true)
     }
 }
 

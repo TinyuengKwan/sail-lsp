@@ -837,13 +837,11 @@ pub(crate) fn handle_code_action(
     let source_fix_all_kind = crate::code_action_helpers::sail_source_fix_all_kind();
     if crate::code_action_helpers::code_action_kind_allowed(&requested_kinds, &source_fix_all_kind)
     {
-        let fmt_opts = snap.last_format_options.lock()
-            .map(|o| o.clone())
-            .unwrap_or_else(|_| crate::code_action_helpers::default_code_action_format_options());
-        if let Some(ide_edits) = ide::formatting::format_document_edits(
-            &sf,
-            &fmt_opts,
-        ) {
+        let fmt_opts =
+            snap.last_format_options.lock().map(|o| o.clone()).unwrap_or_else(|_| {
+                crate::code_action_helpers::default_code_action_format_options()
+            });
+        if let Some(ide_edits) = ide::formatting::format_document_edits(&sf, &fmt_opts) {
             if !ide_edits.is_empty() {
                 let lsp_edits = ide_edits_to_lsp(ide_edits, &sf);
                 actions.push(CodeActionOrCommand::CodeAction(CodeAction {
@@ -932,8 +930,7 @@ pub(crate) fn handle_inlay_hint(
     let ft = snap.analysis.file_id(uri).and_then(|fid| snap.analysis.files_ref().file_text(fid));
     let type_check = ft.map(|ft| hir_ty::query::infer_body(snap.analysis.db(), ft));
     // Use salsa-cached transitive effects for effect hints.
-    let transitive_effects =
-        ft.map(|ft| hir_ty::query::transitive_effects(snap.analysis.db(), ft));
+    let transitive_effects = ft.map(|ft| hir_ty::query::transitive_effects(snap.analysis.db(), ft));
     let ide_hints = ide::inlay_hints::inlay_hints_ide_with_types(
         &all_files,
         uri,
@@ -1801,4 +1798,3 @@ pub(crate) fn handle_view_include_graph(
     let _ = file_id; // Used for context; graph renders all nodes
     Ok(graph)
 }
-

@@ -19,7 +19,8 @@ pub(crate) fn add_braces(acc: &mut Assists, ctx: &AssistContext<'_>) -> Option<(
     let then_abs = cond_start + then_idx;
     let body_start_abs = then_abs + 6; // " then " is 6 chars
 
-    let body_start_trimmed = body_start_abs + (text[body_start_abs..].len() - skip_ws(&text[body_start_abs..]).len());
+    let body_start_trimmed =
+        body_start_abs + (text[body_start_abs..].len() - skip_ws(&text[body_start_abs..]).len());
 
     // If body already starts with '{', bail
     if text.as_bytes().get(body_start_trimmed) == Some(&b'{') {
@@ -43,7 +44,8 @@ pub(crate) fn add_braces(acc: &mut Assists, ctx: &AssistContext<'_>) -> Option<(
 
         // Now handle else body
         let else_body_start = else_abs + 4; // "else" is 4 chars
-        let else_body_start_trimmed = else_body_start + (text[else_body_start..].len() - skip_ws(&text[else_body_start..]).len());
+        let else_body_start_trimmed = else_body_start
+            + (text[else_body_start..].len() - skip_ws(&text[else_body_start..]).len());
 
         if text.as_bytes().get(else_body_start_trimmed) != Some(&b'{') {
             // Find end of else body (next newline or end of text)
@@ -116,10 +118,9 @@ fn find_keyword_else(text: &str) -> Option<usize> {
         match text[search_from..].find("else") {
             Some(pos) => {
                 let abs = search_from + pos;
-                let before_ok = abs == 0
-                    || !text.as_bytes()[abs - 1].is_ascii_alphanumeric();
-                let after_ok = abs + 4 >= text.len()
-                    || !text.as_bytes()[abs + 4].is_ascii_alphanumeric();
+                let before_ok = abs == 0 || !text.as_bytes()[abs - 1].is_ascii_alphanumeric();
+                let after_ok =
+                    abs + 4 >= text.len() || !text.as_bytes()[abs + 4].is_ascii_alphanumeric();
                 if before_ok && after_ok {
                     return Some(abs);
                 }

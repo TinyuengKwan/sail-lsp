@@ -177,7 +177,9 @@ impl WorkspaceContext {
 
     /// Build workspace context from CST-derived data.
     #[allow(dead_code)]
-    pub fn build_from_cst<'a, F: SourceFileInfo + 'a>(files: impl IntoIterator<Item = &'a F>) -> Self {
+    pub fn build_from_cst<'a, F: SourceFileInfo + 'a>(
+        files: impl IntoIterator<Item = &'a F>,
+    ) -> Self {
         use hir_def::bodies::CallableBodies;
         use hir_def::hir::Expr;
         use hir_def::item_tree::{ItemKind, ItemTree};
@@ -360,7 +362,8 @@ impl WorkspaceContext {
                             // Use TypeRef from ItemTree (populated by lower.rs
                             // from type_ref_from_text). Falls back to signature
                             // parsing if type_ref is None.
-                            let payload_ty: Option<Ty> = id.type_ref(&item_tree)
+                            let payload_ty: Option<Ty> = id
+                                .type_ref(&item_tree)
                                 .map(|tr| ty_from_type_ref(tr))
                                 .or_else(|| {
                                     let sig = id.signature(&item_tree);
@@ -545,7 +548,9 @@ impl WorkspaceContext {
                     // which has the full `{member1, member2, ...}` list.
                     // ItemTree signature may be truncated to just
                     // "overload X" without the member list.
-                    let members = file_env.overloads.get(name)
+                    let members = file_env
+                        .overloads
+                        .get(name)
                         .cloned()
                         .unwrap_or_else(|| extract_braced_idents_from_sig(sig));
                     let op_key =
@@ -563,9 +568,7 @@ impl WorkspaceContext {
                         self.type_aliases.entry(name.to_string()).or_insert_with(|| ty.clone());
                     }
                     if let Some(sch) = file_env.alias_schemes.get(name) {
-                        self.alias_schemes
-                            .entry(name.to_string())
-                            .or_insert_with(|| sch.clone());
+                        self.alias_schemes.entry(name.to_string()).or_insert_with(|| sch.clone());
                     }
                 }
                 ItemKind::ScatteredClause => {
@@ -578,9 +581,8 @@ impl WorkspaceContext {
 
                         // Register constructor scheme (same as build_from_cst path).
                         let parent_ty = Ty::named(parent.clone());
-                        let payload_ty: Option<Ty> = id.type_ref(item_tree)
-                            .map(|tr| ty_from_type_ref(tr))
-                            .or_else(|| {
+                        let payload_ty: Option<Ty> =
+                            id.type_ref(item_tree).map(|tr| ty_from_type_ref(tr)).or_else(|| {
                                 let sig = id.signature(item_tree);
                                 sig.find(':').map(|colon_pos| {
                                     let type_text = sig[colon_pos + 1..].trim();
@@ -819,9 +821,20 @@ pub(crate) fn contains_config_dependent(ty: &Ty) -> bool {
     use crate::ty::TyKind;
     // Known config-dependent type names
     const CONFIG_NAMES: &[&str] = &[
-        "xlen", "vlen", "elen", "flen", "xlen_bytes", "log2_xlen",
-        "xlenbits", "vlenbits", "flenbits", "regtype", "fregtype",
-        "physaddrbits_len", "asidlen", "asidbits",
+        "xlen",
+        "vlen",
+        "elen",
+        "flen",
+        "xlen_bytes",
+        "log2_xlen",
+        "xlenbits",
+        "vlenbits",
+        "flenbits",
+        "regtype",
+        "fregtype",
+        "physaddrbits_len",
+        "asidlen",
+        "asidbits",
     ];
     match ty.kind() {
         TyKind::Adt(name, _) if CONFIG_NAMES.contains(&name.as_str()) => true,
@@ -949,18 +962,11 @@ fn ty_from_type_ref(tr: &hir_def::hir::type_ref::TypeRef) -> Ty {
             let text = super::numeric::app_text(name, &ty_args);
             Ty::app(name, ty_args, text)
         }
-        TypeRef::Tuple(items) => {
-            Ty::tuple(items.iter().map(ty_from_type_ref).collect())
-        }
+        TypeRef::Tuple(items) => Ty::tuple(items.iter().map(ty_from_type_ref).collect()),
         TypeRef::Fn { params, ret } => {
-            Ty::function(
-                params.iter().map(ty_from_type_ref).collect(),
-                ty_from_type_ref(ret),
-            )
+            Ty::function(params.iter().map(ty_from_type_ref).collect(), ty_from_type_ref(ret))
         }
-        TypeRef::Bidir { lhs, rhs } => {
-            Ty::bidir(ty_from_type_ref(lhs), ty_from_type_ref(rhs))
-        }
+        TypeRef::Bidir { lhs, rhs } => Ty::bidir(ty_from_type_ref(lhs), ty_from_type_ref(rhs)),
         TypeRef::Error | TypeRef::Exist { .. } | TypeRef::Forall { .. } => Ty::error(),
     }
 }
@@ -984,10 +990,7 @@ fn parse_type_text(text: &str) -> Ty {
             let name = &trimmed[..paren_pos];
             let args_text = &trimmed[paren_pos + 1..trimmed.len() - 1];
             let arg_parts = split_top_level_commas(args_text);
-            let args: Vec<TyArg> = arg_parts
-                .iter()
-                .map(|p| TyArg::numeric(p.trim()))
-                .collect();
+            let args: Vec<TyArg> = arg_parts.iter().map(|p| TyArg::numeric(p.trim())).collect();
             let text_repr = trimmed.to_string();
             return Ty::app(name, args, text_repr);
         }

@@ -11,7 +11,6 @@ use crate::AstNode;
 use super::SyntaxFactory;
 
 impl SyntaxFactory {
-
     /// Create a `Name` node.
     ///
     /// When mapping tracking is enabled, verifies the mapping table

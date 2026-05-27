@@ -692,7 +692,8 @@ fn is_in_param_list(text: &str, offset: usize) -> bool {
                 if depth == 0 {
                     // Found unmatched `(`. Check if preceded by function/mapping name.
                     if let Some(paren_pos) = before.rfind('(') {
-                        let line_start = before[..paren_pos].rfind('\n').map(|p| p + 1).unwrap_or(0);
+                        let line_start =
+                            before[..paren_pos].rfind('\n').map(|p| p + 1).unwrap_or(0);
                         let line = before[line_start..paren_pos].trim();
                         return line.starts_with("function ") || line.starts_with("mapping ");
                     }

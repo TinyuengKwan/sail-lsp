@@ -19,16 +19,22 @@ impl<'t> Parser<'t> {
         if self.at(SK::IDENT) && self.pos() < end_pos {
             let pm = self.start();
             self.bump_any(); // ident (param name or constructor)
-            // If followed by `(`, consume the constructor args
+                             // If followed by `(`, consume the constructor args
             if self.at(T!['(']) && self.pos() < end_pos {
                 let mut depth = 0u32;
                 loop {
-                    if self.at_end() || self.pos() >= end_pos { break; }
-                    if self.at(T!['(']) { depth += 1; }
+                    if self.at_end() || self.pos() >= end_pos {
+                        break;
+                    }
+                    if self.at(T!['(']) {
+                        depth += 1;
+                    }
                     if self.at(T![')']) {
                         depth -= 1;
                         self.bump_any();
-                        if depth == 0 { break; }
+                        if depth == 0 {
+                            break;
+                        }
                         continue;
                     }
                     self.bump_any();
@@ -37,8 +43,7 @@ impl<'t> Parser<'t> {
             // Optional type annotation: `: type`
             if self.at(T![:]) && self.pos() < end_pos {
                 self.bump_any();
-                let recovery =
-                    super::TYPE_RECOVERY.union(TokenSet::new(&[T![as], T![match]]));
+                let recovery = super::TYPE_RECOVERY.union(TokenSet::new(&[T![as], T![match]]));
                 self.parse_type_expr(recovery);
             }
             // Optional `as id` binding
@@ -55,12 +60,11 @@ impl<'t> Parser<'t> {
         if self.at(T![_]) && self.pos() < end_pos {
             let pm = self.start();
             self.bump_any(); // _
-            // Optional type annotation: `_ : type`
+                             // Optional type annotation: `_ : type`
             if self.at(T![:]) && self.pos() < end_pos {
                 self.bump_any(); // :
-                // Parse type, stopping at `=` or `as`
-                let recovery =
-                    super::TYPE_RECOVERY.union(TokenSet::new(&[T![as], T![match]]));
+                                 // Parse type, stopping at `=` or `as`
+                let recovery = super::TYPE_RECOVERY.union(TokenSet::new(&[T![as], T![match]]));
                 self.parse_type_expr(recovery);
             }
             // Optional `as id` binding
@@ -108,7 +112,7 @@ impl<'t> Parser<'t> {
         // fragments up to `=` or `->` or `:`.
         while self.at(T![@]) && self.pos() < end_pos {
             self.bump_any(); // @
-            // Consume the next pattern fragment (ident, ident[...], or (...))
+                             // Consume the next pattern fragment (ident, ident[...], or (...))
             if self.at(T!['(']) {
                 let mut depth = 0u32;
                 loop {
@@ -132,10 +136,7 @@ impl<'t> Parser<'t> {
                 // Bare ident or ident[index] fragment
                 while self.pos() < end_pos
                     && !self.at_end()
-                    && !matches!(
-                        self.current(),
-                        T![@] | T![=] | T![->] | T![:] | T!['{']
-                    )
+                    && !matches!(self.current(), T![@] | T![=] | T![->] | T![:] | T!['{'])
                 {
                     self.bump_any();
                 }

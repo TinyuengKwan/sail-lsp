@@ -37,7 +37,10 @@ impl CommentStyle {
 
     /// Is this a line comment style?
     pub(crate) fn is_line_comment(&self) -> bool {
-        matches!(self, CommentStyle::DoubleSlash | CommentStyle::TripleSlash | CommentStyle::DocBang)
+        matches!(
+            self,
+            CommentStyle::DoubleSlash | CommentStyle::TripleSlash | CommentStyle::DocBang
+        )
     }
 
     /// Is this a block comment style?
@@ -47,10 +50,7 @@ impl CommentStyle {
 
     /// Is this a documentation comment?
     pub(crate) fn is_doc_comment(&self) -> bool {
-        matches!(
-            self,
-            CommentStyle::TripleSlash | CommentStyle::DocBang | CommentStyle::DocBlock
-        )
+        matches!(self, CommentStyle::TripleSlash | CommentStyle::DocBang | CommentStyle::DocBlock)
     }
 
     /// The opening characters for this comment style.

@@ -221,9 +221,7 @@ fn scan_workspace_folders(
                             project.modules.len(),
                         );
                         // Resolve file paths relative to the project file's directory
-                        let project_dir = project_file_path
-                            .parent()
-                            .unwrap_or(&folder_path);
+                        let project_dir = project_file_path.parent().unwrap_or(&folder_path);
                         for relative_path in &project.files {
                             let abs_path = project_dir.join(relative_path);
                             if abs_path.exists() && is_sail_file(&abs_path) {

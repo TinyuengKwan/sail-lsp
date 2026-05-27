@@ -221,7 +221,6 @@ fn infix_bp(kind: SK) -> Option<(u8, u8)> {
 // This is the same crate, so inherent impl blocks are allowed.
 
 impl<'t> Parser<'t> {
-
     pub(crate) fn at_set(&self, set: &TokenSet) -> bool {
         self.at_ts(set)
     }

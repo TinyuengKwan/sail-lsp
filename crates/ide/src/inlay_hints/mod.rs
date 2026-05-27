@@ -373,10 +373,7 @@ function main() = pure_fn(42)
             .filter(|h| h.label.starts_with("/*") && h.label.ends_with("*/"))
             .filter(|h| {
                 // Exclude definition-site effect hints (those appear at function defs)
-                h.data
-                    .as_ref()
-                    .and_then(|d| d.get("kind"))
-                    .and_then(|k| k.as_str())
+                h.data.as_ref().and_then(|d| d.get("kind")).and_then(|k| k.as_str())
                     == Some("call_effect")
             })
             .map(|h| h.label.as_str())
@@ -404,10 +401,7 @@ function main() = dangerous()
         let call_effect_hints: Vec<&str> = hints
             .iter()
             .filter(|h| {
-                h.data
-                    .as_ref()
-                    .and_then(|d| d.get("kind"))
-                    .and_then(|k| k.as_str())
+                h.data.as_ref().and_then(|d| d.get("kind")).and_then(|k| k.as_str())
                     == Some("call_effect")
             })
             .map(|h| h.label.as_str())
@@ -434,10 +428,7 @@ function main() = risky()
         let tooltip = hints
             .iter()
             .find(|h| {
-                h.data
-                    .as_ref()
-                    .and_then(|d| d.get("kind"))
-                    .and_then(|k| k.as_str())
+                h.data.as_ref().and_then(|d| d.get("kind")).and_then(|k| k.as_str())
                     == Some("call_effect")
             })
             .and_then(|h| h.tooltip.clone());

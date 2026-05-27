@@ -48,10 +48,7 @@ pub fn file_item_tree(db: &dyn salsa::Database, input: FileText) -> Option<Arc<I
 
 /// Build per-callable Body arenas from a parsed file.
 #[salsa::tracked(returns(ref))]
-pub fn callable_bodies(
-    db: &dyn salsa::Database,
-    input: FileText,
-) -> Option<ArcCallableBodies> {
+pub fn callable_bodies(db: &dyn salsa::Database, input: FileText) -> Option<ArcCallableBodies> {
     let parsed: &ParsedFileData = parse_file(db, input);
     let green = parsed.green.as_ref()?;
     let root = syntax::SyntaxNode::new_root(green.as_ref().clone());
@@ -263,7 +260,6 @@ pub fn file_def_with_body_ids<'db>(
     ids
 }
 
-
 /// Merge fixity declarations from all files into the `WorkspaceFixities` input.
 pub fn update_workspace_fixities(
     db: &mut dyn salsa::Database,
@@ -302,7 +298,6 @@ pub fn update_workspace_fixities(
         base_db::WorkspaceFixities::new(db, fingerprint, merged);
     }
 }
-
 
 #[cfg(test)]
 mod tests {

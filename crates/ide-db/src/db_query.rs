@@ -75,10 +75,7 @@ pub fn impl_counts(db: &dyn salsa::Database, input: FileText) -> Arc<HashMap<Str
 ///
 /// Salsa ensures this is only recomputed when file text changes.
 #[salsa::tracked(returns(ref))]
-pub fn line_index(
-    db: &dyn salsa::Database,
-    input: FileText,
-) -> Arc<crate::line_index::LineIndex> {
+pub fn line_index(db: &dyn salsa::Database, input: FileText) -> Arc<crate::line_index::LineIndex> {
     let text = input.text(db);
     Arc::new(crate::line_index::LineIndex::new(text.as_ref()))
 }

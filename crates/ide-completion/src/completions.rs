@@ -106,9 +106,8 @@ pub(super) fn complete_name_ref(
                     acc, ctx, all_files, path_ctx, expr_ctx, keywords, builtins,
                 );
                 // Record literal field completion inside `StructName { | }`.
-                let record_items = record::complete_record(
-                    ctx.file, ctx.text, ctx.offset, ctx.prefix, all_files,
-                );
+                let record_items =
+                    record::complete_record(ctx.file, ctx.text, ctx.offset, ctx.prefix, all_files);
                 acc.add_many(record_items);
                 postfix::complete_postfix(acc, ctx);
             }

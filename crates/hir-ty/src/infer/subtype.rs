@@ -4,19 +4,15 @@
 //! when N == M), with compatibility checks that may generate
 //! constraint obligations.
 
-use super::*;
 use super::nexp_simplify::{check_eq, check_le, try_eval_const};
+use super::*;
 
 /// Try Z3 to verify a numeric comparison when algebraic simplification fails.
 /// Returns `Some(true)` if provably true, `None` otherwise (Z3 not available,
 /// timeout, or undecidable). Never returns `Some(false)` — LSP is permissive.
 fn z3_check_le(a: &NumericExpr, b: &NumericExpr) -> Option<bool> {
     // Construct constraint: a <= b
-    let constraint = ConstraintExpr::Compare {
-        lhs: a.clone(),
-        op: CompareOp::Lte,
-        rhs: b.clone(),
-    };
+    let constraint = ConstraintExpr::Compare { lhs: a.clone(), op: CompareOp::Lte, rhs: b.clone() };
     let subst = Subst::default();
     match super::z3_solver::try_solve(&constraint, &subst, &[]) {
         ConstraintStatus::Satisfied => Some(true),
@@ -26,11 +22,7 @@ fn z3_check_le(a: &NumericExpr, b: &NumericExpr) -> Option<bool> {
 
 /// Try Z3 to verify numeric equality.
 fn z3_check_eq(a: &NumericExpr, b: &NumericExpr) -> Option<bool> {
-    let constraint = ConstraintExpr::Compare {
-        lhs: a.clone(),
-        op: CompareOp::Eq,
-        rhs: b.clone(),
-    };
+    let constraint = ConstraintExpr::Compare { lhs: a.clone(), op: CompareOp::Eq, rhs: b.clone() };
     let subst = Subst::default();
     match super::z3_solver::try_solve(&constraint, &subst, &[]) {
         ConstraintStatus::Satisfied => Some(true),
@@ -116,7 +108,9 @@ pub(super) fn is_subtype(table: &mut InferenceTable, sub: &Ty, sup: &Ty) -> Subt
         // atom('n) <: int — always holds
         // nat <: int — always holds
         (TyKind::App { name: app_name, .. }, _)
-            if (app_name == "range" || app_name == "atom" || app_name == "nat"
+            if (app_name == "range"
+                || app_name == "atom"
+                || app_name == "nat"
                 || app_name == "implicit")
                 && sup_name == Some("int") =>
         {
@@ -125,7 +119,9 @@ pub(super) fn is_subtype(table: &mut InferenceTable, sub: &Ty, sup: &Ty) -> Subt
 
         // implicit('n) <-> int: implicit params are integers inferred at
         // compile time; explicit int values satisfy implicit parameters.
-        _ if sup_name == Some("int") && matches!(sub.kind(), TyKind::App { name, .. } if name == "implicit") => {
+        _ if sup_name == Some("int")
+            && matches!(sub.kind(), TyKind::App { name, .. } if name == "implicit") =>
+        {
             SubtypeResult::Ok
         }
         (_, TyKind::App { name: app_name, .. })
@@ -232,19 +228,17 @@ pub(super) fn is_subtype(table: &mut InferenceTable, sub: &Ty, sup: &Ty) -> Subt
             let v1 = a1.first().and_then(extract_nexp);
             let v2 = a2.first().and_then(extract_nexp);
             match (v1, v2) {
-                (Some(e1), Some(e2)) => {
-                    match check_eq(&e1, &e2) {
-                        Some(true) => SubtypeResult::Ok,
-                        Some(false) => SubtypeResult::Fail,
-                        None => {
-                            if table.raw_unify(&sub, &sup) {
-                                SubtypeResult::Ok
-                            } else {
-                                SubtypeResult::Fail
-                            }
+                (Some(e1), Some(e2)) => match check_eq(&e1, &e2) {
+                    Some(true) => SubtypeResult::Ok,
+                    Some(false) => SubtypeResult::Fail,
+                    None => {
+                        if table.raw_unify(&sub, &sup) {
+                            SubtypeResult::Ok
+                        } else {
+                            SubtypeResult::Fail
                         }
                     }
-                }
+                },
                 _ => {
                     if table.raw_unify(&sub, &sup) {
                         SubtypeResult::Ok
@@ -283,10 +277,10 @@ pub(super) fn is_subtype(table: &mut InferenceTable, sub: &Ty, sup: &Ty) -> Subt
                         }
                         _ => {
                             // Algebraic first, then Z3 fallback.
-                            let plo_le_slo = check_le(&plo_e, &slo_e)
-                                .or_else(|| z3_check_le(&plo_e, &slo_e));
-                            let shi_le_phi = check_le(&shi_e, &phi_e)
-                                .or_else(|| z3_check_le(&shi_e, &phi_e));
+                            let plo_le_slo =
+                                check_le(&plo_e, &slo_e).or_else(|| z3_check_le(&plo_e, &slo_e));
+                            let shi_le_phi =
+                                check_le(&shi_e, &phi_e).or_else(|| z3_check_le(&shi_e, &phi_e));
                             match (plo_le_slo, shi_le_phi) {
                                 (Some(true), Some(true)) => SubtypeResult::Ok,
                                 (Some(false), _) | (_, Some(false)) => SubtypeResult::Fail,

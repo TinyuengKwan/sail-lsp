@@ -318,10 +318,7 @@ fn complete_unqualified(
                     sort_text: None,
                     filter_text: Some(name_str.to_string()),
                     deprecated: false,
-                    relevance: CompletionRelevance {
-                        is_local: true,
-                        ..Default::default()
-                    },
+                    relevance: CompletionRelevance { is_local: true, ..Default::default() },
                 });
             }
         }

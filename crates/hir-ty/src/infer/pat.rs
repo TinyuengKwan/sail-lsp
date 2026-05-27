@@ -366,11 +366,7 @@ impl<'db> InferenceContext<'db> {
     /// Check if `name` appears as a binding in ANY pattern in the body.
     /// Fallback for complex patterns (mapping arms, subrange patterns)
     /// that bind_pattern_hir didn't register in locals.
-    pub(super) fn name_appears_in_body_patterns(
-        &self,
-        body: &hir_def::Body,
-        name: &str,
-    ) -> bool {
+    pub(super) fn name_appears_in_body_patterns(&self, body: &hir_def::Body, name: &str) -> bool {
         for &pat_id in body.params.iter() {
             if self.pat_tree_contains_name(body, pat_id, name) {
                 return true;
@@ -396,7 +392,9 @@ impl<'db> InferenceContext<'db> {
     /// Looks for `name[`, `name @`, `name,`, `name)` patterns in source.
     #[allow(dead_code)] // Kept for potential future use in filtering
     pub(super) fn name_likely_pattern_binding(&self, name: &str) -> bool {
-        if name.is_empty() { return false; }
+        if name.is_empty() {
+            return false;
+        }
         // Check all occurrences of `name` in source text
         let src = self.source;
         let mut pos = 0;
@@ -428,7 +426,9 @@ impl<'db> InferenceContext<'db> {
                 }
             }
             pos = abs + 1;
-            if pos >= src.len() { break; }
+            if pos >= src.len() {
+                break;
+            }
         }
         false
     }

@@ -13,7 +13,6 @@ use super::shape::Shape;
 use super::snippet::SnippetProvider;
 use super::vertical::{rewrite_with_alignment, AlignedItem};
 
-
 /// A struct/union field: `name : type`
 pub(crate) struct StructField {
     pub(crate) name: String,
@@ -43,13 +42,7 @@ impl AlignedItem for StructField {
         prefix_max_width: usize,
     ) -> RewriteResult {
         let padding = prefix_max_width.saturating_sub(self.name.len());
-        Ok(format!(
-            "{}{}{}{}",
-            self.name,
-            " ".repeat(padding),
-            self.separator,
-            self.suffix
-        ))
+        Ok(format!("{}{}{}{}", self.name, " ".repeat(padding), self.separator, self.suffix))
     }
 }
 
@@ -118,12 +111,7 @@ impl AlignedItem for MappingArm {
         prefix_max_width: usize,
     ) -> RewriteResult {
         let padding = prefix_max_width.saturating_sub(self.lhs.len());
-        Ok(format!(
-            "{}{} <-> {}",
-            self.lhs,
-            " ".repeat(padding),
-            self.rhs
-        ))
+        Ok(format!("{}{} <-> {}", self.lhs, " ".repeat(padding), self.rhs))
     }
 }
 
@@ -154,15 +142,9 @@ impl AlignedItem for RegisterDecl {
         prefix_max_width: usize,
     ) -> RewriteResult {
         let padding = prefix_max_width.saturating_sub(self.name.len());
-        Ok(format!(
-            "{}{} : {}",
-            self.name,
-            " ".repeat(padding),
-            self.type_text
-        ))
+        Ok(format!("{}{} : {}", self.name, " ".repeat(padding), self.type_text))
     }
 }
-
 
 /// Find the first child node of a given kind.
 fn find_child_node(node: &SyntaxNode, kind: SK) -> Option<SyntaxNode> {
@@ -208,8 +190,8 @@ pub(crate) fn extract_struct_fields(
     snippet: &SnippetProvider,
 ) -> Vec<StructField> {
     // The body lives inside a STRUCT_EXPR or BLOCK_EXPR child node.
-    let body_node = find_child_node(node, SK::STRUCT_EXPR)
-        .or_else(|| find_child_node(node, SK::BLOCK_EXPR));
+    let body_node =
+        find_child_node(node, SK::STRUCT_EXPR).or_else(|| find_child_node(node, SK::BLOCK_EXPR));
     let body_node = match body_node {
         Some(n) => n,
         None => return Vec::new(),
@@ -268,10 +250,7 @@ pub(crate) fn extract_bitfield_fields(
 
         // Parse `name : range_expr` with optional trailing comma and comment
         let (field_part, inline_comment) = if let Some(comment_pos) = trimmed.find("//") {
-            (
-                trimmed[..comment_pos].trim(),
-                Some(trimmed[comment_pos..].to_string()),
-            )
+            (trimmed[..comment_pos].trim(), Some(trimmed[comment_pos..].to_string()))
         } else {
             (trimmed, None)
         };
@@ -281,11 +260,7 @@ pub(crate) fn extract_bitfield_fields(
         if let Some(colon_pos) = field_clean.find(':') {
             let name = field_clean[..colon_pos].trim().to_string();
             let raw_range = field_clean[colon_pos + 1..].trim().to_string();
-            let range_text = if has_comma {
-                format!("{raw_range},")
-            } else {
-                raw_range
-            };
+            let range_text = if has_comma { format!("{raw_range},") } else { raw_range };
             fields.push(BitfieldField {
                 name,
                 range_text,
@@ -348,17 +323,8 @@ pub(crate) fn extract_mapping_arms(
             let lhs = trimmed_no_comma[..arrow_pos].trim().to_string();
             let rhs = trimmed_no_comma[arrow_pos + 3..].trim().to_string();
             let has_comma = trimmed.trim_end().ends_with(',');
-            let rhs = if has_comma {
-                format!("{rhs},")
-            } else {
-                rhs
-            };
-            arms.push(MappingArm {
-                lhs,
-                rhs,
-                range: line_range,
-                is_comment: false,
-            });
+            let rhs = if has_comma { format!("{rhs},") } else { rhs };
+            arms.push(MappingArm { lhs, rhs, range: line_range, is_comment: false });
         }
 
         offset += line_len + 1;
@@ -384,17 +350,12 @@ pub(crate) fn extract_register_decls(
         if let Some(colon_pos) = after_kw.find(':') {
             let name = after_kw[..colon_pos].trim().to_string();
             let type_text = after_kw[colon_pos + 1..].trim().to_string();
-            decls.push(RegisterDecl {
-                name,
-                type_text,
-                range: node.text_range(),
-            });
+            decls.push(RegisterDecl { name, type_text, range: node.text_range() });
         }
     }
 
     decls
 }
-
 
 /// Parse `name : type` lines from body text between braces.
 fn parse_colon_fields(body: &str, body_start: usize) -> Vec<StructField> {
@@ -429,11 +390,7 @@ fn parse_colon_fields(body: &str, body_start: usize) -> Vec<StructField> {
             let name = trimmed_no_comma[..colon_pos].trim().to_string();
             let suffix = trimmed_no_comma[colon_pos + 1..].trim().to_string();
             let has_comma = trimmed.trim_end().ends_with(',');
-            let full_suffix = if has_comma {
-                format!("{suffix},")
-            } else {
-                suffix
-            };
+            let full_suffix = if has_comma { format!("{suffix},") } else { suffix };
             fields.push(StructField {
                 name,
                 separator: " : ".to_string(),
@@ -448,7 +405,6 @@ fn parse_colon_fields(body: &str, body_start: usize) -> Vec<StructField> {
 
     fields
 }
-
 
 /// A function parameter: `name : type` (for function defs) or just `type` (for val specs).
 pub(crate) struct FunctionParam {
@@ -482,12 +438,7 @@ impl AlignedItem for FunctionParam {
             Ok(self.type_text.clone())
         } else {
             let padding = prefix_max_width.saturating_sub(self.name.len());
-            Ok(format!(
-                "{}{} : {}",
-                self.name,
-                " ".repeat(padding),
-                self.type_text
-            ))
+            Ok(format!("{}{} : {}", self.name, " ".repeat(padding), self.type_text))
         }
     }
 }
@@ -615,12 +566,7 @@ fn parse_function_params(params_str: &str, base_offset: usize) -> (Vec<FunctionP
                 && name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '\'');
             if looks_like_name {
                 has_named = true;
-                params.push(FunctionParam {
-                    name,
-                    type_text,
-                    range,
-                    is_comment: false,
-                });
+                params.push(FunctionParam { name, type_text, range, is_comment: false });
             } else {
                 // Not a named param — treat as type-only.
                 params.push(FunctionParam {
@@ -659,9 +605,9 @@ pub(crate) fn rewrite_function_def(
     let source = context.snippet(node.text_range());
 
     // Verify this is a function definition (not mapping).
-    let is_function = node.children_with_tokens().any(|elem| {
-        matches!(elem, NodeOrToken::Token(ref t) if t.kind() == SK::KW_FUNCTION)
-    });
+    let is_function = node
+        .children_with_tokens()
+        .any(|elem| matches!(elem, NodeOrToken::Token(ref t) if t.kind() == SK::KW_FUNCTION));
     if !is_function {
         return None;
     }
@@ -690,16 +636,8 @@ pub(crate) fn rewrite_function_def(
     let suffix_raw = &after_close_raw[..body_start_offset];
 
     // Normalise each component to single-line (collapse legacy wraps).
-    let prefix: String = prefix_raw
-        .lines()
-        .map(|l| l.trim())
-        .collect::<Vec<_>>()
-        .join(" ");
-    let params_str: String = params_str_raw
-        .lines()
-        .map(|l| l.trim())
-        .collect::<Vec<_>>()
-        .join(" ");
+    let prefix: String = prefix_raw.lines().map(|l| l.trim()).collect::<Vec<_>>().join(" ");
+    let params_str: String = params_str_raw.lines().map(|l| l.trim()).collect::<Vec<_>>().join(" ");
     let suffix: String = {
         let joined: String = suffix_raw
             .lines()
@@ -708,11 +646,8 @@ pub(crate) fn rewrite_function_def(
             .collect::<Vec<_>>()
             .join(" ");
         let body_marker = &after_close_raw[body_start_offset..];
-        let marker_part: String = body_marker
-            .lines()
-            .next()
-            .map(|l| l.trim().to_string())
-            .unwrap_or_default();
+        let marker_part: String =
+            body_marker.lines().next().map(|l| l.trim().to_string()).unwrap_or_default();
         let mut s = joined;
         if !marker_part.is_empty() {
             if !s.is_empty() {
@@ -741,10 +676,8 @@ pub(crate) fn rewrite_function_def(
 
     // Convert params to ListItems, then call definitive_tactic.
     use super::lists::{self, DefinitiveListTactic, ListItem, SeparatorTactic};
-    let list_items: Vec<ListItem> = params_vec
-        .iter()
-        .map(|p| ListItem::from_str(p.trim()))
-        .collect();
+    let list_items: Vec<ListItem> =
+        params_vec.iter().map(|p| ListItem::from_str(p.trim())).collect();
     let list_tactic = lists::definitive_tactic(&list_items, one_line_budget, 2); // 2 = ", ".len()
 
     #[derive(Debug, PartialEq)]
@@ -785,14 +718,9 @@ pub(crate) fn rewrite_function_def(
     };
 
     if tactic == Tactic::Horizontal {
-        let joined_params: String = params_vec
-            .iter()
-            .map(|p| p.trim())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let sig_line = format!(
-            "{prefix}({joined_params}){suffix_sep}{suffix_trimmed}"
-        );
+        let joined_params: String =
+            params_vec.iter().map(|p| p.trim()).collect::<Vec<_>>().join(", ");
+        let sig_line = format!("{prefix}({joined_params}){suffix_sep}{suffix_trimmed}");
         // offset_left accounts for text already placed on this line;
         // used_width gives the total consumed columns.
         let sig_shape = shape
@@ -802,13 +730,12 @@ pub(crate) fn rewrite_function_def(
         let fits = sig_shape.is_some() && full_width <= context.config.max_width();
         if fits {
             // Check if source signature is already identical single-line.
-            let source_sig_normalized: String = source[..close_paren + 1]
-                .lines()
-                .map(|l| l.trim())
-                .collect::<Vec<_>>()
-                .join(" ");
+            let source_sig_normalized: String =
+                source[..close_paren + 1].lines().map(|l| l.trim()).collect::<Vec<_>>().join(" ");
             let new_sig_normalized = format!("{prefix}({joined_params})");
-            if source_sig_normalized == new_sig_normalized && !source[..close_paren + 1].contains('\n') {
+            if source_sig_normalized == new_sig_normalized
+                && !source[..close_paren + 1].contains('\n')
+            {
                 return None; // Already correct, no rewrite needed.
             }
             // Rewrite signature + preserve body.
@@ -854,10 +781,8 @@ pub(crate) fn rewrite_function_def(
     } else {
         // Type-only params — just indent each one.
         let body_indent = body_shape.indent.to_string_inner(context.config);
-        let param_lines: Vec<String> = parsed_params
-            .iter()
-            .map(|p| format!("{body_indent}{},", p.type_text))
-            .collect();
+        let param_lines: Vec<String> =
+            parsed_params.iter().map(|p| format!("{body_indent}{},", p.type_text)).collect();
         let params_block = param_lines.join("\n");
         Some(format!(
             "{indent_str}{prefix}(\n{params_block}{close_indent}){suffix_sep}{suffix_trimmed}{body_rest}"
@@ -877,9 +802,9 @@ pub(crate) fn rewrite_val_spec(
     let source = context.snippet(node.text_range());
 
     // Verify this is a val spec.
-    let is_val = node.children_with_tokens().any(|elem| {
-        matches!(elem, NodeOrToken::Token(ref t) if t.kind() == SK::KW_VAL)
-    });
+    let is_val = node
+        .children_with_tokens()
+        .any(|elem| matches!(elem, NodeOrToken::Token(ref t) if t.kind() == SK::KW_VAL));
     if !is_val {
         return None;
     }
@@ -909,10 +834,8 @@ pub(crate) fn rewrite_val_spec(
     }
 
     use super::lists::{self, DefinitiveListTactic, ListFormatting, ListItem, SeparatorTactic};
-    let list_items: Vec<ListItem> = raw_params
-        .iter()
-        .map(|p| ListItem::from_str(p.trim()))
-        .collect();
+    let list_items: Vec<ListItem> =
+        raw_params.iter().map(|p| ListItem::from_str(p.trim())).collect();
 
     let indent = shape.indent.to_string_inner(context.config);
     let body_shape = shape.block_indent(context.config);
@@ -926,19 +849,17 @@ pub(crate) fn rewrite_val_spec(
     let after_trimmed = after_close.trim_start();
     let sep = if after_trimmed.is_empty() { "" } else { " " };
 
-    Some(format!(
-        "{indent}{header}(\n{params_block}\n{indent}){sep}{after_trimmed}"
-    ))
+    Some(format!("{indent}{header}(\n{params_block}\n{indent}){sep}{after_trimmed}"))
 }
-
 
 /// Detect the definition kind by scanning for the first keyword token.
 fn first_keyword(node: &SyntaxNode) -> Option<SK> {
     for elem in node.children_with_tokens() {
         if let NodeOrToken::Token(tok) = elem {
             match tok.kind() {
-                SK::KW_STRUCT | SK::KW_BITFIELD | SK::KW_ENUM | SK::KW_UNION
-                | SK::KW_REGISTER => return Some(tok.kind()),
+                SK::KW_STRUCT | SK::KW_BITFIELD | SK::KW_ENUM | SK::KW_UNION | SK::KW_REGISTER => {
+                    return Some(tok.kind())
+                }
                 _ => {}
             }
         }
@@ -978,9 +899,9 @@ pub(crate) fn rewrite_scattered_clause_def(
     // field definitions (Name : Type). Do NOT handle `function clause`
     // or `mapping clause` — those have expression bodies that would be
     // corrupted by field-alignment logic.
-    let is_union_clause = node.children_with_tokens().any(|elem| {
-        matches!(elem, NodeOrToken::Token(ref t) if t.kind() == SK::KW_UNION)
-    });
+    let is_union_clause = node
+        .children_with_tokens()
+        .any(|elem| matches!(elem, NodeOrToken::Token(ref t) if t.kind() == SK::KW_UNION));
     if !is_union_clause {
         return None;
     }
@@ -1011,9 +932,9 @@ pub(crate) fn rewrite_mapping_def(
     shape: Shape,
 ) -> Option<String> {
     // Verify this is actually a mapping.
-    let is_mapping = node.children_with_tokens().any(|elem| {
-        matches!(elem, NodeOrToken::Token(ref t) if t.kind() == SK::KW_MAPPING)
-    });
+    let is_mapping = node
+        .children_with_tokens()
+        .any(|elem| matches!(elem, NodeOrToken::Token(ref t) if t.kind() == SK::KW_MAPPING));
     if !is_mapping {
         return None;
     }
@@ -1033,7 +954,6 @@ pub(crate) fn rewrite_mapping_def(
     let indent = shape.indent.to_string_inner(context.config);
     Some(format!("{header}\n{aligned_body}\n{indent}}}"))
 }
-
 
 fn rewrite_struct_like(
     node: &SyntaxNode,
@@ -1101,7 +1021,6 @@ fn rewrite_register(
     Some(format!("register {} : {}", decl.name, decl.type_text))
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1121,20 +1040,15 @@ mod tests {
         let (snippet, config) = make_context(source);
         let (root, _errors) = syntax::parse_text(source);
 
-        let named_def = root
-            .children()
-            .find(|c| c.kind() == SK::NAMED_DEF)
-            .expect("should have NAMED_DEF");
+        let named_def =
+            root.children().find(|c| c.kind() == SK::NAMED_DEF).expect("should have NAMED_DEF");
 
         let ctx = RewriteContext::new(&config, &snippet);
         let shape = Shape::with_max_width(&config);
         let result = rewrite_named_def(&named_def, &ctx, shape);
 
         let formatted = result.expect("should format struct");
-        assert!(
-            formatted.contains("x        : int,"),
-            "expected padded x, got:\n{formatted}"
-        );
+        assert!(formatted.contains("x        : int,"), "expected padded x, got:\n{formatted}");
         assert!(
             formatted.contains("y_offset : bits(32),"),
             "expected aligned y_offset, got:\n{formatted}"
@@ -1150,24 +1064,16 @@ mod tests {
         let (snippet, config) = make_context(source);
         let (root, _errors) = syntax::parse_text(source);
 
-        let named_def = root
-            .children()
-            .find(|c| c.kind() == SK::NAMED_DEF)
-            .expect("should have NAMED_DEF");
+        let named_def =
+            root.children().find(|c| c.kind() == SK::NAMED_DEF).expect("should have NAMED_DEF");
 
         let ctx = RewriteContext::new(&config, &snippet);
         let shape = Shape::with_max_width(&config);
         let result = rewrite_named_def(&named_def, &ctx, shape);
 
         let formatted = result.expect("should format bitfield");
-        assert!(
-            formatted.contains("MIE  : 3,"),
-            "expected padded MIE, got:\n{formatted}"
-        );
-        assert!(
-            formatted.contains("MPIE : 7,"),
-            "expected aligned MPIE, got:\n{formatted}"
-        );
+        assert!(formatted.contains("MIE  : 3,"), "expected padded MIE, got:\n{formatted}");
+        assert!(formatted.contains("MPIE : 7,"), "expected aligned MPIE, got:\n{formatted}");
     }
 
     // -- mapping alignment ----------------------------------------------
@@ -1188,14 +1094,8 @@ mod tests {
         let result = rewrite_mapping_def(&callable_def, &ctx, shape);
 
         let formatted = result.expect("should format mapping");
-        assert!(
-            formatted.contains("X    <-> 0x1,"),
-            "expected padded X, got:\n{formatted}"
-        );
-        assert!(
-            formatted.contains("YYYY <-> 0xFF,"),
-            "expected aligned YYYY, got:\n{formatted}"
-        );
+        assert!(formatted.contains("X    <-> 0x1,"), "expected padded X, got:\n{formatted}");
+        assert!(formatted.contains("YYYY <-> 0xFF,"), "expected aligned YYYY, got:\n{formatted}");
     }
 
     // -- register alignment ---------------------------------------------
@@ -1208,10 +1108,7 @@ mod tests {
         let (snippet, config) = make_context(&combined);
         let (root, _errors) = syntax::parse_text(&combined);
 
-        let nodes: Vec<_> = root
-            .children()
-            .filter(|c| c.kind() == SK::NAMED_DEF)
-            .collect();
+        let nodes: Vec<_> = root.children().filter(|c| c.kind() == SK::NAMED_DEF).collect();
         let node_refs: Vec<&SyntaxNode> = nodes.iter().collect();
 
         let decls = extract_register_decls(&node_refs, &snippet);
@@ -1220,10 +1117,7 @@ mod tests {
         let ctx = RewriteContext::new(&config, &snippet);
         let shape = Shape::with_max_width(&config);
         let formatted = rewrite_with_alignment(&decls, &ctx, shape).unwrap();
-        assert!(
-            formatted.contains("x      : int"),
-            "expected padded x, got:\n{formatted}"
-        );
+        assert!(formatted.contains("x      : int"), "expected padded x, got:\n{formatted}");
         assert!(
             formatted.contains("pc_reg : bits(64)"),
             "expected aligned pc_reg, got:\n{formatted}"
@@ -1234,8 +1128,7 @@ mod tests {
 
     #[test]
     fn union_clause_field_alignment() {
-        let source =
-            "union clause ast = {\n  ADD : (reg, reg),\n  LOAD : bits(32),\n}\n";
+        let source = "union clause ast = {\n  ADD : (reg, reg),\n  LOAD : bits(32),\n}\n";
         let (snippet, config) = make_context(source);
         let (root, _errors) = syntax::parse_text(source);
 
@@ -1250,14 +1143,8 @@ mod tests {
         let result = rewrite_scattered_clause_def(&scd, &ctx, shape);
 
         let formatted = result.expect("should format union clause");
-        assert!(
-            formatted.contains("ADD  : (reg, reg),"),
-            "expected padded ADD, got:\n{formatted}"
-        );
-        assert!(
-            formatted.contains("LOAD : bits(32),"),
-            "expected aligned LOAD, got:\n{formatted}"
-        );
+        assert!(formatted.contains("ADD  : (reg, reg),"), "expected padded ADD, got:\n{formatted}");
+        assert!(formatted.contains("LOAD : bits(32),"), "expected aligned LOAD, got:\n{formatted}");
     }
 
     // -- extract helpers ------------------------------------------------
@@ -1268,10 +1155,8 @@ mod tests {
         let (snippet, _config) = make_context(source);
         let (root, _errors) = syntax::parse_text(source);
 
-        let named_def = root
-            .children()
-            .find(|c| c.kind() == SK::NAMED_DEF)
-            .expect("should have NAMED_DEF");
+        let named_def =
+            root.children().find(|c| c.kind() == SK::NAMED_DEF).expect("should have NAMED_DEF");
 
         let fields = extract_struct_fields(&named_def, &snippet);
         assert_eq!(fields.len(), 2);
@@ -1407,10 +1292,7 @@ mod tests {
 
         let formatted = result.expect("legacy-wrapped function should be rewritten to single line");
         // Should be a single line with no newline in the signature part.
-        assert!(
-            !formatted.contains('\n'),
-            "expected single-line output, got:\n{formatted}"
-        );
+        assert!(!formatted.contains('\n'), "expected single-line output, got:\n{formatted}");
         assert!(
             formatted.contains("function foo(x : int, y : bool)"),
             "expected reconstructed single-line params, got:\n{formatted}"
@@ -1441,10 +1323,7 @@ mod tests {
             "expected return type + body start after ), got:\n{formatted}"
         );
         // Each param on its own line.
-        assert!(
-            formatted.contains("alpha"),
-            "expected alpha param, got:\n{formatted}"
-        );
+        assert!(formatted.contains("alpha"), "expected alpha param, got:\n{formatted}");
         assert!(
             formatted.contains("epsilon : unit,"),
             "expected epsilon param with trailing comma, got:\n{formatted}"
@@ -1485,9 +1364,7 @@ mod tests {
         let (snippet, config) = make_context(source);
         let (root, _errors) = syntax::parse_text(source);
 
-        let callable_spec = root
-            .children()
-            .find(|c| c.kind() == SK::CALLABLE_SPEC);
+        let callable_spec = root.children().find(|c| c.kind() == SK::CALLABLE_SPEC);
         // Val specs may or may not parse as CALLABLE_SPEC depending on the grammar.
         // If it doesn't parse as one, just skip the test.
         if let Some(spec) = callable_spec {
@@ -1506,9 +1383,7 @@ mod tests {
         config.max_line_width = Some(60);
         let (root, _errors) = syntax::parse_text(source);
 
-        let callable_spec = root
-            .children()
-            .find(|c| c.kind() == SK::CALLABLE_SPEC);
+        let callable_spec = root.children().find(|c| c.kind() == SK::CALLABLE_SPEC);
         if let Some(spec) = callable_spec {
             let ctx = RewriteContext::new(&config, &snippet);
             let shape = Shape::with_max_width(&config);
@@ -1521,10 +1396,7 @@ mod tests {
                 "should break after opening paren, got:\n{formatted}"
             );
             // Each type on its own line with trailing comma.
-            assert!(
-                formatted.contains("int('v),"),
-                "expected int('v) param, got:\n{formatted}"
-            );
+            assert!(formatted.contains("int('v),"), "expected int('v) param, got:\n{formatted}");
             // Closing paren + return type.
             assert!(
                 formatted.contains(") -> PTW_Result('v)"),

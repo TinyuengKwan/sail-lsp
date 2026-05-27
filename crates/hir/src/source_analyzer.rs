@@ -210,10 +210,7 @@ impl SourceAnalyzer {
     }
 
     /// Returns the DefId of the struct field definition.
-    pub(crate) fn resolve_field(
-        &self,
-        expr_id: ExprId,
-    ) -> Option<hir_def::ModuleDefId> {
+    pub(crate) fn resolve_field(&self, expr_id: ExprId) -> Option<hir_def::ModuleDefId> {
         self.infer()?.field_resolutions.get(&expr_id).copied()
     }
 

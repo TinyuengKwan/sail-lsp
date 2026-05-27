@@ -142,11 +142,8 @@ impl<'a> FmtVisitor<'a> {
         // the structural parts of the definition (TYPE_ARROW, BLOCK_EXPR, NAME,
         // BIN_EXPR, etc.). Bare tokens after the last child node are trailing
         // content the parser attached (attributes, trivia).
-        let last_child_node_end: usize = node
-            .children()
-            .last()
-            .map(|c| c.text_range().end().into())
-            .unwrap_or(node_end);
+        let last_child_node_end: usize =
+            node.children().last().map(|c| c.text_range().end().into()).unwrap_or(node_end);
 
         if last_child_node_end < node_end {
             let trailing = &self.snippet_provider.entire_snippet()[last_child_node_end..node_end];
@@ -172,10 +169,18 @@ impl<'a> FmtVisitor<'a> {
 
             // Dispatch based on node kind.
             match child.kind() {
-                SK::NAMED_DEF | SK::CALLABLE_DEF | SK::CALLABLE_SPEC
-                | SK::TYPE_ALIAS_DEF | SK::SCATTERED_DEF | SK::SCATTERED_CLAUSE_DEF
-                | SK::FIXITY_DEF | SK::DEFAULT_DEF | SK::DIRECTIVE_DEF
-                | SK::END_DEF | SK::CONSTRAINT_DEF | SK::OUTCOME_DEF => {
+                SK::NAMED_DEF
+                | SK::CALLABLE_DEF
+                | SK::CALLABLE_SPEC
+                | SK::TYPE_ALIAS_DEF
+                | SK::SCATTERED_DEF
+                | SK::SCATTERED_CLAUSE_DEF
+                | SK::FIXITY_DEF
+                | SK::DEFAULT_DEF
+                | SK::DIRECTIVE_DEF
+                | SK::END_DEF
+                | SK::CONSTRAINT_DEF
+                | SK::OUTCOME_DEF => {
                     self.visit_definition(&child);
                 }
                 _ => {
@@ -243,7 +248,6 @@ impl<'a> FmtVisitor<'a> {
                 self.push_str(&formatted);
             }
         }
-
     }
 
     /// Apply expression-level rewrites (match arm alignment, operator spacing)
@@ -277,7 +281,9 @@ impl<'a> FmtVisitor<'a> {
                     if original.contains('\n') {
                         continue;
                     }
-                    if let Some(formatted) = super::expr::normalize_binexpr_spacing(&descendant, self.snippet_provider) {
+                    if let Some(formatted) =
+                        super::expr::normalize_binexpr_spacing(&descendant, self.snippet_provider)
+                    {
                         if formatted.trim() != original.trim() {
                             replacements.push((rel_start, rel_end - rel_start, formatted));
                         }
@@ -366,7 +372,8 @@ mod tests {
         // Line 3:   y_offset : bits(32),
         // Line 4: }
         // Line 5: val bar : bool
-        let input = "val foo : int\nstruct S = {\n  x : int,\n  y_offset : bits(32),\n}\nval bar : bool\n";
+        let input =
+            "val foo : int\nstruct S = {\n  x : int,\n  y_offset : bits(32),\n}\nval bar : bool\n";
         // Only format lines 1-4 (the struct). Lines 0 and 5 should be verbatim.
         let output = format_with_file_lines(input, Some((1, 4)));
         // val foo and val bar should be untouched
@@ -388,6 +395,11 @@ mod tests {
         let input = "mapping foo : T <-> bits(6) = {\n  A <-> 0b01,\n  B <-> 0b10\n}\n\n$[wavedrom \"test\"]\nmapping clause bar = X(vm, vd)\n  <-> 0b010 @ vm\n  when true\n";
 
         let output = format_with_visitor(input);
-        assert!(output.contains("wavedrom"), "visitor lost wavedrom!\nInput len: {}\nOutput len: {}\nOutput:\n{output}", input.len(), output.len());
+        assert!(
+            output.contains("wavedrom"),
+            "visitor lost wavedrom!\nInput len: {}\nOutput len: {}\nOutput:\n{output}",
+            input.len(),
+            output.len()
+        );
     }
 }

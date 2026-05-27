@@ -375,20 +375,16 @@ impl CallableBodies {
                     Some(Expr::Ident(n)) => n.clone(),
                     _ => return None,
                 };
-                let pat_args: Vec<_> = args
-                    .iter()
-                    .filter_map(|a| Self::expr_to_pat(body, *a))
-                    .collect();
+                let pat_args: Vec<_> =
+                    args.iter().filter_map(|a| Self::expr_to_pat(body, *a)).collect();
                 let id = body.store.pats.alloc(Pat::App { ctor: ctor_name, args: pat_args });
                 Some(id)
             }
             // Tuple: (a, b) → Tuple([Bind("a"), Bind("b")])
             Some(Expr::Tuple(items)) => {
                 let items = items.clone();
-                let pat_items: Vec<_> = items
-                    .iter()
-                    .filter_map(|e| Self::expr_to_pat(body, *e))
-                    .collect();
+                let pat_items: Vec<_> =
+                    items.iter().filter_map(|e| Self::expr_to_pat(body, *e)).collect();
                 let id = body.store.pats.alloc(Pat::Tuple(pat_items));
                 Some(id)
             }
@@ -404,7 +400,11 @@ impl CallableBodies {
                 let rhs = *rhs;
                 let lhs_pat = Self::expr_to_pat(body, lhs)?;
                 let rhs_pat = Self::expr_to_pat(body, rhs)?;
-                let id = body.store.pats.alloc(Pat::Infix { lhs: lhs_pat, op: op.to_string(), rhs: rhs_pat });
+                let id = body.store.pats.alloc(Pat::Infix {
+                    lhs: lhs_pat,
+                    op: op.to_string(),
+                    rhs: rhs_pat,
+                });
                 Some(id)
             }
             _ => None,

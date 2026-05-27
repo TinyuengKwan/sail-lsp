@@ -481,7 +481,6 @@ pub enum ItemKind {
 }
 
 impl ItemTree {
-
     /// Top-level items in source order (typed arena version).
     pub fn top_level_items(&self) -> &[ModItem] {
         &self.top_level

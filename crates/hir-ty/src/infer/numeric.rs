@@ -667,7 +667,8 @@ pub(super) fn unify_numeric_expr(
     ) = (expected, actual)
     {
         // Compare conditions structurally (via PartialEq) or textually as fallback.
-        if c1 == c2 || normalized_value_text(&c1.to_text()) == normalized_value_text(&c2.to_text()) {
+        if c1 == c2 || normalized_value_text(&c1.to_text()) == normalized_value_text(&c2.to_text())
+        {
             return unify_numeric_expr(t1, t2, subst) && unify_numeric_expr(e1, e2, subst);
         }
     }

@@ -219,10 +219,7 @@ fn ident_neq_literal(body: &Body, ident_side: ExprId, lit_side: ExprId) -> Optio
                         name,
                         Ty::app(
                             "range",
-                            vec![
-                                TyArg::numeric("1"),
-                                TyArg::numeric("max_int"),
-                            ],
+                            vec![TyArg::numeric("1"), TyArg::numeric("max_int")],
                             "range(1, max_int)".to_string(),
                         ),
                     ));
@@ -291,10 +288,7 @@ fn try_extract_comparison_narrowing(
                         // x > 0 → range(1, max_int) ≈ nat (close enough)
                         Some(Ty::app(
                             "range",
-                            vec![
-                                TyArg::numeric("1"),
-                                TyArg::numeric("max_int"),
-                            ],
+                            vec![TyArg::numeric("1"), TyArg::numeric("max_int")],
                             "range(1, max_int)".to_string(),
                         ))
                     }
@@ -305,10 +299,7 @@ fn try_extract_comparison_narrowing(
                     )),
                     "<" => Some(Ty::app(
                         "range",
-                        vec![
-                            TyArg::numeric("min_int"),
-                            TyArg::numeric((val - 1).to_string()),
-                        ],
+                        vec![TyArg::numeric("min_int"), TyArg::numeric((val - 1).to_string())],
                         format!("range(min_int, {})", val - 1),
                     )),
                     "<=" => Some(Ty::app(

@@ -22,11 +22,11 @@ type fp_bits = { 'n, is_fp_bits('n) . bits('n) }
 let fp_eflag_none           : fp_exception_flags = 0b00000
 let fp_eflag_invalid        : fp_exception_flags = 0b00001
 let fp_eflag_divide_by_zero : fp_exception_flags = 0b00010
-let fp_eflag_oveflow        : fp_exception_flags = 0b00100
+let fp_eflag_overflow       : fp_exception_flags = 0b00100
 let fp_eflag_underflow      : fp_exception_flags = 0b01000
 let fp_eflag_inexact        : fp_exception_flags = 0b10000
 
-let fp_eflag_overflow_and_inexact : fp_exception_flags = fp_eflag_oveflow | fp_eflag_inexact
+let fp_eflag_overflow_and_inexact : fp_exception_flags = fp_eflag_overflow | fp_eflag_inexact
 
 let fp_rounding_rne     : fp_rounding_modes = 0b00001
 let fp_rounding_rna     : fp_rounding_modes = 0b00010

@@ -12,8 +12,8 @@ use std::fmt::Write as _;
 use hir_ty::display::{HirDisplay, HirDisplayError, HirFormatter};
 
 use crate::{
-    Adt, AdtId, Enum, Function, Local, Mapping, Module, ModuleDef, PathResolution, Register,
-    Struct, TypeDefKind, GenericParam, Union,
+    Adt, AdtId, Enum, Function, GenericParam, Local, Mapping, Module, ModuleDef, PathResolution,
+    Register, Struct, TypeDefKind, Union,
 };
 
 /// RA renders: `pub fn name(params) -> ret_ty`.

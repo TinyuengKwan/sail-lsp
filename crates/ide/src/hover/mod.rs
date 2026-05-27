@@ -1187,7 +1187,6 @@ overload op = {add, sub}
     }
 }
 
-
 /// CST-native version of `infer_effects_for_def_with_workspace`.
 fn infer_effects_for_def_with_workspace_cst(
     cst_root: &syntax::SyntaxNode,
@@ -1379,7 +1378,7 @@ fn find_type_before_dot(source: &str, field_offset: usize) -> Option<String> {
         return None;
     }
     pos -= 1; // skip dot
-    // Skip whitespace before dot
+              // Skip whitespace before dot
     while pos > 0 && bytes[pos - 1].is_ascii_whitespace() {
         pos -= 1;
     }

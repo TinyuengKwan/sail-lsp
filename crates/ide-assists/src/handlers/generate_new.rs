@@ -30,8 +30,8 @@ pub(crate) fn generate_new(acc: &mut Assists, ctx: &AssistContext<'_>) -> Option
         return None;
     }
 
-    let brace_open_abs = name_start + name_end_rel + eq_pos + 1
-        + (after_name[eq_pos + 1..].len() - after_eq.len());
+    let brace_open_abs =
+        name_start + name_end_rel + eq_pos + 1 + (after_name[eq_pos + 1..].len() - after_eq.len());
     let brace_close = find_matching_brace(text, brace_open_abs)?;
 
     let fields_str = &text[brace_open_abs + 1..brace_close];
@@ -54,18 +54,14 @@ pub(crate) fn generate_new(acc: &mut Assists, ctx: &AssistContext<'_>) -> Option
 
     // Insert after the struct definition (after closing brace)
     // Find end of line after close brace
-    let insert_pos = text[brace_close + 1..]
-        .find('\n')
-        .map_or(brace_close + 1, |p| brace_close + 1 + p + 1);
+    let insert_pos =
+        text[brace_close + 1..].find('\n').map_or(brace_close + 1, |p| brace_close + 1 + p + 1);
 
     acc.add_with_edits(
         AssistId("generate_new", AssistKind::Generate),
         "Generate constructor",
         ctx.range,
-        vec![TextEdit {
-            range: base_db::text_range(insert_pos, insert_pos),
-            new_text: func,
-        }],
+        vec![TextEdit { range: base_db::text_range(insert_pos, insert_pos), new_text: func }],
     );
     Some(())
 }
@@ -81,8 +77,7 @@ fn find_keyword_near(text: &str, offset: usize, kw: &str) -> Option<usize> {
         match window[search_from..].find(kw) {
             Some(pos) => {
                 let abs = start + search_from + pos;
-                let before_ok =
-                    abs == 0 || !text.as_bytes()[abs - 1].is_ascii_alphanumeric();
+                let before_ok = abs == 0 || !text.as_bytes()[abs - 1].is_ascii_alphanumeric();
                 let after_ok = abs + kw_len >= text.len()
                     || !text.as_bytes()[abs + kw_len].is_ascii_alphanumeric();
                 if before_ok && after_ok {
@@ -139,11 +134,7 @@ mod tests {
 
     #[test]
     fn smoke() {
-        let labels = check_assist(
-            generate_new,
-            "struct Point = { x : int, y : int }\n",
-            0,
-        );
+        let labels = check_assist(generate_new, "struct Point = { x : int, y : int }\n", 0);
         let _ = labels;
     }
 }

@@ -6,9 +6,9 @@ use std::collections::HashMap;
 
 use super::constraint;
 use super::{InferenceTable, Subst};
-use crate::ty::{CompareOp, ConstraintExpr, NumericExpr, Ty, TyKind};
 #[cfg(test)]
 use crate::ty::TyArg;
+use crate::ty::{CompareOp, ConstraintExpr, NumericExpr, Ty, TyKind};
 
 /// Result of skolemizing an existential type.
 #[derive(Debug, Clone)]
@@ -112,13 +112,11 @@ fn subst_numeric(expr: &NumericExpr, map: &HashMap<String, String>) -> NumericEx
             name: name.clone(),
             args: args.iter().map(|a| subst_numeric(a, map)).collect(),
         },
-        NumericExpr::If { cond, then_expr, else_expr } => {
-            NumericExpr::If {
-                cond: Box::new(subst_constraint(cond, map)),
-                then_expr: Box::new(subst_numeric(then_expr, map)),
-                else_expr: Box::new(subst_numeric(else_expr, map)),
-            }
-        }
+        NumericExpr::If { cond, then_expr, else_expr } => NumericExpr::If {
+            cond: Box::new(subst_constraint(cond, map)),
+            then_expr: Box::new(subst_numeric(then_expr, map)),
+            else_expr: Box::new(subst_numeric(else_expr, map)),
+        },
     }
 }
 

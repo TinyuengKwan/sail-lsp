@@ -1,6 +1,6 @@
 //! Definition-side HIR layers: body arenas, item tree, DefMap, Resolver.
-pub use parser::{Span, Token};
 pub use hir_expand::analysis_scope;
+pub use parser::{Span, Token};
 pub mod ast_id;
 /// Bitfield accessor materialization.
 pub mod bitfield;

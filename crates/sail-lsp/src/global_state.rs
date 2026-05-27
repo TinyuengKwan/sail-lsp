@@ -110,7 +110,8 @@ pub(crate) struct GlobalState {
     /// the same tab_size / insert_spaces settings the client sends for
     /// standard formatting. Without this, code actions use hardcoded
     /// defaults that may differ from the editor's configuration.
-    pub(crate) last_format_options: std::sync::Arc<std::sync::Mutex<ide_db::ide_types::FormatOptions>>,
+    pub(crate) last_format_options:
+        std::sync::Arc<std::sync::Mutex<ide_db::ide_types::FormatOptions>>,
 }
 
 /// Source root classification for files.
@@ -143,9 +144,7 @@ impl GlobalState {
             library_root: base_db::SourceRoot::new_library(base_db::FileSet::default()),
             config: crate::config::SailLspConfig::default(),
             workspace_folders: std::collections::HashSet::new(),
-            workspace_index: std::sync::Arc::new(
-                ide_db::workspace_index::SymbolIndex::new(),
-            ),
+            workspace_index: std::sync::Arc::new(ide_db::workspace_index::SymbolIndex::new()),
             index_dirty_files: Vec::new(),
             supports_progress: false,
             client_caps: crate::lsp::capabilities::ClientCapabilities::default(),

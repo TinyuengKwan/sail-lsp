@@ -31,8 +31,8 @@ pub mod query;
 pub mod display;
 pub mod flow;
 pub mod inhabitedness;
-pub mod nexp;
 pub mod method_resolution;
+pub mod nexp;
 pub mod representability;
 pub mod utils;
 
@@ -45,4 +45,3 @@ pub use infer::{
     InferenceResult, Subst, TypeCheckResult, TypeMismatch, WorkspaceContext,
 };
 pub use nexp::{NConstraint, Nexp};
-

@@ -37,8 +37,8 @@ pub(super) mod coerce;
 pub mod existential;
 /// Bidirectional mapping type checking (Sail-specific).
 pub mod mapping;
-mod numeric;
 pub(super) mod nexp_simplify;
+mod numeric;
 #[allow(dead_code)] // infrastructure — wired in A-5.2
 pub(super) mod subtype;
 /// Type well-formedness checking.
@@ -322,7 +322,8 @@ pub struct InferenceResult {
     pub type_of_expr: ArenaMap<hir_def::ExprId, Ty>,
     pub type_of_pat: ArenaMap<hir_def::PatId, Ty>,
     pub type_of_binding: ArenaMap<hir_def::BindingId, Ty>,
-    pub method_resolutions: FxHashMap<hir_def::ExprId, (hir_def::item_id::FunctionId, base_db::FileId)>,
+    pub method_resolutions:
+        FxHashMap<hir_def::ExprId, (hir_def::item_id::FunctionId, base_db::FileId)>,
     pub field_resolutions: FxHashMap<hir_def::ExprId, hir_def::ModuleDefId>,
     pub variant_resolutions: FxHashMap<hir_def::ExprOrPatId, hir_def::ModuleDefId>,
     pub expr_adjustments: FxHashMap<hir_def::ExprId, Vec<Adjustment>>,
@@ -369,23 +370,57 @@ pub struct TypeMismatch {
 /// Typed inference diagnostic.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InferenceDiagnostic {
-    UnresolvedIdent { expr: hir_def::ExprId, name: String },
+    UnresolvedIdent {
+        expr: hir_def::ExprId,
+        name: String,
+    },
     UnresolvedField {
         expr: hir_def::ExprId,
         receiver: Ty,
         name: String,
         method_with_same_name_exists: bool,
     },
-    MismatchedArgCount { call_expr: hir_def::ExprId, expected: usize, found: usize },
-    ExpectedFunction { call_expr: hir_def::ExprId, found: Ty },
-    EffectViolation { expr: hir_def::ExprId, effect: hir_def::EffectTag, context: &'static str },
-    UnsolvedConstraint { expr: hir_def::ExprId, constraint: String },
-    IncompleteMatch { expr: hir_def::ExprId, missing_arms: Vec<String> },
-    MissingFields { expr: hir_def::ExprId, record_name: String, missing: Vec<String> },
-    UnusedVariable { pat: hir_def::PatId, name: String },
-    RemoveTrailingReturn { return_expr: hir_def::ExprId },
-    RemoveUnnecessaryElse { if_expr: hir_def::ExprId },
-    ConcatTypeMismatch { expr: hir_def::ExprId, message: String },
+    MismatchedArgCount {
+        call_expr: hir_def::ExprId,
+        expected: usize,
+        found: usize,
+    },
+    ExpectedFunction {
+        call_expr: hir_def::ExprId,
+        found: Ty,
+    },
+    EffectViolation {
+        expr: hir_def::ExprId,
+        effect: hir_def::EffectTag,
+        context: &'static str,
+    },
+    UnsolvedConstraint {
+        expr: hir_def::ExprId,
+        constraint: String,
+    },
+    IncompleteMatch {
+        expr: hir_def::ExprId,
+        missing_arms: Vec<String>,
+    },
+    MissingFields {
+        expr: hir_def::ExprId,
+        record_name: String,
+        missing: Vec<String>,
+    },
+    UnusedVariable {
+        pat: hir_def::PatId,
+        name: String,
+    },
+    RemoveTrailingReturn {
+        return_expr: hir_def::ExprId,
+    },
+    RemoveUnnecessaryElse {
+        if_expr: hir_def::ExprId,
+    },
+    ConcatTypeMismatch {
+        expr: hir_def::ExprId,
+        message: String,
+    },
     ConstraintViolation {
         expr: hir_def::ExprId,
         constraint: String,
@@ -402,11 +437,27 @@ pub enum InferenceDiagnostic {
         quants: Vec<String>,
         signature: Option<String>,
     },
-    NoOverloading { call_expr: hir_def::ExprId, name: String },
-    MappingBindingMismatch { expr: hir_def::ExprId, name: String, side: &'static str },
-    DuplicateBinding { pat: hir_def::PatId, name: String },
-    MissingPatternFields { pat: hir_def::PatId, record_name: String, missing: Vec<String> },
-    NonContiguousSubrange { pat: hir_def::PatId },
+    NoOverloading {
+        call_expr: hir_def::ExprId,
+        name: String,
+    },
+    MappingBindingMismatch {
+        expr: hir_def::ExprId,
+        name: String,
+        side: &'static str,
+    },
+    DuplicateBinding {
+        pat: hir_def::PatId,
+        name: String,
+    },
+    MissingPatternFields {
+        pat: hir_def::PatId,
+        record_name: String,
+        missing: Vec<String>,
+    },
+    NonContiguousSubrange {
+        pat: hir_def::PatId,
+    },
     VectorSubrangeOrder {
         expr: hir_def::ExprId,
         first: String,
@@ -1185,13 +1236,17 @@ fn parse_constraint_from_tokens(tokens: &[(parser::SyntaxKind, String)]) -> Cons
         tokens
             .iter()
             .enumerate()
-            .filter_map(|(i, (k, _))| {
-                match k {
-                    SK::L_PAREN | SK::L_CURLY => { depth += 1; None }
-                    SK::R_PAREN | SK::R_CURLY => { depth -= 1; None }
-                    SK::PIPE if depth == 0 => Some(i),
-                    _ => None,
+            .filter_map(|(i, (k, _))| match k {
+                SK::L_PAREN | SK::L_CURLY => {
+                    depth += 1;
+                    None
                 }
+                SK::R_PAREN | SK::R_CURLY => {
+                    depth -= 1;
+                    None
+                }
+                SK::PIPE if depth == 0 => Some(i),
+                _ => None,
             })
             .collect()
     };
@@ -1223,13 +1278,17 @@ fn parse_constraint_from_tokens(tokens: &[(parser::SyntaxKind, String)]) -> Cons
         tokens
             .iter()
             .enumerate()
-            .filter_map(|(i, (k, _))| {
-                match k {
-                    SK::L_PAREN | SK::L_CURLY => { depth += 1; None }
-                    SK::R_PAREN | SK::R_CURLY => { depth -= 1; None }
-                    SK::AMP if depth == 0 => Some(i),
-                    _ => None,
+            .filter_map(|(i, (k, _))| match k {
+                SK::L_PAREN | SK::L_CURLY => {
+                    depth += 1;
+                    None
                 }
+                SK::R_PAREN | SK::R_CURLY => {
+                    depth -= 1;
+                    None
+                }
+                SK::AMP if depth == 0 => Some(i),
+                _ => None,
             })
             .collect()
     };
@@ -1422,7 +1481,9 @@ pub(super) fn parse_constraint_text(text: &str) -> ConstraintExpr {
             continue;
         }
         // Number
-        if chars[i].is_ascii_digit() || (chars[i] == '-' && i + 1 < chars.len() && chars[i + 1].is_ascii_digit()) {
+        if chars[i].is_ascii_digit()
+            || (chars[i] == '-' && i + 1 < chars.len() && chars[i + 1].is_ascii_digit())
+        {
             let mut s = String::new();
             if chars[i] == '-' {
                 s.push('-');
@@ -1449,10 +1510,26 @@ pub(super) fn parse_constraint_text(text: &str) -> ConstraintExpr {
         if i + 1 < chars.len() {
             let two: String = [chars[i], chars[i + 1]].iter().collect();
             match two.as_str() {
-                "<=" => { tokens.push((SK::LE, two)); i += 2; continue; }
-                ">=" => { tokens.push((SK::GE, two)); i += 2; continue; }
-                "==" => { tokens.push((SK::EQ_EQ, two)); i += 2; continue; }
-                "!=" => { tokens.push((SK::NEQ, "!=".to_string())); i += 2; continue; }
+                "<=" => {
+                    tokens.push((SK::LE, two));
+                    i += 2;
+                    continue;
+                }
+                ">=" => {
+                    tokens.push((SK::GE, two));
+                    i += 2;
+                    continue;
+                }
+                "==" => {
+                    tokens.push((SK::EQ_EQ, two));
+                    i += 2;
+                    continue;
+                }
+                "!=" => {
+                    tokens.push((SK::NEQ, "!=".to_string()));
+                    i += 2;
+                    continue;
+                }
                 _ => {}
             }
         }

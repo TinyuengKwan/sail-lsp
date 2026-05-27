@@ -56,9 +56,7 @@ pub(crate) fn complete_fn_param(acc: &mut Completions, ctx: &CompletionContext<'
             }
 
             // Filter by prefix.
-            if !prefix_lower.is_empty()
-                && !name.to_ascii_lowercase().starts_with(&prefix_lower)
-            {
+            if !prefix_lower.is_empty() && !name.to_ascii_lowercase().starts_with(&prefix_lower) {
                 continue;
             }
 

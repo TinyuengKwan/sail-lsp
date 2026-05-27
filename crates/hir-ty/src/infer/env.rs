@@ -180,7 +180,8 @@ fn substitute_alias_body(
             items.iter().map(|t| substitute_alias_body(t, type_subst, value_subst)).collect(),
         ),
         TyKind::FnPtr(crate::ty::FnSig { params, ret }) => {
-            let p = params.iter().map(|t| substitute_alias_body(t, type_subst, value_subst)).collect();
+            let p =
+                params.iter().map(|t| substitute_alias_body(t, type_subst, value_subst)).collect();
             let r = substitute_alias_body(ret, type_subst, value_subst);
             Ty::function(p, r)
         }
@@ -297,7 +298,9 @@ impl TopLevelEnv {
                             .unwrap_or(Ty::error());
                         for tok in def_node.descendants_with_tokens() {
                             if let Some(t) = tok.as_token() {
-                                if t.kind() == SK::EQ { break; }
+                                if t.kind() == SK::EQ {
+                                    break;
+                                }
                                 if t.kind() == SK::IDENT {
                                     env.values.insert(t.text().to_string(), ty.clone());
                                 }
@@ -433,16 +436,15 @@ impl TopLevelEnv {
                             // Register Mk_{name} constructor (takes all fields,
                             // returns the struct type).
                             let ctor_name = format!("Mk_{name}");
-                            let field_tys: Vec<Ty> =
-                                fields.values().cloned().collect();
+                            let field_tys: Vec<Ty> = fields.values().cloned().collect();
                             let param_ty = if field_tys.len() == 1 {
                                 field_tys.into_iter().next().unwrap()
                             } else {
                                 Ty::tuple(field_tys)
                             };
                             let ret_ty = Ty::named(name.clone());
-                            env.constructors.entry(ctor_name).or_default().push(
-                                Arc::new(TypeScheme {
+                            env.constructors.entry(ctor_name).or_default().push(Arc::new(
+                                TypeScheme {
                                     quantifiers: Vec::new(),
                                     kind_bounds: HashMap::new(),
                                     constraints: Vec::new(),
@@ -451,8 +453,8 @@ impl TopLevelEnv {
                                     ret: ret_ty,
                                     declared_effects: Vec::new(),
                                     is_declared_pure: false,
-                                }),
-                            );
+                                },
+                            ));
                             env.records.insert(name, RecordInfo { params, fields });
                         }
                         Some("enum") => {
@@ -573,8 +575,8 @@ impl TopLevelEnv {
                                 // underlying bitvector, returns bitfield type).
                                 let ctor_name = format!("Mk_{name}");
                                 let ret_ty = Ty::named(name.clone());
-                                env.constructors.entry(ctor_name).or_default().push(
-                                    Arc::new(TypeScheme {
+                                env.constructors.entry(ctor_name).or_default().push(Arc::new(
+                                    TypeScheme {
                                         quantifiers: Vec::new(),
                                         kind_bounds: HashMap::new(),
                                         constraints: Vec::new(),
@@ -583,8 +585,8 @@ impl TopLevelEnv {
                                         ret: ret_ty,
                                         declared_effects: Vec::new(),
                                         is_declared_pure: false,
-                                    }),
-                                );
+                                    },
+                                ));
                                 let field_entries: Vec<_> = info
                                     .fields
                                     .iter()
@@ -659,7 +661,9 @@ impl TopLevelEnv {
                                         .and_then(|eq| text[eq + 1..].find(':').map(|c| eq + 1 + c))
                                         .map(|colon| {
                                             let type_text = text[colon + 1..].trim();
-                                            let tr = hir_def::hir::type_ref::type_ref_from_text(type_text);
+                                            let tr = hir_def::hir::type_ref::type_ref_from_text(
+                                                type_text,
+                                            );
                                             super::workspace::ty_from_type_ref_pub(&tr)
                                         })
                                 })
@@ -675,10 +679,7 @@ impl TopLevelEnv {
                                 declared_effects: Vec::new(),
                                 is_declared_pure: false,
                             });
-                            env.constructors
-                                .entry(ctor_name.clone())
-                                .or_default()
-                                .push(scheme);
+                            env.constructors.entry(ctor_name.clone()).or_default().push(scheme);
                             pattern_constants.insert(ctor_name.clone());
                             let entry = env.unions.entry(parent_name.clone()).or_default();
                             if !entry.contains(ctor_name) {
@@ -702,8 +703,7 @@ impl TopLevelEnv {
                             // Skip `==` and `=>` (won't occur at top level
                             // of a TYPE_ALIAS_DEF but defensive).
                             let bytes = text.as_bytes();
-                            if bytes.get(eq + 1) == Some(&b'=')
-                                || bytes.get(eq + 1) == Some(&b'>')
+                            if bytes.get(eq + 1) == Some(&b'=') || bytes.get(eq + 1) == Some(&b'>')
                             {
                                 None
                             } else {
@@ -1146,9 +1146,9 @@ pub(crate) fn ty_to_match_ty(ty: &Ty) -> MatchTy {
         },
         TyKind::App { name, args, .. } if name == "bits" => {
             // bits(N) — try to extract the width from the Value/Nexp arg.
-            if let Some(width) = args.iter().find_map(|arg| {
-                arg.as_value_str().and_then(|v| v.parse::<usize>().ok())
-            }) {
+            if let Some(width) =
+                args.iter().find_map(|arg| arg.as_value_str().and_then(|v| v.parse::<usize>().ok()))
+            {
                 MatchTy::Bits(width)
             } else {
                 MatchTy::Named(name.clone(), Vec::new())
@@ -1213,9 +1213,9 @@ pub(crate) fn ty_to_match_ty_with_subst(
             MatchTy::List(Box::new(elem))
         }
         TyKind::App { name, args, .. } if name == "bits" => {
-            if let Some(width) = args.iter().find_map(|arg| {
-                arg.as_value_str().and_then(|v| v.parse::<usize>().ok())
-            }) {
+            if let Some(width) =
+                args.iter().find_map(|arg| arg.as_value_str().and_then(|v| v.parse::<usize>().ok()))
+            {
                 MatchTy::Bits(width)
             } else {
                 MatchTy::Named(name.clone(), Vec::new())

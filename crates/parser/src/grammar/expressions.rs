@@ -1,7 +1,6 @@
 use super::*;
 
 impl<'t> Parser<'t> {
-
     pub(crate) fn parse_expr(&mut self) {
         self.expr_bp(R_DEFAULT, 0);
     }

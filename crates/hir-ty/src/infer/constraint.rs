@@ -228,8 +228,7 @@ fn numeric_expr_key(expr: &NumericExpr) -> String {
             format!("(2^{})", numeric_expr_key(inner))
         }
         NumericExpr::App { name, args } => {
-            let args_str =
-                args.iter().map(numeric_expr_key).collect::<Vec<_>>().join(",");
+            let args_str = args.iter().map(numeric_expr_key).collect::<Vec<_>>().join(",");
             format!("{}({})", name, args_str)
         }
         NumericExpr::If { cond, then_expr, else_expr } => {
@@ -289,13 +288,11 @@ pub(super) fn subst_numeric_expr(expr: &NumericExpr, subst: &Subst) -> NumericEx
             name: name.clone(),
             args: args.iter().map(|a| subst_numeric_expr(a, subst)).collect(),
         },
-        NumericExpr::If { cond, then_expr, else_expr } => {
-            NumericExpr::If {
-                cond: Box::new(apply_subst_constraint_expr(cond, subst)),
-                then_expr: Box::new(subst_numeric_expr(then_expr, subst)),
-                else_expr: Box::new(subst_numeric_expr(else_expr, subst)),
-            }
-        }
+        NumericExpr::If { cond, then_expr, else_expr } => NumericExpr::If {
+            cond: Box::new(apply_subst_constraint_expr(cond, subst)),
+            then_expr: Box::new(subst_numeric_expr(then_expr, subst)),
+            else_expr: Box::new(subst_numeric_expr(else_expr, subst)),
+        },
     }
 }
 
@@ -1083,11 +1080,17 @@ fn unify_inner(expected: &Ty, actual: &Ty, subst: &mut Subst, depth: usize) -> b
                     if a_name == "vector" {
                         let actual_n = a_args.first().and_then(|a| a.as_value_str());
                         let elem = a_args.get(1).and_then(|a| {
-                            if let TyArg::Type(t) = a { Some(t) } else { None }
+                            if let TyArg::Type(t) = a {
+                                Some(t)
+                            } else {
+                                None
+                            }
                         });
                         if let (Some(actual_n), Some(elem)) = (actual_n, elem) {
                             if matches!(elem.kind(), TyKind::Scalar(crate::ty::Scalar::Bit)) {
-                                if let Some(expected_n) = expected_args.first().and_then(|a| a.as_value_str()) {
+                                if let Some(expected_n) =
+                                    expected_args.first().and_then(|a| a.as_value_str())
+                                {
                                     return unify_value(&expected_n, &actual_n, subst);
                                 }
                             }

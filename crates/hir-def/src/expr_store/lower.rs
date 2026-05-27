@@ -451,12 +451,15 @@ impl ExprCollector {
             SK::SIZEOF_EXPR => {
                 // Extract the nexp text from inside sizeof(...).
                 // The CST has: KW_SIZEOF L_PAREN <nexp tokens> R_PAREN
-                let nexp_text = node.children_with_tokens()
+                let nexp_text = node
+                    .children_with_tokens()
                     .filter_map(|el| el.into_token())
-                    .filter(|t| !t.kind().is_trivia()
-                        && t.kind() != SK::KW_SIZEOF
-                        && t.kind() != SK::L_PAREN
-                        && t.kind() != SK::R_PAREN)
+                    .filter(|t| {
+                        !t.kind().is_trivia()
+                            && t.kind() != SK::KW_SIZEOF
+                            && t.kind() != SK::L_PAREN
+                            && t.kind() != SK::R_PAREN
+                    })
                     .map(|t| t.text().to_string())
                     .collect::<Vec<_>>()
                     .join(" ");

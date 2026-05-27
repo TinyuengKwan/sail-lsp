@@ -1,7 +1,6 @@
 use super::*;
 
 impl<'t> Parser<'t> {
-
     /// Absorb arithmetic infix operators and their operands in type
     /// position. Handles `8 * 'n`, `'n + 1`, `2 ** 16`, etc.
     fn absorb_numeric_infix(&mut self, _recovery: TokenSet) {
@@ -138,8 +137,14 @@ impl<'t> Parser<'t> {
                 }
             }
             // Type-level constants: literals, dec/inc order keywords.
-            SK::NUM_LIT | SK::BIN_LIT | SK::HEX_LIT | T![_] | T![dec] | T![inc]
-            | T![true] | T![false] => {
+            SK::NUM_LIT
+            | SK::BIN_LIT
+            | SK::HEX_LIT
+            | T![_]
+            | T![dec]
+            | T![inc]
+            | T![true]
+            | T![false] => {
                 let m = self.start();
                 self.bump_any();
                 self.absorb_numeric_infix(recovery);
@@ -289,9 +294,7 @@ impl<'t> Parser<'t> {
 
         // Infix type operators: +, -, *, /, ^, <, >, <=, >=, ==, !=, |, &, in, <->, -->
         // <--> is lexed as `<-` `->` — handle before general infix.
-        if !recovery.contains(self.current())
-            && self.at(T![<-]) && self.nth(1) == T![->]
-        {
+        if !recovery.contains(self.current()) && self.at(T![<-]) && self.nth(1) == T![->] {
             let m = lhs.precede(self);
             self.bump_any(); // <-
             self.bump_any(); // ->
@@ -301,11 +304,21 @@ impl<'t> Parser<'t> {
         if !recovery.contains(self.current())
             && matches!(
                 self.current(),
-                T![+] | T![-] | T![*] | T![/] | T![^]
-                | T![<] | T![>] | T![<=] | T![>=] | T![==] | T![!=]
-                | T![|] | T![&]
-                | T![in]
-                | T![<->]
+                T![+]
+                    | T![-]
+                    | T![*]
+                    | T![/]
+                    | T![^]
+                    | T![<]
+                    | T![>]
+                    | T![<=]
+                    | T![>=]
+                    | T![==]
+                    | T![!=]
+                    | T![|]
+                    | T![&]
+                    | T![in]
+                    | T![<->]
             )
         {
             let m = lhs.precede(self);

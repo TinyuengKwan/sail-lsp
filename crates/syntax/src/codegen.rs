@@ -1058,9 +1058,7 @@ const PUNCTUATION_MACRO_ARMS: &[(&str, &str)] = &[
 /// with arms generated from `KEYWORD_MACRO_ARMS` and `PUNCTUATION_MACRO_ARMS`.
 pub fn generate_t_macro() -> String {
     let mut buf = String::new();
-    buf.push_str(
-        "/// Token shorthand macro.\n",
-    );
+    buf.push_str("/// Token shorthand macro.\n");
     buf.push_str("///\n");
     buf.push_str("/// Usage: `T![function]`, `T![+]`, `T!['(']`, etc.\n");
     buf.push_str("#[macro_export]\n");

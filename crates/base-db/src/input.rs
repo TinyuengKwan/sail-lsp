@@ -60,7 +60,6 @@ impl SourceRoot {
         self.file_set.insert(file, path);
     }
 
-
     /// Look up path for a file ID.
     pub fn path_for_file(&self, file: &FileId) -> Option<&VfsPath> {
         self.file_set.path_for_file(file)

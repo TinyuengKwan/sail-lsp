@@ -60,13 +60,9 @@ fn find_sail_lib() -> Option<PathBuf> {
             return Some(p);
         }
     }
-    let candidates = [
-        PathBuf::from("crates/sail-lsp/data/sail-lib"),
-        PathBuf::from("data/sail-lib"),
-    ];
-    candidates.into_iter()
-        .find(|c| c.is_dir())
-        .and_then(|p| p.canonicalize().ok())
+    let candidates =
+        [PathBuf::from("crates/sail-lsp/data/sail-lib"), PathBuf::from("data/sail-lib")];
+    candidates.into_iter().find(|c| c.is_dir()).and_then(|p| p.canonicalize().ok())
 }
 
 /// Load workspace: project files + sail-lib prelude into salsa database.
@@ -124,11 +120,7 @@ fn load_workspace(root: &Path) -> (AnalysisHost, Files, Vec<(Url, FileId)>) {
 }
 
 /// Build an Analysis with UrlMap from host + files + url_fids.
-fn make_analysis(
-    host: &AnalysisHost,
-    files: &Files,
-    url_fids: &[(Url, FileId)],
-) -> Analysis {
+fn make_analysis(host: &AnalysisHost, files: &Files, url_fids: &[(Url, FileId)]) -> Analysis {
     let mut url_to_fid = HashMap::new();
     let mut fid_to_url = HashMap::new();
     for (url, fid) in url_fids {
@@ -147,11 +139,10 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let verbose = args.iter().any(|a| a == "--verbose" || a == "-v");
     let run_ide = args.iter().any(|a| a == "--run-all-ide-things");
-    let root = args
-        .iter()
-        .filter(|a| !a.starts_with('-'))
-        .nth(1)
-        .expect("Usage: analysis_stats [--verbose] [--run-all-ide-things] /path/to/sail-project");
+    let root =
+        args.iter().filter(|a| !a.starts_with('-')).nth(1).expect(
+            "Usage: analysis_stats [--verbose] [--run-all-ide-things] /path/to/sail-project",
+        );
     let root = PathBuf::from(root);
 
     println!("=======================================================");
@@ -194,8 +185,7 @@ fn main() {
     let mut item_count = 0usize;
     for (_url, fid) in &url_fids {
         if let Some(ft) = files.file_text(*fid) {
-            if let Some(tree) = hir_def::def_query::file_item_tree(analysis.db(), ft).as_ref()
-            {
+            if let Some(tree) = hir_def::def_query::file_item_tree(analysis.db(), ft).as_ref() {
                 item_count += tree.top_level_items().len();
             }
         }
@@ -325,8 +315,14 @@ fn main() {
         }
     }
     let t_tokens = t0.elapsed();
-    let avg_tokens = if !sample_hl.is_empty() { t_tokens.as_micros() / sample_hl.len() as u128 } else { 0 };
-    println!("Semantic tokens (avg of {}): {:>5} µs ({} tokens total)", sample_hl.len(), avg_tokens, token_count);
+    let avg_tokens =
+        if !sample_hl.is_empty() { t_tokens.as_micros() / sample_hl.len() as u128 } else { 0 };
+    println!(
+        "Semantic tokens (avg of {}): {:>5} µs ({} tokens total)",
+        sample_hl.len(),
+        avg_tokens,
+        token_count
+    );
     report_metric("semantic_tokens_avg", avg_tokens as u64, "µs");
 
     // 5d. Goto-definition (sample first 10 files)
@@ -458,11 +454,7 @@ fn main() {
 ///
 /// Runs diagnostics + inlay_hints + annotations + semantic_tokens +
 /// completions + hover in six loops.
-fn run_ide_things(
-    analysis: &Analysis,
-    url_fids: &[(Url, FileId)],
-    _files: &Files,
-) {
+fn run_ide_things(analysis: &Analysis, url_fids: &[(Url, FileId)], _files: &Files) {
     let n = url_fids.len();
     let t_all = Instant::now();
 
@@ -515,7 +507,11 @@ fn run_ide_things(
         }
     }
     let t_completions = t0.elapsed();
-    println!("  Completions:       {:>7} ms ({} items)", t_completions.as_millis(), completion_count);
+    println!(
+        "  Completions:       {:>7} ms ({} items)",
+        t_completions.as_millis(),
+        completion_count
+    );
 
     // 5. Code lenses (annotations)
     let t0 = Instant::now();

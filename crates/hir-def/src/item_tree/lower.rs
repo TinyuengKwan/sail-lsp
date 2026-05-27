@@ -362,7 +362,9 @@ fn lower_cst_node(tree: &mut ItemTree, node: &syntax::SyntaxNode) -> Option<ModI
     // For types with braced member lists (enum/union/struct/bitfield),
     // use the full text so extract_braced_idents_from_sig can find members.
     let body_sig = match item_kind {
-        ItemKind::Enum | ItemKind::Union | ItemKind::Struct | ItemKind::Bitfield => full_text.clone(),
+        ItemKind::Enum | ItemKind::Union | ItemKind::Struct | ItemKind::Bitfield => {
+            full_text.clone()
+        }
         _ => signature_text.clone(),
     };
     let range = node.text_range();
@@ -578,7 +580,8 @@ fn lower_cst_node(tree: &mut ItemTree, node: &syntax::SyntaxNode) -> Option<ModI
             // The constructor and type are AFTER `=`:
             //   "union clause instruction = FVVTYPE : (fvvfunct6, bits(1), vregidx, ...)"
             // We need the part after `:` in the full text.
-            let type_ref = full_text.find('=')
+            let type_ref = full_text
+                .find('=')
                 .and_then(|eq_pos| full_text[eq_pos + 1..].find(':').map(|c| eq_pos + 1 + c))
                 .map(|colon_pos| {
                     let type_text = full_text[colon_pos + 1..].trim();

@@ -20,7 +20,8 @@ pub(crate) fn merge_nested_if(acc: &mut Assists, ctx: &AssistContext<'_>) -> Opt
     let after_then = after_outer_if + then_rel + 4; // "then" is 4 chars
 
     // Skip whitespace and expect '{'
-    let body_start = after_then + (text[after_then..].len() - text[after_then..].trim_start().len());
+    let body_start =
+        after_then + (text[after_then..].len() - text[after_then..].trim_start().len());
     if text.as_bytes().get(body_start)? != &b'{' {
         return None;
     }
@@ -53,10 +54,7 @@ pub(crate) fn merge_nested_if(acc: &mut Assists, ctx: &AssistContext<'_>) -> Opt
         AssistId("merge_nested_if", AssistKind::RefactorRewrite),
         "Merge nested if",
         ctx.range,
-        vec![TextEdit {
-            range: base_db::text_range(outer_if, end),
-            new_text: merged,
-        }],
+        vec![TextEdit { range: base_db::text_range(outer_if, end), new_text: merged }],
     );
     Some(())
 }
@@ -72,8 +70,7 @@ fn find_keyword_at(text: &str, offset: usize, kw: &str) -> Option<usize> {
         match window[search_from..].find(kw) {
             Some(pos) => {
                 let abs = start + search_from + pos;
-                let before_ok =
-                    abs == 0 || !text.as_bytes()[abs - 1].is_ascii_alphanumeric();
+                let before_ok = abs == 0 || !text.as_bytes()[abs - 1].is_ascii_alphanumeric();
                 let after_ok = abs + kw_len >= text.len()
                     || !text.as_bytes()[abs + kw_len].is_ascii_alphanumeric();
                 if before_ok && after_ok {
@@ -93,8 +90,7 @@ fn find_word(text: &str, word: &str) -> Option<usize> {
         match text[search_from..].find(word) {
             Some(pos) => {
                 let abs = search_from + pos;
-                let before_ok =
-                    abs == 0 || !text.as_bytes()[abs - 1].is_ascii_alphanumeric();
+                let before_ok = abs == 0 || !text.as_bytes()[abs - 1].is_ascii_alphanumeric();
                 let after_ok = abs + word.len() >= text.len()
                     || !text.as_bytes()[abs + word.len()].is_ascii_alphanumeric();
                 if before_ok && after_ok {

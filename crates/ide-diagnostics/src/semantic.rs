@@ -95,10 +95,7 @@ fn check_duplicate_definitions(item_tree: &ItemTree, diagnostics: &mut Vec<Diagn
 ///
 /// Walks CST NAMED_DEF nodes for enums/unions, collects member IDENTs inside
 /// braces, and flags duplicates.
-fn check_duplicate_enum_members(
-    cst_root: &syntax::SyntaxNode,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
+fn check_duplicate_enum_members(cst_root: &syntax::SyntaxNode, diagnostics: &mut Vec<Diagnostic>) {
     use parser::SyntaxKind as SK;
     use std::collections::HashSet;
 
@@ -106,9 +103,7 @@ fn check_duplicate_enum_members(
         if node.kind() != SK::NAMED_DEF {
             continue;
         }
-        let first_kw = node
-            .children_with_tokens()
-            .find_map(|c| c.into_token().map(|t| t.kind()));
+        let first_kw = node.children_with_tokens().find_map(|c| c.into_token().map(|t| t.kind()));
         let is_enum = first_kw == Some(SK::KW_ENUM);
         let is_union = first_kw == Some(SK::KW_UNION);
         if !is_enum && !is_union {
@@ -163,10 +158,7 @@ fn check_duplicate_enum_members(
 /// A type like `type T = T`, `struct S = { f: S }`, or mutual recursion
 /// `struct A = { b: B }` / `struct B = { a: A }` cannot be represented
 /// in memory. Uses `hir_ty::representability::is_representable()`.
-fn check_recursive_types(
-    cst_root: &syntax::SyntaxNode,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
+fn check_recursive_types(cst_root: &syntax::SyntaxNode, diagnostics: &mut Vec<Diagnostic>) {
     use parser::SyntaxKind as SK;
 
     // Collect struct/union field types and type alias RHS from the CST.
@@ -177,9 +169,8 @@ fn check_recursive_types(
         let kind = node.kind();
 
         if kind == SK::NAMED_DEF {
-            let first_kw = node
-                .children_with_tokens()
-                .find_map(|c| c.into_token().map(|t| t.kind()));
+            let first_kw =
+                node.children_with_tokens().find_map(|c| c.into_token().map(|t| t.kind()));
             let type_name = node
                 .children()
                 .find(|c| c.kind() == SK::NAME)
@@ -241,10 +232,7 @@ fn check_recursive_types(
             // (direct synonym recursion `type T = T`).
             // Complex expressions (config, if/then/else, dot-qualified) are not
             // recursive type errors.
-            if rhs_tokens.len() == 1
-                && rhs_tokens[0].0 == SK::IDENT
-                && rhs_tokens[0].1 == name
-            {
+            if rhs_tokens.len() == 1 && rhs_tokens[0].0 == SK::IDENT && rhs_tokens[0].1 == name {
                 let range = node.text_range();
                 let span = parser::Span {
                     start: u32::from(range.start()) as usize,
@@ -258,10 +246,7 @@ fn check_recursive_types(
 
     // Check representability for each type definition.
     let field_lookup = |name: &str| -> Vec<String> {
-        type_fields
-            .get(name)
-            .map(|(fields, _)| fields.clone())
-            .unwrap_or_default()
+        type_fields.get(name).map(|(fields, _)| fields.clone()).unwrap_or_default()
     };
 
     for (name, (_fields, span)) in &type_fields {

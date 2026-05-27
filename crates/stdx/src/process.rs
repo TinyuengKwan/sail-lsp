@@ -151,6 +151,111 @@ mod imp {
     }
 }
 
+#[cfg(windows)]
+mod imp {
+    use std::{
+        io,
+        os::windows::prelude::*,
+        process::{ChildStderr, ChildStdout},
+        slice,
+    };
+
+    use miow::{
+        iocp::{CompletionPort, CompletionStatus},
+        pipe::NamedPipe,
+        Overlapped,
+    };
+    use windows_sys::Win32::Foundation::ERROR_BROKEN_PIPE;
+
+    struct Pipe<'a> {
+        dst: &'a mut Vec<u8>,
+        overlapped: Overlapped,
+        pipe: NamedPipe,
+        done: bool,
+    }
+
+    pub(crate) fn read2(
+        out_pipe: ChildStdout,
+        err_pipe: ChildStderr,
+        data: &mut dyn FnMut(bool, &mut Vec<u8>, bool),
+    ) -> io::Result<()> {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+
+        let port = CompletionPort::new(1)?;
+        port.add_handle(0, &out_pipe)?;
+        port.add_handle(1, &err_pipe)?;
+
+        unsafe {
+            let mut out_pipe = Pipe::new(out_pipe, &mut out);
+            let mut err_pipe = Pipe::new(err_pipe, &mut err);
+
+            out_pipe.read()?;
+            err_pipe.read()?;
+
+            let mut status = [CompletionStatus::zero(), CompletionStatus::zero()];
+
+            while !out_pipe.done || !err_pipe.done {
+                for status in port.get_many(&mut status, None)? {
+                    if status.token() == 0 {
+                        out_pipe.complete(status);
+                        data(true, out_pipe.dst, out_pipe.done);
+                        out_pipe.read()?;
+                    } else {
+                        err_pipe.complete(status);
+                        data(false, err_pipe.dst, err_pipe.done);
+                        err_pipe.read()?;
+                    }
+                }
+            }
+
+            Ok(())
+        }
+    }
+
+    impl<'a> Pipe<'a> {
+        unsafe fn new<P: IntoRawHandle>(p: P, dst: &'a mut Vec<u8>) -> Pipe<'a> {
+            let pipe = unsafe { NamedPipe::from_raw_handle(p.into_raw_handle()) };
+            Pipe { dst, pipe, overlapped: Overlapped::zero(), done: false }
+        }
+
+        unsafe fn read(&mut self) -> io::Result<()> {
+            let dst = unsafe { slice_to_end(self.dst) };
+            match unsafe { self.pipe.read_overlapped(dst, self.overlapped.raw()) } {
+                Ok(_) => Ok(()),
+                Err(e) => {
+                    if e.raw_os_error() == Some(ERROR_BROKEN_PIPE as i32) {
+                        self.done = true;
+                        Ok(())
+                    } else {
+                        Err(e)
+                    }
+                }
+            }
+        }
+
+        unsafe fn complete(&mut self, status: &CompletionStatus) {
+            let prev = self.dst.len();
+            unsafe { self.dst.set_len(prev + status.bytes_transferred() as usize) };
+            if status.bytes_transferred() == 0 {
+                self.done = true;
+            }
+        }
+    }
+
+    unsafe fn slice_to_end(v: &mut Vec<u8>) -> &mut [u8] {
+        if v.capacity() == 0 {
+            v.reserve(16);
+        }
+        if v.capacity() == v.len() {
+            v.reserve(1);
+        }
+        let data = unsafe { v.as_mut_ptr().add(v.len()) };
+        let len = v.capacity() - v.len();
+        unsafe { slice::from_raw_parts_mut(data, len) }
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 mod imp {
     use std::{

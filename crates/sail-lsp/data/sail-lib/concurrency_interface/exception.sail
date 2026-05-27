@@ -55,7 +55,7 @@ $ifdef CONCURRENCY_INTERFACE_V2
 // This should be called to announce any exception:
 // - page fault (and other MMU faults)
 // - supervisor/hypevisor calls
-// - Any physical interrrupts (if modelled through sail)
+// - Any physical interrupts (if modelled through sail)
 outcome sail_take_exception : 'exn -> unit
     with 'exn : Type
 = {

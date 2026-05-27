@@ -112,9 +112,18 @@ impl HirBinaryOp {
             HirBinaryOp::Known(BinaryOp::CmpOp(_)) => true,
             HirBinaryOp::Custom(s) => matches!(
                 s.as_str(),
-                "<_u" | "<=_u" | ">_u" | ">=_u"
-                    | "<_s" | "<=_s" | ">_s" | ">=_s"
-                    | "<_si" | "<=_si" | ">_si" | ">=_si"
+                "<_u"
+                    | "<=_u"
+                    | ">_u"
+                    | ">=_u"
+                    | "<_s"
+                    | "<=_s"
+                    | ">_s"
+                    | ">=_s"
+                    | "<_si"
+                    | "<=_si"
+                    | ">_si"
+                    | ">=_si"
             ),
             _ => false,
         }
@@ -203,7 +212,10 @@ pub enum Expr {
     Config(Vec<String>),
     /// `sizeof('n)` — type-level numeric expression used as runtime value.
     /// Stores the nexp text (e.g., "'n", "'n + 1") for type inference.
-    SizeOf { span: Span, nexp: String },
+    SizeOf {
+        span: Span,
+        nexp: String,
+    },
     Constraint(Span),
 
     Return(ExprId),

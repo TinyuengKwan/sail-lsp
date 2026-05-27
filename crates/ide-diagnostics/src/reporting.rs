@@ -74,7 +74,6 @@ pub fn render_message(file: &dyn FileDb, message: &Message) -> String {
     lines.join("\n")
 }
 
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     Syntax { span: Span, message: String },

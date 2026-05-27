@@ -1,7 +1,6 @@
 use super::*;
 
 impl<'t> Parser<'t> {
-
     pub(crate) fn parse_pattern(&mut self, recovery: TokenSet) -> Option<CompletedMarker> {
         let kind = self.current();
         if kind == SK::EOF || recovery.contains(kind) {

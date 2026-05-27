@@ -146,9 +146,7 @@ impl ide_db::FileDb for SalsaTestFile {
         &EMPTY
     }
     fn bodies(&self) -> Option<&hir_def::bodies::CallableBodies> {
-        hir_def::def_query::callable_bodies(&self.db, self.input)
-            .as_ref()
-            .map(|b| b.0.as_ref())
+        hir_def::def_query::callable_bodies(&self.db, self.input).as_ref().map(|b| b.0.as_ref())
     }
     fn cached_expr_type_text(&self, span: parser::Span) -> Option<String> {
         let callable_ids = hir_def::def_query::file_def_with_body_ids(&self.db, self.input);

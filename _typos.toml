@@ -1,0 +1,23 @@
+[files]
+extend-exclude = [
+    "*.rast",
+]
+
+[default]
+extend-ignore-re = [
+    # ignore string which contains $0, which is used widely in tests
+    ".*\\$0.*",
+    # ignore generated content like `boxed....nner()`, `Defaul...efault`
+    "\\w*\\.{3,4}\\w*",
+    # ignore `// spellchecker:off` until `// spellchecker:on`
+    "(?s)(#|//)\\s*spellchecker:off.*?\\n\\s*(#|//)\\s*spellchecker:on",
+]
+
+[default.extend-words]
+ba = "ba"
+fo = "fo"
+jod = "jod"
+pn = "pn"
+
+[default.extend-identifiers]
+NTO = "NTO"

@@ -45,11 +45,7 @@ pub(crate) struct ListItem {
 impl ListItem {
     /// Create from a formatted string.
     pub(crate) fn from_str<S: Into<String>>(s: S) -> Self {
-        Self {
-            pre_comment: None,
-            item: Ok(s.into()),
-            post_comment: None,
-        }
+        Self { pre_comment: None, item: Ok(s.into()), post_comment: None }
     }
 
     /// Get the item text (empty string on error).
@@ -268,7 +264,8 @@ mod tests {
     #[test]
     fn tactic_vertical_when_item_too_wide() {
         // Each item is wider than available width — must go Vertical.
-        let items = make_items(&["extremely_long_item_name_alpha", "extremely_long_item_name_beta"]);
+        let items =
+            make_items(&["extremely_long_item_name_alpha", "extremely_long_item_name_beta"]);
         assert_eq!(definitive_tactic(&items, 20, 1), DefinitiveListTactic::Vertical);
     }
 

@@ -20,9 +20,7 @@ let client: LanguageClient | undefined;
 let outputChannel: vscode.OutputChannel;
 let activationErrorShown = false;
 
-export async function activate(
-    context: vscode.ExtensionContext,
-): Promise<void> {
+export async function activate(context: vscode.ExtensionContext): Promise<void> {
     outputChannel = vscode.window.createOutputChannel("Sail Language Server");
     context.subscriptions.push(outputChannel);
 
@@ -55,17 +53,10 @@ export async function activate(
         initializationOptions: getInitializationOptions(),
     };
 
-    client = new LanguageClient(
-        "sail-lsp",
-        "Sail Language Server",
-        serverOptions,
-        clientOptions,
-    );
+    client = new LanguageClient("sail-lsp", "Sail Language Server", serverOptions, clientOptions);
 
     client.onDidChangeState((event) => {
-        outputChannel.appendLine(
-            `[sail-lsp] client state ${event.oldState} -> ${event.newState}`,
-        );
+        outputChannel.appendLine(`[sail-lsp] client state ${event.oldState} -> ${event.newState}`);
     });
 
     // Register commands
@@ -78,9 +69,7 @@ export async function activate(
         client = undefined;
         const message = error instanceof Error ? error.message : String(error);
         outputChannel.appendLine(`[sail-lsp] failed to start: ${message}`);
-        void vscode.window.showErrorMessage(
-            `Failed to start sail-lsp: ${message}`,
-        );
+        void vscode.window.showErrorMessage(`Failed to start sail-lsp: ${message}`);
         return;
     }
     outputChannel.appendLine("[sail-lsp] server started");
@@ -143,9 +132,7 @@ function findInPath(name: string): string | undefined {
     return undefined;
 }
 
-function getBundledServerPath(
-    context: vscode.ExtensionContext,
-): string | undefined {
+function getBundledServerPath(context: vscode.ExtensionContext): string | undefined {
     const ext = os.platform() === "win32" ? ".exe" : "";
     const bundled = path.join(context.extensionPath, "server", `sail-lsp${ext}`);
 
@@ -193,28 +180,19 @@ function getInitializationOptions(): unknown {
     return {
         diagnostics: {
             enable: config.get<boolean>("diagnostics.enable", true),
-            effectMismatch: config.get<boolean>(
-                "diagnostics.effectMismatch",
-                true,
-            ),
+            effectMismatch: config.get<boolean>("diagnostics.effectMismatch", true),
             disabled: config.get<string[]>("diagnostics.disabled", []),
         },
         inlayHints: {
             enable: config.get<boolean>("inlayHints.enable", true),
             typeHints: config.get<boolean>("inlayHints.typeHints", true),
-            parameterHints: config.get<boolean>(
-                "inlayHints.parameterHints",
-                true,
-            ),
+            parameterHints: config.get<boolean>("inlayHints.parameterHints", true),
             effectHints: config.get<boolean>("inlayHints.effectHints", true),
             maxLength: config.get<number | null>("inlayHints.maxLength", 25),
         },
         completion: {
             enable: config.get<boolean>("completion.enable", true),
-            addCallParenthesis: config.get<boolean>(
-                "completion.addCallParenthesis",
-                true,
-            ),
+            addCallParenthesis: config.get<boolean>("completion.addCallParenthesis", true),
             postfix: config.get<boolean>("completion.postfix", true),
             limit: config.get<number>("completion.limit", 200),
         },
@@ -233,10 +211,7 @@ function getInitializationOptions(): unknown {
         },
         workspace: {
             maxFiles: config.get<number>("workspace.maxFiles", 10000),
-            includePaths: config.get<string[]>(
-                "workspace.includePaths",
-                [],
-            ),
+            includePaths: config.get<string[]>("workspace.includePaths", []),
         },
     };
 }
@@ -257,9 +232,7 @@ function registerCommands(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand("sail-lsp.reload", async () => {
             if (client) {
                 await client.sendNotification("sail-lsp/reloadWorkspace");
-                void vscode.window.showInformationMessage(
-                    "Sail workspace reload requested",
-                );
+                void vscode.window.showInformationMessage("Sail workspace reload requested");
             }
         }),
 
@@ -269,20 +242,14 @@ function registerCommands(context: vscode.ExtensionContext): void {
                     `sail-lsp server: ${getServerPath(context) ?? "unknown"}`,
                 );
             } else {
-                void vscode.window.showWarningMessage(
-                    "sail-lsp server is not running",
-                );
+                void vscode.window.showWarningMessage("sail-lsp server is not running");
             }
         }),
 
         vscode.commands.registerCommand("sail-lsp.toggleInlayHints", () => {
             const config = vscode.workspace.getConfiguration("sail-lsp");
             const current = config.get<boolean>("inlayHints.enable", true);
-            void config.update(
-                "inlayHints.enable",
-                !current,
-                vscode.ConfigurationTarget.Global,
-            );
+            void config.update("inlayHints.enable", !current, vscode.ConfigurationTarget.Global);
         }),
 
         vscode.commands.registerCommand("sail-lsp.showSyntaxTree", async () => {
@@ -290,14 +257,11 @@ function registerCommands(context: vscode.ExtensionContext): void {
             const editor = vscode.window.activeTextEditor;
             if (!editor) return;
 
-            const content = await client.sendRequest<string>(
-                "sail-lsp/viewSyntaxTree",
-                {
-                    textDocument: {
-                        uri: editor.document.uri.toString(),
-                    },
+            const content = await client.sendRequest<string>("sail-lsp/viewSyntaxTree", {
+                textDocument: {
+                    uri: editor.document.uri.toString(),
                 },
-            );
+            });
             await showVirtualTextDocument(content);
         }),
 
@@ -320,14 +284,11 @@ function registerCommands(context: vscode.ExtensionContext): void {
             const editor = vscode.window.activeTextEditor;
             if (!editor) return;
 
-            const content = await client.sendRequest<string>(
-                "sail-lsp/viewItemTree",
-                {
-                    textDocument: {
-                        uri: editor.document.uri.toString(),
-                    },
+            const content = await client.sendRequest<string>("sail-lsp/viewItemTree", {
+                textDocument: {
+                    uri: editor.document.uri.toString(),
                 },
-            );
+            });
             await showVirtualTextDocument(content);
         }),
     );

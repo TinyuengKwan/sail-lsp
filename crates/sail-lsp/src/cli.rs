@@ -423,7 +423,9 @@ pub fn cmd_analysis_stats(dir: &Path, verbose: bool) -> Result<(), String> {
     let t_infer = t0.elapsed();
     eprintln!(
         "Infer all:           {:>7} ms ({} callables, {} type errors)",
-        t_infer.as_millis(), callable_count, type_error_count
+        t_infer.as_millis(),
+        callable_count,
+        type_error_count
     );
     report_metric("infer_all", t_infer.as_millis() as u64, "ms");
     report_metric("callables", callable_count as u64, "count");
@@ -450,7 +452,14 @@ pub fn cmd_analysis_stats(dir: &Path, verbose: bool) -> Result<(), String> {
         eprintln!("\n--- Per-file details ---");
         for (url, fid) in &url_fids {
             let path: &str = url.path();
-            let short = path.rsplit('/').take(3).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("/");
+            let short = path
+                .rsplit('/')
+                .take(3)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("/");
             if let Some(sf) = analysis.file_by_id(*fid) {
                 let lines = sf.text().lines().count();
                 let ft = files.file_text(*fid).unwrap();

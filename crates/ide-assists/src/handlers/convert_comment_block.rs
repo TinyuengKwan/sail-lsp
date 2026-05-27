@@ -26,8 +26,7 @@ fn is_in_line_comment(text: &str, offset: usize) -> bool {
 
 fn is_in_block_comment(text: &str, offset: usize) -> bool {
     // Walk backward for "/*"
-    text[..offset].rfind("/*").is_some()
-        && text[offset..].find("*/").is_some()
+    text[..offset].rfind("/*").is_some() && text[offset..].find("*/").is_some()
 }
 
 fn convert_line_to_block(
@@ -105,10 +104,7 @@ fn convert_line_to_block(
         AssistId("convert_comment_block", AssistKind::RefactorRewrite),
         "Convert to block comment",
         ctx.range,
-        vec![TextEdit {
-            range: base_db::text_range(block_start, block_end),
-            new_text: result,
-        }],
+        vec![TextEdit { range: base_db::text_range(block_start, block_end), new_text: result }],
     );
     Some(())
 }
@@ -144,20 +140,13 @@ fn convert_block_to_line(
     }
 
     // Range includes from line_start to after "*/" + newline
-    let end = if text.as_bytes().get(close + 2) == Some(&b'\n') {
-        close + 3
-    } else {
-        close + 2
-    };
+    let end = if text.as_bytes().get(close + 2) == Some(&b'\n') { close + 3 } else { close + 2 };
 
     acc.add_with_edits(
         AssistId("convert_comment_block", AssistKind::RefactorRewrite),
         "Convert to line comments",
         ctx.range,
-        vec![TextEdit {
-            range: base_db::text_range(line_start, end),
-            new_text: result,
-        }],
+        vec![TextEdit { range: base_db::text_range(line_start, end), new_text: result }],
     );
     Some(())
 }

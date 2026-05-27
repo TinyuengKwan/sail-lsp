@@ -567,7 +567,6 @@ fn default_matrix(matrix: &[Row]) -> Vec<Row> {
         .collect()
 }
 
-
 /// Walk the matrix and synthesize concrete patterns that witness each
 /// uncovered branch. Mirrors the wildcard probe in `compute_match_usefulness`
 /// but recursively builds the missing pattern shape on the way.

@@ -175,7 +175,8 @@ pub fn main() {
                 .and_then(crate::cli::cmd_scip),
             "analysis-stats" => {
                 let verbose = args.iter().any(|a| a == "--verbose" || a == "-v");
-                let dir = args.iter()
+                let dir = args
+                    .iter()
                     .filter(|a| !a.starts_with('-') && *a != "analysis-stats")
                     .nth(1)
                     .map(|s| std::path::Path::new(s.as_str()));
@@ -660,20 +661,16 @@ fn on_task(state: &mut GlobalState, task: Task) {
             // so the handler will see the latest state.
             on_request(state, req);
         }
-        Task::PrimeCaches(progress) => {
-            match progress {
-                PrimeCachesProgress::Begin => {}
-                PrimeCachesProgress::End { cancelled } => {
-                    state.analysis_host.trigger_garbage_collection();
-                    state.prime_caches_queue.op_completed(());
-                    if cancelled {
-                        state
-                            .prime_caches_queue
-                            .request_op("restart after cancellation".into(), ());
-                    }
+        Task::PrimeCaches(progress) => match progress {
+            PrimeCachesProgress::Begin => {}
+            PrimeCachesProgress::End { cancelled } => {
+                state.analysis_host.trigger_garbage_collection();
+                state.prime_caches_queue.op_completed(());
+                if cancelled {
+                    state.prime_caches_queue.request_op("restart after cancellation".into(), ());
                 }
             }
-        }
+        },
         Task::Diagnostics(task_kind) => {
             // Batch of (FileId, diagnostics) stored in DiagnosticCollection.
             // Actual publish happens via take_changes() at end of loop.

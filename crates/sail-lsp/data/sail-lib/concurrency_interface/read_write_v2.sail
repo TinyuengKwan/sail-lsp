@@ -52,11 +52,11 @@ $define _CONCURRENCY_INTERFACE_READ_WRITE_V2
 $include <concurrency_interface/common.sail>
 
 /* This file present the Sail interface for reading and writing memory. This
-   interface can instanciated either at the user-mode level when Sail is used to
+   interface can instantiated either at the user-mode level when Sail is used to
    reason about user-mode program, in which case the addresses used are the
    program addresses: virtual addresses.
 
-   It can also be instanciated at the system level if address translation is
+   It can also be instantiated at the system level if address translation is
    implemented in Sail, in which case the addresses will be physical addresses.
 
    This interface depends on a few parameters:
@@ -69,7 +69,7 @@ $include <concurrency_interface/common.sail>
      access.
    - abort : Type, The type of memory aborts/access failure: To be
      returned when the access has failed. In system-level instantiations, this is
-     expected to be for physcial memory abort (e.g. SError in Arm)
+     expected to be for physical memory abort (e.g. SError in Arm)
    - CHERI : Bool, Whether CHERI is active on this architecture, which means the
      memory has capability tags
    - cap_size_log : Int, If CHERI is on, the log2 of the size of capabilities in
@@ -121,7 +121,7 @@ with
   'cap_size_log : Int
 constraint 'addr_size > 0 & 'cap_size_log >= 0
 = {
-    // Generic classifiers for mem_acc to enable some level of architechture generic programming
+    // Generic classifiers for mem_acc to enable some level of architecture generic programming
 
     // Is the access an explicit data access. That means it must respect basic
     // coherency rule and in particular behave sequentially if used by a single
@@ -204,8 +204,8 @@ constraint 'addr_size > 0 & 'cap_size_log >= 0
 
 /* Requests a memory write. If the write cannot happen due to
    atomicity/exclusive constraints, then the execution path is discarded as
-   impossible (size-0 non deterministic choice). Is the responsability of the
-   Sail model to do the proper non-determinitic choices beforehand */
+   impossible (size-0 non deterministic choice). Is the responsibility of the
+   Sail model to do the proper non-deterministic choices beforehand */
 outcome sail_mem_write : forall 'n 'nt, 'n >= 0 & (if 'CHERI then 'nt >= 0 else 'nt == 0).
   (Mem_request('n, 'nt, 'addr_size, 'addr_space, 'mem_acc), vector('n, bits(8)), vector('nt, bool))
       -> result(unit, 'abort)
@@ -273,8 +273,8 @@ constraint 'addr_size > 0 & 'cap_size_log >= 0
 
 /* Requests a memory write. If the write cannot happen due to
    atomicity/exclusive constraints, then the execution path is discarded as
-   impossible (size-0 non deterministic choice). Is the responsability of the
-   Sail model to do the proper non-determinitic choices beforehand */
+   impossible (size-0 non deterministic choice). Is the responsibility of the
+   Sail model to do the proper non-deterministic choices beforehand */
 outcome sail_mem_address_announce : forall 'n 'nt, 'n >= 0 & (if 'CHERI then 'nt >= 0 else 'nt == 0).
   Mem_request('n, 'nt, 'addr_size, 'addr_space, 'mem_acc)
       -> unit

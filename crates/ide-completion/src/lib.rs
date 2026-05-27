@@ -916,11 +916,8 @@ mod cursor_tests {
         let pos = fixture.cursor_position();
 
         // Find the file containing the cursor
-        let cursor_file = fixture
-            .files
-            .iter()
-            .find(|f| f.file_id == pos.file_id)
-            .expect("cursor file not found");
+        let cursor_file =
+            fixture.files.iter().find(|f| f.file_id == pos.file_id).expect("cursor file not found");
 
         let test_file = TestFile::new(&cursor_file.text);
         let uri = url::Url::parse("file:///test/cursor_file.sail").unwrap();
@@ -938,11 +935,8 @@ mod cursor_tests {
         let fixture = MultiFileFixture::parse(fixture_text);
         let pos = fixture.cursor_position();
 
-        let cursor_file = fixture
-            .files
-            .iter()
-            .find(|f| f.file_id == pos.file_id)
-            .expect("cursor file not found");
+        let cursor_file =
+            fixture.files.iter().find(|f| f.file_id == pos.file_id).expect("cursor file not found");
 
         // Build TestFile for each fixture file
         let test_files: Vec<(url::Url, TestFile)> = fixture
@@ -950,31 +944,24 @@ mod cursor_tests {
             .iter()
             .enumerate()
             .map(|(i, f)| {
-                let uri =
-                    url::Url::parse(&format!("file:///test/file{i}.sail")).unwrap();
+                let uri = url::Url::parse(&format!("file:///test/file{i}.sail")).unwrap();
                 (uri, TestFile::new(&f.text))
             })
             .collect();
 
-        let all_files: Vec<(&url::Url, &dyn ide_db::FileDb)> = test_files
-            .iter()
-            .map(|(u, f)| (u, f as &dyn ide_db::FileDb))
-            .collect();
+        let all_files: Vec<(&url::Url, &dyn ide_db::FileDb)> =
+            test_files.iter().map(|(u, f)| (u, f as &dyn ide_db::FileDb)).collect();
 
         // Find the index of the cursor file
-        let cursor_idx = fixture
-            .files
-            .iter()
-            .position(|f| f.file_id == pos.file_id)
-            .unwrap();
+        let cursor_idx = fixture.files.iter().position(|f| f.file_id == pos.file_id).unwrap();
         let current_uri = &test_files[cursor_idx].0;
 
         let offset: usize = pos.offset.into();
         let prefix = super::completion_prefix(&cursor_file.text, offset);
 
         let keywords = &[
-            "function", "val", "let", "var", "if", "else", "match", "return",
-            "foreach", "while", "struct", "enum", "union", "type", "register",
+            "function", "val", "let", "var", "if", "else", "match", "return", "foreach", "while",
+            "struct", "enum", "union", "type", "register",
         ];
         let builtins = &["true", "false", "bitzero", "bitone", "unit"];
 
@@ -1117,11 +1104,7 @@ mod cursor_tests {
         ",
         );
         let pos = fixture.cursor_position();
-        let cursor_file = fixture
-            .files
-            .iter()
-            .find(|f| f.file_id == pos.file_id)
-            .unwrap();
+        let cursor_file = fixture.files.iter().find(|f| f.file_id == pos.file_id).unwrap();
 
         let offset: usize = pos.offset.into();
         let prefix = super::completion_prefix(&cursor_file.text, offset);
@@ -1141,11 +1124,7 @@ mod cursor_tests {
         ",
         );
         let pos = fixture.cursor_position();
-        let cursor_file = fixture
-            .files
-            .iter()
-            .find(|f| f.file_id == pos.file_id)
-            .unwrap();
+        let cursor_file = fixture.files.iter().find(|f| f.file_id == pos.file_id).unwrap();
 
         let offset: usize = pos.offset.into();
         let items = super::pragma_completions(&cursor_file.text, offset);
@@ -1171,10 +1150,7 @@ mod cursor_tests {
         );
         let pos = fixture.cursor_position();
         let file = fixture.files.iter().find(|f| f.file_id == pos.file_id).unwrap();
-        assert!(
-            !file.text.contains("$0"),
-            "$0 marker should be stripped from text"
-        );
+        assert!(!file.text.contains("$0"), "$0 marker should be stripped from text");
         assert!(
             file.text.contains("bar()"),
             "text should have bar() without marker: {}",

@@ -200,10 +200,7 @@ impl MultiFileFixture {
     /// Get the cursor position as a `FileRange` (zero-width range at offset).
     pub fn cursor_range(&self) -> FileRange {
         let pos = self.cursor_position();
-        FileRange {
-            file_id: pos.file_id,
-            range: base_db::TextRange::empty(pos.offset),
-        }
+        FileRange { file_id: pos.file_id, range: base_db::TextRange::empty(pos.offset) }
     }
 }
 

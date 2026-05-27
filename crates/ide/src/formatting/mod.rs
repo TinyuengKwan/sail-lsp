@@ -79,7 +79,6 @@ pub fn indent_level_from_cst(text: &str, offset: usize) -> u32 {
     level.saturating_sub(1)
 }
 
-
 /// CST-based document formatting.
 ///
 /// Pipeline:
@@ -130,11 +129,7 @@ pub fn format_document_cst(text: &str, options: &FormatOptions) -> String {
 /// Check each line for overflow and trailing whitespace.
 ///
 /// Called after the visitor produces output, before post-processing.
-fn format_lines(
-    text: &mut String,
-    options: &FormatOptions,
-    report: &mut report::FormatReport,
-) {
+fn format_lines(text: &mut String, options: &FormatOptions, report: &mut report::FormatReport) {
     let root_shape = shape::Shape::with_max_width(options);
     let max_width = root_shape.budget(0);
     let mut offset = 0usize;
@@ -158,11 +153,7 @@ fn format_lines(
 ///
 /// Scans for `//` and `/*` tokens in the original that don't appear
 /// in the formatted output, and records `ErrorKind::LostComment`.
-fn check_lost_comments(
-    original: &str,
-    formatted: &str,
-    report: &mut report::FormatReport,
-) {
+fn check_lost_comments(original: &str, formatted: &str, report: &mut report::FormatReport) {
     // Extract comment snippets from original: first 40 chars of each comment.
     for (i, line) in original.lines().enumerate() {
         let trimmed = line.trim();
@@ -569,7 +560,6 @@ pub fn on_enter_edits(file: &dyn FileDb, position: ide_db::LineCol) -> Option<Ve
     None
 }
 
-
 /// Join lines — returns internal IdeTextEdit.
 pub fn join_lines_edits(file: &dyn FileDb, range: TextRange) -> Option<Vec<IdeTextEdit>> {
     let text = file.text();
@@ -654,7 +644,6 @@ pub fn join_lines_edits(file: &dyn FileDb, range: TextRange) -> Option<Vec<IdeTe
         Some(edits)
     }
 }
-
 
 /// Matching brace — returns byte offset of the matching bracket.
 pub fn matching_brace_offset(file: &dyn FileDb, position: ide_db::LineCol) -> Option<usize> {
@@ -924,13 +913,11 @@ bitfield Inst : bits(32) = {
         let line_count = output.lines().count();
         assert!(line_count > 1, "long val should be wrapped (got {line_count} lines):\n{output}");
     }
-
 }
 
 #[cfg(test)]
 mod cst_tests {
     use super::*;
-
 
     #[test]
     fn cst_passthrough_well_formed() {
@@ -941,7 +928,6 @@ mod cst_tests {
         assert!(result.contains("function foo"), "function preserved: {result}");
     }
 
-
     #[test]
     fn cst_struct_alignment() {
         let input = "struct Point = {\n  x : int,\n  y_offset : bits(32),\n}\n";
@@ -949,7 +935,6 @@ mod cst_tests {
         assert!(result.contains("x        : int"), "got: {result}");
         assert!(result.contains("y_offset : bits(32)"), "got: {result}");
     }
-
 
     #[test]
     fn cst_bitfield_alignment() {
@@ -966,7 +951,6 @@ mod cst_tests {
         assert_eq!(a_colon, x_colon, "A and X colons should align:\n{a_line}\n{x_line}");
     }
 
-
     #[test]
     fn cst_mapping_alignment() {
         let input = "mapping foo : A <-> string = {\n  AMOSWAP <-> \"amoswap\",\n  AMOAND <-> \"amoand\",\n  AMOMAXU <-> \"amomaxu\",\n}\n";
@@ -977,7 +961,6 @@ mod cst_tests {
         let maxu_arrow = maxu_line.find("<->").unwrap();
         assert_eq!(swap_arrow, maxu_arrow, "mapping <-> should align:\n{swap_line}\n{maxu_line}");
     }
-
 
     #[test]
     fn cst_match_arm_passthrough() {
@@ -995,7 +978,6 @@ function bar(x : int) -> int = {
         assert!(result.contains("None => 0"), "None arm preserved: {result}");
     }
 
-
     #[test]
     fn cst_register_passthrough() {
         let input = "register PC : xlenbits\nregister nextPC : xlenbits\n";
@@ -1005,18 +987,13 @@ function bar(x : int) -> int = {
         assert!(result.contains("register nextPC : xlenbits"), "nextPC preserved: {result}");
     }
 
-
     #[test]
     fn cst_fallback_on_parse_error() {
         // Deliberately broken Sail: unclosed brace
         let input = "function foo() = {\n  let x = 1\n";
         let cst_result = format_document_cst(input, &FormatOptions::default());
-        assert_eq!(
-            cst_result, input,
-            "CST path should return source unchanged on parse error"
-        );
+        assert_eq!(cst_result, input, "CST path should return source unchanged on parse error");
     }
-
 
     #[test]
     fn cst_idempotent_simple() {
@@ -1026,7 +1003,6 @@ function bar(x : int) -> int = {
         let second = format_document_cst(&first, &opts);
         assert_eq!(first, second, "formatting is not idempotent");
     }
-
 
     #[test]
     fn cst_idempotent_on_sample() {

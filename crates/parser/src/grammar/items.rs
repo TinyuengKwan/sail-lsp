@@ -1,7 +1,6 @@
 use super::*;
 
 impl<'t> Parser<'t> {
-
     pub(crate) fn parse_definition(&mut self) {
         let def_kind = self.classify_definition();
         let m = self.start();
@@ -199,7 +198,8 @@ impl<'t> Parser<'t> {
                     if item_keyword == T![bitfield] && self.at(T!['{']) {
                         // Bitfield body: `{ field : index_range, ... }`.
                         self.parse_bitfield_body();
-                    } else if (item_keyword == T![union] || item_keyword == T![struct]
+                    } else if (item_keyword == T![union]
+                        || item_keyword == T![struct]
                         || item_keyword == T![enum])
                         && self.at(T!['{'])
                     {
@@ -538,15 +538,11 @@ impl<'t> Parser<'t> {
             } else {
                 // atomic_index_range: typ or typ..typ
                 // Absorb numeric literals, type vars, identifiers
-                self.parse_type_expr(TokenSet::new(&[
-                    T![,], T![')'], T!['}'], T![@],
-                ]));
+                self.parse_type_expr(TokenSet::new(&[T![,], T![')'], T!['}'], T![@]]));
                 if self.at(T![.]) && self.nth(1) == T![.] {
                     self.bump_any(); // first .
                     self.bump_any(); // second .
-                    self.parse_type_expr(TokenSet::new(&[
-                        T![,], T![')'], T!['}'], T![@],
-                    ]));
+                    self.parse_type_expr(TokenSet::new(&[T![,], T![')'], T!['}'], T![@]]));
                 }
             }
             // Check for @ concatenation

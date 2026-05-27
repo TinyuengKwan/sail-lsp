@@ -66,13 +66,9 @@ fn find_sail_lib() -> Option<PathBuf> {
             return Some(p);
         }
     }
-    let candidates = [
-        PathBuf::from("crates/sail-lsp/data/sail-lib"),
-        PathBuf::from("data/sail-lib"),
-    ];
-    candidates.into_iter()
-        .find(|c| c.is_dir())
-        .and_then(|p| p.canonicalize().ok())
+    let candidates =
+        [PathBuf::from("crates/sail-lsp/data/sail-lib"), PathBuf::from("data/sail-lib")];
+    candidates.into_iter().find(|c| c.is_dir()).and_then(|p| p.canonicalize().ok())
 }
 
 /// Load workspace: project files + sail-lib prelude into salsa database.
@@ -149,14 +145,10 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let verbose = args.iter().any(|a| a == "--verbose" || a == "-v");
     let json = args.iter().any(|a| a == "--json");
-    let root = args
-        .iter()
-        .filter(|a| !a.starts_with('-'))
-        .nth(1)
-        .unwrap_or_else(|| {
-            eprintln!("Usage: corpus_check [--verbose|-v] [--json] /path/to/sail-project");
-            std::process::exit(1);
-        });
+    let root = args.iter().filter(|a| !a.starts_with('-')).nth(1).unwrap_or_else(|| {
+        eprintln!("Usage: corpus_check [--verbose|-v] [--json] /path/to/sail-project");
+        std::process::exit(1);
+    });
     let root = PathBuf::from(root);
 
     // Use large stack for deep type inference
@@ -235,10 +227,23 @@ fn run_check(root: &Path, verbose: bool, json: bool) -> i32 {
     if json {
         print_json(&per_file, n_files, total_errors, total_warnings, total_info, &by_code, t_total);
     } else {
-        print_text(&per_file, n_files, total_errors, total_warnings, total_info, &by_code, t_total, verbose);
+        print_text(
+            &per_file,
+            n_files,
+            total_errors,
+            total_warnings,
+            total_info,
+            &by_code,
+            t_total,
+            verbose,
+        );
     }
 
-    if total_errors > 0 { 1 } else { 0 }
+    if total_errors > 0 {
+        1
+    } else {
+        0
+    }
 }
 
 // ---------------------------------------------------------------------------

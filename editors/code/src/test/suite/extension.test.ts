@@ -15,11 +15,7 @@ suite("sail-lsp extension", () => {
             };
         };
 
-        assert.ok(
-            packageJson.contributes?.configuration?.properties?.[
-                "sail-lsp.server.path"
-            ],
-        );
+        assert.ok(packageJson.contributes?.configuration?.properties?.["sail-lsp.server.path"]);
     });
 
     test("activation fails gracefully without server binary", async () => {
@@ -39,10 +35,6 @@ suite("sail-lsp extension", () => {
         await extension.activate();
         assert.ok(extension.isActive, "extension should still activate cleanly");
 
-        await workspaceConfig.update(
-            "server.path",
-            undefined,
-            vscode.ConfigurationTarget.Global,
-        );
+        await workspaceConfig.update("server.path", undefined, vscode.ConfigurationTarget.Global);
     });
 });

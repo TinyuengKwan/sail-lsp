@@ -230,14 +230,46 @@ pub fn tokenize(input: &str) -> Vec<(Token, Span)> {
         // Must be checked before the generic oper_char scan.
         if pos + 1 < len {
             match [bytes[pos], bytes[pos + 1]] {
-                [b'(', b')'] => { pos += 2; tokens.push((Token::Unit, Span::new(start, pos))); continue; }
-                [b'{', b'|'] => { pos += 2; tokens.push((Token::LeftCurlyBar, Span::new(start, pos))); continue; }
-                [b'[', b'|'] => { pos += 2; tokens.push((Token::LeftSquareBar, Span::new(start, pos))); continue; }
-                [b'|', b'}'] => { pos += 2; tokens.push((Token::RightCurlyBar, Span::new(start, pos))); continue; }
-                [b'|', b']'] => { pos += 2; tokens.push((Token::RightSquareBar, Span::new(start, pos))); continue; }
-                [b':', b':'] => { pos += 2; tokens.push((Token::Scope, Span::new(start, pos))); continue; }
-                [b':', b'='] => { pos += 2; tokens.push((Token::ColonEqual, Span::new(start, pos))); continue; }
-                [b'!', b'='] => { pos += 2; tokens.push((Token::NotEqualTo, Span::new(start, pos))); continue; }
+                [b'(', b')'] => {
+                    pos += 2;
+                    tokens.push((Token::Unit, Span::new(start, pos)));
+                    continue;
+                }
+                [b'{', b'|'] => {
+                    pos += 2;
+                    tokens.push((Token::LeftCurlyBar, Span::new(start, pos)));
+                    continue;
+                }
+                [b'[', b'|'] => {
+                    pos += 2;
+                    tokens.push((Token::LeftSquareBar, Span::new(start, pos)));
+                    continue;
+                }
+                [b'|', b'}'] => {
+                    pos += 2;
+                    tokens.push((Token::RightCurlyBar, Span::new(start, pos)));
+                    continue;
+                }
+                [b'|', b']'] => {
+                    pos += 2;
+                    tokens.push((Token::RightSquareBar, Span::new(start, pos)));
+                    continue;
+                }
+                [b':', b':'] => {
+                    pos += 2;
+                    tokens.push((Token::Scope, Span::new(start, pos)));
+                    continue;
+                }
+                [b':', b'='] => {
+                    pos += 2;
+                    tokens.push((Token::ColonEqual, Span::new(start, pos)));
+                    continue;
+                }
+                [b'!', b'='] => {
+                    pos += 2;
+                    tokens.push((Token::NotEqualTo, Span::new(start, pos)));
+                    continue;
+                }
                 _ => {}
             }
         }
@@ -649,7 +681,7 @@ mod tests {
         // ( * ml * ) val → 6 tokens
         assert!(tokens.len() >= 5, "expected (* ml *) to be tokens, not comment: {:?}", tokens);
         assert_eq!(tokens[0].0, Token::LeftBracket); // (
-        assert_eq!(tokens[1].0, Token::Multiply);     // *
+        assert_eq!(tokens[1].0, Token::Multiply); // *
     }
 
     #[test]

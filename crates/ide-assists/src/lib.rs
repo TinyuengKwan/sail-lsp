@@ -349,7 +349,6 @@ pub fn organize_imports_edits(file: &dyn FileDb) -> Option<Vec<IdeTextEdit>> {
     Some(vec![edit])
 }
 
-
 /// Given a cursor position inside an `if` expression, produce edits that invert the condition
 /// and swap the then/else branches.
 pub fn invert_if_edits(file: &dyn FileDb, range: TextRange) -> Option<Vec<IdeTextEdit>> {
@@ -423,7 +422,6 @@ fn invert_condition(cond: &str) -> String {
 
 use syntax::parser_lower::DeclRole;
 
-
 pub fn flip_binexpr_edits(file: &dyn FileDb, range: TextRange) -> Option<Vec<IdeTextEdit>> {
     let offset = base_db::range_start(range);
     let bodies = file.bodies()?;
@@ -456,7 +454,6 @@ fn flip_comparison_op(op: &str) -> &str {
     }
 }
 
-
 pub fn apply_demorgan_edits(file: &dyn FileDb, range: TextRange) -> Option<Vec<IdeTextEdit>> {
     let offset = base_db::range_start(range);
     let bodies = file.bodies()?;
@@ -484,7 +481,6 @@ pub fn apply_demorgan_edits(file: &dyn FileDb, range: TextRange) -> Option<Vec<I
     let new_text = format!("~({inv_lhs} {new_op} {inv_rhs})");
     Some(vec![IdeTextEdit { range: base_db::text_range(expr_span.start, expr_span.end), new_text }])
 }
-
 
 pub fn inline_variable_edits(file: &dyn FileDb, range: TextRange) -> Option<Vec<IdeTextEdit>> {
     let offset = base_db::range_start(range);
@@ -554,7 +550,6 @@ pub fn inline_variable_edits(file: &dyn FileDb, range: TextRange) -> Option<Vec<
 
     Some(edits)
 }
-
 
 /// Enhanced extract_function with HIR-aware free variable detection.
 ///
@@ -657,7 +652,6 @@ fn find_def_end_after(file: &dyn FileDb, offset: usize) -> Option<usize> {
     Some(file.text().len())
 }
 
-
 pub fn generate_doc_template_edits(
     file: &dyn FileDb,
     range: TextRange,
@@ -715,7 +709,6 @@ pub fn generate_doc_template_edits(
     None
 }
 
-
 pub fn remove_unused_imports_edits(file: &dyn FileDb) -> Option<Vec<IdeTextEdit>> {
     let text = file.text();
     let parsed = file.parsed()?;
@@ -763,7 +756,6 @@ pub fn remove_unused_imports_edits(file: &dyn FileDb) -> Option<Vec<IdeTextEdit>
         Some(edits)
     }
 }
-
 
 pub fn unwrap_block_edits(file: &dyn FileDb, range: TextRange) -> Option<Vec<IdeTextEdit>> {
     use hir_def::hir::Expr;
@@ -818,7 +810,6 @@ pub fn unwrap_block_edits(file: &dyn FileDb, range: TextRange) -> Option<Vec<Ide
     }
     None
 }
-
 
 pub fn pull_assignment_up_edits(file: &dyn FileDb, range: TextRange) -> Option<Vec<IdeTextEdit>> {
     use hir_def::hir::Expr;
@@ -890,7 +881,6 @@ fn split_assignment(s: &str) -> Option<(&str, &str)> {
     None
 }
 
-
 pub fn guarded_return_edits(file: &dyn FileDb, range: TextRange) -> Option<Vec<IdeTextEdit>> {
     let offset = base_db::range_start(range);
     let bodies = file.bodies()?;
@@ -917,7 +907,6 @@ pub fn guarded_return_edits(file: &dyn FileDb, range: TextRange) -> Option<Vec<I
     let new_text = format!("if {inverted} then return ();\n{body_inner}");
     Some(vec![IdeTextEdit { range: base_db::text_range(expr_span.start, expr_span.end), new_text }])
 }
-
 
 pub fn sort_items_edits(file: &dyn FileDb, range: TextRange) -> Option<Vec<IdeTextEdit>> {
     use hir_def::item_tree::ItemKind;
@@ -1044,7 +1033,6 @@ pub fn sort_items_edits(file: &dyn FileDb, range: TextRange) -> Option<Vec<IdeTe
     None
 }
 
-
 /// Convert line comments (//) to block comments (/* */) in the selection range
 pub fn line_to_block_comment_edits(
     file: &dyn FileDb,
@@ -1160,7 +1148,6 @@ pub fn toggle_doc_comment_edits(file: &dyn FileDb, range: TextRange) -> Option<V
 
     Some(vec![IdeTextEdit { range, new_text }])
 }
-
 
 pub fn add_missing_match_arms_edits<'a, F, I>(
     file: &dyn FileDb,
@@ -1338,7 +1325,6 @@ where
     }])
 }
 
-
 pub fn bitfield_accessor_edits(file: &dyn FileDb, range: TextRange) -> Option<Vec<IdeTextEdit>> {
     use hir_def::item_tree::ItemKind;
     let offset = base_db::range_start(range);
@@ -1391,7 +1377,6 @@ pub fn bitfield_accessor_edits(file: &dyn FileDb, range: TextRange) -> Option<Ve
     None
 }
 
-
 /// Code action: evaluate a constant expression and replace with its value.
 /// Replaces `2 + 3` with `5`, `0xFF` with `bits(8)`, etc.
 pub fn evaluate_constant_edits(file: &dyn FileDb, range: TextRange) -> Option<Vec<IdeTextEdit>> {
@@ -1403,7 +1388,6 @@ pub fn evaluate_constant_edits(file: &dyn FileDb, range: TextRange) -> Option<Ve
     }
     Some(vec![IdeTextEdit { range, new_text: folded }])
 }
-
 
 /// Code action: simplify boolean expressions.
 /// `x == true` → `x`, `x == false` → `~(x)`, `x != true` → `~(x)`, `x != false` → `x`
@@ -1445,7 +1429,6 @@ pub fn simplify_boolean_edits(file: &dyn FileDb, range: TextRange) -> Option<Vec
     }
     Some(vec![IdeTextEdit { range, new_text: simplified }])
 }
-
 
 /// Code action: convert between hex, decimal, and binary literal formats.
 /// `0xFF` → `255`, `255` → `0xFF`, `0b1010` → `10`, etc.
@@ -1496,7 +1479,6 @@ pub fn convert_literal_format_edits(
 
     results
 }
-
 
 pub fn try_fold_constant(text: &str) -> Option<String> {
     let trimmed = text.trim();
@@ -1674,7 +1656,6 @@ pub fn find_match_at_offset_hir(
     .map(|(id, _, span)| (id, span))
 }
 
-
 /// Generate a function stub from an unresolved function call.
 ///
 /// function name that doesn't exist, generates a stub with parameters
@@ -1777,7 +1758,6 @@ fn extract_call_arg_names(
     }
     args
 }
-
 
 /// Inline a function call by replacing it with the function body.
 ///
@@ -1892,7 +1872,6 @@ fn extract_formal_params(def_text: &str) -> Vec<String> {
     params
 }
 
-
 /// Replace a constant reference with its literal value.
 ///
 /// Scans the file for a top-level `let <NAME> = <literal>` binding, then
@@ -1913,9 +1892,8 @@ pub fn inline_const_as_literal_edits(
     if !bytes.get(offset).map_or(false, |b| b.is_ascii_alphanumeric() || *b == b'_') {
         return None;
     }
-    let word_start = text[..offset]
-        .rfind(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-        .map_or(0, |p| p + 1);
+    let word_start =
+        text[..offset].rfind(|c: char| !c.is_ascii_alphanumeric() && c != '_').map_or(0, |p| p + 1);
     let word_end = text[offset..]
         .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
         .map_or(text.len(), |p| offset + p);
@@ -1976,7 +1954,6 @@ pub fn inline_const_as_literal_edits(
     None
 }
 
-
 /// Promote a local let-binding to a top-level definition.
 ///
 /// Finds a `let <name> = <value>` inside a function body and offers to move
@@ -2023,10 +2000,7 @@ pub fn promote_local_to_const_edits(
 
     // Insert at start of file, remove original line.
     let mut edits = Vec::new();
-    edits.push(IdeTextEdit {
-        range: base_db::text_range(0, 0),
-        new_text: top_level,
-    });
+    edits.push(IdeTextEdit { range: base_db::text_range(0, 0), new_text: top_level });
     // Remove the original local binding line (including trailing newline).
     let remove_end = if line_end < text.len() { line_end + 1 } else { line_end };
     edits.push(IdeTextEdit {
@@ -2035,7 +2009,6 @@ pub fn promote_local_to_const_edits(
     });
     Some(edits)
 }
-
 
 /// Replace `var` keyword with `let` for immutable binding.
 pub fn remove_mut_edits(file: &dyn FileDb, range: TextRange) -> Option<Vec<IdeTextEdit>> {
@@ -2063,15 +2036,11 @@ pub fn remove_mut_edits(file: &dyn FileDb, range: TextRange) -> Option<Vec<IdeTe
     }])
 }
 
-
 /// Extract a numeric literal into a named constant.
 ///
 /// Places a `let CONST = <number>` before the current line and replaces
 /// the literal with the constant name.
-pub fn generate_constant_edits(
-    file: &dyn FileDb,
-    range: TextRange,
-) -> Option<Vec<IdeTextEdit>> {
+pub fn generate_constant_edits(file: &dyn FileDb, range: TextRange) -> Option<Vec<IdeTextEdit>> {
     let text = file.text();
     let offset = base_db::range_start(range);
 
@@ -2107,13 +2076,10 @@ pub fn generate_constant_edits(
         range: base_db::text_range(line_start, line_start),
         new_text: format!("{indent}let {const_name} = {lit_text}\n"),
     });
-    edits.push(IdeTextEdit {
-        range: base_db::text_range(num_start, num_end),
-        new_text: const_name,
-    });
+    edits
+        .push(IdeTextEdit { range: base_db::text_range(num_start, num_end), new_text: const_name });
     Some(edits)
 }
-
 
 /// Convert between regular comments (`//`) and block doc comments (`/** */`).
 pub fn convert_comment_style_edits(
@@ -2135,33 +2101,23 @@ pub fn convert_comment_style_edits(
         // Block doc -> line comment
         let content = rest.strip_suffix(" */")?;
         let new_text = format!("{indent}// {content}");
-        Some(vec![IdeTextEdit {
-            range: base_db::text_range(line_start, line_end),
-            new_text,
-        }])
+        Some(vec![IdeTextEdit { range: base_db::text_range(line_start, line_end), new_text }])
     } else if trimmed.starts_with("//") && !trimmed.starts_with("///") {
         // Line comment -> block doc
         let content = trimmed.strip_prefix("//").unwrap_or(trimmed);
         let content = content.strip_prefix(' ').unwrap_or(content);
         let new_text = format!("{indent}/** {content} */");
-        Some(vec![IdeTextEdit {
-            range: base_db::text_range(line_start, line_end),
-            new_text,
-        }])
+        Some(vec![IdeTextEdit { range: base_db::text_range(line_start, line_end), new_text }])
     } else {
         None
     }
 }
 
-
 /// Extract selected code into a separate file with a `$include` directive.
 ///
 /// TODO: Actual file creation requires workspace-level coordination.
 /// This is a stub that always returns `None`.
-pub fn extract_to_include_edits(
-    _file: &dyn FileDb,
-    _range: TextRange,
-) -> Option<Vec<IdeTextEdit>> {
+pub fn extract_to_include_edits(_file: &dyn FileDb, _range: TextRange) -> Option<Vec<IdeTextEdit>> {
     // TODO: Implement extraction to $include file.
     // Steps would be:
     // 1. Take the selected range of code
@@ -2192,12 +2148,10 @@ pub fn auto_include_edits<'a>(
     offset: usize,
     all_files: impl IntoIterator<Item = (&'a url::Url, &'a dyn FileDb)>,
     current_url: Option<&url::Url>,
-) -> Option<(String, IdeTextEdit)>
-{
+) -> Option<(String, IdeTextEdit)> {
     // Step 1: find the identifier under cursor.
     let tokens = file.tokens()?;
-    let (tok, _span) =
-        tokens.iter().rev().find(|(_, sp)| sp.start <= offset && offset < sp.end)?;
+    let (tok, _span) = tokens.iter().rev().find(|(_, sp)| sp.start <= offset && offset < sp.end)?;
     let name = match tok {
         parser::Token::Id(s) => s.clone(),
         _ => return None,
@@ -2296,8 +2250,7 @@ pub fn auto_include_edits<'a>(
 /// from the LSP request handler with access to `all_files`.
 pub(crate) fn auto_include_single_file_check(file: &dyn FileDb, offset: usize) -> Option<String> {
     let tokens = file.tokens()?;
-    let (tok, _span) =
-        tokens.iter().rev().find(|(_, sp)| sp.start <= offset && offset < sp.end)?;
+    let (tok, _span) = tokens.iter().rev().find(|(_, sp)| sp.start <= offset && offset < sp.end)?;
     let name = match tok {
         parser::Token::Id(s) => s.clone(),
         _ => return None,

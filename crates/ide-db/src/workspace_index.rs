@@ -388,7 +388,7 @@ fn is_type_kind(kind: ItemKind) -> bool {
     )
 }
 
-/// A callaback-based signature index stored per-file via salsa.
+/// A callback-based signature index stored per-file via salsa.
 pub type SignatureIndex = HashMap<String, crate::CallableSignature>;
 
 #[cfg(test)]

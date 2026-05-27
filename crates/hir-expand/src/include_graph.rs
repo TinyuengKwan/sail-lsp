@@ -55,7 +55,7 @@ impl IncludeGraph {
         files
     }
 
-    /// Topological sort of all files (includers before includees).
+    /// Topological sort of all files (includers before included files).
     /// Returns `None` if there's a cycle.
     pub fn topological_order(&self) -> Option<Vec<FileId>> {
         let all = self.all_files();

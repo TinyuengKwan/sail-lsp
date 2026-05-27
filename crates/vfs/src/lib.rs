@@ -215,9 +215,7 @@ impl Vfs {
     /// Drain all accumulated changes.
     ///
     /// we return the same type for downstream compatibility.
-    pub fn take_changes(
-        &mut self,
-    ) -> IndexMap<FileId, ChangedFile, BuildHasherDefault<FxHasher>> {
+    pub fn take_changes(&mut self) -> IndexMap<FileId, ChangedFile, BuildHasherDefault<FxHasher>> {
         mem::take(&mut self.changes)
     }
 

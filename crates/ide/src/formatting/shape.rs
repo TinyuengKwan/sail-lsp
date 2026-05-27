@@ -111,11 +111,7 @@ impl Shape {
 
     /// Shape with maximum available width (for root level).
     pub(crate) fn with_max_width(config: &FormatOptions) -> Self {
-        Self {
-            width: config.max_width(),
-            indent: Indent::empty(),
-            offset: 0,
-        }
+        Self { width: config.max_width(), indent: Indent::empty(), offset: 0 }
     }
 
     /// Visual indent: increase offset for continuation lines.
@@ -134,11 +130,7 @@ impl Shape {
 
     /// Reset to block-only (no alignment), keeping block_indent.
     pub(crate) fn block(&self) -> Self {
-        Self {
-            width: self.width,
-            indent: self.indent.block_only(),
-            offset: 0,
-        }
+        Self { width: self.width, indent: self.indent.block_only(), offset: 0 }
     }
 
     /// Reduce available width.

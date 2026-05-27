@@ -19,12 +19,9 @@ use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Registry};
 /// Called once at startup in `main()`. After this, all `tracing::info!`,
 /// `tracing::debug!`, `tracing::info_span!` etc. produce output.
 pub fn setup() {
-    let env_filter = EnvFilter::try_from_env("SAIL_LOG")
-        .unwrap_or_else(|_| EnvFilter::new("warn"));
+    let env_filter = EnvFilter::try_from_env("SAIL_LOG").unwrap_or_else(|_| EnvFilter::new("warn"));
 
-    let fmt_layer = tracing_subscriber::fmt::layer()
-        .with_target(true)
-        .with_writer(std::io::stderr);
+    let fmt_layer = tracing_subscriber::fmt::layer().with_target(true).with_writer(std::io::stderr);
 
     let tree_layer = if std::env::var("SAIL_TRACE_TREE").is_ok() {
         Some(
@@ -37,10 +34,7 @@ pub fn setup() {
         None
     };
 
-    let subscriber = Registry::default()
-        .with(env_filter)
-        .with(fmt_layer)
-        .with(tree_layer);
+    let subscriber = Registry::default().with(env_filter).with(fmt_layer).with(tree_layer);
 
     // Ignore error if a subscriber was already set (e.g., in tests).
     let _ = tracing::subscriber::set_global_default(subscriber);

@@ -13,7 +13,6 @@ use ide_db::test_utils::TestFile;
 use ide_diagnostics::DiagnosticsConfig;
 use url::Url;
 
-
 #[salsa::db]
 #[derive(Default, Clone)]
 struct BenchDb {
@@ -22,7 +21,6 @@ struct BenchDb {
 
 #[salsa::db]
 impl salsa::Database for BenchDb {}
-
 
 fn bench_sail_dir() -> Option<PathBuf> {
     // Allow override via SAIL_RISCV_DIR; otherwise fall back to a well-known
@@ -140,7 +138,6 @@ fn load_workspace_with_url_map(root: &Path) -> (AnalysisHost, Files, Vec<(Url, F
     let url_map = UrlMap::new(u2f, f2u);
     (host, files, url_fids, url_map)
 }
-
 
 fn run_diagnostics_single(source: &str) -> (f64, usize, f64, usize) {
     let db = BenchDb::default();
@@ -303,7 +300,6 @@ fn benchmark_single_file_diagnostics() {
     let accuracy = if total_tests > 0 { detected as f64 / total_tests as f64 * 100.0 } else { 0.0 };
     eprintln!("\n=== Summary: {}/{} detected ({:.1}%) ===", detected, total_tests, accuracy);
 }
-
 
 #[test]
 fn benchmark_workspace_diagnostics() {
@@ -468,7 +464,6 @@ fn benchmark_workspace_diagnostics() {
     let accuracy = if total_tests > 0 { detected as f64 / total_tests as f64 * 100.0 } else { 0.0 };
     eprintln!("\n=== Summary: {}/{} detected ({:.1}%) ===", detected, total_tests, accuracy);
 }
-
 
 /// Make a body-only edit: find first number literal and change it.
 fn make_body_edit(source: &str) -> String {
@@ -659,7 +654,8 @@ fn benchmark_incremental_diagnostics() {
         // Baseline diagnostics
         let baseline = diag_one_file(&host, &files, target_fid, &config, &ws_names);
         let baseline_count = baseline.len();
-        let baseline_codes: Vec<String> = baseline.iter().map(|d| d.code.as_str().to_string()).collect();
+        let baseline_codes: Vec<String> =
+            baseline.iter().map(|d| d.code.as_str().to_string()).collect();
         eprintln!("  Baseline: {} diagnostics", baseline_count);
 
         // Apply body-only edit
@@ -678,21 +674,34 @@ fn benchmark_incremental_diagnostics() {
         match after {
             Ok(after_diags) => {
                 let after_count = after_diags.len();
-                let after_codes: Vec<String> = after_diags.iter().map(|d| d.code.as_str().to_string()).collect();
+                let after_codes: Vec<String> =
+                    after_diags.iter().map(|d| d.code.as_str().to_string()).collect();
 
                 // Structural diagnostics should be stable across body-only edits
-                let structural_before: Vec<&String> = baseline_codes.iter()
-                    .filter(|c| c.contains("duplicate") || c.contains("syntax") || c.contains("parse"))
+                let structural_before: Vec<&String> = baseline_codes
+                    .iter()
+                    .filter(|c| {
+                        c.contains("duplicate") || c.contains("syntax") || c.contains("parse")
+                    })
                     .collect();
-                let structural_after: Vec<&String> = after_codes.iter()
-                    .filter(|c| c.contains("duplicate") || c.contains("syntax") || c.contains("parse"))
+                let structural_after: Vec<&String> = after_codes
+                    .iter()
+                    .filter(|c| {
+                        c.contains("duplicate") || c.contains("syntax") || c.contains("parse")
+                    })
                     .collect();
 
                 let structural_stable = structural_before.len() == structural_after.len();
-                eprintln!("  After edit: {} diagnostics (edit: {} us, diag: {} us)", after_count, edit_us, diag_us);
-                eprintln!("  Structural stable: {} (before: {}, after: {})",
+                eprintln!(
+                    "  After edit: {} diagnostics (edit: {} us, diag: {} us)",
+                    after_count, edit_us, diag_us
+                );
+                eprintln!(
+                    "  Structural stable: {} (before: {}, after: {})",
                     if structural_stable { "YES" } else { "NO" },
-                    structural_before.len(), structural_after.len());
+                    structural_before.len(),
+                    structural_after.len()
+                );
 
                 if !structural_stable {
                     eprintln!("  WARNING: body-only edit changed structural diagnostics");
@@ -739,12 +748,24 @@ fn benchmark_incremental_diagnostics() {
         match after {
             Ok(after_diags) => {
                 let after_count = after_diags.len();
-                eprintln!("  After sig edit: {} diagnostics (edit: {} us, diag: {} us)", after_count, edit_us, diag_us);
+                eprintln!(
+                    "  After sig edit: {} diagnostics (edit: {} us, diag: {} us)",
+                    after_count, edit_us, diag_us
+                );
                 // Adding a well-typed function should not increase error count
                 // (it may add unused-variable warnings at most)
-                let errors_before = baseline.iter().filter(|d| d.severity == ide_diagnostics::Severity::Error).count();
-                let errors_after = after_diags.iter().filter(|d| d.severity == ide_diagnostics::Severity::Error).count();
-                eprintln!("  Error count: before={}, after={} (should be equal or fewer)", errors_before, errors_after);
+                let errors_before = baseline
+                    .iter()
+                    .filter(|d| d.severity == ide_diagnostics::Severity::Error)
+                    .count();
+                let errors_after = after_diags
+                    .iter()
+                    .filter(|d| d.severity == ide_diagnostics::Severity::Error)
+                    .count();
+                eprintln!(
+                    "  Error count: before={}, after={} (should be equal or fewer)",
+                    errors_before, errors_after
+                );
             }
             Err(_) => {
                 eprintln!("  CRASH: diagnostics panicked after signature edit!");
@@ -759,7 +780,6 @@ fn benchmark_incremental_diagnostics() {
 
     eprintln!("=== Done ===");
 }
-
 
 /// Pick a medium-sized file suitable for highlighting/completion benchmarks.
 /// Prefers files with 100-400 lines that contain function definitions.
@@ -875,7 +895,6 @@ fn benchmark_highlighting() {
 
     eprintln!("=== Highlighting Done ===");
 }
-
 
 #[test]
 fn benchmark_completion() {

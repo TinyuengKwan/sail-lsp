@@ -19,11 +19,7 @@ pub(crate) trait AlignedItem {
 
     /// Rewrite just the prefix (text before the alignment separator).
     /// Used to measure maximum prefix width.
-    fn rewrite_prefix(
-        &self,
-        context: &RewriteContext<'_>,
-        shape: Shape,
-    ) -> RewriteResult;
+    fn rewrite_prefix(&self, context: &RewriteContext<'_>, shape: Shape) -> RewriteResult;
 
     /// Rewrite the full item, padding the prefix to `prefix_max_width`.
     fn rewrite_aligned_item(
@@ -156,9 +152,9 @@ pub(crate) fn group_aligned_items<T: AlignedItem>(items: &[T]) -> Vec<&[T]> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::snippet::SnippetProvider;
     use super::*;
     use ide_db::ide_types::FormatOptions;
-    use super::super::snippet::SnippetProvider;
 
     /// Test helper: a simple aligned item with known prefix and suffix.
     struct TestField {
@@ -168,13 +164,20 @@ mod tests {
     }
 
     impl AlignedItem for TestField {
-        fn skip(&self) -> bool { false }
-        fn get_range(&self) -> TextRange { self.range }
+        fn skip(&self) -> bool {
+            false
+        }
+        fn get_range(&self) -> TextRange {
+            self.range
+        }
         fn rewrite_prefix(&self, _ctx: &RewriteContext<'_>, _shape: Shape) -> RewriteResult {
             Ok(self.prefix.clone())
         }
         fn rewrite_aligned_item(
-            &self, _ctx: &RewriteContext<'_>, _shape: Shape, prefix_max_width: usize,
+            &self,
+            _ctx: &RewriteContext<'_>,
+            _shape: Shape,
+            prefix_max_width: usize,
         ) -> RewriteResult {
             let padding = prefix_max_width.saturating_sub(self.prefix.len());
             Ok(format!("{}{} : {}", self.prefix, " ".repeat(padding), self.suffix))
@@ -191,11 +194,13 @@ mod tests {
 
         let items = vec![
             TestField {
-                prefix: "x".into(), suffix: "int".into(),
+                prefix: "x".into(),
+                suffix: "int".into(),
                 range: base_db::text_range(0, 8),
             },
             TestField {
-                prefix: "y_offset".into(), suffix: "bits(32)".into(),
+                prefix: "y_offset".into(),
+                suffix: "bits(32)".into(),
                 range: base_db::text_range(9, 28),
             },
         ];

@@ -389,10 +389,8 @@ pub fn semantic_diagnostics(
             }
 
             // 2c. TypeMismatch cooking.
-            any_diags.extend(AnyDiagnostic::from_type_mismatches(
-                &tcr.0.type_mismatches,
-                source_map,
-            ));
+            any_diags
+                .extend(AnyDiagnostic::from_type_mismatches(&tcr.0.type_mismatches, source_map));
         }
     }
 

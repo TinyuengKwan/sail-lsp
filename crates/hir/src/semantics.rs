@@ -297,10 +297,7 @@ impl<'db> Semantics<'db> {
         let resolution = sa.as_ref().and_then(|sa| sa.resolve_path(db, name));
 
         if is_call {
-            return Some(crate::NameRefKind::Call {
-                callee_name: name.to_string(),
-                resolution,
-            });
+            return Some(crate::NameRefKind::Call { callee_name: name.to_string(), resolution });
         }
 
         match resolution {
@@ -357,7 +354,8 @@ impl<'db> Semantics<'db> {
         &self,
         file_text: FileText,
         offset: usize,
-    ) -> Option<either::Either<hir_def::ModuleDefId, (hir_def::item_id::FunctionId, base_db::FileId)>> {
+    ) -> Option<either::Either<hir_def::ModuleDefId, (hir_def::item_id::FunctionId, base_db::FileId)>>
+    {
         let sa = self.imp.analyze(file_text, offset, true)?;
         let expr_id = sa.expr_id(offset)?;
         sa.resolve_field_or_method(expr_id)
@@ -368,11 +366,7 @@ impl<'db> Semantics<'db> {
     /// wraps the same call through a public API on Semantics so that
     /// external crates (ide-completion) can access it without reaching
     /// into `pub(crate)` internals.
-    pub fn names_in_scope(
-        &self,
-        file_text: FileText,
-        offset: usize,
-    ) -> Vec<hir_def::Name> {
+    pub fn names_in_scope(&self, file_text: FileText, offset: usize) -> Vec<hir_def::Name> {
         let sa = match self.imp.analyze(file_text, offset, false) {
             Some(sa) => sa,
             None => return Vec::new(),

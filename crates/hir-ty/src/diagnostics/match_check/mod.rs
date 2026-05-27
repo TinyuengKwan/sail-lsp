@@ -201,7 +201,6 @@ pub struct UsefulnessReport {
     pub redundant: Vec<Span>,
 }
 
-
 /// Lower a `Pat` from a Body arena to a `MatchPat`. Walks `Pat` children
 /// arena-native equivalent of `lower_pattern` — walks `Pat` children
 /// via `PatId` lookups in the Body instead of `core_ast::Pattern` Box
@@ -302,7 +301,6 @@ where
         (self)(name)
     }
 }
-
 
 /// Lower match arms from Expr's arena-native MatchArm representation.
 /// Uses `lower_pattern_hir` (Body arena) instead of `lower_pattern` (core_ast).
@@ -461,7 +459,6 @@ impl<'a> Cx for EnvCx<'a> {
         }
     }
 }
-
 
 /// Maximum bitvector width for exhaustive enumeration. For widths up to
 /// this limit we can enumerate all 2^N values and find a concrete missing

@@ -7,8 +7,8 @@
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
 
 use dashmap::DashMap;
 use rustc_hash::FxHasher;
@@ -81,7 +81,6 @@ pub use ::vfs::file_set::{FileSet, FileSetConfig, FileSetConfigBuilder};
 
 /// Anchored path for relative file resolution.
 pub use ::vfs::{AnchoredPath, AnchoredPathBuf};
-
 
 /// Salsa input: the source text for a single file.
 #[salsa::input(debug)]
@@ -518,5 +517,4 @@ mod tests {
         change2.apply(&mut db);
         assert_eq!(db.files.file_text(id0).unwrap().text(&db).as_ref(), "val x : bool\n");
     }
-
 }

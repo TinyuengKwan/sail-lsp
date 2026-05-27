@@ -130,10 +130,7 @@ pub(super) fn check_le(a: &NumericExpr, b: &NumericExpr) -> Option<bool> {
         return Some(true);
     }
     // Simplify b - a; if result >= 0, then a <= b.
-    let diff = simplify(&NumericExpr::Sub(
-        Box::new(b.clone()),
-        Box::new(a.clone()),
-    ));
+    let diff = simplify(&NumericExpr::Sub(Box::new(b.clone()), Box::new(a.clone())));
     match &diff {
         NumericExpr::Const(n) => return Some(*n >= 0),
         // Var('n) where we know nothing → undecidable.
@@ -156,8 +153,7 @@ pub(super) fn check_eq(a: &NumericExpr, b: &NumericExpr) -> Option<bool> {
     if a == b {
         return Some(true);
     }
-    let diff =
-        simplify(&NumericExpr::Sub(Box::new(a.clone()), Box::new(b.clone())));
+    let diff = simplify(&NumericExpr::Sub(Box::new(a.clone()), Box::new(b.clone())));
     match diff {
         NumericExpr::Const(0) => Some(true),
         NumericExpr::Const(_) => Some(false),

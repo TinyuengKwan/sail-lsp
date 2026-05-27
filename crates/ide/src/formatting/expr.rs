@@ -3,16 +3,14 @@
 //! Implements Rewrite-style formatting for Sail expression nodes
 //! using CST node ranges for precise source extraction.
 
-
 use parser::SyntaxKind as SK;
 use syntax::SyntaxNode;
 
 use super::rewrite::RewriteContext;
 use super::shape::Shape;
 use super::snippet::SnippetProvider;
-use super::vertical::{AlignedItem, rewrite_with_alignment};
+use super::vertical::{rewrite_with_alignment, AlignedItem};
 use ide_db::line_index::TextRange;
-
 
 /// A match arm parsed from CST or text: `pattern => body`.
 #[allow(dead_code)] // Activated when visitor computes inner shape for nested match.
@@ -111,12 +109,7 @@ pub(crate) fn extract_match_arms(
             let suffix = trimmed[arrow_pos + 2..].trim_start().to_string();
             // Strip trailing comma from suffix
             let suffix = suffix.strip_suffix(',').unwrap_or(&suffix).trim_end().to_string();
-            arms.push(MatchArmItem {
-                prefix,
-                suffix,
-                range: line_range,
-                is_comment: false,
-            });
+            arms.push(MatchArmItem { prefix, suffix, range: line_range, is_comment: false });
         } else {
             // Non-arm line (e.g., continuation) — preserve verbatim
             arms.push(MatchArmItem {
@@ -186,7 +179,6 @@ pub(crate) fn rewrite_match_expr(
 
     Some(format!("{header}\n{aligned}\n{close_brace}{trailer}"))
 }
-
 
 /// Rewrite an IF_EXPR with aligned then/else.
 ///
@@ -259,7 +251,6 @@ pub(crate) fn rewrite_if_expr(
     Some(result.join("\n"))
 }
 
-
 /// Normalize operator spacing in a BIN_EXPR node.
 ///
 /// Ensures single space around binary operators: `&`, `|`, `^`,
@@ -275,9 +266,18 @@ pub(crate) fn normalize_binexpr_spacing(
     for child in node.children_with_tokens() {
         match child.kind() {
             // Binary operators that need spacing
-            SK::AMP | SK::PIPE | SK::CARET
-            | SK::EQ_EQ | SK::NEQ | SK::GE | SK::LE
-            | SK::PLUS | SK::MINUS | SK::STAR | SK::SLASH | SK::PERCENT => {
+            SK::AMP
+            | SK::PIPE
+            | SK::CARET
+            | SK::EQ_EQ
+            | SK::NEQ
+            | SK::GE
+            | SK::LE
+            | SK::PLUS
+            | SK::MINUS
+            | SK::STAR
+            | SK::SLASH
+            | SK::PERCENT => {
                 let op_text = child.as_token().map(|t| t.text().to_string()).unwrap_or_default();
                 // Ensure space before and after
                 if let Some(last) = parts.last_mut() {
@@ -325,8 +325,6 @@ pub(crate) fn normalize_binexpr_spacing(
         None
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {

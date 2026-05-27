@@ -203,7 +203,6 @@ impl Analysis {
 }
 
 impl Analysis {
-
     /// Get a SalsaFile by FileId.: Analysis methods take FileId.
     pub fn file_by_id(&self, id: FileId) -> Option<SalsaFile<'_>> {
         let ft = self.files.file_text(id)?;

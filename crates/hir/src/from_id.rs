@@ -43,12 +43,7 @@ macro_rules! from_module_def {
     )*}
 }
 
-from_module_def![
-    (Function, Function),
-    (Adt, TypeDef),
-    (Register, Register),
-    (Mapping, Mapping),
-];
+from_module_def![(Function, Function), (Adt, TypeDef), (Register, Register), (Mapping, Mapping),];
 
 impl ModuleDef {
     /// Construct a `ModuleDef` from a `DefLocation` and `ItemKind`.

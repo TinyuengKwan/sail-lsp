@@ -11,7 +11,6 @@ use super::constraint;
 use super::{Obligation, Ty, TyArg, TyKind};
 use crate::ty::{ConstraintExpr, NumericExpr};
 
-
 /// ena type variable key. Wraps InferTy's u32 ID.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TyVarKey(pub u32);
@@ -51,7 +50,10 @@ impl UnifyValue for TyVarValue {
             // unify_values because bind() checks equality first.
             // If this fires, a code path bypassed bind().
             (TyVarValue::Known(_), TyVarValue::Known(_)) => {
-                debug_assert!(false, "unify_values called with two Known values — bind() should have caught this");
+                debug_assert!(
+                    false,
+                    "unify_values called with two Known values — bind() should have caught this"
+                );
                 Ok(v1.clone())
             }
             (TyVarValue::Known(_), TyVarValue::Unknown) => Ok(v1.clone()),
@@ -61,7 +63,6 @@ impl UnifyValue for TyVarValue {
     }
 }
 
-
 /// Manages inference variables during type inference.
 #[derive(Debug)]
 pub struct InferenceTable {
@@ -69,8 +70,7 @@ pub struct InferenceTable {
     pub(super) var_count: u32,
     pending_obligations: Vec<Obligation>,
     type_aliases: HashMap<String, Ty>,
-    alias_schemes:
-        HashMap<String, std::sync::Arc<super::env::AliasScheme>>,
+    alias_schemes: HashMap<String, std::sync::Arc<super::env::AliasScheme>>,
     /// Freshened placeholder names → InferTy ids for deep_resolve.
     placeholder_to_infer: HashMap<String, u32>,
 }
@@ -107,7 +107,10 @@ impl InferenceTable {
     }
 
     /// Look up an alias scheme by name (excludes config-dependent aliases).
-    pub(super) fn alias_scheme(&self, name: &str) -> Option<std::sync::Arc<super::env::AliasScheme>> {
+    pub(super) fn alias_scheme(
+        &self,
+        name: &str,
+    ) -> Option<std::sync::Arc<super::env::AliasScheme>> {
         let sch = self.alias_schemes.get(name)?.clone();
         if sch.config_dependent {
             return None;
@@ -178,43 +181,36 @@ impl InferenceTable {
             TyKind::Param(_) => self.new_type_var(),
             // Scalar types with constraint args: strip args.
             // bool(not('p)) → bool, int('n) → int, atom(N) → int, range(lo,hi) → int
-            TyKind::App { name, .. }
-                if name == "bool" || name == "atom_bool" =>
-            {
+            TyKind::App { name, .. } if name == "bool" || name == "atom_bool" => {
                 Ty::scalar(Scalar::Bool)
             }
             // atom(N), range(lo,hi): these contain numeric constraints
             // from the callee's scope. Replace with fresh var — the
             // caller's context will determine the actual type.
-            TyKind::App { name, .. }
-                if name == "atom" || name == "range" =>
-            {
-                self.new_type_var()
-            }
+            TyKind::App { name, .. } if name == "atom" || name == "range" => self.new_type_var(),
             // int(constraint), nat(constraint): strip constraint, keep base
-            TyKind::App { name, .. }
-                if name == "int" || name == "nat" =>
-            {
-                Ty::named(name.clone())
-            }
+            TyKind::App { name, .. } if name == "int" || name == "nat" => Ty::named(name.clone()),
             TyKind::App { name, args, text } => {
                 // Structural types (bits, vector, etc.): recurse into args
-                let new_args: Vec<crate::ty::TyArg> = args.iter().map(|a| match a {
-                    crate::ty::TyArg::Type(t) => crate::ty::TyArg::Type(self.insert_type_vars(t)),
-                    // Value args containing param refs: replace with fresh var
-                    crate::ty::TyArg::Value(s) if s.contains('\'') => {
-                        crate::ty::TyArg::Type(self.new_type_var())
-                    }
-                    other => other.clone(),
-                }).collect();
+                let new_args: Vec<crate::ty::TyArg> = args
+                    .iter()
+                    .map(|a| match a {
+                        crate::ty::TyArg::Type(t) => {
+                            crate::ty::TyArg::Type(self.insert_type_vars(t))
+                        }
+                        // Value args containing param refs: replace with fresh var
+                        crate::ty::TyArg::Value(s) if s.contains('\'') => {
+                            crate::ty::TyArg::Type(self.new_type_var())
+                        }
+                        other => other.clone(),
+                    })
+                    .collect();
                 Ty::app(name.clone(), new_args, text.clone())
             }
             TyKind::Tuple(items) => {
                 Ty::tuple(items.iter().map(|t| self.insert_type_vars(t)).collect())
             }
-            TyKind::Exist { inner, .. } => {
-                self.insert_type_vars(inner)
-            }
+            TyKind::Exist { inner, .. } => self.insert_type_vars(inner),
             _ => ty.clone(),
         }
     }
@@ -413,8 +409,7 @@ impl InferenceTable {
             TyKind::Bidir { lhs, rhs } => {
                 let lhs = lhs.clone();
                 let rhs = rhs.clone();
-                self.ty_contains_infer_var(&lhs, var_id)
-                    || self.ty_contains_infer_var(&rhs, var_id)
+                self.ty_contains_infer_var(&lhs, var_id) || self.ty_contains_infer_var(&rhs, var_id)
             }
             _ => false,
         }
@@ -437,7 +432,10 @@ impl InferenceTable {
         // Same inference variable on both sides → trivially equal
         match (t1.kind(), t2.kind()) {
             (TyKind::Infer(crate::ty::InferTy(a)), TyKind::Infer(crate::ty::InferTy(b)))
-                if a == b => return true,
+                if a == b =>
+            {
+                return true
+            }
             _ => {}
         }
 
@@ -500,13 +498,25 @@ impl InferenceTable {
                 // Try expanding t1 (local alias map first)
                 let t1_exp = if t1_name.is_some() {
                     let exp = self.normalize_alias_ty(&t1);
-                    if exp != t1 { Some(exp) } else { None }
-                } else { None };
+                    if exp != t1 {
+                        Some(exp)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
                 // Try expanding t2 (local alias map first)
                 let t2_exp = if t2_name.is_some() {
                     let exp = self.normalize_alias_ty(&t2);
-                    if exp != t2 { Some(exp) } else { None }
-                } else { None };
+                    if exp != t2 {
+                        Some(exp)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
                 // Cross-file alias expansion via db is deferred to
                 // apply_to (safe aliases only). See workspace.rs.
                 // Re-try unification with expanded forms
@@ -610,9 +620,7 @@ impl InferenceTable {
                 let text = super::numeric::app_text(name, &new_args);
                 Ty::app(name, new_args, text)
             }
-            TyKind::Tuple(items) => {
-                Ty::tuple(items.iter().map(|t| self.deep_resolve(t)).collect())
-            }
+            TyKind::Tuple(items) => Ty::tuple(items.iter().map(|t| self.deep_resolve(t)).collect()),
             TyKind::FnPtr(crate::ty::FnSig { params, ret }) => Ty::function(
                 params.iter().map(|p| self.deep_resolve(p)).collect(),
                 self.deep_resolve(ret),
@@ -620,9 +628,7 @@ impl InferenceTable {
             TyKind::Exist { vars, constraint, inner } => {
                 Ty::exist(vars.clone(), constraint.clone(), self.deep_resolve(inner))
             }
-            TyKind::Bidir { lhs, rhs } => {
-                Ty::bidir(self.deep_resolve(lhs), self.deep_resolve(rhs))
-            }
+            TyKind::Bidir { lhs, rhs } => Ty::bidir(self.deep_resolve(lhs), self.deep_resolve(rhs)),
             TyKind::Abstract { .. } => resolved,
         }
     }
@@ -721,7 +727,13 @@ impl InferenceTable {
             if ok && !vars.is_empty() {
                 use super::existential;
                 let mut table = super::InferenceTable::default();
-                match existential::extract_witnesses(&vars, &constraint, &inner, expected, &mut table) {
+                match existential::extract_witnesses(
+                    &vars,
+                    &constraint,
+                    &inner,
+                    expected,
+                    &mut table,
+                ) {
                     existential::WitnessResult::ConstraintViolation { .. } => {
                         return false;
                     }
@@ -789,7 +801,8 @@ impl InferenceTable {
                         return false;
                     }
                 }
-                if constraint::is_numeric_text(expected) && constraint::is_numeric_scalar_ty(actual) {
+                if constraint::is_numeric_text(expected) && constraint::is_numeric_scalar_ty(actual)
+                {
                     return true;
                 }
                 if expected == "bit" {
@@ -829,10 +842,9 @@ impl InferenceTable {
             },
             TyKind::FnPtr(crate::ty::FnSig { params: expected_params, ret: expected_ret }) => {
                 match actual.kind() {
-                    TyKind::FnPtr(crate::ty::FnSig {
-                        params: actual_params,
-                        ret: actual_ret,
-                    }) if expected_params.len() == actual_params.len() => {
+                    TyKind::FnPtr(crate::ty::FnSig { params: actual_params, ret: actual_ret })
+                        if expected_params.len() == actual_params.len() =>
+                    {
                         let expected_ret = expected_ret.clone();
                         let actual_ret = actual_ret.clone();
                         let pairs: Vec<_> = expected_params
@@ -884,7 +896,11 @@ impl InferenceTable {
                         if a_name == "vector" {
                             let actual_n = a_args.first().and_then(|a| a.as_value_str());
                             let elem = a_args.get(1).and_then(|a| {
-                                if let TyArg::Type(t) = a { Some(t.clone()) } else { None }
+                                if let TyArg::Type(t) = a {
+                                    Some(t.clone())
+                                } else {
+                                    None
+                                }
                             });
                             if let (Some(actual_n), Some(elem)) = (actual_n, elem) {
                                 if matches!(elem.kind(), TyKind::Scalar(crate::ty::Scalar::Bit)) {
@@ -904,7 +920,9 @@ impl InferenceTable {
                 }
                 if expected_name == "vector" {
                     if let Some(actual_n) = constraint::bits_width(actual) {
-                        if let Some(expected_n) = expected_args.first().and_then(|a| a.as_value_str()) {
+                        if let Some(expected_n) =
+                            expected_args.first().and_then(|a| a.as_value_str())
+                        {
                             if let Some(TyArg::Type(elem)) = expected_args.get(1) {
                                 if matches!(elem.kind(), TyKind::Scalar(crate::ty::Scalar::Bit)) {
                                     let en = super::normalized_value_text(&expected_n);
@@ -947,11 +965,8 @@ impl InferenceTable {
                             let a_args = a_args.clone();
                             if let Some(sch) = self.alias_scheme(&a_name) {
                                 if let Some(expanded) = sch.substitute(&a_args) {
-                                    let expected_ty = Ty::app(
-                                        expected_name.clone(),
-                                        expected_args.clone(),
-                                        "",
-                                    );
+                                    let expected_ty =
+                                        Ty::app(expected_name.clone(), expected_args.clone(), "");
                                     if self.unify_structural(&expected_ty, &expanded, depth + 1) {
                                         return true;
                                     }
@@ -971,7 +986,13 @@ impl InferenceTable {
                 if ok && !vars.is_empty() {
                     use super::existential;
                     let mut table = super::InferenceTable::default();
-                    match existential::extract_witnesses(&vars, &constraint, &inner, actual, &mut table) {
+                    match existential::extract_witnesses(
+                        &vars,
+                        &constraint,
+                        &inner,
+                        actual,
+                        &mut table,
+                    ) {
                         existential::WitnessResult::ConstraintViolation { .. } => {
                             return false;
                         }
@@ -1009,9 +1030,7 @@ impl InferenceTable {
                 let s2 = b.as_value_str();
                 match (s1, s2) {
                     (Some(v1), Some(v2)) => {
-                        if super::normalized_value_text(&v1)
-                            == super::normalized_value_text(&v2)
-                        {
+                        if super::normalized_value_text(&v1) == super::normalized_value_text(&v2) {
                             return true;
                         }
                         // If either contains a type variable (apostrophe prefix),

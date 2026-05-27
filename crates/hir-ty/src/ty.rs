@@ -136,8 +136,16 @@ impl Ty {
                 // Primitive types that are definitely NOT bitvectors.
                 !matches!(
                     name.as_str(),
-                    "int" | "nat" | "bool" | "string" | "unit" | "real"
-                        | "option" | "list" | "vector" | "result"
+                    "int"
+                        | "nat"
+                        | "bool"
+                        | "string"
+                        | "unit"
+                        | "real"
+                        | "option"
+                        | "list"
+                        | "vector"
+                        | "result"
                 )
             }
             _ => false,
@@ -223,7 +231,7 @@ pub enum TyArg {
     Type(Ty),
     /// Structured numeric argument (parsed from a string).
     Nexp(NumericExpr),
-    /// Fallback for unparseable numeric strings (complex expressions).
+    /// Fallback for unparsable numeric strings (complex expressions).
     Value(String),
 }
 
@@ -265,13 +273,23 @@ pub enum Kind {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ConstraintExpr {
     Bool(bool),
-    Compare { lhs: NumericExpr, op: CompareOp, rhs: NumericExpr },
-    InSet { value: NumericExpr, items: Vec<NumericExpr> },
+    Compare {
+        lhs: NumericExpr,
+        op: CompareOp,
+        rhs: NumericExpr,
+    },
+    InSet {
+        value: NumericExpr,
+        items: Vec<NumericExpr>,
+    },
     And(Vec<ConstraintExpr>),
     Or(Vec<ConstraintExpr>),
     Not(Box<ConstraintExpr>),
     /// NC_app: general constraint function application (e.g. `app(arg1, arg2)`).
-    App { name: String, args: Vec<ConstraintExpr> },
+    App {
+        name: String,
+        args: Vec<ConstraintExpr>,
+    },
     /// NC_var: a boolean-kinded type variable (e.g. `'p` where `'p : Bool`).
     BoolVar(String),
     Unsupported,
@@ -342,7 +360,10 @@ pub enum NumericExpr {
     /// Exponentiation: `2^n`. Base is always 2 (Sail convention).
     Exp(Box<NumericExpr>),
     /// Function application in type-level arithmetic: `div('n, 8)`, `mod('n, 4)`.
-    App { name: String, args: Vec<NumericExpr> },
+    App {
+        name: String,
+        args: Vec<NumericExpr>,
+    },
     /// Type-level if-then-else.
     If {
         cond: Box<ConstraintExpr>,
