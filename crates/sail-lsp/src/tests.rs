@@ -1180,6 +1180,7 @@ fn returns_linked_editing_ranges_for_identifier() {
 }
 
 #[test]
+#[cfg(unix)] // Uses file:///tmp/ URI which doesn't resolve to an absolute path on Windows
 fn extracts_document_links() {
     let uri = Url::parse("file:///tmp/main.sail").unwrap();
     let source = "let a = \"sub/module.sail\"\n// see https://example.com/spec\n";

@@ -1,53 +1,94 @@
-//! VfsPath — abstract path type for the VFS.
+//! Abstract-ish representation of paths for VFS.
 //!
-//! We keep the single-variant representation since Sail has no virtual/in-memory files,
-//! but align the public API signatures (as_path -> Option, strip_prefix, etc.).
+//! ALIGN(ra): Supports both real filesystem paths (`AbsPathBuf`) and
+//! virtual in-memory paths (`VirtualPath`). Virtual paths are platform-
+//! independent and primarily used in tests to avoid Windows/Linux differences.
+
+use std::fmt;
 
 use paths::{AbsPath, AbsPathBuf, RelPath};
 
-/// Path type for the VFS.
+/// Path in [`Vfs`].
 ///
-/// The public API is aligned: `as_path()` returns `Option` (always `Some` for us),
-/// `strip_prefix` is available, `encode` is `pub(crate)`.
+/// Long-term, we want to support files which do not reside in the file-system,
+/// so we treat `VfsPath`s as opaque identifiers.
+///
+/// [`Vfs`]: crate::Vfs
 #[derive(Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
-pub struct VfsPath(AbsPathBuf);
+pub struct VfsPath(VfsPathRepr);
 
 impl VfsPath {
-    pub fn new(path: AbsPathBuf) -> Self {
-        VfsPath(path)
+    /// Creates an "in-memory" path from `/`-separated string.
+    ///
+    /// This is most useful for testing, to avoid windows/linux differences.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `path` does not start with `'/'`.
+    pub fn new_virtual_path(path: String) -> VfsPath {
+        assert!(path.starts_with('/'));
+        VfsPath(VfsPathRepr::VirtualPath(VirtualPath(path)))
     }
 
-    // TODO(align): ra has `new_virtual_path(path: String) -> VfsPath` for in-memory test paths.
-    // Sail doesn't need virtual paths; add if test infrastructure requires it.
+    /// Create a VfsPath from an `AbsPathBuf`.
+    pub fn new(path: AbsPathBuf) -> Self {
+        VfsPath(VfsPathRepr::PathBuf(path))
+    }
 
-    // TODO(align): ra has `new_real_path(path: String) -> VfsPath` convenience constructor.
-
-    /// For sail-lsp this is always `Some` since we only have real paths.
+    /// Returns the `AbsPath` representation of `self` if `self` is on the file system.
     pub fn as_path(&self) -> Option<&AbsPath> {
-        Some(&self.0)
+        match &self.0 {
+            VfsPathRepr::PathBuf(it) => Some(it.as_path()),
+            VfsPathRepr::VirtualPath(_) => None,
+        }
     }
 
     pub fn into_abs_path(self) -> Option<AbsPathBuf> {
-        Some(self.0)
+        match self.0 {
+            VfsPathRepr::PathBuf(it) => Some(it),
+            VfsPathRepr::VirtualPath(_) => None,
+        }
     }
 
-    /// Join a relative path onto this VfsPath.
+    /// Creates a new `VfsPath` with `path` adjoined to `self`.
     pub fn join(&self, path: &str) -> Option<VfsPath> {
-        Some(VfsPath(self.0.join(path)))
+        match &self.0 {
+            VfsPathRepr::PathBuf(it) => {
+                let res = it.join(path).normalize();
+                Some(VfsPath(VfsPathRepr::PathBuf(res)))
+            }
+            VfsPathRepr::VirtualPath(it) => {
+                let res = it.join(path)?;
+                Some(VfsPath(VfsPathRepr::VirtualPath(res)))
+            }
+        }
     }
 
-    /// Remove the last component of this path, returning true if successful.
+    /// Remove the last component of `self` if there is one.
+    ///
+    /// If `self` has no component, returns `false`; else returns `true`.
     pub fn pop(&mut self) -> bool {
-        self.0.pop()
+        match &mut self.0 {
+            VfsPathRepr::PathBuf(it) => it.pop(),
+            VfsPathRepr::VirtualPath(it) => it.pop(),
+        }
     }
 
     /// Check if this path starts with the given prefix.
     pub fn starts_with(&self, other: &VfsPath) -> bool {
-        self.0.starts_with(&other.0)
+        match (&self.0, &other.0) {
+            (VfsPathRepr::PathBuf(lhs), VfsPathRepr::PathBuf(rhs)) => lhs.starts_with(rhs),
+            (VfsPathRepr::VirtualPath(lhs), VfsPathRepr::VirtualPath(rhs)) => lhs.starts_with(rhs),
+            (VfsPathRepr::PathBuf(_) | VfsPathRepr::VirtualPath(_), _) => false,
+        }
     }
 
     pub fn strip_prefix(&self, other: &VfsPath) -> Option<&RelPath> {
-        self.0.strip_prefix(&other.0)
+        match (&self.0, &other.0) {
+            (VfsPathRepr::PathBuf(lhs), VfsPathRepr::PathBuf(rhs)) => lhs.strip_prefix(rhs),
+            (VfsPathRepr::VirtualPath(lhs), VfsPathRepr::VirtualPath(rhs)) => lhs.strip_prefix(rhs),
+            (VfsPathRepr::PathBuf(_) | VfsPathRepr::VirtualPath(_), _) => None,
+        }
     }
 
     /// Returns the `VfsPath` without its final component, if there is one.
@@ -62,54 +103,148 @@ impl VfsPath {
 
     /// Returns `self`'s base name and file extension.
     pub fn name_and_extension(&self) -> Option<(&str, Option<&str>)> {
-        self.0.name_and_extension()
+        match &self.0 {
+            VfsPathRepr::PathBuf(p) => p.name_and_extension(),
+            VfsPathRepr::VirtualPath(p) => p.name_and_extension(),
+        }
     }
 
     /// Encode the path into the given buffer (for prefix matching).
-    #[allow(dead_code)] // kept for API alignment with ra
     pub(crate) fn encode(&self, buf: &mut Vec<u8>) {
-        buf.push(0); // tag: real path (ra tag 0 = PathBuf, 1 = VirtualPath)
-        #[cfg(unix)]
-        {
-            use std::os::unix::ffi::OsStrExt;
-            buf.extend(self.0.as_os_str().as_bytes());
-        }
-        #[cfg(not(unix))]
-        {
-            // TODO(align): ra uses UTF-16 LE wide char encoding on Windows
-            // for case/separator-agnostic FST keys.
-            buf.extend(self.0.as_os_str().to_string_lossy().as_bytes());
+        let tag = match &self.0 {
+            VfsPathRepr::PathBuf(_) => 0,
+            VfsPathRepr::VirtualPath(_) => 1,
+        };
+        buf.push(tag);
+        match &self.0 {
+            VfsPathRepr::PathBuf(path) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::ffi::OsStrExt;
+                    buf.extend(path.as_os_str().as_bytes());
+                }
+                #[cfg(not(unix))]
+                {
+                    buf.extend(path.as_os_str().to_string_lossy().as_bytes());
+                }
+            }
+            VfsPathRepr::VirtualPath(VirtualPath(s)) => buf.extend(s.as_bytes()),
         }
     }
 }
 
+/// Internal, private representation of [`VfsPath`].
+#[derive(Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
+enum VfsPathRepr {
+    PathBuf(AbsPathBuf),
+    VirtualPath(VirtualPath),
+}
+
 impl From<AbsPathBuf> for VfsPath {
     fn from(path: AbsPathBuf) -> Self {
-        VfsPath(path.normalize())
+        VfsPath(VfsPathRepr::PathBuf(path.normalize()))
+    }
+}
+
+impl fmt::Display for VfsPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.0 {
+            VfsPathRepr::PathBuf(it) => it.fmt(f),
+            VfsPathRepr::VirtualPath(VirtualPath(it)) => it.fmt(f),
+        }
+    }
+}
+
+impl fmt::Debug for VfsPath {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.0, f)
+    }
+}
+
+impl fmt::Debug for VfsPathRepr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self {
+            VfsPathRepr::PathBuf(it) => it.fmt(f),
+            VfsPathRepr::VirtualPath(VirtualPath(it)) => it.fmt(f),
+        }
     }
 }
 
 impl PartialEq<AbsPath> for VfsPath {
     fn eq(&self, other: &AbsPath) -> bool {
-        self.0.as_path() == other
+        match &self.0 {
+            VfsPathRepr::PathBuf(lhs) => lhs == other,
+            VfsPathRepr::VirtualPath(_) => false,
+        }
     }
 }
 
 impl PartialEq<VfsPath> for AbsPath {
     fn eq(&self, other: &VfsPath) -> bool {
-        self == other.0.as_path()
+        other == self
     }
 }
 
-impl std::fmt::Debug for VfsPath {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Debug::fmt(&self.0, f)
-    }
-}
+/// `/`-separated virtual path.
+///
+/// This is used to describe files that do not reside on the file system.
+#[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
+struct VirtualPath(String);
 
-impl std::fmt::Display for VfsPath {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(&self.0, f)
+impl VirtualPath {
+    fn starts_with(&self, other: &VirtualPath) -> bool {
+        self.0.starts_with(&other.0)
+    }
+
+    fn strip_prefix(&self, base: &VirtualPath) -> Option<&RelPath> {
+        <_ as AsRef<paths::Utf8Path>>::as_ref(&self.0)
+            .strip_prefix(&base.0)
+            .ok()
+            .map(RelPath::new_unchecked)
+    }
+
+    fn pop(&mut self) -> bool {
+        let pos = match self.0.rfind('/') {
+            Some(pos) => pos,
+            None => return false,
+        };
+        self.0 = self.0[..pos].to_string();
+        true
+    }
+
+    fn join(&self, mut path: &str) -> Option<VirtualPath> {
+        let mut res = self.clone();
+        while path.starts_with("../") {
+            if !res.pop() {
+                return None;
+            }
+            path = &path["../".len()..];
+        }
+        path = path.trim_start_matches("./");
+        res.0 = format!("{}/{path}", res.0);
+        Some(res)
+    }
+
+    fn name_and_extension(&self) -> Option<(&str, Option<&str>)> {
+        let file_path = if self.0.ends_with('/') { &self.0[..&self.0.len() - 1] } else { &self.0 };
+        let file_name = match file_path.rfind('/') {
+            Some(position) => &file_path[position + 1..],
+            None => file_path,
+        };
+
+        if file_name.is_empty() {
+            None
+        } else {
+            let mut file_stem_and_extension = file_name.rsplitn(2, '.');
+            let extension = file_stem_and_extension.next();
+            let file_stem = file_stem_and_extension.next();
+
+            match (file_stem, extension) {
+                (None, None) => None,
+                (None | Some(""), Some(_)) => Some((file_name, None)),
+                (Some(file_stem), extension) => Some((file_stem, extension)),
+            }
+        }
     }
 }
 
@@ -118,43 +253,73 @@ mod tests {
     use super::*;
 
     #[test]
-    fn encode_produces_tagged_bytes() {
-        let path = VfsPath::new(AbsPathBuf::assert_utf8("/tmp/test.sail".into()));
-        let mut buf = Vec::new();
-        path.encode(&mut buf);
-        // First byte is the tag (0 = real path).
-        assert_eq!(buf[0], 0);
-        // Remaining bytes are the OS path representation.
-        assert!(buf.len() > 1);
-        assert!(buf[1..].ends_with(b"/tmp/test.sail"));
+    fn virtual_path_basic() {
+        let path = VfsPath::new_virtual_path("/foo/bar.sail".to_string());
+        assert!(path.as_path().is_none());
+        assert_eq!(path.name_and_extension(), Some(("bar", Some("sail"))));
     }
 
     #[test]
-    fn as_path_returns_some() {
-        let path = VfsPath::new(AbsPathBuf::assert_utf8("/tmp/test.sail".into()));
-        assert!(path.as_path().is_some());
+    fn virtual_path_join() {
+        let base = VfsPath::new_virtual_path("/project".to_string());
+        let child = base.join("src/main.sail").unwrap();
+        assert_eq!(format!("{child}"), "/project/src/main.sail");
     }
 
     #[test]
-    fn from_normalizes() {
-        let path = VfsPath::from(AbsPathBuf::assert_utf8("/tmp/../tmp/test.sail".into()));
-        assert_eq!(path.as_path().unwrap().as_str(), "/tmp/test.sail");
+    fn virtual_path_pop() {
+        let mut path = VfsPath::new_virtual_path("/foo/bar".to_string());
+        assert!(path.pop());
+        assert_eq!(format!("{path}"), "/foo");
+        assert!(path.pop());
+        assert_eq!(format!("{path}"), "");
+        assert!(!path.pop());
     }
 
     #[test]
-    fn strip_prefix_works() {
-        let base = VfsPath::new(AbsPathBuf::assert_utf8("/project".into()));
-        let child = VfsPath::new(AbsPathBuf::assert_utf8("/project/src/main.sail".into()));
+    fn virtual_path_strip_prefix() {
+        let base = VfsPath::new_virtual_path("/project".to_string());
+        let child = VfsPath::new_virtual_path("/project/src/main.sail".to_string());
         let rel = child.strip_prefix(&base);
         assert!(rel.is_some());
         assert_eq!(rel.unwrap().as_str(), "src/main.sail");
     }
 
     #[test]
-    fn cross_type_eq() {
-        let vfs = VfsPath::new(AbsPathBuf::assert_utf8("/tmp/test.sail".into()));
-        let abs = AbsPath::assert("/tmp/test.sail".into());
-        assert_eq!(vfs, *abs);
-        assert_eq!(*abs, vfs);
+    fn virtual_path_starts_with() {
+        let base = VfsPath::new_virtual_path("/project".to_string());
+        let child = VfsPath::new_virtual_path("/project/src/main.sail".to_string());
+        assert!(child.starts_with(&base));
+
+        let other = VfsPath::new_virtual_path("/other".to_string());
+        assert!(!child.starts_with(&other));
+    }
+
+    #[test]
+    fn virtual_path_encode() {
+        let path = VfsPath::new_virtual_path("/tmp/test.sail".to_string());
+        let mut buf = Vec::new();
+        path.encode(&mut buf);
+        assert_eq!(buf[0], 1); // tag: virtual
+        assert_eq!(&buf[1..], b"/tmp/test.sail");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn real_path_encode() {
+        let path = VfsPath::new(AbsPathBuf::assert_utf8("/tmp/test.sail".into()));
+        let mut buf = Vec::new();
+        path.encode(&mut buf);
+        assert_eq!(buf[0], 0); // tag: real path
+        assert!(buf.len() > 1);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn cross_type_no_match() {
+        let real = VfsPath::new(AbsPathBuf::assert_utf8("/tmp/test.sail".into()));
+        let virt = VfsPath::new_virtual_path("/tmp/test.sail".to_string());
+        // Different repr => not equal
+        assert_ne!(real, virt);
     }
 }

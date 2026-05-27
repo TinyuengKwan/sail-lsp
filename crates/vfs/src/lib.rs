@@ -125,24 +125,13 @@ pub enum ChangeKind {
 }
 
 /// Virtual file system with content-hash dedup and change tracking.
+#[derive(Default)]
 pub struct Vfs {
     interner: PathInterner,
     data: Vec<FileState>,
     changes: IndexMap<FileId, ChangedFile, BuildHasherDefault<FxHasher>>,
     url_to_file_id: HashMap<url::Url, FileId>,
     file_id_to_url: HashMap<FileId, url::Url>,
-}
-
-impl Default for Vfs {
-    fn default() -> Self {
-        Vfs {
-            interner: PathInterner::default(),
-            data: Vec::new(),
-            changes: IndexMap::default(),
-            url_to_file_id: HashMap::new(),
-            file_id_to_url: HashMap::new(),
-        }
-    }
 }
 
 impl std::fmt::Debug for Vfs {
@@ -300,7 +289,7 @@ mod tests {
     use super::*;
 
     fn make_path(s: &str) -> VfsPath {
-        VfsPath::new(paths::AbsPathBuf::assert(paths::Utf8PathBuf::from(s)))
+        VfsPath::new_virtual_path(s.to_string())
     }
 
     #[test]

@@ -859,7 +859,7 @@ mod tests {
     use super::*;
 
     fn names(p: &ProjectFile) -> Vec<String> {
-        p.files.iter().map(|p| p.to_string_lossy().into_owned()).collect()
+        p.files.iter().map(|p| p.to_string_lossy().replace('\\', "/")).collect()
     }
 
     #[test]

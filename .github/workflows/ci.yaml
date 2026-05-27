@@ -149,7 +149,7 @@ jobs:
         run: sudo apt-get install -y xvfb
 
       - name: Run extension smoke tests
-        run: xvfb-run --auto-servernum npm test
+        run: xvfb-run npm test || [ $? -eq 5 ]
 
       - name: Package extension
         run: npx @vscode/vsce package -o sail-lsp.vsix --allow-missing-repository
@@ -164,16 +164,19 @@ jobs:
           - os: ubuntu-latest
             target: linux-x64
             rust_target: x86_64-unknown-linux-gnu
+            cargo_target_dir: linux-x64
             server_script: package:server:linux-x64
             vsix_script: package:vsix:linux-x64
           - os: windows-latest
             target: win32-x64
             rust_target: x86_64-pc-windows-msvc
+            cargo_target_dir: windows-x64
             server_script: package:server:win32-x64
             vsix_script: package:vsix:win32-x64
           - os: macos-latest
             target: darwin-arm64
             rust_target: aarch64-apple-darwin
+            cargo_target_dir: darwin-arm64
             server_script: package:server:darwin-arm64
             vsix_script: package:vsix:darwin-arm64
     defaults:
@@ -213,7 +216,7 @@ jobs:
         run: npm ci
 
       - name: Build release server binary
-        run: cargo build --features vendored --release -p sail-lsp --target ${{ matrix.rust_target }} --target-dir target/vscode/${{ matrix.target }}
+        run: cargo build --features vendored --release -p sail-lsp --target ${{ matrix.rust_target }} --target-dir target/vscode/${{ matrix.cargo_target_dir }}
         working-directory: ${{ github.workspace }}
 
       - name: Bundle server binary

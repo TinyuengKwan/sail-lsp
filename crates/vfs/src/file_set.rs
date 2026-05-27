@@ -195,7 +195,7 @@ mod tests {
     use super::*;
 
     fn make_path(s: &str) -> VfsPath {
-        VfsPath::new(paths::AbsPathBuf::assert(paths::Utf8PathBuf::from(s)))
+        VfsPath::new_virtual_path(s.to_string())
     }
 
     #[test]
