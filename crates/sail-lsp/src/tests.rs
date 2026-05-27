@@ -11,9 +11,11 @@ use ide::annotations::{
 };
 use ide::calls::find_call_at_position;
 use ide::completion::completion_prefix;
+#[cfg(unix)]
+use ide::formatting::document_links_for_file;
 use ide::formatting::{
-    document_links_for_file, format_document_cst, linked_editing_ranges_for_position,
-    make_selection_range, range_format_document_edits,
+    format_document_cst, linked_editing_ranges_for_position, make_selection_range,
+    range_format_document_edits,
 };
 use ide::navigation::{
     implementation_locations, parse_named_type, resolve_workspace_symbol,

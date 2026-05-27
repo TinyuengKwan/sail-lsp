@@ -192,6 +192,7 @@ impl Symbol {
     }
 
     #[inline]
+    #[allow(clippy::type_complexity)]
     fn select_shard(
         storage: &'static Map,
         s: &str,
