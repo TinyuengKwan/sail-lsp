@@ -2,7 +2,7 @@
   "name": "sail-lsp",
   "displayName": "Sail Language Server",
   "description": "Language support for Sail with navigation, diagnostics, hover, inlay hints, and bundled sail-lsp binaries",
-  "publisher": "sail-lsp",
+  "publisher": "Lunarwwww",
   "version": "0.2.0",
   "type": "commonjs",
   "license": "SEE LICENSE IN LICENSE",
