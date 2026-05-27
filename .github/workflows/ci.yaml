@@ -54,10 +54,11 @@ jobs:
         run: cargo test -p syntax -- codegen --nocapture 2>&1 | head -20 || true
 
       - name: Test (default features, z3-solver enabled)
+        if: runner.os != 'Windows'
         run: cargo nextest run --workspace --no-fail-fast --hide-progress-bar --status-level fail
 
       - name: Test (no z3-solver)
-        if: matrix.os == 'ubuntu-latest'
+        if: runner.os == 'Windows' || matrix.os == 'ubuntu-latest'
         run: cargo nextest run --workspace --no-default-features --no-fail-fast --hide-progress-bar --status-level fail
 
       - name: Build release binary
@@ -131,8 +132,11 @@ jobs:
       - name: Build (production)
         run: npm run vscode:prepublish
 
+      - name: Install xvfb
+        run: sudo apt-get install -y xvfb
+
       - name: Run extension smoke tests
-        run: npm test
+        run: xvfb-run npm test
 
       - name: Package extension
         run: npx @vscode/vsce package -o sail-lsp.vsix --allow-missing-repository
@@ -186,8 +190,14 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build release server binary
+      - name: Build release server binary (with z3)
+        if: runner.os != 'Windows'
         run: cargo build --release -p sail-lsp --target ${{ matrix.rust_target }} --target-dir target/vscode/${{ matrix.target }}
+        working-directory: ${{ github.workspace }}
+
+      - name: Build release server binary (no z3, Windows)
+        if: runner.os == 'Windows'
+        run: cargo build --release -p sail-lsp --no-default-features --target ${{ matrix.rust_target }} --target-dir target/vscode/${{ matrix.target }}
         working-directory: ${{ github.workspace }}
 
       - name: Bundle server binary

@@ -10,6 +10,9 @@ authors = ["sail-lsp contributors"]
 
 [workspace.lints]
 
+[workspace.lints.clippy]
+len_without_is_empty = "allow"
+
 [profile.dev]
 debug = 1
 

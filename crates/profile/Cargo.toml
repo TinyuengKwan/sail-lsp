@@ -19,6 +19,12 @@ perf-event = "=0.4.8"
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
 libc.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.60", features = [
+    "Win32_System_Threading",
+    "Win32_System_ProcessStatus",
+] }
+
 [features]
 cpu_profiler = []
 jemalloc = ["jemalloc-ctl"]
