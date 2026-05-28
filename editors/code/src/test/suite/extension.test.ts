@@ -4,7 +4,7 @@ import * as vscode from "vscode";
 
 suite("sail-lsp extension", () => {
     test("package manifest exposes bundled server setting", async () => {
-        const extension = vscode.extensions.getExtension("sail-lsp.sail-lsp");
+        const extension = vscode.extensions.getExtension("Lunarwwww.sail-lsp");
         assert.ok(extension, "extension should be present in test host");
 
         const packageJson = extension.packageJSON as {
@@ -19,7 +19,7 @@ suite("sail-lsp extension", () => {
     });
 
     test("activation fails gracefully without server binary", async () => {
-        const extension = vscode.extensions.getExtension("sail-lsp.sail-lsp");
+        const extension = vscode.extensions.getExtension("Lunarwwww.sail-lsp");
         assert.ok(extension, "extension should be present in test host");
 
         const extensionPath = extension.extensionPath;
