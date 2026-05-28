@@ -407,7 +407,7 @@ impl<'a> Cx for EnvCx<'a> {
     fn ctor_sub_tys(&self, name: &str, scrutinee: &MatchTy) -> Vec<MatchTy> {
         let arity = self.constructor_arity.get(name).copied().unwrap_or(0);
         let Some(payload) = (self.resolve_variant)(name, scrutinee) else {
-            return std::iter::repeat(MatchTy::Unknown).take(arity).collect();
+            return std::iter::repeat_n(MatchTy::Unknown, arity).collect();
         };
         // Arity reconciliation: sail unions accept both `Foo(a, b)` and
         // `Foo((a, b))`. If the recorded payload is a single tuple and the
@@ -427,7 +427,7 @@ impl<'a> Cx for EnvCx<'a> {
                 }
             }
         }
-        std::iter::repeat(MatchTy::Unknown).take(arity).collect()
+        std::iter::repeat_n(MatchTy::Unknown, arity).collect()
     }
 
     fn record_field_tys(&self, scrutinee: &MatchTy, fields: &[String]) -> Vec<MatchTy> {
@@ -446,7 +446,7 @@ impl<'a> Cx for EnvCx<'a> {
                         .unwrap_or(MatchTy::Unknown)
                 })
                 .collect(),
-            None => std::iter::repeat(MatchTy::Unknown).take(fields.len()).collect(),
+            None => std::iter::repeat_n(MatchTy::Unknown, fields.len()).collect(),
         }
     }
 

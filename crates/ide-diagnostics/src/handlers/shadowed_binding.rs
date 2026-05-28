@@ -23,7 +23,7 @@ pub(crate) fn shadowed_binding(_ctx: &DiagnosticsContext<'_>, d: &ShadowedBindin
 
 /// Fix: rename the shadowing variable with a `_` prefix.
 fn fixes(d: &ShadowedBinding) -> Option<Vec<Assist>> {
-    let range: ide_db::line_index::TextRange = d.node.value.text_range().into();
+    let range: ide_db::line_index::TextRange = d.node.value.text_range();
     let new_name = format!("_{}", d.name);
     let edit = TextEdit { range, new_text: new_name.clone() };
     Some(vec![crate::fix(

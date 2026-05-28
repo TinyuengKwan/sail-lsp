@@ -61,7 +61,7 @@ impl IncludeGraph {
         let all = self.all_files();
         let mut in_degree: HashMap<FileId, usize> = all.iter().map(|&f| (f, 0)).collect();
 
-        for (_, targets) in &self.includes {
+        for targets in self.includes.values() {
             for &t in targets {
                 *in_degree.entry(t).or_default() += 1;
             }
@@ -100,7 +100,7 @@ impl IncludeGraph {
         let all = self.all_files();
         let mut in_degree: HashMap<FileId, usize> = all.iter().map(|&f| (f, 0)).collect();
 
-        for (_, targets) in &self.includes {
+        for targets in self.includes.values() {
             for &t in targets {
                 *in_degree.entry(t).or_default() += 1;
             }

@@ -235,22 +235,14 @@ impl<'db> InferenceContext<'db> {
     }
 
     /// Look up source span for an ExprId via the source_map.
-    /// Falls back to the deprecated self.expr_span(body, ) stub if no source_map.
-    fn expr_span(&self, body: &hir_def::Body, id: hir_def::ExprId) -> Option<Span> {
-        if let Some(ref sm) = self.source_map {
-            return sm.expr_syntax(id);
-        }
-        #[allow(deprecated)]
-        self.expr_span(body, id)
+    /// Returns None when no source_map is available.
+    fn expr_span(&self, _body: &hir_def::Body, id: hir_def::ExprId) -> Option<Span> {
+        self.source_map.as_ref()?.expr_syntax(id)
     }
 
     /// Look up source span for a PatId via the source_map.
-    pub(super) fn pat_span(&self, body: &hir_def::Body, id: hir_def::PatId) -> Option<Span> {
-        if let Some(ref sm) = self.source_map {
-            return sm.pat_syntax(id);
-        }
-        #[allow(deprecated)]
-        self.pat_span(body, id)
+    pub(super) fn pat_span(&self, _body: &hir_def::Body, id: hir_def::PatId) -> Option<Span> {
+        self.source_map.as_ref()?.pat_syntax(id)
     }
 
     /// Finish and return result.
@@ -550,12 +542,11 @@ impl<'db> InferenceContext<'db> {
                 }
             }
             // Param at top level.
-            (TyKind::Param(name), _) => {
-                if !subst.types.contains_key(name) {
+            (TyKind::Param(name), _)
+                if !subst.types.contains_key(name) => {
                     subst.types.insert(name.clone(), actual.clone());
                     subst.values.insert(name.clone(), actual.display_text());
                 }
-            }
             (TyKind::App { args: exp_args, name, .. }, TyKind::Scalar(s))
                 if matches!(name.as_str(), "int" | "atom" | "nat" | "range") =>
             {
@@ -696,6 +687,7 @@ impl<'db> InferenceContext<'db> {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn instantiation_error_with_sig(
         &mut self,
         id: &str,
@@ -871,10 +863,10 @@ impl<'db> InferenceContext<'db> {
     fn collection_length_text(&self, ty: &Ty) -> Option<String> {
         match ty.kind() {
             TyKind::App { name, args, .. } if name == "vector" || name == "bits" => {
-                args.first().and_then(|arg| match arg {
-                    TyArg::Nexp(n) => Some(n.to_string_repr()),
-                    TyArg::Value(value) => Some(value.clone()),
-                    TyArg::Type(ty) => Some(ty.display_text()),
+                args.first().map(|arg| match arg {
+                    TyArg::Nexp(n) => n.to_string_repr(),
+                    TyArg::Value(value) => value.clone(),
+                    TyArg::Type(ty) => ty.display_text(),
                 })
             }
             _ => None,
@@ -926,7 +918,7 @@ impl<'db> InferenceContext<'db> {
         // Collect candidate schemes from local env.
         let mut all_schemes: SmallVec<[std::sync::Arc<TypeScheme>; 8]> = SmallVec::new();
         for member in &members {
-            all_schemes.extend(self.env.lookup_functions(member).into_iter());
+            all_schemes.extend(self.env.lookup_functions(member));
         }
 
         // Plausibility filter: arity must be 2 + leaf-name match on both args.
@@ -946,7 +938,6 @@ impl<'db> InferenceContext<'db> {
             let mut mrc =
                 crate::method_resolution::MethodResolutionContext { table: &mut self.table };
             if mrc.try_candidate(&freshened.params, &args) {
-                drop(mrc);
                 return Some(self.table.resolve(&freshened.ret));
             }
         }
@@ -1018,9 +1009,9 @@ impl<'db> InferenceContext<'db> {
         }
     }
 
-    /// Run the Maranget-style pattern usefulness check on a `match` and
-    /// emit `IncompleteMatch` / `RedundantMatchArm` diagnostics. Pattern
-    /// binding has already happened in `check_match_cases`.
+    // Run the Maranget-style pattern usefulness check on a `match` and
+    // emit `IncompleteMatch` / `RedundantMatchArm` diagnostics. Pattern
+    // binding has already happened in `check_match_cases`.
 
     /// Run exhaustiveness checking on match arms from a Body arena.
     /// Parallel to `check_match_exhaustiveness` but uses `lower_arms_hir`
@@ -1722,7 +1713,7 @@ impl<'db> InferenceContext<'db> {
                         (vi, concrete_count)
                     })
                     .collect();
-                scored.sort_by(|a, b| b.1.cmp(&a.1)); // most specific first
+                scored.sort_by_key(|b| std::cmp::Reverse(b.1)); // most specific first
                 scored[0].0
             };
             let (ci, ret_ty, _subst) = &viable[best];
@@ -1936,34 +1927,28 @@ impl<'db> InferenceContext<'db> {
                 else if let Some(ty) = self.cross_file_value_type(name) {
                     ty
                 }
-                // 4. Top-level symbols (constructors, etc. — existence only)
-                else if self.env.top_level_symbol_exists(name) {
-                    Ty::error()
-                }
-                // 4. ExprScopes: check if name is a local binding that
-                //    wasn't tracked in `locals` (match arm patterns, foreach
-                //    iterators in complex positions, etc.)
-                else if self.expr_scopes.scope_for(id).is_some_and(|scope_id| {
-                    self.expr_scopes
-                        .resolve_name_in_scope(scope_id, &hir_def::name::Name::new(name))
-                        .is_some()
-                }) {
-                    Ty::error()
-                }
-                // 5. Pattern constants (enum constructors used as patterns)
-                else if self.pattern_constants.contains(name.as_str()) {
-                    Ty::error()
-                }
-                // 6. Check if the name appears as a binding in any pattern
-                //    in this body (fallback for complex patterns that
-                //    bind_pattern_hir didn't register in locals).
-                else if self.name_appears_in_body_patterns(body, name) {
-                    Ty::error()
-                }
-                // 6b. Auto-generated names or names that appear as pattern
-                //     bindings elsewhere in the source (scattered clause
-                //     cross-body references, funcl as-bindings, etc.)
-                else if name.starts_with("__") || self.name_likely_pattern_binding(name) {
+                // The remaining cases all resolve `name` to a known binding or
+                // symbol, so they type as error() with no further inference:
+                //   4.  Top-level symbols (constructors, etc. — existence only)
+                //   4b. ExprScopes: a local binding not tracked in `locals`
+                //       (match arm patterns, foreach iterators in complex spots)
+                //   5.  Pattern constants (enum constructors used as patterns)
+                //   6.  Name appears as a binding in some pattern in this body
+                //       (fallback for patterns bind_pattern_hir didn't register)
+                //   6b. Auto-generated names or names that appear as pattern
+                //       bindings elsewhere (scattered clause cross-body refs,
+                //       funcl as-bindings, etc.)
+                else if self.env.top_level_symbol_exists(name)
+                    || self.expr_scopes.scope_for(id).is_some_and(|scope_id| {
+                        self.expr_scopes
+                            .resolve_name_in_scope(scope_id, &hir_def::name::Name::new(name))
+                            .is_some()
+                    })
+                    || self.pattern_constants.contains(name.as_str())
+                    || self.name_appears_in_body_patterns(body, name)
+                    || name.starts_with("__")
+                    || self.name_likely_pattern_binding(name)
+                {
                     Ty::error()
                 }
                 // 7. Genuinely unresolved — emit diagnostic.
@@ -2039,11 +2024,10 @@ impl<'db> InferenceContext<'db> {
                         };
                         if let Some(ref elem) = elem_ty {
                             // Verify LHS (new element) is compatible with list element type
-                            if !lhs_ty.is_error() && !elem.is_error() {
-                                if !self.table.unify(elem, &lhs_ty) {
+                            if !lhs_ty.is_error() && !elem.is_error()
+                                && !self.table.unify(elem, &lhs_ty) {
                                     self.result.record_type_mismatch(*lhs, elem, &lhs_ty);
                                 }
-                            }
                             // Result is the list type
                             rhs_ty
                         } else if rhs_ty.is_error() {
@@ -2218,8 +2202,8 @@ impl<'db> InferenceContext<'db> {
                     // Unify with result type
                     if result_ty.is_error() && !arm_ty.is_error() {
                         result_ty = arm_ty;
-                    } else if !result_ty.is_error() && !arm_ty.is_error() {
-                        if !self.table.unify(&result_ty, &arm_ty) {
+                    } else if !result_ty.is_error() && !arm_ty.is_error()
+                        && !self.table.unify(&result_ty, &arm_ty) {
                             // Guarded arms get lenient treatment.
                             if has_guard {
                                 locals.pop_scope();
@@ -2243,7 +2227,6 @@ impl<'db> InferenceContext<'db> {
                                 self.result.record_type_mismatch(arm.body, &result_ty, &arm_ty);
                             }
                         }
-                    }
                     locals.pop_scope();
                 }
                 // Match result type is determined by arm unification above.
@@ -2441,11 +2424,10 @@ impl<'db> InferenceContext<'db> {
                     let ty = self.infer_expr_hir(body, i, locals);
                     // Check element against expected element type
                     if let Some(ref expected) = expected_elem {
-                        if !ty.is_error() && !expected.is_error() {
-                            if !self.table.unify(expected, &ty) {
+                        if !ty.is_error() && !expected.is_error()
+                            && !self.table.unify(expected, &ty) {
                                 self.result.record_type_mismatch(i, expected, &ty);
                             }
-                        }
                     }
                     if elem_ty.is_none() && !ty.is_error() {
                         elem_ty = Some(ty);
@@ -2643,11 +2625,10 @@ impl<'db> InferenceContext<'db> {
                     // Unify with result type (catch must return same type as try body)
                     if result_ty.is_error() && !arm_ty.is_error() {
                         result_ty = arm_ty;
-                    } else if !result_ty.is_error() && !arm_ty.is_error() {
-                        if !self.table.unify(&result_ty, &arm_ty) {
+                    } else if !result_ty.is_error() && !arm_ty.is_error()
+                        && !self.table.unify(&result_ty, &arm_ty) {
                             self.result.record_type_mismatch(arm.body, &result_ty, &arm_ty);
                         }
-                    }
                     locals.pop_scope();
                 }
 
@@ -2712,15 +2693,14 @@ impl<'db> InferenceContext<'db> {
                         let value_ty = self.infer_expr_hir(body, *field_expr, locals);
                         if let Some(raw_ty) = record.fields.get(fname.as_str()) {
                             let expected_ty = apply_subst(raw_ty, &type_subst);
-                            if !value_ty.is_error() && !expected_ty.is_error() {
-                                if !self.table.unify(&expected_ty, &value_ty) {
+                            if !value_ty.is_error() && !expected_ty.is_error()
+                                && !self.table.unify(&expected_ty, &value_ty) {
                                     self.result.record_type_mismatch(
                                         *field_expr,
                                         &expected_ty,
                                         &value_ty,
                                     );
                                 }
-                            }
                         }
                     }
                     // Check for missing required fields.
@@ -2765,15 +2745,14 @@ impl<'db> InferenceContext<'db> {
                     for (fname, field_expr) in fields {
                         let value_ty = self.infer_expr_hir(body, *field_expr, locals);
                         if let Some(expected_ty) = record.fields.get(fname.as_str()) {
-                            if !value_ty.is_error() && !expected_ty.is_error() {
-                                if !self.table.unify(expected_ty, &value_ty) {
+                            if !value_ty.is_error() && !expected_ty.is_error()
+                                && !self.table.unify(expected_ty, &value_ty) {
                                     self.result.record_type_mismatch(
                                         *field_expr,
                                         expected_ty,
                                         &value_ty,
                                     );
                                 }
-                            }
                         }
                     }
                 } else {
@@ -2966,11 +2945,10 @@ impl<'db> InferenceContext<'db> {
         // Check body type against declared return type.
         if let Some(scheme) = &expected_scheme {
             let ret_ty = &scheme.ret;
-            if !ret_ty.is_error() && !resolved_ty.is_error() {
-                if !self.table.unify(ret_ty, &resolved_ty) {
+            if !ret_ty.is_error() && !resolved_ty.is_error()
+                && !self.table.unify(ret_ty, &resolved_ty) {
                     self.result.record_type_mismatch(body.root(), ret_ty, &resolved_ty);
                 }
-            }
         }
 
         // Effects enforcement.
@@ -3046,12 +3024,11 @@ impl<'db> InferenceContext<'db> {
             // Infer guard
             if let Some(guard_id) = arm.guard {
                 let guard_ty = self.infer_expr_hir(body, guard_id, &mut locals);
-                if !guard_ty.is_error() {
-                    if !self.table.unify(&Ty::named("bool".to_string()), &guard_ty) {
+                if !guard_ty.is_error()
+                    && !self.table.unify(&Ty::named("bool".to_string()), &guard_ty) {
                         let bool_ty = Ty::named("bool".to_string());
                         self.result.record_type_mismatch(guard_id, &bool_ty, &guard_ty);
                     }
-                }
             }
 
             // Infer LHS and RHS expressions
@@ -3069,7 +3046,7 @@ impl<'db> InferenceContext<'db> {
                     arm.lhs_pat.map(|p| self.collect_hir_pat_bindings(body, p)).unwrap_or_default();
                 let rhs_names =
                     arm.rhs_pat.map(|p| self.collect_hir_pat_bindings(body, p)).unwrap_or_default();
-                for (name, _span) in &lhs_names {
+                for name in lhs_names.keys() {
                     if !rhs_names.contains_key(name) {
                         self.push_inference_diagnostic(
                             InferenceDiagnostic::MappingBindingMismatch {
@@ -3080,7 +3057,7 @@ impl<'db> InferenceContext<'db> {
                         );
                     }
                 }
-                for (name, _span) in &rhs_names {
+                for name in rhs_names.keys() {
                     if !lhs_names.contains_key(name) {
                         self.push_inference_diagnostic(
                             InferenceDiagnostic::MappingBindingMismatch {
@@ -3130,10 +3107,8 @@ impl<'db> InferenceContext<'db> {
             }
             Expr::If { cond, then_branch, else_branch: None } => {
                 // if cond then throw/exit — negate the condition
-                let is_diverging = match body.expr(*then_branch) {
-                    Some(Expr::Throw(_) | Expr::Exit(_)) => true,
-                    _ => false,
-                };
+                let is_diverging =
+                    matches!(body.expr(*then_branch), Some(Expr::Throw(_) | Expr::Exit(_)));
                 if is_diverging {
                     if let Some(cond_span) = self.expr_span(body, *cond) {
                         if let Some(cond_text) = self.source.get(cond_span.start..cond_span.end) {

@@ -495,7 +495,7 @@ pub fn type_alias(name: &str, ty: &str) -> SyntaxNode {
 
 /// Create an enum definition: `enum name = { V1, V2, ... }`.
 pub fn enum_def(name: &str, variants: &[&str]) -> SyntaxNode {
-    let variants_str = variants.iter().map(|v| format!("{v}")).collect::<Vec<_>>().join(", ");
+    let variants_str = variants.iter().map(|v| v.to_string()).collect::<Vec<_>>().join(", ");
     let (root, _) = parsing::parse_text(&format!("enum {name} = {{ {variants_str} }}\n"));
     root.descendants()
         .find(|n| n.kind() == SyntaxKind::NAMED_DEF)

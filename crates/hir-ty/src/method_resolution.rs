@@ -234,7 +234,7 @@ pub fn resolve_overload_with_table<'a>(
     //
     // Sort by specificity (most specific first). If the top candidate
     // is strictly more specific than the second, resolve to it.
-    viable.sort_by(|a, b| b.1.cmp(&a.1));
+    viable.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     if viable.len() == 1 {
         return Pick::Resolved(viable[0].0);

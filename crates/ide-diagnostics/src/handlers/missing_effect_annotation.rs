@@ -24,7 +24,7 @@ pub(crate) fn missing_effect_annotation(
 
 /// Unresolved fix: add effect annotation to the val spec.
 fn fixes(d: &MissingEffectAnnotation) -> Option<Vec<Assist>> {
-    let range: ide_db::line_index::TextRange = d.node.value.text_range().into();
+    let range: ide_db::line_index::TextRange = d.node.value.text_range();
     Some(vec![crate::unresolved_fix(
         "add_effect_annotation",
         &format!("Add effect annotation `{}`", d.effects),

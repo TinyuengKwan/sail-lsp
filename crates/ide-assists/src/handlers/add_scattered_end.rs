@@ -25,20 +25,20 @@ pub(crate) fn add_scattered_end(acc: &mut Assists, ctx: &AssistContext<'_>) -> O
 
     // Find a ScatteredHead at cursor position
     for &id in item_tree.top_level_items() {
-        if id.item_kind(&item_tree) != hir_def::item_tree::ItemKind::ScatteredHead {
+        if id.item_kind(item_tree) != hir_def::item_tree::ItemKind::ScatteredHead {
             continue;
         }
-        let id_span = id.span(&item_tree);
+        let id_span = id.span(item_tree);
         if offset < id_span.start || offset > id_span.end {
             continue;
         }
 
-        let name = id.name(&item_tree).as_str();
+        let name = id.name(item_tree).as_str();
 
         // Check if `end name` already exists in the file
         let has_end = item_tree.top_level_items().iter().any(|eid| {
-            eid.item_kind(&item_tree) == hir_def::item_tree::ItemKind::EndMarker
-                && eid.name(&item_tree).as_str() == name
+            eid.item_kind(item_tree) == hir_def::item_tree::ItemKind::EndMarker
+                && eid.name(item_tree).as_str() == name
         });
         if has_end {
             return None; // Already has end marker
@@ -47,8 +47,8 @@ pub(crate) fn add_scattered_end(acc: &mut Assists, ctx: &AssistContext<'_>) -> O
         // Find the last clause or the head itself for insert position
         let mut last_span_end = id_span.end;
         for &eid in item_tree.top_level_items() {
-            let espan = eid.span(&item_tree);
-            if eid.name(&item_tree).as_str() == name && espan.end > last_span_end {
+            let espan = eid.span(item_tree);
+            if eid.name(item_tree).as_str() == name && espan.end > last_span_end {
                 last_span_end = espan.end;
             }
         }

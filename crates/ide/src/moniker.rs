@@ -91,18 +91,17 @@ pub fn moniker(
     // Check if this is a local binding (function parameter, let var)
     if let Some(parsed) = file.parsed() {
         for occ in &parsed.symbol_occurrences {
-            if occ.name == name && occ.span.start <= offset && offset <= occ.span.end {
-                if occ.scope == Some(syntax::parser_lower::Scope::Local) {
+            if occ.name == name && occ.span.start <= offset && offset <= occ.span.end
+                && occ.scope == Some(syntax::parser_lower::Scope::Local) {
                     return Some(MonikerResult::Local);
                 }
-            }
         }
     }
 
     // Build moniker path: project → file stem → symbol
     let file_stem = file_url
         .path_segments()
-        .and_then(|segments| segments.last())
+        .and_then(|mut segments| segments.next_back())
         .unwrap_or("unknown")
         .strip_suffix(".sail")
         .unwrap_or("unknown");
@@ -112,8 +111,8 @@ pub fn moniker(
         item_tree
             .top_level_items()
             .iter()
-            .find(|id| id.name(&item_tree).as_str() == name)
-            .map(|id| match id.item_kind(&item_tree) {
+            .find(|id| id.name(item_tree).as_str() == name)
+            .map(|id| match id.item_kind(item_tree) {
                 hir_def::item_tree::ItemKind::Function
                 | hir_def::item_tree::ItemKind::Mapping
                 | hir_def::item_tree::ItemKind::ValSpec

@@ -22,7 +22,7 @@ pub struct CallableSignature {
     pub return_type: Option<String>,
 }
 
-fn span_text<'a>(text: &'a str, span: Span) -> &'a str {
+fn span_text(text: &str, span: Span) -> &str {
     text.get(span.start..span.end).unwrap_or("")
 }
 

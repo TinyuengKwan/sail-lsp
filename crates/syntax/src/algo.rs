@@ -22,7 +22,7 @@ pub fn ancestors_at_offset(
     node: &SyntaxNode,
     offset: TextSize,
 ) -> impl Iterator<Item = SyntaxNode> {
-    node.token_at_offset(offset).into_iter().flat_map(|token| token.parent_ancestors())
+    node.token_at_offset(offset).flat_map(|token| token.parent_ancestors())
 }
 
 /// Finds a node of specific AST type at offset.

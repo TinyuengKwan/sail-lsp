@@ -45,6 +45,11 @@ impl AnalysisScope {
         1 + self.included.len()
     }
 
+    /// Always false — an analysis scope always contains at least the root file.
+    pub fn is_empty(&self) -> bool {
+        false
+    }
+
     /// Scope with no includes (just the root file).
     pub fn single_file(root: FileId) -> Self {
         Self { root, included: HashSet::new() }

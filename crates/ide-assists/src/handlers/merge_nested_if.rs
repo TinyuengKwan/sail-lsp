@@ -66,20 +66,15 @@ fn find_keyword_at(text: &str, offset: usize, kw: &str) -> Option<usize> {
     let mut search_from = 0;
     let mut best = None;
     let kw_len = kw.len();
-    loop {
-        match window[search_from..].find(kw) {
-            Some(pos) => {
-                let abs = start + search_from + pos;
-                let before_ok = abs == 0 || !text.as_bytes()[abs - 1].is_ascii_alphanumeric();
-                let after_ok = abs + kw_len >= text.len()
-                    || !text.as_bytes()[abs + kw_len].is_ascii_alphanumeric();
-                if before_ok && after_ok {
-                    best = Some(abs);
-                }
-                search_from += pos + 1;
-            }
-            None => break,
+    while let Some(pos) = window[search_from..].find(kw) {
+        let abs = start + search_from + pos;
+        let before_ok = abs == 0 || !text.as_bytes()[abs - 1].is_ascii_alphanumeric();
+        let after_ok = abs + kw_len >= text.len()
+            || !text.as_bytes()[abs + kw_len].is_ascii_alphanumeric();
+        if before_ok && after_ok {
+            best = Some(abs);
         }
+        search_from += pos + 1;
     }
     best
 }

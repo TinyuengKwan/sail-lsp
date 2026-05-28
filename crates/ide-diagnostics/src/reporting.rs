@@ -148,6 +148,12 @@ pub struct WarningEmitter {
     seen: HashSet<(DiagnosticCode, usize, usize, String)>,
 }
 
+impl Default for WarningEmitter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WarningEmitter {
     pub fn new() -> Self {
         Self { seen: HashSet::new() }

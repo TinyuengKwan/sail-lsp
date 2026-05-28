@@ -22,6 +22,7 @@ use crate::global_state::GlobalStateSnapshot;
 /// - holds `&mut GlobalState` (not pool or snapshot)
 /// - creates `GlobalStateSnapshot` inside each dispatch method
 /// - handler functions are `fn` pointers (not closures)
+///
 /// Usage in main_loop `on_request()`:
 /// ```ignore
 /// RequestDispatcher { req: Some(req), global_state: &mut *self }

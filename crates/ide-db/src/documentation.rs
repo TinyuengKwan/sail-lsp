@@ -78,8 +78,7 @@ fn docs_from_loc(
     mod_item.doc(item_tree).map(|s| Documentation::new(s.to_string()))
 }
 
-/// Implements HasDocs for each hir type that wraps a DefLocation.
-
+// Implements HasDocs for each hir type that wraps a DefLocation.
 impl HasDocs for hir::Function {
     fn docs(&self, db: &dyn hir_def::db::DefDatabase) -> Option<Documentation> {
         docs_from_loc(db, &hir::ModuleDef::Function(*self).location())

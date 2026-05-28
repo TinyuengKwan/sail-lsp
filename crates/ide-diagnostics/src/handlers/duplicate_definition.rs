@@ -23,7 +23,7 @@ pub(crate) fn duplicate_definition(
 
 /// Fix: rename the duplicate definition by appending `_2` suffix.
 fn fixes(d: &DuplicateDefinition) -> Option<Vec<Assist>> {
-    let range: ide_db::line_index::TextRange = d.node.value.text_range().into();
+    let range: ide_db::line_index::TextRange = d.node.value.text_range();
     let new_name = format!("{}_2", d.name);
     let edit = TextEdit { range, new_text: new_name.clone() };
     Some(vec![crate::fix(

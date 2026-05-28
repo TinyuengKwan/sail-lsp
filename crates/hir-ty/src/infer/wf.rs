@@ -19,7 +19,6 @@ pub struct WfError {
 ///
 /// Validates type constructors exist, arity matches declarations,
 /// and type variables are bound. Returns a list of errors.
-
 pub fn check_wf_typ(ty: &Ty, env: &TopLevelEnv) -> Vec<WfError> {
     let mut errors = Vec::new();
     check_wf_inner(ty, env, &mut errors);

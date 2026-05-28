@@ -147,7 +147,7 @@ impl Parse<ast::SourceFile> {
         let mut buf = format!("{:#?}", self.tree().syntax());
         for err in self.errors() {
             use std::fmt::Write;
-            let _ = write!(buf, "error {:?}: {}\n", err.range(), err);
+            let _ = writeln!(buf, "error {:?}: {}", err.range(), err);
         }
         buf
     }

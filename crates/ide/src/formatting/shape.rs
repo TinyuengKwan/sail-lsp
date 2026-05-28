@@ -49,22 +49,22 @@ impl Indent {
     }
 
     /// Render as a whitespace string.
-    pub(crate) fn to_string_inner(&self, config: &FormatOptions) -> Cow<'static, str> {
+    pub(crate) fn to_string_inner(self, config: &FormatOptions) -> Cow<'static, str> {
         let mut s = String::with_capacity(self.width());
         if config.hard_tabs() {
             let tabs = self.block_indent / config.tab_spaces();
             let spaces = self.block_indent % config.tab_spaces();
-            s.extend(std::iter::repeat('\t').take(tabs));
-            s.extend(std::iter::repeat(' ').take(spaces));
+            s.extend(std::iter::repeat_n('\t', tabs));
+            s.extend(std::iter::repeat_n(' ', spaces));
         } else {
-            s.extend(std::iter::repeat(' ').take(self.block_indent));
+            s.extend(std::iter::repeat_n(' ', self.block_indent));
         }
-        s.extend(std::iter::repeat(' ').take(self.alignment));
+        s.extend(std::iter::repeat_n(' ', self.alignment));
         Cow::Owned(s)
     }
 
     /// Render with a leading newline.
-    pub(crate) fn to_string_with_newline(&self, config: &FormatOptions) -> Cow<'static, str> {
+    pub(crate) fn to_string_with_newline(self, config: &FormatOptions) -> Cow<'static, str> {
         let mut s = String::from("\n");
         s.push_str(&self.to_string_inner(config));
         Cow::Owned(s)

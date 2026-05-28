@@ -240,7 +240,7 @@ impl CallableBodies {
         None
     }
 
-    /// Extract parameter PatIds from PARAM_LIST, adding them to the body arena.
+    // Extract parameter PatIds from PARAM_LIST, adding them to the body arena.
     // extract_cst_params deleted — replaced by Body::lower_body_with_params
     // which uses ExprCollector::lower_cst_pat for structural pattern lowering.
 
@@ -508,11 +508,10 @@ fn collect_effect_tags(
             Expr::Ident(name) if register_names.contains(name.as_str()) => {
                 tags.insert(EffectTag::RegisterRead);
             }
-            Expr::Assign { target, .. } => {
-                if hir_is_register_write(body, *target) {
+            Expr::Assign { target, .. }
+                if hir_is_register_write(body, *target) => {
                     tags.insert(EffectTag::RegisterWrite);
                 }
-            }
             // Detect calls to known-impure external functions.
             // We only tag External for functions in the local file that have
             // observable structural effects. Cross-file effect inference is done

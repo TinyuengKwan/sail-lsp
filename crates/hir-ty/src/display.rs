@@ -92,7 +92,7 @@ impl<'a> HirFormatter<'a> {
     }
 
     fn should_truncate(&self) -> bool {
-        self.max_size.map_or(false, |max| self.curr_size >= max)
+        self.max_size.is_some_and(|max| self.curr_size >= max)
     }
 }
 

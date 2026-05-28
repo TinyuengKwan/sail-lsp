@@ -29,8 +29,7 @@ pub fn matching_brace(file: &dyn FileDb, offset: usize) -> Option<usize> {
         if token == open {
             // Scan forward for matching close
             let mut depth = 1i32;
-            for i in (idx + 1)..tokens.len() {
-                let (t, s) = &tokens[i];
+            for (t, s) in tokens.iter().skip(idx + 1) {
                 if t == open {
                     depth += 1;
                 }

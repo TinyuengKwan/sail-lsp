@@ -106,20 +106,20 @@ impl AstIdMap {
         // Register every direct child node (top-level items).
         for child in root.children() {
             let ptr = SyntaxNodePtr::new(&child);
-            if !map.contains_key(&ptr) {
-                let idx = arena.alloc(ptr);
-                map.insert(ptr, idx);
-            }
+            map.entry(ptr).or_insert_with(|| {
+                
+                arena.alloc(ptr)
+            });
 
             // Also register second-level children (e.g., members of a
             // struct/enum/bitfield definition) so scattered clauses,
             // enum members, etc. can be addressed.
             for grandchild in child.children() {
                 let gptr = SyntaxNodePtr::new(&grandchild);
-                if !map.contains_key(&gptr) {
-                    let idx = arena.alloc(gptr);
-                    map.insert(gptr, idx);
-                }
+                map.entry(gptr).or_insert_with(|| {
+                    
+                    arena.alloc(gptr)
+                });
             }
         }
 

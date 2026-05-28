@@ -36,7 +36,7 @@ pub(crate) fn import_on_the_fly(
         }
         if let Some(item_tree) = ctx.file.item_tree() {
             for &id in item_tree.top_level_items() {
-                names.insert(id.name(&item_tree).as_str().to_string());
+                names.insert(id.name(item_tree).as_str().to_string());
             }
         }
         names
@@ -51,7 +51,7 @@ pub(crate) fn import_on_the_fly(
             continue;
         };
         for &id in item_tree.top_level_items() {
-            let name = id.name(&item_tree).as_str();
+            let name = id.name(item_tree).as_str();
             let name_lower = name.to_ascii_lowercase();
 
             if !name_lower.starts_with(&prefix_lower) {
@@ -61,7 +61,7 @@ pub(crate) fn import_on_the_fly(
                 continue;
             }
 
-            let kind = match id.item_kind(&item_tree) {
+            let kind = match id.item_kind(item_tree) {
                 hir_def::ItemKind::Function | hir_def::ItemKind::Mapping => {
                     CompletionItemKind::Function
                 }

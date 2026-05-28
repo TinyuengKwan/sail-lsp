@@ -308,7 +308,7 @@ fn lower_named_def(node: &SyntaxNode, parsed: &mut ParsedFile, _text: &str) {
                         parsed.typed_bindings.push(TypedBinding {
                             name: name.clone(),
                             name_span,
-                            ty_span: node_span(&n),
+                            ty_span: node_span(n),
                             scope: Scope::TopLevel,
                         });
                         break;
@@ -1000,7 +1000,7 @@ fn find_return_type_span(node: &SyntaxNode) -> Option<Span> {
                 if tok.kind().is_trivia() {
                     continue;
                 }
-                let ts = token_span(&tok);
+                let ts = token_span(tok);
                 if ret_start.is_none() {
                     ret_start = Some(ts.start);
                 }

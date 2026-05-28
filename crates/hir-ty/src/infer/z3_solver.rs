@@ -228,7 +228,7 @@ fn solve_with_z3_bounded_exp(
     for b in &exp_bounds {
         solver.assert(b);
     }
-    solver.assert(&z3_expr.not());
+    solver.assert(z3_expr.not());
     match solver.check() {
         SatResult::Unsat => ConstraintStatus::Satisfied,
         SatResult::Unknown => ConstraintStatus::Unknown,
@@ -307,7 +307,7 @@ pub fn try_solve_unique(
     }
     solver2.assert(&z3_expr);
     let v_const = Int::from_i64(v);
-    solver2.assert(&var_z3.eq(&v_const).not());
+    solver2.assert(var_z3.eq(&v_const).not());
 
     match solver2.check() {
         SatResult::Unsat => Some(v), // Unique!
@@ -342,7 +342,7 @@ fn solve_with_z3(
     for a in &z3_assumptions {
         solver.assert(a);
     }
-    solver.assert(&z3_expr.not());
+    solver.assert(z3_expr.not());
     match solver.check() {
         SatResult::Unsat => ConstraintStatus::Satisfied,
         SatResult::Unknown => ConstraintStatus::Unknown,
@@ -697,7 +697,7 @@ fn write_constraint(buf: &mut String, expr: &ConstraintExpr) {
             buf.push(')');
         }
         ConstraintExpr::Unsupported => {
-            buf.push_str("?");
+            buf.push('?');
         }
         ConstraintExpr::App { name, args } => {
             buf.push_str(name);

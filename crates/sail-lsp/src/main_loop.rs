@@ -546,7 +546,7 @@ fn on_task(state: &mut GlobalState, task: Task) {
                     let abs = paths::AbsPathBuf::assert_utf8(path.clone());
                     let vfs_path = base_db::VfsPath::new(abs.clone());
                     // Use AbsPath::strip_prefix to determine if file is under $SAIL_DIR.
-                    let is_library = sail_dir.as_ref().map_or(false, |sd| {
+                    let is_library = sail_dir.as_ref().is_some_and(|sd| {
                         let sd_abs = paths::AbsPathBuf::assert_utf8(sd.clone());
                         abs.strip_prefix(&sd_abs).is_some()
                     });

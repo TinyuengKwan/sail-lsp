@@ -39,6 +39,7 @@ pub enum HirUnaryOp {
 
 impl HirBinaryOp {
     /// Parse an operator string into a structured `HirBinaryOp`.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(op: &str) -> Self {
         match op {
             "+" => HirBinaryOp::Known(BinaryOp::ArithOp(ArithOp::Add)),
@@ -137,6 +138,7 @@ impl HirBinaryOp {
 
 impl HirUnaryOp {
     /// Parse an operator string into a structured `HirUnaryOp`.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(op: &str) -> Self {
         match op {
             "not" | "~" => HirUnaryOp::Known(UnaryOp::Not),

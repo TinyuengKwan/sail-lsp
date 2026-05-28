@@ -16,7 +16,7 @@ pub fn call_arg_count(call: &syntax::parser_lower::CallSite) -> usize {
         let base = call.arg_separator_spans.len() + 1;
         // Detect trailing comma: last separator is adjacent to close paren
         if let (Some(last_sep), Some(close)) = (call.arg_separator_spans.last(), call.close_span) {
-            if call.arg_separator_spans.len() > 0 && last_sep.end >= close.start.saturating_sub(1) {
+            if !call.arg_separator_spans.is_empty() && last_sep.end >= close.start.saturating_sub(1) {
                 return base - 1;
             }
         }
@@ -65,7 +65,7 @@ pub fn signature_help_ide(
     position: LineCol,
 ) -> Option<ide_db::ide_types::SignatureHelp> {
     let (callee, arg_index) = find_call_at_position(file, position)?;
-    let all_files = files.iter().copied().collect::<Vec<_>>();
+    let all_files = files.to_vec();
 
     // Find ALL overloaded signatures (not just the first match)
     let all_sigs =

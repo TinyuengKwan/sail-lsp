@@ -454,7 +454,7 @@ fn eval_numeric_expr_with_assumptions(
             // 2^n: evaluate inner, then compute 2^n via bit shift.
             // Mirrors Nexp::Exp::eval in nexp.rs:119-126.
             let n = eval_numeric_expr_with_assumptions(inner, subst, assumptions, visited)?;
-            if n >= 0 && n <= 63 {
+            if (0..=63).contains(&n) {
                 Some(1i64 << n)
             } else {
                 None // overflow guard

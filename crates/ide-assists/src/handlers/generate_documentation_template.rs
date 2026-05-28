@@ -37,7 +37,7 @@ pub(crate) fn generate_documentation_template(
     let ret_ty = if let Some(arrow) = after_paren.find("->") {
         let after_arrow = after_paren[arrow + 2..].trim_start();
         // Return type ends at '=' or newline
-        let end = after_arrow.find(|c: char| c == '=' || c == '\n').unwrap_or(after_arrow.len());
+        let end = after_arrow.find(['=', '\n']).unwrap_or(after_arrow.len());
         Some(after_arrow[..end].trim().to_string())
     } else {
         None
@@ -89,20 +89,15 @@ fn find_function_keyword(text: &str, offset: usize) -> Option<usize> {
     let kw = "function";
     let mut best = None;
     let mut search_from = 0;
-    loop {
-        match window[search_from..].find(kw) {
-            Some(pos) => {
-                let abs = start + search_from + pos;
-                let before_ok = abs == 0 || !text.as_bytes()[abs - 1].is_ascii_alphanumeric();
-                let after_ok = abs + kw.len() >= text.len()
-                    || !text.as_bytes()[abs + kw.len()].is_ascii_alphanumeric();
-                if before_ok && after_ok {
-                    best = Some(abs);
-                }
-                search_from += pos + 1;
-            }
-            None => break,
+    while let Some(pos) = window[search_from..].find(kw) {
+        let abs = start + search_from + pos;
+        let before_ok = abs == 0 || !text.as_bytes()[abs - 1].is_ascii_alphanumeric();
+        let after_ok = abs + kw.len() >= text.len()
+            || !text.as_bytes()[abs + kw.len()].is_ascii_alphanumeric();
+        if before_ok && after_ok {
+            best = Some(abs);
         }
+        search_from += pos + 1;
     }
     best
 }

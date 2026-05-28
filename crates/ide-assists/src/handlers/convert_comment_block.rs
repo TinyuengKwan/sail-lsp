@@ -71,12 +71,12 @@ fn convert_line_to_block(
 
     // Extract comment content (strip "// " or "//" prefix)
     let mut content_lines = Vec::new();
-    for i in start_line..=end_line {
-        let trimmed = lines[i].trim_start();
-        let body = if trimmed.starts_with("// ") {
-            &trimmed[3..]
-        } else if trimmed.starts_with("//") {
-            &trimmed[2..]
+    for line in lines.iter().take(end_line + 1).skip(start_line) {
+        let trimmed = line.trim_start();
+        let body = if let Some(stripped) = trimmed.strip_prefix("// ") {
+            stripped
+        } else if let Some(stripped) = trimmed.strip_prefix("//") {
+            stripped
         } else {
             trimmed
         };

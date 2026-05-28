@@ -24,7 +24,7 @@ pub(crate) fn unused_import(_ctx: &DiagnosticsContext<'_>, d: &UnusedImport) -> 
 
 /// Fix: remove the entire $include line.
 fn fixes(d: &UnusedImport) -> Option<Vec<Assist>> {
-    let range: ide_db::line_index::TextRange = d.node.value.text_range().into();
+    let range: ide_db::line_index::TextRange = d.node.value.text_range();
     let edit = TextEdit { range, new_text: String::new() };
     Some(vec![crate::fix(
         "remove_unused_import",

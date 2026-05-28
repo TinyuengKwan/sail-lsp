@@ -112,7 +112,7 @@ impl Nexp {
             Nexp::Neg(a) => Some(a.eval(env)?.checked_neg()?),
             Nexp::Exp(a) => {
                 let n = a.eval(env)?;
-                if n >= 0 && n <= 63 {
+                if (0..=63).contains(&n) {
                     Some(1i64 << n)
                 } else {
                     None // overflow guard

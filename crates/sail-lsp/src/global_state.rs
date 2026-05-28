@@ -215,7 +215,6 @@ impl GlobalState {
     }
 
     /// Compute current server health status.
-
     /// Send status notification if changed.
     pub(crate) fn update_status_or_notify(&mut self) {
         let status = self.current_status();
@@ -265,6 +264,7 @@ impl GlobalState {
     /// - `workspace_context(db, ws)` is a salsa tracked query that
     ///   aggregates cross-file data from all files' `top_level_env`
     /// - `infer` depends on it automatically via salsa
+    ///
     /// Called on workspace scan completion and file add/remove events.
     /// NOT called on every edit — content changes flow through `FileText`
     /// → `top_level_env` → `workspace_context` automatically.

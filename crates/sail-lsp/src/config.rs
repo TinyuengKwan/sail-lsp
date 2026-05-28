@@ -16,6 +16,7 @@ use serde::Deserialize;
 /// Missing fields retain defaults via `#[serde(default)]`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
+#[derive(Default)]
 pub struct SailLspConfig {
     /// Diagnostics configuration.
     pub diagnostics: DiagnosticsConfig,
@@ -150,20 +151,6 @@ pub struct WorkspaceConfig {
     pub include_paths: Vec<String>,
 }
 
-impl Default for SailLspConfig {
-    fn default() -> Self {
-        Self {
-            diagnostics: DiagnosticsConfig::default(),
-            inlay_hints: InlayHintsConfig::default(),
-            completion: CompletionConfig::default(),
-            code_lens: CodeLensConfig::default(),
-            hover: HoverConfig::default(),
-            semantic_tokens: SemanticTokensConfig::default(),
-            z3: Z3Config::default(),
-            workspace: WorkspaceConfig::default(),
-        }
-    }
-}
 
 impl Default for DiagnosticsConfig {
     fn default() -> Self {

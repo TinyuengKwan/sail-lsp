@@ -44,11 +44,11 @@ pub(crate) fn add_missing_fields(acc: &mut Assists, ctx: &AssistContext<'_>) -> 
     let mut all_fields: Vec<String> = Vec::new();
 
     for &id in item_tree.top_level_items() {
-        if id.name(&item_tree).as_str() == struct_name
-            && matches!(id.item_kind(&item_tree), hir_def::item_tree::ItemKind::Struct)
+        if id.name(item_tree).as_str() == struct_name
+            && matches!(id.item_kind(item_tree), hir_def::item_tree::ItemKind::Struct)
         {
             // Extract field names from the definition text
-            let id_span = id.span(&item_tree);
+            let id_span = id.span(item_tree);
             let def_text = text.get(id_span.start..id_span.end)?;
             // Find text between { and } — each line with `:` is a field
             if let Some(brace_start) = def_text.find('{') {

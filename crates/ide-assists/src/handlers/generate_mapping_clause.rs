@@ -23,20 +23,20 @@ pub(crate) fn generate_mapping_clause(acc: &mut Assists, ctx: &AssistContext<'_>
 
     // Find a MappingSpec at cursor position
     for &id in item_tree.top_level_items() {
-        if id.item_kind(&item_tree) != hir_def::item_tree::ItemKind::MappingSpec {
+        if id.item_kind(item_tree) != hir_def::item_tree::ItemKind::MappingSpec {
             continue;
         }
-        let id_span = id.span(&item_tree);
+        let id_span = id.span(item_tree);
         if offset < id_span.start || offset > id_span.end {
             continue;
         }
 
-        let name = id.name(&item_tree).as_str();
+        let name = id.name(item_tree).as_str();
 
         // Check if any clause already exists
         let has_clause = item_tree.top_level_items().iter().any(|eid| {
-            eid.item_kind(&item_tree) == hir_def::item_tree::ItemKind::Mapping
-                && eid.name(&item_tree).as_str() == name
+            eid.item_kind(item_tree) == hir_def::item_tree::ItemKind::Mapping
+                && eid.name(item_tree).as_str() == name
         });
 
         let label = if has_clause {

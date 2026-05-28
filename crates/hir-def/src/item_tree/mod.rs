@@ -253,13 +253,8 @@ impl ModItem {
     /// Map to the legacy `ItemKind` for backward compatibility.
     pub fn item_kind(&self, tree: &ItemTree) -> ItemKind {
         match self {
-            Self::Function(id) => {
-                if tree.functions[*id].is_clause {
-                    ItemKind::Function // still Function, is_clause is separate
-                } else {
-                    ItemKind::Function
-                }
-            }
+            // is_clause does not affect the legacy ItemKind mapping.
+            Self::Function(_) => ItemKind::Function,
             Self::TypeDef(id) => match tree.type_defs[*id].kind {
                 TypeDefKind::Struct => ItemKind::Struct,
                 TypeDefKind::Union => ItemKind::Union,
@@ -613,7 +608,7 @@ impl ItemTree {
     pub fn build_fixity_context(&self) -> syntax::FixityContext {
         let mut ctx = syntax::FixityContext::new();
         for decl in &self.fixities {
-            let base_bp = (decl.level as u8) * 2 + 1;
+            let base_bp = decl.level * 2 + 1;
             let (l_bp, r_bp) = match decl.assoc {
                 Associativity::Left => (base_bp, base_bp + 1),
                 Associativity::Right => (base_bp + 1, base_bp),

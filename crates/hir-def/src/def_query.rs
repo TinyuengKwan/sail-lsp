@@ -91,7 +91,7 @@ impl std::hash::Hash for ArcDefMap {
 #[salsa::tracked(returns(ref))]
 pub fn crate_def_map(db: &dyn salsa::Database, input: FileText) -> Option<ArcDefMap> {
     let item_tree = file_item_tree(db, input).as_ref()?;
-    Some(ArcDefMap(Arc::new(DefMap::build(&item_tree))))
+    Some(ArcDefMap(Arc::new(DefMap::build(item_tree))))
 }
 
 /// Salsa tracked function: build the per-file CallGraph from callable bodies.
@@ -226,8 +226,7 @@ pub fn body_with_source_map<'db>(
     }
 
     // Fallback: empty body (should not happen for valid CallableIds)
-    let mut fallback_map = BodySourceMap::default();
-    fallback_map.file_id = Some(file_id);
+    let fallback_map = BodySourceMap { file_id: Some(file_id), ..Default::default() };
     ArcBodyWithSourceMap(Arc::new((Body::empty(), fallback_map)))
 }
 

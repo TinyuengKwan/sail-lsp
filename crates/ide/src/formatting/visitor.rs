@@ -272,24 +272,21 @@ impl<'a> FmtVisitor<'a> {
                 continue;
             }
 
-            match kind {
-                SK::BIN_EXPR => {
-                    // Only normalize single-line binary expressions.
-                    // Multi-line BIN_EXPR have intentional line breaks
-                    // (e.g., `<->` continuation) that must be preserved.
-                    let original = &source[rel_start..rel_end];
-                    if original.contains('\n') {
-                        continue;
-                    }
-                    if let Some(formatted) =
-                        super::expr::normalize_binexpr_spacing(&descendant, self.snippet_provider)
-                    {
-                        if formatted.trim() != original.trim() {
-                            replacements.push((rel_start, rel_end - rel_start, formatted));
-                        }
+            if kind == SK::BIN_EXPR {
+                // Only normalize single-line binary expressions.
+                // Multi-line BIN_EXPR have intentional line breaks
+                // (e.g., `<->` continuation) that must be preserved.
+                let original = &source[rel_start..rel_end];
+                if original.contains('\n') {
+                    continue;
+                }
+                if let Some(formatted) =
+                    super::expr::normalize_binexpr_spacing(&descendant, self.snippet_provider)
+                {
+                    if formatted.trim() != original.trim() {
+                        replacements.push((rel_start, rel_end - rel_start, formatted));
                     }
                 }
-                _ => {}
             }
         }
 
@@ -298,7 +295,7 @@ impl<'a> FmtVisitor<'a> {
         }
 
         // Apply replacements in reverse order.
-        replacements.sort_by(|a, b| b.0.cmp(&a.0));
+        replacements.sort_by_key(|b| std::cmp::Reverse(b.0));
         let mut result = source.to_string();
         for (offset, len, new_text) in replacements {
             if offset + len <= result.len() {

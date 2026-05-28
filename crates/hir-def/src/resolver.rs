@@ -76,11 +76,11 @@ pub enum Resolution {
 #[derive(Debug)]
 enum Scope<'db> {
     /// All items and imported names of a module/file.
-    BlockScope { def_map: &'db DefMap },
+    Block { def_map: &'db DefMap },
     /// Local bindings from let/var/match/foreach.
-    ExprScope { bindings: HashMap<Name, DefId> },
+    Expr { bindings: HashMap<Name, DefId> },
     /// Workspace-wide definitions from all files.
-    WorkspaceScope { def_map: &'db WorkspaceDefMap },
+    Workspace { def_map: &'db WorkspaceDefMap },
 }
 
 /// Check if a name is a Sail built-in type.
@@ -106,7 +106,7 @@ fn is_builtin_type(name: &str) -> bool {
     )
 }
 
-/// Scope-chain resolver: ExprScope > BlockScope > WorkspaceScope.
+/// Scope-chain resolver: Expr > Block > Workspace.
 #[derive(Debug)]
 pub struct Resolver<'db> {
     scopes: Vec<Scope<'db>>,
@@ -117,7 +117,7 @@ pub struct Resolver<'db> {
 impl<'db> Resolver<'db> {
     /// Create a resolver with a single block/module scope.
     pub fn new(def_map: &'db DefMap) -> Self {
-        Self { scopes: vec![Scope::BlockScope { def_map }], from_file: None }
+        Self { scopes: vec![Scope::Block { def_map }], from_file: None }
     }
 
     /// Create a resolver with a module scope. Alias for `new`.
@@ -128,13 +128,13 @@ impl<'db> Resolver<'db> {
     /// Create a resolver for a specific file, setting `from_file` for
     /// visibility filtering.
     pub fn new_for_file(def_map: &'db DefMap, file_id: base_db::FileId) -> Self {
-        Self { scopes: vec![Scope::BlockScope { def_map }], from_file: Some(file_id) }
+        Self { scopes: vec![Scope::Block { def_map }], from_file: Some(file_id) }
     }
 
     /// Try to access the underlying DefMap, if any block scope exists.
     pub fn try_def_map(&self) -> Option<&'db DefMap> {
         self.scopes.iter().find_map(|s| match s {
-            Scope::BlockScope { def_map } => Some(*def_map),
+            Scope::Block { def_map } => Some(*def_map),
             _ => None,
         })
     }
@@ -144,8 +144,8 @@ impl<'db> Resolver<'db> {
     pub fn for_file_in_workspace(def_map: &'db DefMap, workspace: &'db WorkspaceDefMap) -> Self {
         Self {
             scopes: vec![
-                Scope::WorkspaceScope { def_map: workspace },
-                Scope::BlockScope { def_map },
+                Scope::Workspace { def_map: workspace },
+                Scope::Block { def_map },
             ],
             from_file: None,
         }
@@ -155,8 +155,8 @@ impl<'db> Resolver<'db> {
     pub fn for_file_in_scope(def_map: &'db DefMap, scoped_workspace: &'db WorkspaceDefMap) -> Self {
         Self {
             scopes: vec![
-                Scope::WorkspaceScope { def_map: scoped_workspace },
-                Scope::BlockScope { def_map },
+                Scope::Workspace { def_map: scoped_workspace },
+                Scope::Block { def_map },
             ],
             from_file: None,
         }
@@ -175,7 +175,7 @@ impl<'db> Resolver<'db> {
 
     /// Push a fresh expression scope.
     pub fn push_expr_scope(&mut self) {
-        self.scopes.push(Scope::ExprScope { bindings: HashMap::new() });
+        self.scopes.push(Scope::Expr { bindings: HashMap::new() });
     }
 
     /// Pop the innermost scope. Panics if only the block scope remains.
@@ -187,7 +187,7 @@ impl<'db> Resolver<'db> {
     /// Add a binding to the innermost expression scope.
     pub fn add_binding(&mut self, name: Name, def: DefId) {
         match self.scopes.last_mut() {
-            Some(Scope::ExprScope { bindings }) => {
+            Some(Scope::Expr { bindings }) => {
                 bindings.insert(name, def);
             }
             _ => panic!("add_binding called without an active expression scope"),
@@ -195,25 +195,25 @@ impl<'db> Resolver<'db> {
     }
 
     /// Resolve `name` by walking scopes from innermost to outermost.
-    /// Priority: ExprScope > BlockScope (current file) > WorkspaceScope.
+    /// Priority: Expr > Block (current file) > Workspace.
     ///
     /// This is the combined-namespace legacy API. New code should prefer
     /// `resolve_path_in_type_ns` / `resolve_path_in_value_ns`.
     pub fn resolve_name(&self, name: &str) -> Resolution {
         for scope in self.scopes.iter().rev() {
             match scope {
-                Scope::ExprScope { bindings } => {
+                Scope::Expr { bindings } => {
                     if let Some(&def) = bindings.get(name) {
                         return Resolution::Def(def);
                     }
                 }
-                Scope::BlockScope { def_map } => {
+                Scope::Block { def_map } => {
                     let ids = def_map.lookup_name(name);
                     if !ids.is_empty() {
                         return Resolution::Defs(ids.to_vec());
                     }
                 }
-                Scope::WorkspaceScope { def_map } => {
+                Scope::Workspace { def_map } => {
                     let visible = match self.from_file {
                         Some(fid) => def_map.contains_visible_from(name, fid),
                         None => def_map.contains(name),
@@ -244,7 +244,7 @@ impl<'db> Resolver<'db> {
         let name_key = Name::from(name);
         for scope in self.scopes.iter().rev() {
             match scope {
-                Scope::BlockScope { def_map } => {
+                Scope::Block { def_map } => {
                     let per_ns = def_map.root_scope().get(&name_key);
                     if let Some(item) = per_ns.types {
                         let type_def_id = TypeDefId(item.def.as_raw());
@@ -256,7 +256,7 @@ impl<'db> Resolver<'db> {
                         return Some(type_ns);
                     }
                 }
-                Scope::WorkspaceScope { def_map } => {
+                Scope::Workspace { def_map } => {
                     let visible = match self.from_file {
                         Some(fid) => def_map.contains_visible_from(name, fid),
                         None => def_map.contains(name),
@@ -265,7 +265,7 @@ impl<'db> Resolver<'db> {
                         return Some(TypeNs::Workspace(Name::from(name)));
                     }
                 }
-                Scope::ExprScope { .. } => {} // locals are values, not types
+                Scope::Expr { .. } => {} // locals are values, not types
             }
         }
         None
@@ -282,12 +282,12 @@ impl<'db> Resolver<'db> {
         let name_key = Name::from(name);
         for scope in self.scopes.iter().rev() {
             match scope {
-                Scope::ExprScope { bindings } => {
+                Scope::Expr { bindings } => {
                     if let Some(&def) = bindings.get(name) {
                         return Some(ValueNs::LocalBinding(def));
                     }
                 }
-                Scope::BlockScope { def_map } => {
+                Scope::Block { def_map } => {
                     let ids = def_map.root_scope().get_values(&name_key);
                     if !ids.is_empty() {
                         let first_raw = crate::nameres::DefId(ids[0].as_raw());
@@ -326,7 +326,7 @@ impl<'db> Resolver<'db> {
                         }
                     }
                 }
-                Scope::WorkspaceScope { def_map } => {
+                Scope::Workspace { def_map } => {
                     let visible = match self.from_file {
                         Some(fid) => def_map.contains_visible_from(name, fid),
                         None => def_map.contains(name),
@@ -396,7 +396,7 @@ impl<'db> Resolver<'db> {
     pub fn names_in_scope(&self) -> Vec<Name> {
         let mut names = Vec::new();
         // Collect module-level names via item_scope() (
-        // RA-aligned item_scope accessor instead of manual BlockScope match).
+        // RA-aligned item_scope accessor instead of manual Block match).
         if let Some(item_scope) = self.item_scope() {
             for (name, _) in item_scope.entries() {
                 names.push(name.clone());
@@ -404,13 +404,13 @@ impl<'db> Resolver<'db> {
         }
         for scope in self.scopes() {
             match scope {
-                Scope::ExprScope { bindings } => {
+                Scope::Expr { bindings } => {
                     names.extend(bindings.keys().cloned());
                 }
-                Scope::BlockScope { .. } => {
+                Scope::Block { .. } => {
                     // Module-level names already collected via item_scope() above.
                 }
-                Scope::WorkspaceScope { def_map } => {
+                Scope::Workspace { def_map } => {
                     for name in def_map.defs.keys() {
                         names.push(name.clone());
                     }
@@ -422,7 +422,7 @@ impl<'db> Resolver<'db> {
 
     pub fn item_scope(&self) -> Option<&crate::item_scope::ItemScope> {
         for scope in self.scopes() {
-            if let Scope::BlockScope { def_map } = scope {
+            if let Scope::Block { def_map } = scope {
                 return Some(def_map.root_scope());
             }
         }
@@ -432,7 +432,7 @@ impl<'db> Resolver<'db> {
     /// Access the underlying [`DefMap`] (the block/module scope).
     pub fn def_map(&self) -> &'db DefMap {
         for scope in &self.scopes {
-            if let Scope::BlockScope { def_map } = scope {
+            if let Scope::Block { def_map } = scope {
                 return def_map;
             }
         }

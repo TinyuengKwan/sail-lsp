@@ -49,10 +49,10 @@ pub(crate) fn add_missing_match_arms(acc: &mut Assists, ctx: &AssistContext<'_>)
 
     // Check if the file has any enum definition
     for &id in item_tree.top_level_items() {
-        if id.item_kind(&item_tree) == ItemKind::Enum || id.item_kind(&item_tree) == ItemKind::Union
+        if id.item_kind(item_tree) == ItemKind::Enum || id.item_kind(item_tree) == ItemKind::Union
         {
             // Check inline variants
-            let sig = id.signature(&item_tree);
+            let sig = id.signature(item_tree);
             if let Some(brace_start) = sig.find('{') {
                 if let Some(brace_end) = sig.rfind('}') {
                     let inner = &sig[brace_start + 1..brace_end];
@@ -62,19 +62,19 @@ pub(crate) fn add_missing_match_arms(acc: &mut Assists, ctx: &AssistContext<'_>)
                         .filter(|s| !s.is_empty())
                         .collect();
                     if !variants.is_empty() {
-                        enum_name = Some(id.name(&item_tree).as_str().to_string());
+                        enum_name = Some(id.name(item_tree).as_str().to_string());
                         all_variants = variants.iter().map(|s| s.to_string()).collect();
                     }
                 }
             }
         }
         // Also check scattered enum clauses (member_name field)
-        if id.is_clause(&item_tree) && id.member_name(&item_tree).is_some() {
-            if let Some(member) = id.member_name(&item_tree) {
+        if id.is_clause(item_tree) && id.member_name(item_tree).is_some() {
+            if let Some(member) = id.member_name(item_tree) {
                 if !all_variants.contains(&member.to_string()) {
                     all_variants.push(member.to_string());
                     if enum_name.is_none() {
-                        enum_name = Some(id.name(&item_tree).as_str().to_string());
+                        enum_name = Some(id.name(item_tree).as_str().to_string());
                     }
                 }
             }

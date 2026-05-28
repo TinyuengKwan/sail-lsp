@@ -325,12 +325,12 @@ fn build_dependency_tree(changes: &[Change]) -> (Vec<usize>, Vec<DependentChange
         let mut found_parent = false;
 
         // Only replace-type changes can be parents (they introduce new subtrees).
-        for j in 0..i {
-            let parent_kind = changes[j].change_kind();
+        for (j, parent) in changes.iter().enumerate().take(i) {
+            let parent_kind = parent.change_kind();
             if !matches!(parent_kind, ChangeKind::Replace | ChangeKind::ReplaceRange) {
                 continue;
             }
-            let parent_range = changes[j].target_range();
+            let parent_range = parent.target_range();
             // Check strict containment (not equal — equal ranges are siblings, not parent/child).
             if parent_range.start() <= child_range.start()
                 && parent_range.end() >= child_range.end()
@@ -514,12 +514,8 @@ fn find_node_in(root: &SyntaxNode, original: &SyntaxNode) -> Option<SyntaxNode> 
     let target_range = original.text_range();
     let target_kind = original.kind();
 
-    for node in root.descendants() {
-        if node.text_range() == target_range && node.kind() == target_kind {
-            return Some(node);
-        }
-    }
-    None
+    root.descendants()
+        .find(|node| node.text_range() == target_range && node.kind() == target_kind)
 }
 
 /// Resolve annotations: find the annotated elements in the (possibly mutated) tree.

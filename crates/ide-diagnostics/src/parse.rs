@@ -30,9 +30,9 @@ pub fn compute_parse_diagnostics(file: &dyn FileDb, lex_errors: &[LexError]) -> 
     if let Some(item_tree) = file.item_tree() {
         let text = file.text();
         for &id in item_tree.top_level_items() {
-            let span = id.span(&item_tree);
+            let span = id.span(item_tree);
             let def_text = text.get(span.start..span.end).unwrap_or("");
-            let sig = id.signature(&item_tree);
+            let sig = id.signature(item_tree);
 
             // Deprecated effect annotations: `effect {wmv}` etc.
             if sig.contains("effect {") || sig.contains("effect{") {
@@ -51,7 +51,7 @@ pub fn compute_parse_diagnostics(file: &dyn FileDb, lex_errors: &[LexError]) -> 
             // Missing extern purity: `val name = {backend: "..."} : type`
             // should have `pure` or `impure` annotation.
             // Only applies to ValSpec entries (not functions/mappings).
-            if id.item_kind(&item_tree) == hir_def::ItemKind::ValSpec {
+            if id.item_kind(item_tree) == hir_def::ItemKind::ValSpec {
                 // Extern bindings have `= { lem: "...", c: "..." }` in their text.
                 // Look for `= {` followed by a string literal (distinguishes from
                 // function body `= { ... }` which has expressions, not strings).
@@ -59,7 +59,7 @@ pub fn compute_parse_diagnostics(file: &dyn FileDb, lex_errors: &[LexError]) -> 
                 if is_extern {
                     let has_purity = def_text.contains("pure") || def_text.contains("impure");
                     if !has_purity {
-                        let name_len = id.name(&item_tree).as_str().len();
+                        let name_len = id.name(item_tree).as_str().len();
                         let name_span = base_db::text_range(
                             span.start,
                             span.start + name_len.min(span.end - span.start),

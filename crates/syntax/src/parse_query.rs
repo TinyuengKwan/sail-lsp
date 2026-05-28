@@ -68,7 +68,7 @@ impl ParsedFileData {
         let old_errors = self.errors.as_deref().map(|e| e.to_vec()).unwrap_or_default();
 
         let (green, errors, _range) =
-            crate::parsing::incremental_reparse(&node, delete, insert, old_errors.into_iter())?;
+            crate::parsing::incremental_reparse(&node, delete, insert, old_errors)?;
 
         Some(ParsedFileData {
             tokens: self.tokens.clone(), // tokens not re-lexed in incremental path
@@ -126,8 +126,8 @@ impl Eq for ParsedFileData {}
 impl std::hash::Hash for ParsedFileData {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         std::ptr::hash(Arc::as_ptr(&self.tokens), state);
-        self.green.as_ref().map(|a| std::ptr::hash(Arc::as_ptr(a), state));
-        self.errors.as_ref().map(|a| std::ptr::hash(Arc::as_ptr(a), state));
+        if let Some(a) = self.green.as_ref() { std::ptr::hash(Arc::as_ptr(a), state) }
+        if let Some(a) = self.errors.as_ref() { std::ptr::hash(Arc::as_ptr(a), state) }
     }
 }
 
@@ -189,10 +189,7 @@ pub fn parse_file(db: &dyn salsa::Database, input: FileText) -> ParsedFileData {
 #[salsa::tracked(returns(as_deref))]
 pub fn parse_errors(db: &dyn salsa::Database, input: FileText) -> Option<Box<[SyntaxError]>> {
     let parsed = parse_file(db, input);
-    match &parsed.errors {
-        None => None,
-        Some(errors) => Some(errors.iter().cloned().collect()),
-    }
+    parsed.errors.as_ref().map(|errors| errors.iter().cloned().collect())
 }
 
 /// Wrapper for `Arc<ParsedFile>` with pointer-based Eq/Hash for salsa.

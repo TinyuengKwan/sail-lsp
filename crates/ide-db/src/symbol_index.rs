@@ -276,9 +276,9 @@ pub fn extract_symbol_decls(file: &dyn FileDb) -> Vec<SymbolDecl> {
         return item_tree
             .top_level_items()
             .iter()
-            .filter(|id| !id.is_clause(&item_tree)) // skip clauses for workspace symbol
+            .filter(|id| !id.is_clause(item_tree)) // skip clauses for workspace symbol
             .filter_map(|id| {
-                let (kind, detail) = match id.item_kind(&item_tree) {
+                let (kind, detail) = match id.item_kind(item_tree) {
                     hir_def::ItemKind::Function => (SymbolKind::Function, "function"),
                     hir_def::ItemKind::ValSpec => (SymbolKind::Function, "value"),
                     hir_def::ItemKind::Mapping | hir_def::ItemKind::MappingSpec => {
@@ -298,10 +298,10 @@ pub fn extract_symbol_decls(file: &dyn FileDb) -> Vec<SymbolDecl> {
                     _ => return None,
                 };
                 Some(SymbolDecl {
-                    name: id.name(&item_tree).as_str().to_string(),
+                    name: id.name(item_tree).as_str().to_string(),
                     kind,
                     detail,
-                    offset: id.span(&item_tree).start,
+                    offset: id.span(item_tree).start,
                 })
             })
             .collect();
@@ -330,7 +330,7 @@ pub fn document_symbols_ide(file: &dyn FileDb) -> Vec<crate::ide_types::Navigati
         it.top_level_items()
             .iter()
             .map(|id| {
-                let s = id.span(&it);
+                let s = id.span(it);
                 (s.start, s.end)
             })
             .collect()
@@ -339,7 +339,7 @@ pub fn document_symbols_ide(file: &dyn FileDb) -> Vec<crate::ide_types::Navigati
     };
     let item_tree_ref = file.item_tree();
     let item_tree_index: HashMap<&str, hir_def::item_tree::ModItem> =
-        if let Some(ref it) = item_tree_ref {
+        if let Some(it) = item_tree_ref {
             it.top_level_items().iter().map(|&id| (id.name(it).as_str(), id)).collect()
         } else {
             HashMap::new()
@@ -426,7 +426,7 @@ pub fn document_symbols_ide(file: &dyn FileDb) -> Vec<crate::ide_types::Navigati
     let mut bitfield_indices: HashMap<String, usize> = HashMap::new();
     for (idx, target) in roots.iter().enumerate() {
         if target.kind == IdeSymbolKind::Struct
-            && target.detail.as_deref().map_or(false, |d| d.starts_with("bitfield"))
+            && target.detail.as_deref().is_some_and(|d| d.starts_with("bitfield"))
         {
             bitfield_indices.insert(target.name.clone(), idx);
         }

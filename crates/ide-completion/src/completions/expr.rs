@@ -363,8 +363,8 @@ fn complete_unqualified(
                 }
                 // Filter by context: type position → only types
                 let (kind, detail) = decl_kind_to_completion(decl.kind);
-                if ctx.position == CompletionPosition::TypeAnnotation {
-                    if !matches!(
+                if ctx.position == CompletionPosition::TypeAnnotation
+                    && !matches!(
                         kind,
                         CompletionItemKind::Struct
                             | CompletionItemKind::Enum
@@ -372,7 +372,6 @@ fn complete_unqualified(
                     ) {
                         continue;
                     }
-                }
                 if !seen.insert(decl.name.clone()) {
                     continue;
                 }

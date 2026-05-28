@@ -33,7 +33,7 @@ impl<T: Send + 'static> TaskPool<T> {
     {
         let sender = self.sender.clone();
         self.pool.spawn(move || {
-            if let Ok(result) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| task())) {
+            if let Ok(result) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(task)) {
                 let _ = sender.send(result);
             }
         });

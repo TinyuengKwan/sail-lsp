@@ -168,7 +168,7 @@ fn extract_narrowings(body: &Body, expr_id: ExprId, env: &mut FlowEnvironment) {
         }
 
         // Pattern: `not(cond)` / `~(cond)` — negation (limited narrowing)
-        Expr::UnaryOp { op, expr: inner } if matches!(op, HirUnaryOp::Known(UnaryOp::Not)) => {
+        Expr::UnaryOp { op: HirUnaryOp::Known(UnaryOp::Not), expr: inner } => {
             // Negation doesn't produce useful narrowings in most cases.
             // Future: for `not(x == 0)` we could narrow x to non-zero.
             let _ = inner;

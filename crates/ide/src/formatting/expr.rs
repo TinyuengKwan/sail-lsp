@@ -236,9 +236,7 @@ pub(crate) fn rewrite_if_expr(
         }
 
         // Determine if this is a condition line or body line
-        if trimmed.starts_with("if ") || trimmed.starts_with("else if ") {
-            result.push(format!("{indent}{trimmed}"));
-        } else if trimmed.starts_with("else") {
+        if trimmed.starts_with("if ") || trimmed.starts_with("else") {
             result.push(format!("{indent}{trimmed}"));
         } else {
             // Body line — add one level of indentation

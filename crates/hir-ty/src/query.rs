@@ -47,7 +47,7 @@ impl std::hash::Hash for ArcTopLevelEnv {
 /// body-only edits skip downstream re-computation.
 #[salsa::tracked(returns(ref))]
 pub fn top_level_env(db: &dyn salsa::Database, input: FileText) -> ArcTopLevelEnv {
-    let text: &str = &input.text(db);
+    let text: &str = input.text(db);
     let parsed = syntax::parse_query::parse_file(db, input);
     let cst_root = match &parsed.green {
         Some(green) => syntax::SyntaxNode::new_root(green.as_ref().clone()),
@@ -249,8 +249,8 @@ pub fn infer_body(db: &dyn salsa::Database, input: FileText) -> ArcInferenceResu
         all_diagnostics.extend(result.0.diagnostics().iter().cloned());
     }
 
-    let mut result = TypeCheckResult::default();
-    result.legacy_diagnostics = all_diagnostics;
+    let result =
+        TypeCheckResult { legacy_diagnostics: all_diagnostics, ..TypeCheckResult::default() };
     ArcInferenceResult(Arc::new(result))
 }
 
@@ -267,7 +267,7 @@ pub fn infer<'db>(
     let _p = tracing::info_span!("infer", name = %id.name(db)).entered();
 
     let file = id.file(db);
-    let text: &str = &file.text(db);
+    let text: &str = file.text(db);
 
     let env_data = top_level_env(db, file);
     let mut env = env_data.0.env.clone();

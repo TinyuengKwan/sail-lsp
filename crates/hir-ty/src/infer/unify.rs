@@ -727,17 +727,14 @@ impl InferenceTable {
             if ok && !vars.is_empty() {
                 use super::existential;
                 let mut table = super::InferenceTable::default();
-                match existential::extract_witnesses(
+                if let existential::WitnessResult::ConstraintViolation { .. } = existential::extract_witnesses(
                     &vars,
                     &constraint,
                     &inner,
                     expected,
                     &mut table,
                 ) {
-                    existential::WitnessResult::ConstraintViolation { .. } => {
-                        return false;
-                    }
-                    _ => {}
+                    return false;
                 }
             }
             return ok;
@@ -986,17 +983,14 @@ impl InferenceTable {
                 if ok && !vars.is_empty() {
                     use super::existential;
                     let mut table = super::InferenceTable::default();
-                    match existential::extract_witnesses(
+                    if let existential::WitnessResult::ConstraintViolation { .. } = existential::extract_witnesses(
                         &vars,
                         &constraint,
                         &inner,
                         actual,
                         &mut table,
                     ) {
-                        existential::WitnessResult::ConstraintViolation { .. } => {
-                            return false;
-                        }
-                        _ => {}
+                        return false;
                     }
                 }
                 ok
@@ -1048,9 +1042,9 @@ impl InferenceTable {
                             NumericExpr::parse(s).or_else(|| super::parse_numeric_expr_text(s))
                         };
                         if let (Some(n1), Some(n2)) = (parse_any(&v1), parse_any(&v2)) {
-                            match nexp_simplify::check_eq(&n1, &n2) {
-                                Some(result) => return result,
-                                None => {} // undecidable — fall through to permissive
+                            // None: undecidable — fall through to permissive
+                            if let Some(result) = nexp_simplify::check_eq(&n1, &n2) {
+                                return result;
                             }
                         }
                         // Final fallback: permissive (can't decide)

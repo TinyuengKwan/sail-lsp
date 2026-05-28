@@ -28,7 +28,7 @@ pub(crate) fn remove_trailing_return(
 ///
 /// that the client resolves via `codeAction/resolve`.
 fn fixes(d: &RemoveTrailingReturn) -> Option<Vec<Assist>> {
-    let range: ide_db::line_index::TextRange = d.node.value.text_range().into();
+    let range: ide_db::line_index::TextRange = d.node.value.text_range();
     Some(vec![crate::unresolved_fix("remove_trailing_return", "Remove trailing `return`", range)])
 }
 

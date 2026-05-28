@@ -17,7 +17,7 @@ pub fn ssr_from_comment(
     pos: TextSize,
 ) -> Option<(MatchFinder<'_>, rowan::TextRange)> {
     // Get the file text.
-    let text: &str = &ft.text(db);
+    let text: &str = ft.text(db);
 
     // Find the line containing `pos`.
     let offset = u32::from(pos) as usize;

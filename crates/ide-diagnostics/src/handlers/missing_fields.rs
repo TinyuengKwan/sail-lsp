@@ -25,7 +25,7 @@ pub(crate) fn missing_fields(_ctx: &DiagnosticsContext<'_>, d: &MissingFields) -
 /// Sail equivalent: int→0, nat→0, bool→false, bit→bitzero,
 /// bits→sail_zeros(), string→"", unit→().
 fn fixes(d: &MissingFields) -> Option<Vec<ide_db::assists::Assist>> {
-    let range: ide_db::line_index::TextRange = d.node.value.text_range().into();
+    let range: ide_db::line_index::TextRange = d.node.value.text_range();
     let fields_str = d.missing.join(", ");
 
     let missing_text = d

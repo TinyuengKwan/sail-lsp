@@ -117,11 +117,10 @@ pub(crate) fn handle_did_change_watched_files(
                     }
                 }
             }
-            FileChangeType::DELETED => {
-                if is_sail || is_project_file {
+            FileChangeType::DELETED
+                if (is_sail || is_project_file) => {
                     needs_reload = true;
                 }
-            }
             _ => {}
         }
     }

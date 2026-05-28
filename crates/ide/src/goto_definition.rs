@@ -239,7 +239,7 @@ pub fn goto_definition_field_or_method(
     let source = file_text.text(db);
 
     // Extract the identifier token at the offset from source text
-    let token_name = extract_identifier_at(&source, offset)?;
+    let token_name = extract_identifier_at(source, offset)?;
 
     let sema = hir::Semantics::new(db);
 

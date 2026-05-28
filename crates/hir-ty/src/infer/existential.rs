@@ -287,7 +287,7 @@ fn eval_numeric_with_witnesses(
         }
         NumericExpr::Exp(inner) => {
             let n = eval_numeric_with_witnesses(inner, witnesses)?;
-            if n >= 0 && n <= 63 {
+            if (0..=63).contains(&n) {
                 Some(1i64 << n)
             } else {
                 None

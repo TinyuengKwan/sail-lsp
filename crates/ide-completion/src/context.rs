@@ -210,8 +210,6 @@ fn position_from_analysis(analysis: &CompletionAnalysis) -> CompletionPosition {
                     PathKind::Pat { .. } => CompletionPosition::Pattern,
                     PathKind::Expr { .. } | PathKind::Item { .. } => CompletionPosition::Expression,
                 }
-            } else if nr.dot_access.is_some() {
-                CompletionPosition::Expression
             } else {
                 CompletionPosition::Expression
             }
@@ -398,8 +396,8 @@ fn analyze(text: &str, offset: usize, prefix: &str) -> CompletionAnalysis {
     // Brace depth for top-level detection
     let mut brace_depth = 0i32;
     let bytes = text.as_bytes();
-    for i in 0..offset {
-        match bytes[i] {
+    for &b in bytes.iter().take(offset) {
+        match b {
             b'{' => brace_depth += 1,
             b'}' => brace_depth -= 1,
             _ => {}
@@ -567,7 +565,7 @@ fn expected_type_and_name(
     if let Some(arrow_pos) = before.rfind("->") {
         let after_arrow = before[arrow_pos + 2..].trim_start();
         // The return type extends until `=` or `{`
-        if let Some(end) = after_arrow.find(|c: char| c == '=' || c == '{') {
+        if let Some(end) = after_arrow.find(['=', '{']) {
             let ret_ty = after_arrow[..end].trim();
             if !ret_ty.is_empty()
                 && ret_ty.chars().all(|c| {

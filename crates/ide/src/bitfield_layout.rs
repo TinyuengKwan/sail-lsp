@@ -85,7 +85,7 @@ pub fn parse_bitfield_fields(signature: &str) -> Vec<BitfieldField> {
         }
     }
     // Sort by hi bit descending (MSB first)
-    fields.sort_by(|a, b| b.hi.cmp(&a.hi));
+    fields.sort_by_key(|b| std::cmp::Reverse(b.hi));
     fields
 }
 
@@ -178,11 +178,11 @@ pub fn render_bitfield_layout(fields: &[BitfieldField]) -> String {
 pub fn bitfield_layout_for_name(file: &dyn ide_db::FileDb, name: &str) -> Option<String> {
     let tree = file.item_tree()?;
     let id = tree.top_level_items().iter().find(|id| {
-        id.item_kind(&tree) == hir_def::item_tree::ItemKind::Bitfield
-            && id.name(&tree).as_str() == name
+        id.item_kind(tree) == hir_def::item_tree::ItemKind::Bitfield
+            && id.name(tree).as_str() == name
     })?;
 
-    let fields = parse_bitfield_fields(id.signature(&tree));
+    let fields = parse_bitfield_fields(id.signature(tree));
     if fields.is_empty() {
         return None;
     }

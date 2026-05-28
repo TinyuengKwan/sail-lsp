@@ -93,7 +93,7 @@ where
                                 let instantiated = instantiate_signature(&sig, &arg_types);
                                 if instantiated != headline {
                                     markdown.push("___".to_string());
-                                    markdown.push(format!("*instantiated as:*"));
+                                    markdown.push("*instantiated as:*".to_string());
                                     headline = instantiated;
                                 }
                             }
@@ -138,7 +138,7 @@ where
             let members = overload_members(decl_ref.file, &decl_ref.decl);
             if !members.is_empty() {
                 markdown.push("___".to_string());
-                markdown.push(format!("**members:**"));
+                markdown.push("**members:**".to_string());
                 for member in members {
                     if let Some(sig) =
                         find_callable_signature(files.iter().copied(), current_uri, &member)
@@ -198,8 +198,8 @@ where
                 if let Some(tree) = file.item_tree() {
                     for &id in tree.top_level_items() {
                         // Scattered clauses: member_name carries the variant name
-                        if *id.name(&tree) == **enum_name && id.is_clause(&tree) {
-                            if let Some(member) = id.member_name(&tree) {
+                        if *id.name(tree) == **enum_name && id.is_clause(tree) {
+                            if let Some(member) = id.member_name(tree) {
                                 let member_s = member.to_string();
                                 if !variants.contains(&member_s) {
                                     variants.push(member_s);
@@ -283,7 +283,7 @@ where
             .item_tree()
             .and_then(|tree| {
                 tree.find_by_name(&decl_ref.decl.name)
-                    .and_then(|id| id.doc(&tree).map(|d| d.to_string()))
+                    .and_then(|id| id.doc(tree).map(|d| d.to_string()))
             })
             .or_else(|| extract_comments(decl_ref.file.text(), decl_ref.decl.span.start));
         if let Some(comments) = doc_text {
@@ -308,7 +308,7 @@ where
 
         // Show path like RA (using simple relative path or filename)
         let path = decl_ref.uri.path();
-        let filename = path.split('/').last().unwrap_or(path);
+        let filename = path.split('/').next_back().unwrap_or(path);
 
         // Build navigation link
         let pos = decl_ref.file.position_at(decl_ref.decl.span.start);
@@ -335,18 +335,18 @@ where
             .filter_map(|tree| {
                 let mut best: Option<hir_def::item_tree::ModItem> = None;
                 for &id in tree.top_level_items() {
-                    if id.name(&tree).as_str() != symbol_key {
+                    if id.name(tree).as_str() != symbol_key {
                         continue;
                     }
                     let take = match best {
                         None => true,
                         Some(existing) => {
                             let new_is_spec = matches!(
-                                id.item_kind(&tree),
+                                id.item_kind(tree),
                                 hir_def::ItemKind::ValSpec | hir_def::ItemKind::MappingSpec
                             );
                             let existing_is_spec = matches!(
-                                existing.item_kind(&tree),
+                                existing.item_kind(tree),
                                 hir_def::ItemKind::ValSpec | hir_def::ItemKind::MappingSpec
                             );
                             new_is_spec && !existing_is_spec
@@ -357,7 +357,7 @@ where
                     }
                 }
                 best.map(|id| {
-                    (id.signature(&tree).to_string(), id.doc(&tree).map(|d| d.to_string()))
+                    (id.signature(tree).to_string(), id.doc(tree).map(|d| d.to_string()))
                 })
             })
             .next();
@@ -554,8 +554,8 @@ fn decl_headline(file: &dyn FileDb, decl: &Decl) -> String {
     if decl.scope == Scope::TopLevel {
         if let Some(it) = file.item_tree() {
             for &id in it.top_level_items() {
-                let span = id.span(&it);
-                if id.name(&it).as_str() == decl.name
+                let span = id.span(it);
+                if id.name(it).as_str() == decl.name
                     && span.start <= decl.span.start
                     && span.end >= decl.span.end
                 {
@@ -1319,12 +1319,12 @@ pub fn hover_resolve_field_or_method(
     let source = file_text.text(db);
 
     // Extract the identifier at offset for display
-    let token_name = extract_hover_identifier(&source, offset)?;
+    let token_name = extract_hover_identifier(source, offset)?;
 
     // Try field resolution
     if let Some(_field_def_id) = sema.resolve_field(file_text, offset) {
         // Try to find the parent type name by looking at the expression before the dot
-        let type_name = find_type_before_dot(&source, offset);
+        let type_name = find_type_before_dot(source, offset);
         return match type_name {
             Some(ty) => Some(format!("field `{}` of `{}`", token_name, ty)),
             None => Some(format!("field `{}`", token_name)),

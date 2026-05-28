@@ -73,16 +73,16 @@ impl SymbolIndex {
         // Extract entries from ItemTree (definitions + declarations)
         if let Some(item_tree) = file.item_tree() {
             for &id in item_tree.top_level_items() {
-                let name = id.name(&item_tree).as_str().to_string();
+                let name = id.name(item_tree).as_str().to_string();
                 file_names.push(name.clone());
                 self.by_name.entry(name).or_default().push(SymbolEntry {
                     url: url.clone(),
-                    name: id.name(&item_tree).as_str().to_string(),
-                    kind: id.item_kind(&item_tree),
-                    span: id.span(&item_tree),
-                    signature_text: id.signature(&item_tree).to_string(),
-                    doc: id.doc(&item_tree).map(|s| s.to_string()),
-                    is_clause: id.is_clause(&item_tree),
+                    name: id.name(item_tree).as_str().to_string(),
+                    kind: id.item_kind(item_tree),
+                    span: id.span(item_tree),
+                    signature_text: id.signature(item_tree).to_string(),
+                    doc: id.doc(item_tree).map(|s| s.to_string()),
+                    is_clause: id.is_clause(item_tree),
                 });
             }
         }
@@ -233,11 +233,11 @@ fn edit_distance(a: &str, b: &str) -> usize {
     let m = a.len();
     let n = b.len();
     let mut dp = vec![vec![0usize; n + 1]; m + 1];
-    for i in 0..=m {
-        dp[i][0] = i;
+    for (i, row) in dp.iter_mut().enumerate() {
+        row[0] = i;
     }
-    for j in 0..=n {
-        dp[0][j] = j;
+    for (j, cell) in dp[0].iter_mut().enumerate() {
+        *cell = j;
     }
     for (i, ca) in a.chars().enumerate() {
         for (j, cb) in b.chars().enumerate() {

@@ -68,8 +68,8 @@ pub fn compute_match_usefulness(
         // Useless arm = no row in `arm_rows` extends the prefix.
         let any_useful = arm_rows
             .iter()
-            .any(|row| is_useful(&prefix, row.pats.as_slice(), &[scrutinee_ty.clone()], cx, 0));
-        if !any_useful && !arm.guard_span.is_some() {
+            .any(|row| is_useful(&prefix, row.pats.as_slice(), std::slice::from_ref(scrutinee_ty), cx, 0));
+        if !any_useful && arm.guard_span.is_none() {
             report.redundant.push(arm.arm_span);
         }
         // Only un-guarded rows go into the prefix; guarded rows might
@@ -86,7 +86,7 @@ pub fn compute_match_usefulness(
     // useful, the match is non-exhaustive — we extract concrete witnesses
     // from the failing constructors.
     let probe = vec![MatchPat::Wild];
-    let witnesses = collect_witnesses(&prefix, &probe, &[scrutinee_ty.clone()], cx, 0);
+    let witnesses = collect_witnesses(&prefix, &probe, std::slice::from_ref(scrutinee_ty), cx, 0);
     report.missing_witnesses = witnesses;
     report
 }
@@ -132,7 +132,7 @@ fn is_useful(
             let mut new_tys: Vec<MatchTy> = if sub_tys.len() == args.len() {
                 sub_tys
             } else {
-                std::iter::repeat(MatchTy::Unknown).take(args.len()).collect()
+                std::iter::repeat_n(MatchTy::Unknown, args.len()).collect()
             };
             new_tys.extend_from_slice(tail_tys);
             let specialized = specialize_ctor(matrix, name, args.len());
@@ -179,7 +179,7 @@ fn is_useful(
             };
             let mut new_pats = items.clone();
             new_pats.extend_from_slice(tail);
-            let mut new_tys: Vec<MatchTy> = std::iter::repeat(elem_ty).take(items.len()).collect();
+            let mut new_tys: Vec<MatchTy> = std::iter::repeat_n(elem_ty, items.len()).collect();
             new_tys.extend_from_slice(tail_tys);
             let specialized = specialize_vec(matrix, items.len());
             is_useful(&specialized, &new_pats, &new_tys, cx, depth + 1)
@@ -192,7 +192,7 @@ fn is_useful(
             let mut new_tys: Vec<MatchTy> = if sub_tys.len() == fields.len() {
                 sub_tys
             } else {
-                std::iter::repeat(MatchTy::Unknown).take(fields.len()).collect()
+                std::iter::repeat_n(MatchTy::Unknown, fields.len()).collect()
             };
             new_tys.extend_from_slice(tail_tys);
             let specialized = specialize_struct(matrix, &field_names);
@@ -288,7 +288,7 @@ fn is_useful_wild(
         let field_names: Vec<String> = field_entries.iter().map(|(n, _)| n.clone()).collect();
         let specialized = specialize_struct(matrix, &field_names);
         let mut new_pats: Vec<MatchPat> =
-            std::iter::repeat(MatchPat::Wild).take(field_names.len()).collect();
+            std::iter::repeat_n(MatchPat::Wild, field_names.len()).collect();
         new_pats.extend_from_slice(tail);
         let mut new_tys: Vec<MatchTy> = field_entries.into_iter().map(|(_, t)| t).collect();
         new_tys.extend_from_slice(tail_tys);
@@ -301,7 +301,7 @@ fn is_useful_wild(
                 let sub_tys = cx.ctor_sub_tys(&info.name, head_ty);
                 let new_pats = {
                     let mut v: Vec<MatchPat> =
-                        std::iter::repeat(MatchPat::Wild).take(info.arity).collect();
+                        std::iter::repeat_n(MatchPat::Wild, info.arity).collect();
                     v.extend_from_slice(tail);
                     v
                 };
@@ -378,7 +378,7 @@ fn specialize_ctor(matrix: &[Row], name: &str, arity: usize) -> Vec<Row> {
         match &row.pats[0] {
             MatchPat::Wild => {
                 let mut pats: Vec<MatchPat> =
-                    std::iter::repeat(MatchPat::Wild).take(arity).collect();
+                    std::iter::repeat_n(MatchPat::Wild, arity).collect();
                 pats.extend_from_slice(&row.pats[1..]);
                 out.push(Row { pats, arm_span: row.arm_span, has_guard: row.has_guard });
             }
@@ -412,7 +412,7 @@ fn specialize_tuple(matrix: &[Row], arity: usize) -> Vec<Row> {
         match &row.pats[0] {
             MatchPat::Wild => {
                 let mut pats: Vec<MatchPat> =
-                    std::iter::repeat(MatchPat::Wild).take(arity).collect();
+                    std::iter::repeat_n(MatchPat::Wild, arity).collect();
                 pats.extend_from_slice(&row.pats[1..]);
                 out.push(Row { pats, arm_span: row.arm_span, has_guard: row.has_guard });
             }
@@ -503,7 +503,7 @@ fn specialize_vec(matrix: &[Row], arity: usize) -> Vec<Row> {
         match &row.pats[0] {
             MatchPat::Wild => {
                 let mut pats: Vec<MatchPat> =
-                    std::iter::repeat(MatchPat::Wild).take(arity).collect();
+                    std::iter::repeat_n(MatchPat::Wild, arity).collect();
                 pats.extend_from_slice(&row.pats[1..]);
                 out.push(Row { pats, arm_span: row.arm_span, has_guard: row.has_guard });
             }
@@ -528,7 +528,7 @@ fn specialize_struct(matrix: &[Row], field_names: &[String]) -> Vec<Row> {
         match &row.pats[0] {
             MatchPat::Wild => {
                 let mut pats: Vec<MatchPat> =
-                    std::iter::repeat(MatchPat::Wild).take(field_names.len()).collect();
+                    std::iter::repeat_n(MatchPat::Wild, field_names.len()).collect();
                 pats.extend_from_slice(&row.pats[1..]);
                 out.push(Row { pats, arm_span: row.arm_span, has_guard: row.has_guard });
             }
@@ -581,7 +581,7 @@ fn collect_witnesses(
         return Vec::new();
     }
     if pats.is_empty() {
-        return if matrix.is_empty() { vec![] } else { vec![] };
+        return vec![];
     }
     let head = &pats[0];
     let head_ty = &tys[0];
@@ -639,7 +639,7 @@ fn collect_witnesses(
         let field_names: Vec<String> = field_entries.iter().map(|(n, _)| n.clone()).collect();
         let specialized = specialize_struct(matrix, &field_names);
         let mut new_pats: Vec<MatchPat> =
-            std::iter::repeat(MatchPat::Wild).take(field_names.len()).collect();
+            std::iter::repeat_n(MatchPat::Wild, field_names.len()).collect();
         new_pats.extend_from_slice(tail);
         let mut new_tys: Vec<MatchTy> = field_entries.iter().map(|(_, t)| t.clone()).collect();
         new_tys.extend_from_slice(tail_tys);
@@ -658,7 +658,7 @@ fn collect_witnesses(
                 let sub_tys = cx.ctor_sub_tys(&info.name, head_ty);
                 let new_pats = {
                     let mut v: Vec<MatchPat> =
-                        std::iter::repeat(MatchPat::Wild).take(info.arity).collect();
+                        std::iter::repeat_n(MatchPat::Wild, info.arity).collect();
                     v.extend_from_slice(tail);
                     v
                 };
@@ -673,7 +673,7 @@ fn collect_witnesses(
                     // `Ctor(_, _, ..., _)` with `arity` wildcards.
                     witnesses.push(MatchPat::Ctor {
                         name: info.name.clone(),
-                        args: std::iter::repeat(MatchPat::Wild).take(info.arity).collect(),
+                        args: std::iter::repeat_n(MatchPat::Wild, info.arity).collect(),
                     });
                 }
             }

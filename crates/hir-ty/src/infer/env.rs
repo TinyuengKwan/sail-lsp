@@ -429,7 +429,7 @@ impl TopLevelEnv {
                         Some("struct") => {
                             // Extract field names and types
                             let fields = extract_struct_fields_from_cst(&def_node);
-                            for (field_name, _) in &fields {
+                            for field_name in fields.keys() {
                                 env.known_field_names.insert(field_name.clone());
                             }
                             let params = extract_type_params_from_cst(&def_node);
@@ -568,7 +568,7 @@ impl TopLevelEnv {
                         }
                         Some("bitfield") => {
                             if let Some(info) = bitfield_info_from_cst(&def_node) {
-                                for (field_name, _) in &info.fields {
+                                for field_name in info.fields.keys() {
                                     env.known_field_names.insert(field_name.clone());
                                 }
                                 // Register Mk_{name} constructor (takes
@@ -1164,7 +1164,7 @@ pub(crate) fn ty_to_match_ty(ty: &Ty) -> MatchTy {
                     TyArg::Type(t) => Some(t),
                     _ => None,
                 })
-                .last()
+                .next_back()
                 .map(ty_to_match_ty)
                 .unwrap_or(MatchTy::Unknown);
             MatchTy::Vector(Box::new(elem))
@@ -1228,7 +1228,7 @@ pub(crate) fn ty_to_match_ty_with_subst(
                     TyArg::Type(t) => Some(ty_to_match_ty_with_subst(t, subst, records)),
                     _ => None,
                 })
-                .last()
+                .next_back()
                 .unwrap_or(MatchTy::Unknown);
             MatchTy::Vector(Box::new(elem))
         }

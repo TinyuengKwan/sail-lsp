@@ -23,7 +23,7 @@ pub(crate) fn deprecated_syntax(_ctx: &DiagnosticsContext<'_>, d: &DeprecatedSyn
 ///
 /// Deletes the entire deprecated node (e.g., `effect {}` block).
 fn fixes(d: &DeprecatedSyntax) -> Option<Vec<Assist>> {
-    let range: ide_db::line_index::TextRange = d.node.value.text_range().into();
+    let range: ide_db::line_index::TextRange = d.node.value.text_range();
     let edit = TextEdit { range, new_text: String::new() };
     Some(vec![crate::fix(
         "remove_deprecated",

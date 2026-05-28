@@ -96,18 +96,13 @@ fn find_if_near(text: &str, offset: usize) -> Option<usize> {
     // Find the last "if " before cursor
     let mut best = None;
     let mut search_from = 0;
-    loop {
-        match window[search_from..].find("if ") {
-            Some(pos) => {
-                let abs = start + search_from + pos;
-                // Make sure it's a keyword (preceded by whitespace or start)
-                if abs == 0 || !text.as_bytes()[abs - 1].is_ascii_alphanumeric() {
-                    best = Some(abs);
-                }
-                search_from += pos + 1;
-            }
-            None => break,
+    while let Some(pos) = window[search_from..].find("if ") {
+        let abs = start + search_from + pos;
+        // Make sure it's a keyword (preceded by whitespace or start)
+        if abs == 0 || !text.as_bytes()[abs - 1].is_ascii_alphanumeric() {
+            best = Some(abs);
         }
+        search_from += pos + 1;
     }
     best
 }

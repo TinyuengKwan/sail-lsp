@@ -288,7 +288,7 @@ pub fn normalize_validated_rename(
     if !is_valid_identifier_name(base_name) {
         return Err("new_name must be a valid identifier".to_string());
     }
-    if keywords.iter().any(|kw| *kw == base_name) {
+    if keywords.contains(&base_name) {
         return Err("new_name cannot be a Sail keyword".to_string());
     }
 

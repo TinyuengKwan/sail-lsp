@@ -181,8 +181,8 @@ pub fn type_ref_from_text(text: &str) -> TypeRef {
 
     // Try to parse as bidir FIRST (before fn type, since `<->` contains `->`)
     if let Some(idx) = find_top_level(text, "<->") {
-        let lhs = type_ref_from_text(&text[..idx].trim_end());
-        let rhs = type_ref_from_text(&text[idx + 3..].trim_start());
+        let lhs = type_ref_from_text(text[..idx].trim_end());
+        let rhs = type_ref_from_text(text[idx + 3..].trim_start());
         return TypeRef::Bidir { lhs: Box::new(lhs), rhs: Box::new(rhs) };
     }
 
@@ -225,8 +225,8 @@ pub fn type_ref_from_text(text: &str) -> TypeRef {
     }
 
     // Type variable: starts with '
-    if text.starts_with('\'') {
-        return TypeRef::Var(text[1..].to_string());
+    if let Some(stripped) = text.strip_prefix('\'') {
+        return TypeRef::Var(stripped.to_string());
     }
 
     // Simple named type

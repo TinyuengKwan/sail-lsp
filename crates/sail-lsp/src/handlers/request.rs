@@ -572,7 +572,7 @@ pub(crate) fn handle_inlay_hint_resolve(
     let mut ide_hint = crate::from_proto::inlay_hint(&line_index, &params);
     ide::inlay_hints::resolve_inlay_hint(&mut ide_hint);
     let mut result = params;
-    result.tooltip = ide_hint.tooltip.map(|t| InlayHintTooltip::String(t));
+    result.tooltip = ide_hint.tooltip.map(InlayHintTooltip::String);
     Ok(result)
 }
 
@@ -645,14 +645,9 @@ pub(crate) fn handle_code_action(
     // --- Refactoring assists ---
     let ide_range = crate::from_proto::text_range(&line_index, params.range);
 
-    let range_assists: &[(
-        &str,
-        CodeActionKind,
-        fn(
-            &dyn ide_db::FileDb,
-            ide_db::line_index::TextRange,
-        ) -> Option<Vec<ide_db::ide_types::IdeTextEdit>>,
-    )] = &[
+    type RangeAssistFn =
+        fn(&dyn ide_db::FileDb, ide_db::line_index::TextRange) -> Option<Vec<ide_db::ide_types::IdeTextEdit>>;
+    let range_assists: &[(&str, CodeActionKind, RangeAssistFn)] = &[
         ("Invert if", CodeActionKind::REFACTOR_REWRITE, ide_assists::invert_if_edits),
         (
             "Flip binary expression",
@@ -898,7 +893,7 @@ pub(crate) fn handle_completion(
         return Ok(None);
     }
     let lsp_items: Vec<CompletionItem> =
-        ide_items.iter().map(|i| crate::to_proto::completion_item(i)).collect();
+        ide_items.iter().map(crate::to_proto::completion_item).collect();
     Ok(Some(CompletionResponse::Array(lsp_items)))
 }
 
@@ -970,7 +965,7 @@ pub(crate) fn handle_signature_help(
             .into_iter()
             .map(|s| SignatureInformation {
                 label: s.label,
-                documentation: s.documentation.map(|d| Documentation::String(d)),
+                documentation: s.documentation.map(Documentation::String),
                 parameters: Some(
                     s.parameters
                         .into_iter()

@@ -418,12 +418,12 @@ pub fn generate_nodes(ast: &AstSrc) -> String {
     buf.push_str("//! Generated from `sail.ungram`, do not edit by hand.\n");
     buf.push_str("//!\n");
     buf.push_str("//! Run `cargo test -p syntax -- codegen` to validate.\n");
-    buf.push_str("\n");
+    buf.push('\n');
     buf.push_str("#![allow(dead_code)]\n");
-    buf.push_str("\n");
+    buf.push('\n');
     buf.push_str("use parser::SyntaxKind as SK;\n");
     buf.push_str("use crate::syntax_node::{SyntaxNode, SyntaxToken};\n");
-    buf.push_str("\n");
+    buf.push('\n');
     buf.push_str("use super::super::{support, AstNode};\n");
 
     // Determine which traits are actually used by generated impls
@@ -442,7 +442,7 @@ pub fn generate_nodes(ast: &AstSrc) -> String {
         let trait_list: Vec<&str> = used_traits.into_iter().collect();
         buf.push_str(&format!("use super::super::traits::{{{}}};\n", trait_list.join(", ")));
     }
-    buf.push_str("\n");
+    buf.push('\n');
 
     // Build lookup: node name -> fields (for accessor generation)
     let node_map: std::collections::HashMap<&str, &[Field]> =
@@ -643,22 +643,20 @@ fn emit_struct_node(
     #[allow(unused)] _enum_map: &std::collections::HashMap<&str, &[String]>,
 ) {
     // Struct definition
-    buf.push_str(&format!("#[derive(Debug, Clone, PartialEq, Eq, Hash)]\n"));
+    buf.push_str("#[derive(Debug, Clone, PartialEq, Eq, Hash)]\n");
     buf.push_str(&format!("pub struct {pascal} {{\n"));
-    buf.push_str(&format!("    pub(crate) syntax: SyntaxNode,\n"));
-    buf.push_str(&format!("}}\n\n"));
+    buf.push_str("    pub(crate) syntax: SyntaxNode,\n");
+    buf.push_str("}\n\n");
 
     // AstNode impl
     buf.push_str(&format!("impl AstNode for {pascal} {{\n"));
     buf.push_str(&format!("    fn can_cast(kind: SK) -> bool {{ kind == SK::{kind} }}\n"));
-    buf.push_str(&format!("    fn cast(syntax: SyntaxNode) -> Option<Self> {{\n"));
-    buf.push_str(&format!(
-        "        if Self::can_cast(syntax.kind()) {{ Some(Self {{ syntax }}) }} else {{ None }}\n"
-    ));
-    buf.push_str(&format!("    }}\n"));
-    buf.push_str(&format!("    fn syntax(&self) -> &SyntaxNode {{ &self.syntax }}\n"));
+    buf.push_str("    fn cast(syntax: SyntaxNode) -> Option<Self> {\n");
+    buf.push_str("        if Self::can_cast(syntax.kind()) { Some(Self { syntax }) } else { None }\n");
+    buf.push_str("    }\n");
+    buf.push_str("    fn syntax(&self) -> &SyntaxNode { &self.syntax }\n");
     buf.push_str(&format!("    fn kind() -> SK {{ SK::{kind} }}\n"));
-    buf.push_str(&format!("}}\n\n"));
+    buf.push_str("}\n\n");
 
     // Generate typed accessors from fields
     let pascal_ref: &str = pascal;
@@ -772,38 +770,38 @@ fn emit_struct_node(
             buf.push_str(accessor);
             buf.push('\n');
         }
-        buf.push_str(&format!("}}\n\n"));
+        buf.push_str("}\n\n");
     }
 }
 
 /// Emit an enum AST node (Expr, Pat, Type).
 fn emit_enum_node(buf: &mut String, name: &str, variants: &[String]) {
     // Enum definition
-    buf.push_str(&format!("#[derive(Debug, Clone, PartialEq, Eq, Hash)]\n"));
+    buf.push_str("#[derive(Debug, Clone, PartialEq, Eq, Hash)]\n");
     buf.push_str(&format!("pub enum {name} {{\n"));
     for v in variants {
         buf.push_str(&format!("    {v}({v}),\n"));
     }
-    buf.push_str(&format!("}}\n\n"));
+    buf.push_str("}\n\n");
 
     // AstNode impl
     buf.push_str(&format!("impl AstNode for {name} {{\n"));
 
     // can_cast
-    buf.push_str(&format!("    fn can_cast(kind: SK) -> bool {{\n"));
-    buf.push_str(&format!("        matches!(kind, "));
+    buf.push_str("    fn can_cast(kind: SK) -> bool {\n");
+    buf.push_str("        matches!(kind, ");
     let kind_arms: Vec<String> = variants
         .iter()
         .filter(|v| is_concrete_node(v))
         .map(|v| format!("SK::{}", to_upper_snake_case(v)))
         .collect();
     buf.push_str(&kind_arms.join(" | "));
-    buf.push_str(&format!(")\n"));
-    buf.push_str(&format!("    }}\n"));
+    buf.push_str(")\n");
+    buf.push_str("    }\n");
 
     // cast
-    buf.push_str(&format!("    fn cast(syntax: SyntaxNode) -> Option<Self> {{\n"));
-    buf.push_str(&format!("        match syntax.kind() {{\n"));
+    buf.push_str("    fn cast(syntax: SyntaxNode) -> Option<Self> {\n");
+    buf.push_str("        match syntax.kind() {\n");
     for v in variants {
         if !is_concrete_node(v) {
             continue;
@@ -811,25 +809,25 @@ fn emit_enum_node(buf: &mut String, name: &str, variants: &[String]) {
         let upper = to_upper_snake_case(v);
         buf.push_str(&format!("            SK::{upper} => Some({name}::{v}({v} {{ syntax }})),\n"));
     }
-    buf.push_str(&format!("            _ => None,\n"));
-    buf.push_str(&format!("        }}\n"));
-    buf.push_str(&format!("    }}\n"));
+    buf.push_str("            _ => None,\n");
+    buf.push_str("        }\n");
+    buf.push_str("    }\n");
 
     // syntax
-    buf.push_str(&format!("    fn syntax(&self) -> &SyntaxNode {{\n"));
-    buf.push_str(&format!("        match self {{\n"));
+    buf.push_str("    fn syntax(&self) -> &SyntaxNode {\n");
+    buf.push_str("        match self {\n");
     for v in variants {
         buf.push_str(&format!("            {name}::{v}(it) => &it.syntax,\n"));
     }
-    buf.push_str(&format!("        }}\n"));
-    buf.push_str(&format!("    }}\n"));
+    buf.push_str("        }\n");
+    buf.push_str("    }\n");
 
     // kind — enums have multiple kinds, so this is a placeholder
     buf.push_str(&format!(
         "    fn kind() -> SK {{ unimplemented!(\"enum {name} has multiple kinds\") }}\n"
     ));
 
-    buf.push_str(&format!("}}\n\n"));
+    buf.push_str("}\n\n");
 }
 
 /// Write the complete nodes.rs file.
@@ -875,12 +873,12 @@ pub fn generate_tokens() -> String {
     buf.push_str("//! Generated token wrappers from `sail.ungram`.\n");
     buf.push_str("//!\n");
     buf.push_str("//! Each token type wraps a `SyntaxToken` and implements `AstToken`.\n");
-    buf.push_str("\n");
+    buf.push('\n');
     buf.push_str("use parser::SyntaxKind;\n");
-    buf.push_str("\n");
+    buf.push('\n');
     buf.push_str("use crate::syntax_node::SyntaxToken;\n");
     buf.push_str("use crate::ast::AstToken;\n");
-    buf.push_str("\n");
+    buf.push('\n');
 
     // Macro definition (mirrors the existing hand-written one)
     buf.push_str("macro_rules! ast_token {\n");
@@ -889,7 +887,7 @@ pub fn generate_tokens() -> String {
     buf.push_str("        pub struct $name {\n");
     buf.push_str("            pub(crate) syntax: SyntaxToken,\n");
     buf.push_str("        }\n");
-    buf.push_str("\n");
+    buf.push('\n');
     buf.push_str("        impl std::fmt::Display for $name {\n");
     buf.push_str(
         "            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n",
@@ -897,7 +895,7 @@ pub fn generate_tokens() -> String {
     buf.push_str("                std::fmt::Display::fmt(&self.syntax, f)\n");
     buf.push_str("            }\n");
     buf.push_str("        }\n");
-    buf.push_str("\n");
+    buf.push('\n');
     buf.push_str("        impl AstToken for $name {\n");
     buf.push_str("            fn can_cast(kind: SyntaxKind) -> bool {\n");
     buf.push_str("                kind == SyntaxKind::$kind\n");

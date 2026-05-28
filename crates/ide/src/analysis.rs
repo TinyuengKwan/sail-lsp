@@ -164,7 +164,7 @@ impl Default for AnalysisHost {
 /// Here we flatten them into one struct for convenience since our
 /// tower-lsp architecture doesn't have a separate snapshot layer.
 /// + K2-3: Clone is cheap (salsa db clone = Arc bump, Files clone = Arc bump).
-/// Enables passing to worker threads for parallel diagnostics, prime_caches.
+///   Enables passing to worker threads for parallel diagnostics, prime_caches.
 #[derive(Clone)]
 pub struct Analysis {
     db: RootDatabase,

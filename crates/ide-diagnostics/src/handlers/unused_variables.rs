@@ -22,7 +22,7 @@ pub(crate) fn unused_variables(_ctx: &DiagnosticsContext<'_>, d: &UnusedVariable
 /// Generate fix: prefix the variable name with `_`.
 fn fixes(d: &UnusedVariable) -> Option<Vec<ide_db::assists::Assist>> {
     let new_name = format!("_{}", d.name);
-    let range: ide_db::line_index::TextRange = d.node.value.text_range().into();
+    let range: ide_db::line_index::TextRange = d.node.value.text_range();
     let edit = TextEdit { range, new_text: new_name.clone() };
     let source_change = SourceChange::from_text_edit(edit);
     Some(vec![crate::fix(

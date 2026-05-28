@@ -89,6 +89,12 @@ pub struct Assists {
     buf: Vec<Assist>,
 }
 
+impl Default for Assists {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Assists {
     pub fn new() -> Self {
         Self { buf: Vec::new() }

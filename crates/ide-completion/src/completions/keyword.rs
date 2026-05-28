@@ -58,9 +58,9 @@ pub(crate) fn complete_keywords(
         );
 
         let include = match ctx.position {
-            CompletionPosition::TopLevel => is_top_level_kw || (!is_top_level_kw && !is_local_kw),
+            CompletionPosition::TopLevel => is_top_level_kw || !is_local_kw,
             CompletionPosition::Expression | CompletionPosition::Pattern => {
-                is_local_kw || (!is_top_level_kw && !is_local_kw)
+                is_local_kw || !is_top_level_kw
             }
             CompletionPosition::TypeAnnotation => false, // No keywords in type position
         };

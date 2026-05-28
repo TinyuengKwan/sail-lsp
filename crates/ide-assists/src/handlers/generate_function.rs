@@ -37,7 +37,7 @@ pub(crate) fn generate_function(acc: &mut Assists, ctx: &AssistContext<'_>) -> O
                     // Fallback: count commas + 1
                     arg_list
                         .descendants_with_tokens()
-                        .filter(|el| el.as_token().map_or(false, |t| t.kind() == SK::COMMA))
+                        .filter(|el| el.as_token().is_some_and(|t| t.kind() == SK::COMMA))
                         .count()
                         + 1,
                 );

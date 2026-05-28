@@ -99,6 +99,6 @@ pub(crate) fn compute_edits_from_matches(
         }
     }
     // Sort in reverse order so applying from end→start doesn't invalidate ranges.
-    edits.sort_by(|a, b| b.0.range.start().cmp(&a.0.range.start()));
+    edits.sort_by_key(|b| std::cmp::Reverse(b.0.range.start()));
     edits
 }

@@ -30,7 +30,7 @@ pub(crate) fn effect_violation(_ctx: &DiagnosticsContext<'_>, d: &EffectViolatio
 
 /// Unresolved fix: add the missing effect annotation to the function.
 fn fixes(d: &EffectViolation) -> Option<Vec<Assist>> {
-    let range: ide_db::line_index::TextRange = d.node.value.text_range().into();
+    let range: ide_db::line_index::TextRange = d.node.value.text_range();
     Some(vec![crate::unresolved_fix(
         "add_effect_annotation",
         &format!("Add `{:?}` effect annotation", d.effect),

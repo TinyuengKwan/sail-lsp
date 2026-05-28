@@ -220,8 +220,8 @@ fn symbol_definition_spans(file: &dyn FileDb, symbol_key: &str) -> Vec<Span> {
         let spans: Vec<Span> = item_tree
             .top_level_items()
             .iter()
-            .filter(|id| id.name(&item_tree).as_str() == symbol_key && !id.is_clause(&item_tree))
-            .map(|id| id.span(&item_tree))
+            .filter(|id| id.name(item_tree).as_str() == symbol_key && !id.is_clause(item_tree))
+            .map(|id| id.span(item_tree))
             .collect();
         if !spans.is_empty() {
             return spans;
@@ -230,8 +230,8 @@ fn symbol_definition_spans(file: &dyn FileDb, symbol_key: &str) -> Vec<Span> {
         return item_tree
             .top_level_items()
             .iter()
-            .filter(|id| id.name(&item_tree).as_str() == symbol_key)
-            .map(|id| id.span(&item_tree))
+            .filter(|id| id.name(item_tree).as_str() == symbol_key)
+            .map(|id| id.span(item_tree))
             .collect();
     }
 

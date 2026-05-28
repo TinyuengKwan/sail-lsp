@@ -32,7 +32,7 @@ pub(crate) fn unnecessary_mutability(
 ///
 /// mutability keyword.
 fn fixes(d: &UnnecessaryMutability) -> Option<Vec<Assist>> {
-    let range: ide_db::line_index::TextRange = d.node.value.text_range().into();
+    let range: ide_db::line_index::TextRange = d.node.value.text_range();
     Some(vec![crate::unresolved_fix(
         "make_immutable",
         &format!("Change `{}` to immutable (`let`)", d.name),

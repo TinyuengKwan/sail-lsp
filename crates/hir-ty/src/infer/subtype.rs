@@ -97,10 +97,10 @@ pub(super) fn is_subtype(table: &mut InferenceTable, sub: &Ty, sup: &Ty) -> Subt
 
     match (sub.kind(), sup.kind()) {
         (TyKind::Scalar(a), TyKind::Scalar(b)) if a == b => {
-            return SubtypeResult::Ok;
+            SubtypeResult::Ok
         }
         (TyKind::Adt(a, _), TyKind::Adt(b, _)) if a == b => {
-            return SubtypeResult::Ok;
+            SubtypeResult::Ok
         }
 
         //

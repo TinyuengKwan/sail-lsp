@@ -57,7 +57,7 @@ pub fn infer_call_arg_types_at_position(
     Some(arg_types)
 }
 
-fn span_text<'a>(file: &'a dyn FileDb, span: parser::Span) -> &'a str {
+fn span_text(file: &dyn FileDb, span: parser::Span) -> &str {
     file.text()[span.start..span.end].trim()
 }
 

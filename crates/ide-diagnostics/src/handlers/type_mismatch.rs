@@ -36,14 +36,14 @@ pub(crate) fn type_mismatch(ctx: &DiagnosticsContext<'_>, d: &TypeMismatch) -> O
     // Use adjusted_display_range to narrow the range for if-expressions:
     // point at the `if` keyword rather than the whole if-expr block.
     if let Some(if_ptr) =
-        syntax::AstPtr::<syntax::ast::IfExpr>::try_from_raw(d.expr_or_pat.value.clone())
+        syntax::AstPtr::<syntax::ast::IfExpr>::try_from_raw(d.expr_or_pat.value)
     {
         let _narrowed = crate::adjusted_display_range::<syntax::ast::IfExpr>(
             ctx,
             hir_def::in_file::InFile { file_id: d.expr_or_pat.file_id, value: if_ptr },
             &|if_expr| {
                 if_expr.syntax().first_token().map(|t| {
-                    let range: base_db::TextRange = t.text_range().into();
+                    let range: base_db::TextRange = t.text_range();
                     range
                 })
             },
@@ -67,7 +67,7 @@ pub(crate) fn type_mismatch(ctx: &DiagnosticsContext<'_>, d: &TypeMismatch) -> O
 ///
 /// Sail-specific fixes based on common Sail type coercions.
 fn fixes(d: &TypeMismatch) -> Option<Vec<Assist>> {
-    let range: ide_db::line_index::TextRange = d.expr_or_pat.value.text_range().into();
+    let range: ide_db::line_index::TextRange = d.expr_or_pat.value.text_range();
 
     match (d.expected.kind(), d.actual.kind()) {
         // bool → bit: suggest bool_to_bits(expr)

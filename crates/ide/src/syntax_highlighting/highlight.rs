@@ -18,7 +18,7 @@ pub(super) fn build_name_classification(
         return map;
     };
     for &id in item_tree.top_level_items() {
-        let kind = id.item_kind(&item_tree);
+        let kind = id.item_kind(item_tree);
         let idx = match kind {
             hir_def::ItemKind::Function
             | hir_def::ItemKind::Mapping
@@ -34,15 +34,15 @@ pub(super) fn build_name_classification(
             hir_def::ItemKind::Var => 4,      // var → variable
             _ => continue,
         };
-        map.insert(id.name(&item_tree).as_str().to_string(), idx);
+        map.insert(id.name(item_tree).as_str().to_string(), idx);
     }
     // Also classify enum members as enumMember (index 10).
     // ItemTree entries record enum type names; we need to look at
     // the signature text for member names.
     for &id in item_tree.top_level_items() {
-        if id.item_kind(&item_tree) == hir_def::ItemKind::Enum {
+        if id.item_kind(item_tree) == hir_def::ItemKind::Enum {
             // Parse enum members from signature: "enum Foo = { A, B, C }"
-            let sig = id.signature(&item_tree);
+            let sig = id.signature(item_tree);
             if let Some(brace_start) = sig.find('{') {
                 if let Some(brace_end) = sig.rfind('}') {
                     let inner = &sig[brace_start + 1..brace_end];

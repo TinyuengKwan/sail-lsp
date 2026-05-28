@@ -899,7 +899,7 @@ pub(crate) fn type_from_cst_node(node: &syntax::SyntaxNode) -> Ty {
             // Distinguish `->` (function) from `<->` (bidir mapping)
             let is_bidir = node
                 .children_with_tokens()
-                .any(|el| el.as_token().map_or(false, |t| t.kind() == SK::DOUBLE_ARROW));
+                .any(|el| el.as_token().is_some_and(|t| t.kind() == SK::DOUBLE_ARROW));
             let children: Vec<_> = node.children().collect();
             if children.len() >= 2 {
                 let lhs_node = &children[0];
@@ -929,7 +929,7 @@ pub(crate) fn type_from_cst_node(node: &syntax::SyntaxNode) -> Ty {
             // rest = args. For keyword types (register), name comes from
             // a token, and ALL child nodes are args.
             let children: Vec<_> = node.children().collect();
-            let name_from_child = children.first().and_then(|c| cst_ident_text(c));
+            let name_from_child = children.first().and_then(cst_ident_text);
             let (name, args_start) = if let Some(n) = name_from_child {
                 (n, 1) // skip first child (it's the name)
             } else {
@@ -948,7 +948,7 @@ pub(crate) fn type_from_cst_node(node: &syntax::SyntaxNode) -> Ty {
                 (kw_name, 0) // don't skip — all children are args
             };
             let args: Vec<TyArg> =
-                children.iter().skip(args_start).map(|c| type_arg_from_cst_node(c)).collect();
+                children.iter().skip(args_start).map(type_arg_from_cst_node).collect();
             let text = node.text().to_string().trim().to_string();
             Ty::app(name, args, text)
         }
@@ -1180,7 +1180,7 @@ fn collect_forall_from_cst(
 
     // Collect quantifier names only from tokens before the constraint.
     let quant_end = constraint_start
-        .and_then(|s| all_tokens[..s].iter().rposition(|(k, _)| *k == SK::COMMA).map(|i| i))
+        .and_then(|s| all_tokens[..s].iter().rposition(|(k, _)| *k == SK::COMMA))
         .unwrap_or(all_tokens.len());
     for (k, text) in &all_tokens[..quant_end] {
         if *k == SK::TY_VAR && !quantifiers.contains(text) {
@@ -1791,7 +1791,7 @@ fn find_type_child_deep(node: &syntax::SyntaxNode) -> Option<syntax::SyntaxNode>
     })
 }
 
-/// Parse a constraint expression from source text (for assert propagation).
+// Parse a constraint expression from source text (for assert propagation).
 
 /// Find the first keyword token text in a CST node.
 fn first_keyword_text(node: &syntax::SyntaxNode) -> Option<String> {

@@ -156,7 +156,7 @@ pub fn parse_accessor_name(name: &str) -> Option<BitfieldAccessor> {
 /// Split "TypeName_fieldname" into ("TypeName", "fieldname").
 /// Heuristic: first uppercase segment is the type name.
 fn split_accessor_name(s: &str) -> Option<(String, String)> {
-    let first_lower = s.find(|c: char| c == '_')?;
+    let first_lower = s.find('_')?;
     let bf = &s[..first_lower];
     let field = &s[first_lower + 1..];
     if bf.is_empty() || field.is_empty() {

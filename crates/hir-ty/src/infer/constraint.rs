@@ -49,7 +49,7 @@ impl Polynomial {
             return Some(0);
         }
         if self.terms.len() == 1 {
-            if let Some((&ref key, &val)) = self.terms.iter().next() {
+            if let Some((key, &val)) = self.terms.iter().next() {
                 if key.is_empty() {
                     return Some(val);
                 }
@@ -181,7 +181,7 @@ pub(super) fn polynomial_from_numeric_expr(expr: &NumericExpr) -> Option<Polynom
             // Case 2: inner evaluates to a constant via polynomial algebra.
             let inner_poly = polynomial_from_numeric_expr(inner)?;
             let n = inner_poly.as_constant()?;
-            if n >= 0 && n <= 63 {
+            if (0..=63).contains(&n) {
                 Some(Polynomial::constant(1i64 << n))
             } else {
                 None // Overflow or negative exponent — delegate to Z3
@@ -959,7 +959,7 @@ fn unify_inner(expected: &Ty, actual: &Ty, subst: &mut Subst, depth: usize) -> b
             if let Some(actual_name) = actual.as_name() {
                 return expected_scalar.name() == actual_name;
             }
-            return false;
+            false
         }
         TyKind::Adt(expected, _) => {
             if matches!(actual.kind(), TyKind::Tuple(_) | TyKind::FnPtr(..)) {
@@ -1153,11 +1153,8 @@ fn unify_inner(expected: &Ty, actual: &Ty, subst: &mut Subst, depth: usize) -> b
             if ok && !vars.is_empty() {
                 use super::existential;
                 let mut table = super::InferenceTable::default();
-                match existential::extract_witnesses(vars, constraint, inner, actual, &mut table) {
-                    existential::WitnessResult::ConstraintViolation { .. } => {
-                        return false;
-                    }
-                    _ => {}
+                if let existential::WitnessResult::ConstraintViolation { .. } = existential::extract_witnesses(vars, constraint, inner, actual, &mut table) {
+                    return false;
                 }
             }
             ok

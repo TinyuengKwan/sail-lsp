@@ -31,7 +31,7 @@ pub fn scan_sail_files(root: &std::path::Path) -> Vec<(PathBuf, String)> {
 
     for entry in walker {
         let path = entry.path();
-        if path.extension().map_or(false, |ext| ext == "sail") {
+        if path.extension().is_some_and(|ext| ext == "sail") {
             if let Ok(text) = std::fs::read_to_string(path) {
                 result.push((path.to_path_buf(), text));
             }
@@ -43,12 +43,12 @@ pub fn scan_sail_files(root: &std::path::Path) -> Vec<(PathBuf, String)> {
 
 /// Check if a file path is a Sail source file.
 pub fn is_sail_file(path: &std::path::Path) -> bool {
-    path.extension().map_or(false, |ext| ext == "sail")
+    path.extension().is_some_and(|ext| ext == "sail")
 }
 
 /// Check if a file path is a Sail project file.
 pub fn is_project_file(path: &std::path::Path) -> bool {
-    path.file_name().map_or(false, |name| {
+    path.file_name().is_some_and(|name| {
         let name = name.to_string_lossy();
         name == "sail.proj" || name.ends_with(".sail_project")
     })

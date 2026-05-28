@@ -323,7 +323,7 @@ pub fn syntax_diagnostics(
             res.push(Diagnostic::new(
                 hir_def::diagnostics::DiagnosticCode::SyntaxError,
                 format!("Syntax Error: {err}"),
-                base_db::TextRange::from(err.range()),
+                err.range(),
             ));
         }
     }

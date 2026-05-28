@@ -37,7 +37,7 @@ pub(crate) fn missing_match_arms(_ctx: &DiagnosticsContext<'_>, d: &IncompleteMa
 /// - If missing arms are known, generate an arm for each variant.
 /// - Otherwise, add a wildcard arm `_ => ()`.
 fn fixes(d: &IncompleteMatch) -> Option<Vec<ide_db::assists::Assist>> {
-    let range: ide_db::line_index::TextRange = d.node.value.text_range().into();
+    let range: ide_db::line_index::TextRange = d.node.value.text_range();
     let insert_range = base_db::text_range(base_db::range_end(range), base_db::range_end(range));
 
     let mut assists = Vec::new();

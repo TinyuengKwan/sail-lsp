@@ -21,7 +21,7 @@ pub(crate) fn unresolved_ident(_ctx: &DiagnosticsContext<'_>, d: &UnresolvedIden
 ///
 /// via lazy resolution. Here we suggest a rename based on edit distance.
 fn fixes(d: &UnresolvedIdent) -> Option<Vec<Assist>> {
-    let range: ide_db::line_index::TextRange = d.node.value.text_range().into();
+    let range: ide_db::line_index::TextRange = d.node.value.text_range();
     Some(vec![crate::unresolved_fix(
         "unresolved_ident",
         &format!("Find similar name for `{}`", d.name),

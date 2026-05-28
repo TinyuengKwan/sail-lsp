@@ -33,6 +33,7 @@ pub use crate::{
 /// Two-phase architecture:
 /// 1. `CompletionContext::new()` -> `(ctx, CompletionAnalysis)`
 /// 2. Match on `CompletionAnalysis` -> dispatch to providers
+#[allow(clippy::too_many_arguments)]
 pub fn completions(
     db: &dyn salsa::Database,
     file_text: Option<base_db::FileText>,
@@ -655,7 +656,7 @@ pub(crate) fn postfix_completions(
             continue;
         }
 
-        let snippet = template.replace("{}", &receiver);
+        let snippet = template.replace("{}", receiver);
 
         items.push(IdeDbCompletionItem {
             label: format!(".{trigger}"),
@@ -713,8 +714,8 @@ pub(crate) fn field_completions(
             if let Some(parsed) = file.parsed() {
                 // Find struct fields from declarations
                 for decl in &parsed.decls {
-                    if decl.name == *ty_name || ty_name.starts_with(&decl.name) {
-                        if matches!(
+                    if (decl.name == *ty_name || ty_name.starts_with(&decl.name))
+                        && matches!(
                             decl.kind,
                             syntax::parser_lower::DeclKind::Struct
                                 | syntax::parser_lower::DeclKind::Bitfield
@@ -742,7 +743,6 @@ pub(crate) fn field_completions(
                                 });
                             }
                         }
-                    }
                 }
             }
         }
@@ -769,7 +769,7 @@ pub(crate) fn extract_struct_fields(text: &str) -> Vec<String> {
         if let Some(colon_pos) = part.find(':') {
             let name = part[..colon_pos].trim();
             if !name.is_empty()
-                && name.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
+                && name.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
             {
                 fields.push(name.to_string());
             }

@@ -47,6 +47,7 @@ impl DiagnosticCode {
     }
 
     /// Parse from string, falling back to `SyntaxError`.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> DiagnosticCode {
         match s {
             "duplicate-definition" => DiagnosticCode::SailError("duplicate-definition"),

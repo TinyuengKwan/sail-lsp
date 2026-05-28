@@ -232,11 +232,7 @@ fn highlight_if_else(file: &dyn FileDb, trigger: Span) -> Vec<HighlightedRange> 
         if span.start == trigger.start {
             continue;
         }
-        let distance = if span.start > trigger.start {
-            span.start - trigger.start
-        } else {
-            trigger.start - span.start
-        };
+        let distance = span.start.abs_diff(trigger.start);
         if distance > 2000 {
             continue;
         }
@@ -272,11 +268,7 @@ fn highlight_try_catch(file: &dyn FileDb, trigger: Span) -> Vec<HighlightedRange
         if span.start == trigger.start {
             continue;
         }
-        let distance = if span.start > trigger.start {
-            span.start - trigger.start
-        } else {
-            trigger.start - span.start
-        };
+        let distance = span.start.abs_diff(trigger.start);
         if distance > 2000 {
             continue;
         }

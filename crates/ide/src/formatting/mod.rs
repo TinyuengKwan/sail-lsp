@@ -129,7 +129,7 @@ pub fn format_document_cst(text: &str, options: &FormatOptions) -> String {
 /// Check each line for overflow and trailing whitespace.
 ///
 /// Called after the visitor produces output, before post-processing.
-fn format_lines(text: &mut String, options: &FormatOptions, report: &mut report::FormatReport) {
+fn format_lines(text: &mut str, options: &FormatOptions, report: &mut report::FormatReport) {
     let root_shape = shape::Shape::with_max_width(options);
     let max_width = root_shape.budget(0);
     let mut offset = 0usize;
@@ -157,9 +157,7 @@ fn check_lost_comments(original: &str, formatted: &str, report: &mut report::For
     // Extract comment snippets from original: first 40 chars of each comment.
     for (i, line) in original.lines().enumerate() {
         let trimmed = line.trim();
-        let comment_text = if trimmed.starts_with("//") {
-            Some(trimmed)
-        } else if trimmed.starts_with("/*") {
+        let comment_text = if trimmed.starts_with("//") || trimmed.starts_with("/*") {
             Some(trimmed)
         } else {
             None
@@ -282,15 +280,9 @@ pub fn linked_editing_ranges_for_position(
     file: &dyn FileDb,
     position: ide_db::LineCol,
 ) -> Option<LinkedEditingRanges> {
-    let Some((token, _)) = file.token_at(position) else {
-        return None;
-    };
-    let Some(symbol_key) = token_symbol_key(token) else {
-        return None;
-    };
-    let Some(tokens) = file.tokens() else {
-        return None;
-    };
+    let (token, _) = file.token_at(position)?;
+    let symbol_key = token_symbol_key(token)?;
+    let tokens = file.tokens()?;
 
     let mut ranges = Vec::new();
     for (candidate, span) in tokens {
@@ -381,9 +373,9 @@ pub fn document_links_for_file(uri: &Url, file: &dyn FileDb) -> Vec<DocumentLink
     // that function's definition in the same file.
     if let Some(tree) = file.item_tree() {
         for &id in tree.top_level_items() {
-            if let Some(doc) = id.doc(&tree) {
+            if let Some(doc) = id.doc(tree) {
                 // Search for [name] patterns in the doc text
-                let doc_start = id.span(&tree).start; // approximate: doc is before the def
+                let doc_start = id.span(tree).start; // approximate: doc is before the def
                 let mut search_pos = 0;
                 while let Some(bracket_start) = doc[search_pos..].find('[') {
                     let abs_start = search_pos + bracket_start;
@@ -454,7 +446,7 @@ pub fn make_selection_range(file: &dyn FileDb, position: ide_db::LineCol) -> Sel
     // Definition-level selection ranges from ItemTree
     if let Some(item_tree) = file.item_tree() {
         for &id in item_tree.top_level_items() {
-            let span = id.span(&item_tree);
+            let span = id.span(item_tree);
             if span.start <= offset && offset <= span.end {
                 let r = base_db::text_range(span.start, span.end);
                 if !r.is_empty() {
@@ -499,7 +491,7 @@ pub fn on_enter_edits(file: &dyn FileDb, position: ide_db::LineCol) -> Option<Ve
     let prev_end =
         file.offset_at(&ide_db::LineCol { line: prev_line_idx + 1, col: 0 }).min(file.text().len());
     let prev_line = &file.text()[prev_start..prev_end];
-    let prev_trimmed = prev_line.trim_end_matches(|c| c == '\n' || c == '\r');
+    let prev_trimmed = prev_line.trim_end_matches(['\n', '\r']);
     let stripped = prev_trimmed.trim_start();
 
     let make_edit = |new_text: String| -> IdeTextEdit {
@@ -520,7 +512,7 @@ pub fn on_enter_edits(file: &dyn FileDb, position: ide_db::LineCol) -> Option<Ve
         let next_line_is_comment = if next_start < next_end {
             file.text()
                 .get(next_start..next_end)
-                .map_or(false, |l| l.trim_start().starts_with("//"))
+                .is_some_and(|l| l.trim_start().starts_with("//"))
         } else {
             false
         };

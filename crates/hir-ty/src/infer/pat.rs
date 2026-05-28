@@ -46,15 +46,14 @@ impl<'db> InferenceContext<'db> {
             Pat::Wild | Pat::Missing => {}
             Pat::Literal(lit) => {
                 let lit_ty = super::infer_literal_type(lit);
-                if !expected.is_error() && !lit_ty.is_error() {
-                    if !self.table.unify(expected, &lit_ty) {
+                if !expected.is_error() && !lit_ty.is_error()
+                    && !self.table.unify(expected, &lit_ty) {
                         self.result.record_type_mismatch_at(
                             hir_def::ExprOrPatId::PatId(pat_id),
                             expected,
                             &lit_ty,
                         );
                     }
-                }
             }
             Pat::Bind(name) => {
                 // Duplicate detection is done per-pattern-tree (not against
@@ -206,7 +205,7 @@ impl<'db> InferenceContext<'db> {
                                     ranges.push((*h, *l));
                                 }
                             }
-                            ranges.sort_by(|a, b| b.0.cmp(&a.0));
+                            ranges.sort_by_key(|b| std::cmp::Reverse(b.0));
                             for i in 1..ranges.len() {
                                 let expected_hi = ranges[i - 1].1.wrapping_sub(1);
                                 if ranges[i].0 != expected_hi {
@@ -283,12 +282,11 @@ impl<'db> InferenceContext<'db> {
         let Some(pat) = body.pat(pat_id) else { return };
         let span = self.pat_span(body, pat_id).unwrap_or(Span::new(0, 0));
         match pat {
-            Pat::Bind(name) => {
+            Pat::Bind(name)
                 if is_pattern_binding(name, &self.pattern_constants, self.env.has_workspace_context)
-                {
+                => {
                     out.entry(name.clone()).or_insert(span);
                 }
-            }
             Pat::Typed { inner, .. } | Pat::AsType { pat: inner, .. } => {
                 self.collect_hir_pat_bindings_inner(body, *inner, out);
             }
@@ -483,13 +481,16 @@ impl<'db> InferenceContext<'db> {
                 ) {
                     return;
                 }
-                if seen.contains_key(&name) {
-                    self.push_inference_diagnostic(InferenceDiagnostic::DuplicateBinding {
-                        pat: pat_id,
-                        name,
-                    });
-                } else {
-                    seen.insert(name, pat_id);
+                match seen.entry(name) {
+                    std::collections::hash_map::Entry::Occupied(e) => {
+                        self.push_inference_diagnostic(InferenceDiagnostic::DuplicateBinding {
+                            pat: pat_id,
+                            name: e.key().clone(),
+                        });
+                    }
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        e.insert(pat_id);
+                    }
                 }
             }
             Pat::Typed { inner, .. } | Pat::AsType { pat: inner, .. } => {
@@ -502,13 +503,16 @@ impl<'db> InferenceContext<'db> {
                     &self.pattern_constants,
                     self.env.has_workspace_context,
                 ) {
-                    if seen.contains_key(&binding) {
-                        self.push_inference_diagnostic(InferenceDiagnostic::DuplicateBinding {
-                            pat: pat_id,
-                            name: binding,
-                        });
-                    } else {
-                        seen.insert(binding, pat_id);
+                    match seen.entry(binding) {
+                        std::collections::hash_map::Entry::Occupied(e) => {
+                            self.push_inference_diagnostic(InferenceDiagnostic::DuplicateBinding {
+                                pat: pat_id,
+                                name: e.key().clone(),
+                            });
+                        }
+                        std::collections::hash_map::Entry::Vacant(e) => {
+                            e.insert(pat_id);
+                        }
                     }
                 }
             }

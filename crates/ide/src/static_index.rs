@@ -113,7 +113,7 @@ impl StaticIndex {
 
         let file_stem = url
             .path_segments()
-            .and_then(|s| s.last())
+            .and_then(|mut s| s.next_back())
             .unwrap_or("unknown")
             .strip_suffix(".sail")
             .unwrap_or("unknown");

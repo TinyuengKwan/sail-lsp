@@ -147,10 +147,5 @@ fn try_bare_parse_for_kind(s: &str, predicate: fn(SyntaxKind) -> bool) -> Option
 
 /// Find the first descendant node whose kind satisfies the predicate.
 fn find_descendant(root: &SyntaxNode, predicate: fn(SyntaxKind) -> bool) -> Option<SyntaxNode> {
-    for node in root.descendants() {
-        if predicate(node.kind()) {
-            return Some(node);
-        }
-    }
-    None
+    root.descendants().find(|node| predicate(node.kind()))
 }

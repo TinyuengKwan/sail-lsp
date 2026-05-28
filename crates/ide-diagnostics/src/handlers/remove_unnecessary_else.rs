@@ -28,7 +28,7 @@ pub(crate) fn remove_unnecessary_else(
 ///
 /// that the client resolves via `codeAction/resolve`.
 fn fixes(d: &RemoveUnnecessaryElse) -> Option<Vec<Assist>> {
-    let range: ide_db::line_index::TextRange = d.node.value.text_range().into();
+    let range: ide_db::line_index::TextRange = d.node.value.text_range();
     Some(vec![crate::unresolved_fix("remove_unnecessary_else", "Remove unnecessary `else`", range)])
 }
 

@@ -22,7 +22,7 @@ pub(crate) fn unreachable_code(_ctx: &DiagnosticsContext<'_>, d: &UnreachableCod
 
 /// Fix: delete the unreachable code block.
 fn fixes(d: &UnreachableCode) -> Option<Vec<Assist>> {
-    let range: ide_db::line_index::TextRange = d.node.value.text_range().into();
+    let range: ide_db::line_index::TextRange = d.node.value.text_range();
     let edit = TextEdit { range, new_text: String::new() };
     Some(vec![crate::fix(
         "remove_unreachable_code",

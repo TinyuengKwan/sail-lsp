@@ -38,8 +38,8 @@ pub fn complete_record(
     for (_, ws_file) in all_files {
         if let Some(parsed) = ws_file.parsed() {
             for decl in &parsed.decls {
-                if decl.name == *struct_name {
-                    if matches!(
+                if decl.name == *struct_name
+                    && matches!(
                         decl.kind,
                         syntax::parser_lower::DeclKind::Struct
                             | syntax::parser_lower::DeclKind::Bitfield
@@ -71,7 +71,6 @@ pub fn complete_record(
                             });
                         }
                     }
-                }
             }
         }
     }
@@ -149,7 +148,7 @@ fn extract_record_fields(def_text: &str) -> Vec<String> {
         if let Some(colon_pos) = trimmed.find(':') {
             let field_name = trimmed[..colon_pos].trim();
             if !field_name.is_empty()
-                && field_name.chars().next().map_or(false, |c| c.is_alphabetic())
+                && field_name.chars().next().is_some_and(|c| c.is_alphabetic())
             {
                 fields.push(field_name.to_string());
             }

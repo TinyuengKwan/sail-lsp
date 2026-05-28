@@ -29,7 +29,7 @@ pub(crate) fn mismatched_arg_count(
 /// When too few args: suggest adding placeholder `()` arguments.
 /// When too many args: suggest removing extra arguments.
 fn fixes(d: &MismatchedArgCount) -> Option<Vec<Assist>> {
-    let range: ide_db::line_index::TextRange = d.node.value.text_range().into();
+    let range: ide_db::line_index::TextRange = d.node.value.text_range();
     let label = if d.found < d.expected {
         format!("Add {} missing argument(s)", d.expected - d.found)
     } else {

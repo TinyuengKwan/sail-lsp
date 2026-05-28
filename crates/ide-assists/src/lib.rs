@@ -56,7 +56,7 @@ fn expected_token_from_message(message: &str) -> Option<&'static str> {
 }
 
 fn line_text(file: &dyn FileDb, line: u32) -> Option<&str> {
-    let start = file.offset_at(&ide_db::LineCol { line: line, col: 0 });
+    let start = file.offset_at(&ide_db::LineCol { line, col: 0 });
     if start > file.text().len() {
         return None;
     }
@@ -581,8 +581,8 @@ pub fn extract_function_edits(file: &dyn FileDb, range: TextRange) -> Option<Vec
     for occ in &parsed.symbol_occurrences {
         let occ_start = occ.span.start;
         let occ_end = occ.span.end;
-        if occ_start >= start && occ_end <= end {
-            if occ.role.is_none() && occ.scope == Some(syntax::parser_lower::Scope::Local) {
+        if occ_start >= start && occ_end <= end
+            && occ.role.is_none() && occ.scope == Some(syntax::parser_lower::Scope::Local) {
                 if let Some(def_occ) = parsed.symbol_occurrences.iter().find(|o| {
                     o.name == occ.name
                         && o.role == Some(DeclRole::Definition)
@@ -593,7 +593,6 @@ pub fn extract_function_edits(file: &dyn FileDb, range: TextRange) -> Option<Vec
                     }
                 }
             }
-        }
     }
 
     // Phase 2 : Also scan HIR Body for identifiers in selection
@@ -643,7 +642,7 @@ pub fn extract_function_edits(file: &dyn FileDb, range: TextRange) -> Option<Vec
 fn find_def_end_after(file: &dyn FileDb, offset: usize) -> Option<usize> {
     if let Some(it) = file.item_tree() {
         for &id in it.top_level_items() {
-            let span = id.span(&it);
+            let span = id.span(it);
             if span.start <= offset && offset <= span.end {
                 return Some(span.end);
             }
@@ -690,7 +689,7 @@ pub fn generate_doc_template_edits(
     // Non-callable definitions: use ItemTree
     if let Some(it) = file.item_tree() {
         for &id in it.top_level_items() {
-            let span = id.span(&it);
+            let span = id.span(it);
             if offset < span.start || offset > span.end {
                 continue;
             }
@@ -699,7 +698,7 @@ pub fn generate_doc_template_edits(
             if before.trim_end().ends_with("*/") || before.trim_end().ends_with("///") {
                 return None;
             }
-            let doc = format!("/*!\n * TODO: document\n */\n");
+            let doc = "/*!\n * TODO: document\n */\n".to_string();
             return Some(vec![IdeTextEdit {
                 range: base_db::text_range(span.start, span.start),
                 new_text: doc,
@@ -793,7 +792,7 @@ pub fn unwrap_block_edits(file: &dyn FileDb, range: TextRange) -> Option<Vec<Ide
             // Parse the body text and try extract_trivial_expression for single-item blocks.
             let (root, _) = syntax::parse_text(trimmed);
             let block = root.descendants().find_map(syntax::ast::BlockExpr::cast);
-            if let Some(trivial) = block.as_ref().and_then(|b| utils::extract_trivial_expression(b))
+            if let Some(trivial) = block.as_ref().and_then(utils::extract_trivial_expression)
             {
                 trivial.syntax().text().to_string()
             } else {
@@ -916,11 +915,11 @@ pub fn sort_items_edits(file: &dyn FileDb, range: TextRange) -> Option<Vec<IdeTe
 
     // Find enum/struct/union at cursor
     for &id in item_tree.top_level_items() {
-        let span = id.span(&item_tree);
+        let span = id.span(item_tree);
         if offset < span.start || offset > span.end {
             continue;
         }
-        if !matches!(id.item_kind(&item_tree), ItemKind::Enum | ItemKind::Struct | ItemKind::Union)
+        if !matches!(id.item_kind(item_tree), ItemKind::Enum | ItemKind::Struct | ItemKind::Union)
         {
             continue;
         }
@@ -1246,22 +1245,21 @@ where
         let mut current_enum_members_local: Vec<String> = Vec::new();
 
         for &id in tree.top_level_items() {
-            match id.item_kind(&tree) {
+            match id.item_kind(tree) {
                 ItemKind::Enum => {
                     // Flush previous enum
-                    if let Some(_) = &current_enum_name {
-                        if existing_arms.iter().any(|a| current_enum_members_local.contains(a)) {
+                    if current_enum_name.is_some()
+                        && existing_arms.iter().any(|a| current_enum_members_local.contains(a)) {
                             for m in &current_enum_members_local {
                                 if !existing_arms.contains(m) && !enum_members.contains(m) {
                                     enum_members.push(m.clone());
                                 }
                             }
                         }
-                    }
-                    current_enum_name = Some(id.name(&tree).as_str().to_string());
+                    current_enum_name = Some(id.name(tree).as_str().to_string());
                     current_enum_members_local.clear();
                     // Extract members from signature: "enum Foo = { A, B, C }"
-                    let sig = id.signature(&tree);
+                    let sig = id.signature(tree);
                     if let Some(brace_start) = sig.find('{') {
                         if let Some(brace_end) = sig.rfind('}') {
                             let inner = &sig[brace_start + 1..brace_end];
@@ -1276,7 +1274,7 @@ where
                 }
                 ItemKind::Union => {
                     // Extract union variants from signature
-                    let sig = id.signature(&tree);
+                    let sig = id.signature(tree);
                     if existing_arms.iter().any(|a| sig.contains(a.as_str())) {
                         // Parse union members from signature text
                     }
@@ -1285,15 +1283,14 @@ where
             }
         }
         // Flush last enum
-        if let Some(_) = &current_enum_name {
-            if existing_arms.iter().any(|a| current_enum_members_local.contains(a)) {
+        if current_enum_name.is_some()
+            && existing_arms.iter().any(|a| current_enum_members_local.contains(a)) {
                 for m in &current_enum_members_local {
                     if !existing_arms.contains(m) && !enum_members.contains(m) {
                         enum_members.push(m.clone());
                     }
                 }
             }
-        }
     }
 
     let missing_arms: Vec<String> = if !enum_members.is_empty() {
@@ -1332,15 +1329,15 @@ pub fn bitfield_accessor_edits(file: &dyn FileDb, range: TextRange) -> Option<Ve
     let text = file.text();
 
     for &id in item_tree.top_level_items() {
-        let span = id.span(&item_tree);
+        let span = id.span(item_tree);
         if offset < span.start || offset > span.end {
             continue;
         }
-        if id.item_kind(&item_tree) != ItemKind::Bitfield {
+        if id.item_kind(item_tree) != ItemKind::Bitfield {
             continue;
         }
 
-        let bf_name = id.name(&item_tree).as_str();
+        let bf_name = id.name(item_tree).as_str();
         let def_text = text.get(span.start..span.end)?;
         // Extract field names from { field : hi .. lo } body
         let brace_start = def_text.find('{')?;
@@ -1404,9 +1401,7 @@ pub fn simplify_boolean_edits(file: &dyn FileDb, range: TextRange) -> Option<Vec
         lhs.trim().to_string()
     } else if text == "not(true)" || text == "~(true)" {
         "false".to_string()
-    } else if text == "not(false)" || text == "~(false)" {
-        "true".to_string()
-    } else if text == "true & true" {
+    } else if text == "not(false)" || text == "~(false)" || text == "true & true" {
         "true".to_string()
     } else if text.starts_with("true & ")
         || text.starts_with("false & ")
@@ -1529,8 +1524,8 @@ fn try_eval_int_expr(s: &str) -> Option<i64> {
                 "*" => Some(lhs * rhs),
                 "/" if rhs != 0 => Some(lhs / rhs),
                 "%" if rhs != 0 => Some(lhs % rhs),
-                "<<" if rhs >= 0 && rhs < 64 => Some(lhs << rhs),
-                ">>" if rhs >= 0 && rhs < 64 => Some(lhs >> rhs),
+                "<<" if (0..64).contains(&rhs) => Some(lhs << rhs),
+                ">>" if (0..64).contains(&rhs) => Some(lhs >> rhs),
                 _ => None,
             };
         }
@@ -1556,7 +1551,7 @@ fn try_eval_int_expr(s: &str) -> Option<i64> {
     if let Some(pos) = s.find(" ^ ") {
         let base = try_eval_int_expr(s[..pos].trim())?;
         let exp = try_eval_int_expr(s[pos + 3..].trim())?;
-        if exp >= 0 && exp < 63 {
+        if (0..63).contains(&exp) {
             return Some(base.pow(exp as u32));
         }
     }
@@ -1595,7 +1590,7 @@ where
         };
         if span.start <= offset && offset < span.end && predicate(hir) {
             let width = span.end - span.start;
-            if best.as_ref().map_or(true, |b| width < b.3) {
+            if best.as_ref().is_none_or(|b| width < b.3) {
                 best = Some((id, hir, span, width));
             }
         }
@@ -1804,12 +1799,12 @@ pub fn inline_call_edits(file: &dyn FileDb, offset: usize) -> Option<Vec<IdeText
     // Find function definition in ItemTree
     let tree = file.item_tree()?;
     let entry_id = tree.top_level_items().iter().find(|id| {
-        id.name(&tree).as_str() == callee_name
-            && matches!(id.item_kind(&tree), hir_def::item_tree::ItemKind::Function)
+        id.name(tree).as_str() == callee_name
+            && matches!(id.item_kind(tree), hir_def::item_tree::ItemKind::Function)
     })?;
 
     // Extract function body from source text
-    let entry_span = entry_id.span(&tree);
+    let entry_span = entry_id.span(tree);
     let def_text = text.get(entry_span.start..entry_span.end)?;
     let eq_pos = def_text.find('=')?;
     let body_text = def_text[eq_pos + 1..].trim();
@@ -1864,7 +1859,7 @@ fn extract_formal_params(def_text: &str) -> Vec<String> {
         let part = part.trim();
         // Handle `name : type` or just `name`
         let name = part.split(':').next().unwrap_or(part).trim();
-        if !name.is_empty() && name.chars().next().map_or(false, |c| c.is_alphabetic() || c == '_')
+        if !name.is_empty() && name.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
         {
             params.push(name.to_string());
         }
@@ -1889,7 +1884,7 @@ pub fn inline_const_as_literal_edits(
         return None;
     }
     let bytes = text.as_bytes();
-    if !bytes.get(offset).map_or(false, |b| b.is_ascii_alphanumeric() || *b == b'_') {
+    if !bytes.get(offset).is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_') {
         return None;
     }
     let word_start =
@@ -2049,7 +2044,7 @@ pub fn generate_constant_edits(file: &dyn FileDb, range: TextRange) -> Option<Ve
         return None;
     }
     let bytes = text.as_bytes();
-    if !bytes.get(offset).map_or(false, |b| b.is_ascii_digit()) {
+    if !bytes.get(offset).is_some_and(|b| b.is_ascii_digit()) {
         return None;
     }
     // Walk backwards and forwards to find the full number token.
@@ -2197,7 +2192,7 @@ pub fn auto_include_edits<'a>(
     // sophisticated version would compute a relative path between the two URLs.
     let include_path = def_url
         .path_segments()
-        .and_then(|segs| segs.last())
+        .and_then(|mut segs| segs.next_back())
         .map(|s| s.to_string())
         .unwrap_or_else(|| def_url.path().to_string());
     if include_path.is_empty() {

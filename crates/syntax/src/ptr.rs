@@ -88,7 +88,7 @@ pub struct AstPtr<N: AstNode> {
 // Manual impls to avoid requiring N: Clone/Debug/etc.
 impl<N: AstNode> Clone for AstPtr<N> {
     fn clone(&self) -> Self {
-        Self { raw: self.raw.clone(), _ty: PhantomData }
+        Self { raw: self.raw, _ty: PhantomData }
     }
 }
 
@@ -125,7 +125,7 @@ impl<N: AstNode> AstPtr<N> {
 
     /// Access the underlying raw pointer.
     pub fn syntax_node_ptr(&self) -> SyntaxNodePtr {
-        self.raw.clone()
+        self.raw
     }
 
     /// The text range.

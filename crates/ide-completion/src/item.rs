@@ -189,7 +189,7 @@ impl From<ide_db::ide_types::CompletionItem> for CompletionItem {
             kind: old.kind,
             lookup: old.filter_text,
             detail: old.detail,
-            documentation: old.documentation.map(|s| Documentation::new(s)),
+            documentation: old.documentation.map(Documentation::new),
             deprecated: old.deprecated,
             trigger_call_info: false,
             relevance: old.relevance,

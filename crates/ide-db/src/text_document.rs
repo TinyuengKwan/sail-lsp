@@ -112,7 +112,7 @@ impl TextDocument {
     }
 
     fn line_start(&self, line_index: usize) -> usize {
-        self.line_offsets.get(line_index).copied().unwrap_or_else(|| self.content.len())
+        self.line_offsets.get(line_index).copied().unwrap_or(self.content.len())
     }
 
     // Given a byte offset, what is the corresponding character?
@@ -152,12 +152,11 @@ fn compute_line_offsets(text: &str, is_at_line_start: bool, text_offset: usize) 
     for i in 0..text.len() {
         match text[i] {
             b'\n' => line_offsets.push(text_offset + i + 1),
-            b'\r' => {
+            b'\r'
                 // This is a new line *unless* the next character is \n.
-                if text.get(i + 1) != Some(&b'\n') {
+                if text.get(i + 1) != Some(&b'\n') => {
                     line_offsets.push(text_offset + i + 1)
                 }
-            }
             _ => {}
         }
     }

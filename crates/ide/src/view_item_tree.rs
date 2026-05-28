@@ -22,15 +22,15 @@ pub fn view_item_tree(file: &dyn FileDb) -> String {
     lines.push(String::new());
 
     for (idx, &id) in tree.top_level_items().iter().enumerate() {
-        let doc_marker = if id.doc(&tree).is_some() { " [doc]" } else { "" };
-        let clause_marker = if id.is_clause(&tree) { " [clause]" } else { "" };
-        let member = id.member_name(&tree).map(|m| format!(" member={m}")).unwrap_or_default();
-        let span = id.span(&tree);
+        let doc_marker = if id.doc(tree).is_some() { " [doc]" } else { "" };
+        let clause_marker = if id.is_clause(tree) { " [clause]" } else { "" };
+        let member = id.member_name(tree).map(|m| format!(" member={m}")).unwrap_or_default();
+        let span = id.span(tree);
         lines.push(format!(
             "{idx:>3}  {:?}{clause_marker}{member}{doc_marker}",
-            id.item_kind(&tree),
+            id.item_kind(tree),
         ));
-        lines.push(format!("      {}", id.signature(&tree)));
+        lines.push(format!("      {}", id.signature(tree)));
         lines.push(format!("      span: {}..{}", span.start, span.end));
     }
 

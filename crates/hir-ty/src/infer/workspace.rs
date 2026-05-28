@@ -235,8 +235,8 @@ impl WorkspaceContext {
 
             // Aggregate cross-file data from ItemTree entries
             for &id in item_tree.top_level_items() {
-                let name = id.name(&item_tree).as_str();
-                match id.item_kind(&item_tree) {
+                let name = id.name(item_tree).as_str();
+                match id.item_kind(item_tree) {
                     ItemKind::ValSpec => {
                         ctx.cross_file_function_names.insert(name.to_string());
                         // Use scheme from TopLevelEnv
@@ -256,7 +256,7 @@ impl WorkspaceContext {
                         ctx.cross_file_function_names.insert(name.to_string());
                     }
                     ItemKind::Enum => {
-                        let sig = id.signature(&item_tree);
+                        let sig = id.signature(item_tree);
                         let members = extract_braced_idents_from_sig(sig);
                         let enum_entry = ctx.enums.entry(name.to_string()).or_default();
                         for m in &members {
@@ -268,7 +268,7 @@ impl WorkspaceContext {
                         }
                     }
                     ItemKind::Union => {
-                        let sig = id.signature(&item_tree);
+                        let sig = id.signature(item_tree);
                         let variants = extract_braced_idents_from_sig(sig);
                         let union_entry = ctx.unions.entry(name.to_string()).or_default();
                         for v in &variants {
@@ -295,7 +295,7 @@ impl WorkspaceContext {
                         ctx.cross_file_value_names.insert(name.to_string());
                     }
                     ItemKind::Struct => {
-                        let sig = id.signature(&item_tree);
+                        let sig = id.signature(item_tree);
                         let fields = extract_braced_idents_from_sig(sig);
                         ctx.known_field_names.extend(fields);
 
@@ -306,7 +306,7 @@ impl WorkspaceContext {
                         }
                     }
                     ItemKind::Bitfield => {
-                        let sig = id.signature(&item_tree);
+                        let sig = id.signature(item_tree);
                         let fields = extract_braced_idents_from_sig(sig);
                         ctx.known_field_names.extend(fields);
                         if let Some(info) = file_env.bitfields.get(name) {
@@ -316,7 +316,7 @@ impl WorkspaceContext {
                         }
                     }
                     ItemKind::Overload => {
-                        let sig = id.signature(&item_tree);
+                        let sig = id.signature(item_tree);
                         let members = extract_braced_idents_from_sig(sig);
                         // For `overload operator | = {or_vec}`, `name` is
                         // "operator". Also register under the actual operator
@@ -348,7 +348,7 @@ impl WorkspaceContext {
                         // Handle scattered enum/union clauses.
                         // Mark the parent type as potentially open (scattered).
                         ctx.scattered_open_types.insert(name.to_string());
-                        if let Some(member) = id.member_name(&item_tree) {
+                        if let Some(member) = id.member_name(item_tree) {
                             ctx.cross_file_value_names.insert(member.to_string());
                             ctx.cross_file_constructor_names.insert(member.to_string());
                             ctx.cross_file_pattern_constants.insert(member.to_string());
@@ -363,10 +363,10 @@ impl WorkspaceContext {
                             // from type_ref_from_text). Falls back to signature
                             // parsing if type_ref is None.
                             let payload_ty: Option<Ty> = id
-                                .type_ref(&item_tree)
-                                .map(|tr| ty_from_type_ref(tr))
+                                .type_ref(item_tree)
+                                .map(ty_from_type_ref)
                                 .or_else(|| {
-                                    let sig = id.signature(&item_tree);
+                                    let sig = id.signature(item_tree);
                                     sig.find(':').map(|colon_pos| {
                                         let type_text = sig[colon_pos + 1..].trim();
                                         parse_type_text(type_text)
@@ -582,7 +582,7 @@ impl WorkspaceContext {
                         // Register constructor scheme (same as build_from_cst path).
                         let parent_ty = Ty::named(parent.clone());
                         let payload_ty: Option<Ty> =
-                            id.type_ref(item_tree).map(|tr| ty_from_type_ref(tr)).or_else(|| {
+                            id.type_ref(item_tree).map(ty_from_type_ref).or_else(|| {
                                 let sig = id.signature(item_tree);
                                 sig.find(':').map(|colon_pos| {
                                     let type_text = sig[colon_pos + 1..].trim();
@@ -1110,11 +1110,11 @@ pub fn scoped_workspace_context<'a, F: SourceFileInfo + 'a>(
                 .filter(|(fid, _)| scope.contains(*fid.as_ref()))
                 .map(|(_, f)| *f)
                 .collect();
-            Arc::new(WorkspaceContext::build_from_cst(scoped.into_iter()))
+            Arc::new(WorkspaceContext::build_from_cst(scoped))
         }
         None => {
             let all: Vec<&'a F> = all_files.iter().map(|(_, f)| *f).collect();
-            Arc::new(WorkspaceContext::build_from_cst(all.into_iter()))
+            Arc::new(WorkspaceContext::build_from_cst(all))
         }
     }
 }

@@ -851,11 +851,10 @@ fn extract_fixity_decl(node: &syntax::SyntaxNode) -> Option<FixityDecl> {
             SK::NUM_LIT => {
                 level = tok.text().parse::<u8>().ok();
             }
-            SK::IDENT => {
-                if operator.is_none() {
+            SK::IDENT
+                if operator.is_none() => {
                     operator = Some(tok.text().to_string());
                 }
-            }
             // Operator symbols like `+`, `*`, `~`, `@` etc.
             _ if operator.is_none()
                 && !matches!(kind, SK::KW_INFIX | SK::KW_INFIXL | SK::KW_INFIXR | SK::NUM_LIT) =>
