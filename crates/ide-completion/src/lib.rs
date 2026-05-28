@@ -719,30 +719,31 @@ pub(crate) fn field_completions(
                             decl.kind,
                             syntax::parser_lower::DeclKind::Struct
                                 | syntax::parser_lower::DeclKind::Bitfield
-                        ) {
-                            // Extract field names from the definition text
-                            let def_text =
-                                file.text().get(decl.span.start..decl.span.end).unwrap_or("");
-                            for field in extract_struct_fields(def_text) {
-                                if !prefix_lower.is_empty()
-                                    && !field.to_ascii_lowercase().starts_with(&prefix_lower)
-                                {
-                                    continue;
-                                }
-                                items.push(IdeDbCompletionItem {
-                                    label: field.clone(),
-                                    kind: CompletionItemKind::Field,
-                                    detail: Some(format!("field of {}", decl.name)),
-                                    documentation: None,
-                                    insert_text: None,
-                                    text_edit: None,
-                                    sort_text: Some(format!("0{field}")),
-                                    filter_text: None,
-                                    deprecated: false,
-                                    relevance: Default::default(),
-                                });
+                        )
+                    {
+                        // Extract field names from the definition text
+                        let def_text =
+                            file.text().get(decl.span.start..decl.span.end).unwrap_or("");
+                        for field in extract_struct_fields(def_text) {
+                            if !prefix_lower.is_empty()
+                                && !field.to_ascii_lowercase().starts_with(&prefix_lower)
+                            {
+                                continue;
                             }
+                            items.push(IdeDbCompletionItem {
+                                label: field.clone(),
+                                kind: CompletionItemKind::Field,
+                                detail: Some(format!("field of {}", decl.name)),
+                                documentation: None,
+                                insert_text: None,
+                                text_edit: None,
+                                sort_text: Some(format!("0{field}")),
+                                filter_text: None,
+                                deprecated: false,
+                                relevance: Default::default(),
+                            });
                         }
+                    }
                 }
             }
         }

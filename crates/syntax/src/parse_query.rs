@@ -126,8 +126,12 @@ impl Eq for ParsedFileData {}
 impl std::hash::Hash for ParsedFileData {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         std::ptr::hash(Arc::as_ptr(&self.tokens), state);
-        if let Some(a) = self.green.as_ref() { std::ptr::hash(Arc::as_ptr(a), state) }
-        if let Some(a) = self.errors.as_ref() { std::ptr::hash(Arc::as_ptr(a), state) }
+        if let Some(a) = self.green.as_ref() {
+            std::ptr::hash(Arc::as_ptr(a), state)
+        }
+        if let Some(a) = self.errors.as_ref() {
+            std::ptr::hash(Arc::as_ptr(a), state)
+        }
     }
 }
 

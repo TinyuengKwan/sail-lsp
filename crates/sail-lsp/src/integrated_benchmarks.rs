@@ -523,9 +523,9 @@ fn pick_small_target_file(
     for (url, fid) in url_fids {
         if let Some(ft) = files.file_text(*fid) {
             let text_arc = ft.text(db);
-            let text: &str = &text_arc;
+            let text: &str = text_arc;
             let lines = text.lines().count();
-            if lines >= 30 && lines <= 120 {
+            if (30..=120).contains(&lines) {
                 let ids = hir_def::def_query::file_def_with_body_ids(db, ft);
                 if ids.len() >= 2 && ids.len() <= 8 {
                     return Some((url.clone(), *fid, text.to_string(), lines, ids.len()));
@@ -536,7 +536,7 @@ fn pick_small_target_file(
     for (url, fid) in url_fids {
         if let Some(ft) = files.file_text(*fid) {
             let text_arc = ft.text(db);
-            let text: &str = &text_arc;
+            let text: &str = text_arc;
             let lines = text.lines().count();
             let ids = hir_def::def_query::file_def_with_body_ids(db, ft);
             if ids.len() >= 2 && lines <= 200 {
@@ -792,9 +792,9 @@ fn pick_medium_target_file(
     for (url, fid) in url_fids {
         if let Some(ft) = files.file_text(*fid) {
             let text_arc = ft.text(db);
-            let text: &str = &text_arc;
+            let text: &str = text_arc;
             let lines = text.lines().count();
-            if lines >= 100 && lines <= 400 && text.contains("function ") {
+            if (100..=400).contains(&lines) && text.contains("function ") {
                 return Some((url.clone(), *fid, text.to_string(), lines));
             }
         }
@@ -803,7 +803,7 @@ fn pick_medium_target_file(
     for (url, fid) in url_fids {
         if let Some(ft) = files.file_text(*fid) {
             let text_arc = ft.text(db);
-            let text: &str = &text_arc;
+            let text: &str = text_arc;
             let lines = text.lines().count();
             if lines >= 50 && text.contains("function ") {
                 return Some((url.clone(), *fid, text.to_string(), lines));

@@ -417,7 +417,7 @@ mod tests {
     fn root_scope_exists() {
         let (_, scopes) = scopes_for("function f() = 42\n");
         // At least the root scope should exist
-        assert!(scopes.scopes.len() >= 1);
+        assert!(!scopes.scopes.is_empty());
     }
 
     #[test]
@@ -458,7 +458,7 @@ mod tests {
         // The innermost scope's chain should reach the root (parent = None)
         let last_scope_id = ScopeId::from_raw(RawIdx::from_u32(scopes.scopes.len() as u32 - 1));
         let chain: Vec<_> = scopes.scope_chain(Some(last_scope_id)).collect();
-        assert!(chain.len() >= 1);
+        assert!(!chain.is_empty());
         // The last in chain should have no parent (root)
         let root = chain.last().unwrap();
         assert!(scopes.scopes[*root].parent.is_none());

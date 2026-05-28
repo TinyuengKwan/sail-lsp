@@ -581,18 +581,21 @@ pub fn extract_function_edits(file: &dyn FileDb, range: TextRange) -> Option<Vec
     for occ in &parsed.symbol_occurrences {
         let occ_start = occ.span.start;
         let occ_end = occ.span.end;
-        if occ_start >= start && occ_end <= end
-            && occ.role.is_none() && occ.scope == Some(syntax::parser_lower::Scope::Local) {
-                if let Some(def_occ) = parsed.symbol_occurrences.iter().find(|o| {
-                    o.name == occ.name
-                        && o.role == Some(DeclRole::Definition)
-                        && (o.span.start < start || o.span.end > end)
-                }) {
-                    if seen.insert(def_occ.name.clone()) {
-                        params.push(def_occ.name.clone());
-                    }
+        if occ_start >= start
+            && occ_end <= end
+            && occ.role.is_none()
+            && occ.scope == Some(syntax::parser_lower::Scope::Local)
+        {
+            if let Some(def_occ) = parsed.symbol_occurrences.iter().find(|o| {
+                o.name == occ.name
+                    && o.role == Some(DeclRole::Definition)
+                    && (o.span.start < start || o.span.end > end)
+            }) {
+                if seen.insert(def_occ.name.clone()) {
+                    params.push(def_occ.name.clone());
                 }
             }
+        }
     }
 
     // Phase 2 : Also scan HIR Body for identifiers in selection
@@ -792,8 +795,7 @@ pub fn unwrap_block_edits(file: &dyn FileDb, range: TextRange) -> Option<Vec<Ide
             // Parse the body text and try extract_trivial_expression for single-item blocks.
             let (root, _) = syntax::parse_text(trimmed);
             let block = root.descendants().find_map(syntax::ast::BlockExpr::cast);
-            if let Some(trivial) = block.as_ref().and_then(utils::extract_trivial_expression)
-            {
+            if let Some(trivial) = block.as_ref().and_then(utils::extract_trivial_expression) {
                 trivial.syntax().text().to_string()
             } else {
                 // Fallback: manual brace stripping.
@@ -919,8 +921,7 @@ pub fn sort_items_edits(file: &dyn FileDb, range: TextRange) -> Option<Vec<IdeTe
         if offset < span.start || offset > span.end {
             continue;
         }
-        if !matches!(id.item_kind(item_tree), ItemKind::Enum | ItemKind::Struct | ItemKind::Union)
-        {
+        if !matches!(id.item_kind(item_tree), ItemKind::Enum | ItemKind::Struct | ItemKind::Union) {
             continue;
         }
 
@@ -1249,13 +1250,14 @@ where
                 ItemKind::Enum => {
                     // Flush previous enum
                     if current_enum_name.is_some()
-                        && existing_arms.iter().any(|a| current_enum_members_local.contains(a)) {
-                            for m in &current_enum_members_local {
-                                if !existing_arms.contains(m) && !enum_members.contains(m) {
-                                    enum_members.push(m.clone());
-                                }
+                        && existing_arms.iter().any(|a| current_enum_members_local.contains(a))
+                    {
+                        for m in &current_enum_members_local {
+                            if !existing_arms.contains(m) && !enum_members.contains(m) {
+                                enum_members.push(m.clone());
                             }
                         }
+                    }
                     current_enum_name = Some(id.name(tree).as_str().to_string());
                     current_enum_members_local.clear();
                     // Extract members from signature: "enum Foo = { A, B, C }"
@@ -1284,13 +1286,14 @@ where
         }
         // Flush last enum
         if current_enum_name.is_some()
-            && existing_arms.iter().any(|a| current_enum_members_local.contains(a)) {
-                for m in &current_enum_members_local {
-                    if !existing_arms.contains(m) && !enum_members.contains(m) {
-                        enum_members.push(m.clone());
-                    }
+            && existing_arms.iter().any(|a| current_enum_members_local.contains(a))
+        {
+            for m in &current_enum_members_local {
+                if !existing_arms.contains(m) && !enum_members.contains(m) {
+                    enum_members.push(m.clone());
                 }
             }
+        }
     }
 
     let missing_arms: Vec<String> = if !enum_members.is_empty() {
@@ -1859,8 +1862,7 @@ fn extract_formal_params(def_text: &str) -> Vec<String> {
         let part = part.trim();
         // Handle `name : type` or just `name`
         let name = part.split(':').next().unwrap_or(part).trim();
-        if !name.is_empty() && name.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
-        {
+        if !name.is_empty() && name.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_') {
             params.push(name.to_string());
         }
     }

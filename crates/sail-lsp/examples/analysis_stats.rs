@@ -269,7 +269,7 @@ fn main() {
     println!("    max: {:>7} µs", max);
 
     if !slow_callables.is_empty() {
-        slow_callables.sort_by(|a, b| b.1.cmp(&a.1));
+        slow_callables.sort_by_key(|b| std::cmp::Reverse(b.1));
         println!("\n  Slowest callables (>50ms):");
         for (name, ms) in slow_callables.iter().take(20) {
             println!("    {:>7} ms  {}", ms, name);

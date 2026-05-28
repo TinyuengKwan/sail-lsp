@@ -186,6 +186,11 @@ impl MultiFileFixture {
         self.files.len()
     }
 
+    /// Is empty?
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    
     /// Get the cursor position extracted from `$0` marker.
     /// Panics if no `$0` was present in any file.
     pub fn cursor_position(&self) -> FilePosition {

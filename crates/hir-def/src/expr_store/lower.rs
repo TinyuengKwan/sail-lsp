@@ -1164,7 +1164,7 @@ function f(x : opt(int)) -> int = match x {
     #[test]
     fn cst_literal() {
         let body = cst_body("function f() = 42\n");
-        assert!(body.len() >= 1);
+        assert!(!body.is_empty());
         let has_lit = body.iter_exprs().any(|(_, e)| matches!(e, Expr::Literal(_)));
         assert!(has_lit);
     }

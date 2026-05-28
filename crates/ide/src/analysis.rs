@@ -692,6 +692,47 @@ impl Analysis {
     }
 }
 
+/// Pre-materialized workspace of SalsaFiles for WorkspaceDb compatibility.
+/// Created by Analysis::workspace(). Stores all files so their references
+/// remain valid for WorkspaceDb::get_file() and all_files().
+pub struct SalsaWorkspace<'a> {
+    files: Vec<(url::Url, SalsaFile<'a>)>,
+}
+
+impl<'a> ide_db::WorkspaceDb for SalsaWorkspace<'a> {
+    fn get_file(&self, uri: &url::Url) -> Option<&dyn FileDb> {
+        self.files.iter().find(|(u, _)| u == uri).map(|(_, sf)| sf as &dyn FileDb)
+    }
+
+    fn all_files(&self) -> Vec<(&url::Url, &dyn FileDb)> {
+        self.files.iter().map(|(u, sf)| (u, sf as &dyn FileDb)).collect()
+    }
+}
+
+// D8: inference_diag_to_ide removed — replaced by
+// ide_diagnostics::handlers::dispatch() (RA handler-per-diagnostic pattern).
+// hir_diag_to_ide moved to ide-diagnostics::hir_diag_to_ide (RA two-pipeline).
+
+//
+// These wrap the existing query methods with salsa cancellation support.
+// New code should prefer these over direct calls.
+
+impl Analysis {
+    /// File structure (outline / document symbols).
+    pub fn file_structure(
+        &self,
+        file_id: FileId,
+    ) -> crate::Cancellable<Vec<ide_db::ide_types::NavigationTarget>> {
+        let sf = match self.file_by_id(file_id) {
+            Some(sf) => sf,
+            None => return Ok(Vec::new()),
+        };
+        Ok(ide_db::symbol_index::document_symbols_ide(&sf))
+    }
+
+    // diagnostics() already defined above at line 271 with Cancellable return.
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -798,45 +839,4 @@ mod tests {
 
         assert_eq!(text1, text2);
     }
-}
-
-/// Pre-materialized workspace of SalsaFiles for WorkspaceDb compatibility.
-/// Created by Analysis::workspace(). Stores all files so their references
-/// remain valid for WorkspaceDb::get_file() and all_files().
-pub struct SalsaWorkspace<'a> {
-    files: Vec<(url::Url, SalsaFile<'a>)>,
-}
-
-impl<'a> ide_db::WorkspaceDb for SalsaWorkspace<'a> {
-    fn get_file(&self, uri: &url::Url) -> Option<&dyn FileDb> {
-        self.files.iter().find(|(u, _)| u == uri).map(|(_, sf)| sf as &dyn FileDb)
-    }
-
-    fn all_files(&self) -> Vec<(&url::Url, &dyn FileDb)> {
-        self.files.iter().map(|(u, sf)| (u, sf as &dyn FileDb)).collect()
-    }
-}
-
-// D8: inference_diag_to_ide removed — replaced by
-// ide_diagnostics::handlers::dispatch() (RA handler-per-diagnostic pattern).
-// hir_diag_to_ide moved to ide-diagnostics::hir_diag_to_ide (RA two-pipeline).
-
-//
-// These wrap the existing query methods with salsa cancellation support.
-// New code should prefer these over direct calls.
-
-impl Analysis {
-    /// File structure (outline / document symbols).
-    pub fn file_structure(
-        &self,
-        file_id: FileId,
-    ) -> crate::Cancellable<Vec<ide_db::ide_types::NavigationTarget>> {
-        let sf = match self.file_by_id(file_id) {
-            Some(sf) => sf,
-            None => return Ok(Vec::new()),
-        };
-        Ok(ide_db::symbol_index::document_symbols_ide(&sf))
-    }
-
-    // diagnostics() already defined above at line 271 with Cancellable return.
 }

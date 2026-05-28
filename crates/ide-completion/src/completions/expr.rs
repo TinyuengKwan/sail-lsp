@@ -369,9 +369,10 @@ fn complete_unqualified(
                         CompletionItemKind::Struct
                             | CompletionItemKind::Enum
                             | CompletionItemKind::TypeParameter
-                    ) {
-                        continue;
-                    }
+                    )
+                {
+                    continue;
+                }
                 if !seen.insert(decl.name.clone()) {
                     continue;
                 }

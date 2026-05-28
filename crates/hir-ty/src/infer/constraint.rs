@@ -1153,7 +1153,9 @@ fn unify_inner(expected: &Ty, actual: &Ty, subst: &mut Subst, depth: usize) -> b
             if ok && !vars.is_empty() {
                 use super::existential;
                 let mut table = super::InferenceTable::default();
-                if let existential::WitnessResult::ConstraintViolation { .. } = existential::extract_witnesses(vars, constraint, inner, actual, &mut table) {
+                if let existential::WitnessResult::ConstraintViolation { .. } =
+                    existential::extract_witnesses(vars, constraint, inner, actual, &mut table)
+                {
                     return false;
                 }
             }

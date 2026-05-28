@@ -91,10 +91,13 @@ pub fn moniker(
     // Check if this is a local binding (function parameter, let var)
     if let Some(parsed) = file.parsed() {
         for occ in &parsed.symbol_occurrences {
-            if occ.name == name && occ.span.start <= offset && offset <= occ.span.end
-                && occ.scope == Some(syntax::parser_lower::Scope::Local) {
-                    return Some(MonikerResult::Local);
-                }
+            if occ.name == name
+                && occ.span.start <= offset
+                && offset <= occ.span.end
+                && occ.scope == Some(syntax::parser_lower::Scope::Local)
+            {
+                return Some(MonikerResult::Local);
+            }
         }
     }
 

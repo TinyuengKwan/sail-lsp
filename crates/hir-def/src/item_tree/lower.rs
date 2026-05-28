@@ -851,10 +851,9 @@ fn extract_fixity_decl(node: &syntax::SyntaxNode) -> Option<FixityDecl> {
             SK::NUM_LIT => {
                 level = tok.text().parse::<u8>().ok();
             }
-            SK::IDENT
-                if operator.is_none() => {
-                    operator = Some(tok.text().to_string());
-                }
+            SK::IDENT if operator.is_none() => {
+                operator = Some(tok.text().to_string());
+            }
             // Operator symbols like `+`, `*`, `~`, `@` etc.
             _ if operator.is_none()
                 && !matches!(kind, SK::KW_INFIX | SK::KW_INFIXL | SK::KW_INFIXR | SK::NUM_LIT) =>
@@ -1049,7 +1048,8 @@ mod tests {
         let (root, _) = syntax::parse_text(source);
         let mut symbols = std::collections::HashSet::new();
         // Add default FEATURE_* symbols like the real preprocessor
-        for s in &["FEATURE_UNION_BARRIER"] {
+        {
+            let s = &"FEATURE_UNION_BARRIER";
             symbols.insert(s.to_string());
         }
         ItemTree::build_from_cst_with_preprocess(&root, &mut symbols)
@@ -1443,7 +1443,7 @@ end execute
                     let p = entry.path();
                     if p.is_dir() {
                         collect_sail_files(&p, out);
-                    } else if p.extension().map_or(false, |e| e == "sail") {
+                    } else if p.extension().is_some_and(|e| e == "sail") {
                         out.push(p);
                     }
                 }
@@ -1500,7 +1500,7 @@ end execute
         eprintln!("Parse errors: {} across {} files", total_parse_errors, error_files.len());
         eprintln!("Clean: {} / {}", total_files - error_files.len() as u32, total_files);
 
-        error_files.sort_by(|a, b| b.1.cmp(&a.1));
+        error_files.sort_by_key(|b| std::cmp::Reverse(b.1));
         eprintln!("\n=== Files with errors (top 30) ===");
         for (file, count, msgs) in error_files.iter().take(30) {
             eprintln!("{}: {} errors", file, count);

@@ -26,10 +26,10 @@ pub fn view_item_tree(file: &dyn FileDb) -> String {
         let clause_marker = if id.is_clause(tree) { " [clause]" } else { "" };
         let member = id.member_name(tree).map(|m| format!(" member={m}")).unwrap_or_default();
         let span = id.span(tree);
-        lines.push(format!(
-            "{idx:>3}  {:?}{clause_marker}{member}{doc_marker}",
-            id.item_kind(tree),
-        ));
+        lines
+            .push(
+                format!("{idx:>3}  {:?}{clause_marker}{member}{doc_marker}", id.item_kind(tree),),
+            );
         lines.push(format!("      {}", id.signature(tree)));
         lines.push(format!("      span: {}..{}", span.start, span.end));
     }

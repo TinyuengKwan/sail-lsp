@@ -93,9 +93,10 @@ fn resolve_definition_at(file: &dyn FileDb, position: LineCol) -> Option<Definit
     // For top-level symbols, we construct from parsed declarations
     if symbol.scope == Some(Scope::TopLevel) || symbol.scope.is_none() {
         if symbol.kind == SymbolOccurrenceKind::Type
-            && BuiltinType::from_name(&symbol.name).is_some() {
-                return None; // Can't rename builtins
-            }
+            && BuiltinType::from_name(&symbol.name).is_some()
+        {
+            return None; // Can't rename builtins
+        }
         // For top-level names, create a Definition::Function/TypeDef/etc.
         // by looking up the declaration in the parsed file.
         if let Some(parsed) = file.parsed() {

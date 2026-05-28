@@ -617,7 +617,7 @@ function b() = helper()
         // per-file callgraph sites Vec.
         let file_a = TestFile::new("function helper() = 0\nfunction in_a() = helper()\n");
         let file_b = TestFile::new("function in_b1() = helper()\nfunction in_b2() = helper()\n");
-        let snapshot = vec![file_a, file_b];
+        let snapshot = [file_a, file_b];
         let ws = WorkspaceCallGraph::from_files(snapshot.iter());
         // helper has 3 call sites total: 1 in file A + 2 in file B.
         assert_eq!(ws.site_count_to("helper"), 3);
@@ -641,7 +641,7 @@ function b() = helper()
         // the cache is being hit instead of rebuilding.
         let file_a = TestFile::new("function helper() = 0\nfunction main() = helper()\n");
         let file_b = TestFile::new("function other() = 0\n");
-        let snapshot = vec![file_a, file_b];
+        let snapshot = [file_a, file_b];
 
         let g1 = cached_workspace_callgraph(snapshot.iter());
         let g2 = cached_workspace_callgraph(snapshot.iter());
@@ -670,8 +670,8 @@ function b() = helper()
         let a = TestFile::new("function fa() = 0\n");
         let b = TestFile::new("function fb() = 0\n");
 
-        let snapshot_ab = vec![a.clone(), b.clone()];
-        let snapshot_ba = vec![b, a];
+        let snapshot_ab = [a.clone(), b.clone()];
+        let snapshot_ba = [b, a];
         let g1 = cached_workspace_callgraph(snapshot_ab.iter());
         let g2 = cached_workspace_callgraph(snapshot_ba.iter());
         assert!(Arc::ptr_eq(&g1, &g2), "order-flipped snapshots should hit the same cache entry");

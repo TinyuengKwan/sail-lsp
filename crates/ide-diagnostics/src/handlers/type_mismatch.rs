@@ -35,9 +35,7 @@ pub(crate) fn type_mismatch(ctx: &DiagnosticsContext<'_>, d: &TypeMismatch) -> O
 
     // Use adjusted_display_range to narrow the range for if-expressions:
     // point at the `if` keyword rather than the whole if-expr block.
-    if let Some(if_ptr) =
-        syntax::AstPtr::<syntax::ast::IfExpr>::try_from_raw(d.expr_or_pat.value)
-    {
+    if let Some(if_ptr) = syntax::AstPtr::<syntax::ast::IfExpr>::try_from_raw(d.expr_or_pat.value) {
         let _narrowed = crate::adjusted_display_range::<syntax::ast::IfExpr>(
             ctx,
             hir_def::in_file::InFile { file_id: d.expr_or_pat.file_id, value: if_ptr },

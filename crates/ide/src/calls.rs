@@ -16,7 +16,8 @@ pub fn call_arg_count(call: &syntax::parser_lower::CallSite) -> usize {
         let base = call.arg_separator_spans.len() + 1;
         // Detect trailing comma: last separator is adjacent to close paren
         if let (Some(last_sep), Some(close)) = (call.arg_separator_spans.last(), call.close_span) {
-            if !call.arg_separator_spans.is_empty() && last_sep.end >= close.start.saturating_sub(1) {
+            if !call.arg_separator_spans.is_empty() && last_sep.end >= close.start.saturating_sub(1)
+            {
                 return base - 1;
             }
         }

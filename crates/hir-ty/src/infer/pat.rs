@@ -46,14 +46,16 @@ impl<'db> InferenceContext<'db> {
             Pat::Wild | Pat::Missing => {}
             Pat::Literal(lit) => {
                 let lit_ty = super::infer_literal_type(lit);
-                if !expected.is_error() && !lit_ty.is_error()
-                    && !self.table.unify(expected, &lit_ty) {
-                        self.result.record_type_mismatch_at(
-                            hir_def::ExprOrPatId::PatId(pat_id),
-                            expected,
-                            &lit_ty,
-                        );
-                    }
+                if !expected.is_error()
+                    && !lit_ty.is_error()
+                    && !self.table.unify(expected, &lit_ty)
+                {
+                    self.result.record_type_mismatch_at(
+                        hir_def::ExprOrPatId::PatId(pat_id),
+                        expected,
+                        &lit_ty,
+                    );
+                }
             }
             Pat::Bind(name) => {
                 // Duplicate detection is done per-pattern-tree (not against
@@ -283,10 +285,14 @@ impl<'db> InferenceContext<'db> {
         let span = self.pat_span(body, pat_id).unwrap_or(Span::new(0, 0));
         match pat {
             Pat::Bind(name)
-                if is_pattern_binding(name, &self.pattern_constants, self.env.has_workspace_context)
-                => {
-                    out.entry(name.clone()).or_insert(span);
-                }
+                if is_pattern_binding(
+                    name,
+                    &self.pattern_constants,
+                    self.env.has_workspace_context,
+                ) =>
+            {
+                out.entry(name.clone()).or_insert(span);
+            }
             Pat::Typed { inner, .. } | Pat::AsType { pat: inner, .. } => {
                 self.collect_hir_pat_bindings_inner(body, *inner, out);
             }

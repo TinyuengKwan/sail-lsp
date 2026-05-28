@@ -362,10 +362,8 @@ impl WorkspaceContext {
                             // Use TypeRef from ItemTree (populated by lower.rs
                             // from type_ref_from_text). Falls back to signature
                             // parsing if type_ref is None.
-                            let payload_ty: Option<Ty> = id
-                                .type_ref(item_tree)
-                                .map(ty_from_type_ref)
-                                .or_else(|| {
+                            let payload_ty: Option<Ty> =
+                                id.type_ref(item_tree).map(ty_from_type_ref).or_else(|| {
                                     let sig = id.signature(item_tree);
                                     sig.find(':').map(|colon_pos| {
                                         let type_text = sig[colon_pos + 1..].trim();

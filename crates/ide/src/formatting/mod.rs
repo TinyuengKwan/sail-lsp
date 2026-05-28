@@ -510,9 +510,7 @@ pub fn on_enter_edits(file: &dyn FileDb, position: ide_db::LineCol) -> Option<Ve
             .offset_at(&ide_db::LineCol { line: position.line + 2, col: 0 })
             .min(file.text().len());
         let next_line_is_comment = if next_start < next_end {
-            file.text()
-                .get(next_start..next_end)
-                .is_some_and(|l| l.trim_start().starts_with("//"))
+            file.text().get(next_start..next_end).is_some_and(|l| l.trim_start().starts_with("//"))
         } else {
             false
         };

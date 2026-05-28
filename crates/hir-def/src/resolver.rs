@@ -143,10 +143,7 @@ impl<'db> Resolver<'db> {
     /// Names not found in the current file fall back to the workspace.
     pub fn for_file_in_workspace(def_map: &'db DefMap, workspace: &'db WorkspaceDefMap) -> Self {
         Self {
-            scopes: vec![
-                Scope::Workspace { def_map: workspace },
-                Scope::Block { def_map },
-            ],
+            scopes: vec![Scope::Workspace { def_map: workspace }, Scope::Block { def_map }],
             from_file: None,
         }
     }
@@ -154,10 +151,7 @@ impl<'db> Resolver<'db> {
     /// Create a resolver scoped to an `$include` analysis scope.
     pub fn for_file_in_scope(def_map: &'db DefMap, scoped_workspace: &'db WorkspaceDefMap) -> Self {
         Self {
-            scopes: vec![
-                Scope::Workspace { def_map: scoped_workspace },
-                Scope::Block { def_map },
-            ],
+            scopes: vec![Scope::Workspace { def_map: scoped_workspace }, Scope::Block { def_map }],
             from_file: None,
         }
     }

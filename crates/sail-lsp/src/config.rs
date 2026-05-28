@@ -151,7 +151,6 @@ pub struct WorkspaceConfig {
     pub include_paths: Vec<String>,
 }
 
-
 impl Default for DiagnosticsConfig {
     fn default() -> Self {
         Self {

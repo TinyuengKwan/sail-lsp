@@ -542,11 +542,10 @@ impl<'db> InferenceContext<'db> {
                 }
             }
             // Param at top level.
-            (TyKind::Param(name), _)
-                if !subst.types.contains_key(name) => {
-                    subst.types.insert(name.clone(), actual.clone());
-                    subst.values.insert(name.clone(), actual.display_text());
-                }
+            (TyKind::Param(name), _) if !subst.types.contains_key(name) => {
+                subst.types.insert(name.clone(), actual.clone());
+                subst.values.insert(name.clone(), actual.display_text());
+            }
             (TyKind::App { args: exp_args, name, .. }, TyKind::Scalar(s))
                 if matches!(name.as_str(), "int" | "atom" | "nat" | "range") =>
             {
@@ -2024,10 +2023,12 @@ impl<'db> InferenceContext<'db> {
                         };
                         if let Some(ref elem) = elem_ty {
                             // Verify LHS (new element) is compatible with list element type
-                            if !lhs_ty.is_error() && !elem.is_error()
-                                && !self.table.unify(elem, &lhs_ty) {
-                                    self.result.record_type_mismatch(*lhs, elem, &lhs_ty);
-                                }
+                            if !lhs_ty.is_error()
+                                && !elem.is_error()
+                                && !self.table.unify(elem, &lhs_ty)
+                            {
+                                self.result.record_type_mismatch(*lhs, elem, &lhs_ty);
+                            }
                             // Result is the list type
                             rhs_ty
                         } else if rhs_ty.is_error() {
@@ -2202,31 +2203,33 @@ impl<'db> InferenceContext<'db> {
                     // Unify with result type
                     if result_ty.is_error() && !arm_ty.is_error() {
                         result_ty = arm_ty;
-                    } else if !result_ty.is_error() && !arm_ty.is_error()
-                        && !self.table.unify(&result_ty, &arm_ty) {
-                            // Guarded arms get lenient treatment.
-                            if has_guard {
-                                locals.pop_scope();
-                                continue;
-                            }
-                            // Check if this is a dependent-type width mismatch
-                            // (same outer constructor, different args) vs a real
-                            // type error (completely different types).
-                            //
-                            // Sail dependent match pattern:
-                            //   match 'm { 8 => bits(8), 16 => bits(16) }
-                            // Upstream: each arm constrains 'm in its scope.
-                            // We lack dependent types → same-constructor arms
-                            // with different args are accepted permissively.
-                            //
-                            // Real mismatch (int vs bool): always report.
-                            let resolved_result = self.table.resolve(&result_ty);
-                            if is_dependent_width_mismatch(&resolved_result, &arm_ty) {
-                                result_ty = Ty::error();
-                            } else {
-                                self.result.record_type_mismatch(arm.body, &result_ty, &arm_ty);
-                            }
+                    } else if !result_ty.is_error()
+                        && !arm_ty.is_error()
+                        && !self.table.unify(&result_ty, &arm_ty)
+                    {
+                        // Guarded arms get lenient treatment.
+                        if has_guard {
+                            locals.pop_scope();
+                            continue;
                         }
+                        // Check if this is a dependent-type width mismatch
+                        // (same outer constructor, different args) vs a real
+                        // type error (completely different types).
+                        //
+                        // Sail dependent match pattern:
+                        //   match 'm { 8 => bits(8), 16 => bits(16) }
+                        // Upstream: each arm constrains 'm in its scope.
+                        // We lack dependent types → same-constructor arms
+                        // with different args are accepted permissively.
+                        //
+                        // Real mismatch (int vs bool): always report.
+                        let resolved_result = self.table.resolve(&result_ty);
+                        if is_dependent_width_mismatch(&resolved_result, &arm_ty) {
+                            result_ty = Ty::error();
+                        } else {
+                            self.result.record_type_mismatch(arm.body, &result_ty, &arm_ty);
+                        }
+                    }
                     locals.pop_scope();
                 }
                 // Match result type is determined by arm unification above.
@@ -2424,10 +2427,12 @@ impl<'db> InferenceContext<'db> {
                     let ty = self.infer_expr_hir(body, i, locals);
                     // Check element against expected element type
                     if let Some(ref expected) = expected_elem {
-                        if !ty.is_error() && !expected.is_error()
-                            && !self.table.unify(expected, &ty) {
-                                self.result.record_type_mismatch(i, expected, &ty);
-                            }
+                        if !ty.is_error()
+                            && !expected.is_error()
+                            && !self.table.unify(expected, &ty)
+                        {
+                            self.result.record_type_mismatch(i, expected, &ty);
+                        }
                     }
                     if elem_ty.is_none() && !ty.is_error() {
                         elem_ty = Some(ty);
@@ -2625,10 +2630,12 @@ impl<'db> InferenceContext<'db> {
                     // Unify with result type (catch must return same type as try body)
                     if result_ty.is_error() && !arm_ty.is_error() {
                         result_ty = arm_ty;
-                    } else if !result_ty.is_error() && !arm_ty.is_error()
-                        && !self.table.unify(&result_ty, &arm_ty) {
-                            self.result.record_type_mismatch(arm.body, &result_ty, &arm_ty);
-                        }
+                    } else if !result_ty.is_error()
+                        && !arm_ty.is_error()
+                        && !self.table.unify(&result_ty, &arm_ty)
+                    {
+                        self.result.record_type_mismatch(arm.body, &result_ty, &arm_ty);
+                    }
                     locals.pop_scope();
                 }
 
@@ -2693,14 +2700,16 @@ impl<'db> InferenceContext<'db> {
                         let value_ty = self.infer_expr_hir(body, *field_expr, locals);
                         if let Some(raw_ty) = record.fields.get(fname.as_str()) {
                             let expected_ty = apply_subst(raw_ty, &type_subst);
-                            if !value_ty.is_error() && !expected_ty.is_error()
-                                && !self.table.unify(&expected_ty, &value_ty) {
-                                    self.result.record_type_mismatch(
-                                        *field_expr,
-                                        &expected_ty,
-                                        &value_ty,
-                                    );
-                                }
+                            if !value_ty.is_error()
+                                && !expected_ty.is_error()
+                                && !self.table.unify(&expected_ty, &value_ty)
+                            {
+                                self.result.record_type_mismatch(
+                                    *field_expr,
+                                    &expected_ty,
+                                    &value_ty,
+                                );
+                            }
                         }
                     }
                     // Check for missing required fields.
@@ -2745,14 +2754,16 @@ impl<'db> InferenceContext<'db> {
                     for (fname, field_expr) in fields {
                         let value_ty = self.infer_expr_hir(body, *field_expr, locals);
                         if let Some(expected_ty) = record.fields.get(fname.as_str()) {
-                            if !value_ty.is_error() && !expected_ty.is_error()
-                                && !self.table.unify(expected_ty, &value_ty) {
-                                    self.result.record_type_mismatch(
-                                        *field_expr,
-                                        expected_ty,
-                                        &value_ty,
-                                    );
-                                }
+                            if !value_ty.is_error()
+                                && !expected_ty.is_error()
+                                && !self.table.unify(expected_ty, &value_ty)
+                            {
+                                self.result.record_type_mismatch(
+                                    *field_expr,
+                                    expected_ty,
+                                    &value_ty,
+                                );
+                            }
                         }
                     }
                 } else {
@@ -2945,10 +2956,12 @@ impl<'db> InferenceContext<'db> {
         // Check body type against declared return type.
         if let Some(scheme) = &expected_scheme {
             let ret_ty = &scheme.ret;
-            if !ret_ty.is_error() && !resolved_ty.is_error()
-                && !self.table.unify(ret_ty, &resolved_ty) {
-                    self.result.record_type_mismatch(body.root(), ret_ty, &resolved_ty);
-                }
+            if !ret_ty.is_error()
+                && !resolved_ty.is_error()
+                && !self.table.unify(ret_ty, &resolved_ty)
+            {
+                self.result.record_type_mismatch(body.root(), ret_ty, &resolved_ty);
+            }
         }
 
         // Effects enforcement.
@@ -3025,10 +3038,11 @@ impl<'db> InferenceContext<'db> {
             if let Some(guard_id) = arm.guard {
                 let guard_ty = self.infer_expr_hir(body, guard_id, &mut locals);
                 if !guard_ty.is_error()
-                    && !self.table.unify(&Ty::named("bool".to_string()), &guard_ty) {
-                        let bool_ty = Ty::named("bool".to_string());
-                        self.result.record_type_mismatch(guard_id, &bool_ty, &guard_ty);
-                    }
+                    && !self.table.unify(&Ty::named("bool".to_string()), &guard_ty)
+                {
+                    let bool_ty = Ty::named("bool".to_string());
+                    self.result.record_type_mismatch(guard_id, &bool_ty, &guard_ty);
+                }
             }
 
             // Infer LHS and RHS expressions

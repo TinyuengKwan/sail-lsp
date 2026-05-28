@@ -43,34 +43,34 @@ pub fn complete_record(
                         decl.kind,
                         syntax::parser_lower::DeclKind::Struct
                             | syntax::parser_lower::DeclKind::Bitfield
-                    ) {
-                        let def_text =
-                            ws_file.text().get(decl.span.start..decl.span.end).unwrap_or("");
-                        for field in extract_record_fields(def_text) {
-                            // Skip already-filled fields
-                            if already_filled.contains(&field) {
-                                continue;
-                            }
-                            // Apply prefix filter
-                            if !prefix_lower.is_empty()
-                                && !field.to_ascii_lowercase().starts_with(&prefix_lower)
-                            {
-                                continue;
-                            }
-                            items.push(CompletionItem {
-                                label: field.clone(),
-                                kind: CompletionItemKind::Field,
-                                detail: Some(format!("field of {struct_name}")),
-                                insert_text: Some(format!("{field} = ")),
-                                text_edit: None,
-                                sort_text: Some(format!("0{field}")),
-                                filter_text: None,
-                                documentation: None,
-                                deprecated: false,
-                                relevance: CompletionRelevance::default(),
-                            });
+                    )
+                {
+                    let def_text = ws_file.text().get(decl.span.start..decl.span.end).unwrap_or("");
+                    for field in extract_record_fields(def_text) {
+                        // Skip already-filled fields
+                        if already_filled.contains(&field) {
+                            continue;
                         }
+                        // Apply prefix filter
+                        if !prefix_lower.is_empty()
+                            && !field.to_ascii_lowercase().starts_with(&prefix_lower)
+                        {
+                            continue;
+                        }
+                        items.push(CompletionItem {
+                            label: field.clone(),
+                            kind: CompletionItemKind::Field,
+                            detail: Some(format!("field of {struct_name}")),
+                            insert_text: Some(format!("{field} = ")),
+                            text_edit: None,
+                            sort_text: Some(format!("0{field}")),
+                            filter_text: None,
+                            documentation: None,
+                            deprecated: false,
+                            relevance: CompletionRelevance::default(),
+                        });
                     }
+                }
             }
         }
     }

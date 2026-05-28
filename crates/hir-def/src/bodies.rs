@@ -508,10 +508,9 @@ fn collect_effect_tags(
             Expr::Ident(name) if register_names.contains(name.as_str()) => {
                 tags.insert(EffectTag::RegisterRead);
             }
-            Expr::Assign { target, .. }
-                if hir_is_register_write(body, *target) => {
-                    tags.insert(EffectTag::RegisterWrite);
-                }
+            Expr::Assign { target, .. } if hir_is_register_write(body, *target) => {
+                tags.insert(EffectTag::RegisterWrite);
+            }
             // Detect calls to known-impure external functions.
             // We only tag External for functions in the local file that have
             // observable structural effects. Cross-file effect inference is done
@@ -712,7 +711,7 @@ function mul(x, y) = x * y
     #[test]
     fn cst_mapping_produces_body() {
         let b = bodies("mapping size_bits : int <-> bool = { 1 <-> true, 0 <-> false }\n");
-        assert!(b.len() >= 1, "mapping should produce at least 1 body");
+        assert!(!b.is_empty(), "mapping should produce at least 1 body");
     }
 
     #[test]

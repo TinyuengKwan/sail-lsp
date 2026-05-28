@@ -727,13 +727,9 @@ impl InferenceTable {
             if ok && !vars.is_empty() {
                 use super::existential;
                 let mut table = super::InferenceTable::default();
-                if let existential::WitnessResult::ConstraintViolation { .. } = existential::extract_witnesses(
-                    &vars,
-                    &constraint,
-                    &inner,
-                    expected,
-                    &mut table,
-                ) {
+                if let existential::WitnessResult::ConstraintViolation { .. } =
+                    existential::extract_witnesses(&vars, &constraint, &inner, expected, &mut table)
+                {
                     return false;
                 }
             }
@@ -983,13 +979,15 @@ impl InferenceTable {
                 if ok && !vars.is_empty() {
                     use super::existential;
                     let mut table = super::InferenceTable::default();
-                    if let existential::WitnessResult::ConstraintViolation { .. } = existential::extract_witnesses(
-                        &vars,
-                        &constraint,
-                        &inner,
-                        actual,
-                        &mut table,
-                    ) {
+                    if let existential::WitnessResult::ConstraintViolation { .. } =
+                        existential::extract_witnesses(
+                            &vars,
+                            &constraint,
+                            &inner,
+                            actual,
+                            &mut table,
+                        )
+                    {
                         return false;
                     }
                 }

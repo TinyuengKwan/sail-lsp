@@ -356,9 +356,7 @@ where
                         best = Some(id);
                     }
                 }
-                best.map(|id| {
-                    (id.signature(tree).to_string(), id.doc(tree).map(|d| d.to_string()))
-                })
+                best.map(|id| (id.signature(tree).to_string(), id.doc(tree).map(|d| d.to_string())))
             })
             .next();
 
@@ -822,6 +820,215 @@ fn enum_info_for_symbol(file: &dyn FileDb, symbol: &str) -> Option<EnumInfo> {
     None
 }
 
+/// CST-native version of `infer_effects_for_def_with_workspace`.
+fn infer_effects_for_def_with_workspace_cst(
+    cst_root: &syntax::SyntaxNode,
+    name: &str,
+    all_files: &[(&url::Url, &dyn ide_db::FileDb)],
+) -> Vec<String> {
+    use hir_def::bodies::{CallableBodies, EffectTag};
+    use hir_def::callgraph::{CallGraph, WorkspaceCallGraph};
+
+    let bodies = CallableBodies::from_cst(cst_root);
+    let local_callgraph = CallGraph::from_callable_bodies(&bodies);
+
+    let ws_callgraph: Option<WorkspaceCallGraph> = if all_files.len() > 1 {
+        Some(WorkspaceCallGraph::from_callgraphs(
+            all_files.iter().filter_map(|(_, f)| f.callgraph()),
+        ))
+    } else {
+        None
+    };
+
+    let mut direct: std::collections::HashMap<String, std::collections::BTreeSet<EffectTag>> =
+        std::collections::HashMap::new();
+    for entry in bodies.entries() {
+        direct.entry(entry.name.clone()).or_default().extend(entry.effects.iter().copied());
+    }
+
+    let mut full = direct.clone();
+    for _ in 0..full.len() + 1 {
+        let mut changed = false;
+        let snapshot = full.clone();
+        for (caller, effects) in full.iter_mut() {
+            let callees: Vec<&str> = if let Some(ref ws) = ws_callgraph {
+                ws.callees_of(caller).collect()
+            } else {
+                local_callgraph.callees_of(caller).collect()
+            };
+            for callee in callees {
+                if let Some(callee_effects) = snapshot.get(callee) {
+                    for eff in callee_effects {
+                        if effects.insert(*eff) {
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let effects = full.get(name).cloned().unwrap_or_default();
+    effects.iter().map(|t| t.as_str().to_string()).collect()
+}
+
+pub fn collect_effects_from_body(file: &dyn ide_db::FileDb, name: &str) -> Vec<String> {
+    use hir_def::bodies::CallableBodies;
+
+    let (cst_root, _) = syntax::parse_text(file.text());
+    let bodies = CallableBodies::from_cst(&cst_root);
+
+    let mut effects = Vec::new();
+    for entry in bodies.entries() {
+        if entry.name == name {
+            for tag in &entry.effects {
+                effects.push(tag.as_str().to_string());
+            }
+        }
+    }
+    effects.sort();
+    effects.dedup();
+    effects
+}
+
+/// Find the span of a binding's initializer value using Body arena.
+/// CST-native replacement for `declared_effects_for_def`.
+pub fn declared_effects_for_def_cst(file: &dyn ide_db::FileDb, name: &str) -> Vec<String> {
+    // Effects are stored in the val spec signature text.
+    // For now, delegate to EffectTag infrastructure.
+    collect_effects_from_body(file, name)
+}
+
+/// Find the value span of a let/var binding from source text.
+/// Looks for `= value` in the definition text. CST-native replacement
+/// for `find_binding_value_span`.
+fn find_binding_value_span_from_text(
+    source: &str,
+    decl_span: parser::Span,
+) -> Option<parser::Span> {
+    let def_text = source.get(decl_span.start..decl_span.end)?;
+    // Find standalone `=` (not `==`, `=>`, `!=`, `<=`, `>=`)
+    let bytes = def_text.as_bytes();
+    for (i, &b) in bytes.iter().enumerate() {
+        if b == b'=' {
+            let prev = if i > 0 { bytes[i - 1] } else { 0 };
+            let next = if i + 1 < bytes.len() { bytes[i + 1] } else { 0 };
+            if prev == b'!' || prev == b'<' || prev == b'>' {
+                continue;
+            }
+            if next == b'=' || next == b'>' {
+                continue;
+            }
+            let value_start = decl_span.start + i + 1;
+            let value_text = &def_text[i + 1..];
+            let trimmed_start = value_text.len() - value_text.trim_start().len();
+            let trimmed_end = value_text.len() - value_text.trim_end().len();
+            return Some(parser::Span::new(
+                value_start + trimmed_start,
+                decl_span.start + def_text.len() - trimmed_end,
+            ));
+        }
+    }
+    None
+}
+
+/// 投産-4: Semantic hover enrichment using SourceAnalyzer.
+///
+/// Resolves field access and method call expressions at the cursor to
+/// provide richer hover information. Called from the LSP handler layer
+/// where salsa database is available.
+///
+/// Returns additional markdown lines to append to hover, or None if
+/// no semantic enrichment is possible.
+pub fn hover_resolve_field_or_method(
+    db: &dyn salsa::Database,
+    file_text: base_db::FileText,
+    offset: usize,
+) -> Option<String> {
+    let sema = hir::Semantics::new(db);
+    let source = file_text.text(db);
+
+    // Extract the identifier at offset for display
+    let token_name = extract_hover_identifier(source, offset)?;
+
+    // Try field resolution
+    if let Some(_field_def_id) = sema.resolve_field(file_text, offset) {
+        // Try to find the parent type name by looking at the expression before the dot
+        let type_name = find_type_before_dot(source, offset);
+        return match type_name {
+            Some(ty) => Some(format!("field `{}` of `{}`", token_name, ty)),
+            None => Some(format!("field `{}`", token_name)),
+        };
+    }
+
+    // Try method/function call resolution
+    if let Some((_func_id, _target_file_id)) = sema.resolve_method_call(file_text, offset) {
+        // Try to get the return type from type inference
+        if let Some(ty) = sema.type_of_expr(file_text, offset) {
+            use hir_ty::display::HirDisplay;
+            return Some(format!("```sail\n{} : {}\n```", token_name, ty.display()));
+        }
+        return Some(format!("function `{}`", token_name));
+    }
+
+    None
+}
+
+/// Extract an identifier at a byte offset (for hover display).
+fn extract_hover_identifier(source: &str, offset: usize) -> Option<String> {
+    if offset >= source.len() {
+        return None;
+    }
+    let bytes = source.as_bytes();
+    if !(bytes[offset].is_ascii_alphanumeric() || bytes[offset] == b'_') {
+        return None;
+    }
+    let mut start = offset;
+    while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') {
+        start -= 1;
+    }
+    let mut end = offset;
+    while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+        end += 1;
+    }
+    Some(source[start..end].to_string())
+}
+
+/// Try to find the type/expression name before a `.field` access.
+/// Scans backward from the field name past the dot to find the preceding identifier.
+fn find_type_before_dot(source: &str, field_offset: usize) -> Option<String> {
+    let bytes = source.as_bytes();
+    // Walk backward past the field name
+    let mut pos = field_offset;
+    while pos > 0 && (bytes[pos - 1].is_ascii_alphanumeric() || bytes[pos - 1] == b'_') {
+        pos -= 1;
+    }
+    // Expect a dot
+    if pos == 0 || bytes[pos - 1] != b'.' {
+        return None;
+    }
+    pos -= 1; // skip dot
+              // Skip whitespace before dot
+    while pos > 0 && bytes[pos - 1].is_ascii_whitespace() {
+        pos -= 1;
+    }
+    // Now read the identifier before the dot
+    if pos == 0 {
+        return None;
+    }
+    let end = pos;
+    while pos > 0 && (bytes[pos - 1].is_ascii_alphanumeric() || bytes[pos - 1] == b'_') {
+        pos -= 1;
+    }
+    if pos == end {
+        return None;
+    }
+    Some(source[pos..end].to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1185,213 +1392,4 @@ overload op = {add, sub}
             }
         }
     }
-}
-
-/// CST-native version of `infer_effects_for_def_with_workspace`.
-fn infer_effects_for_def_with_workspace_cst(
-    cst_root: &syntax::SyntaxNode,
-    name: &str,
-    all_files: &[(&url::Url, &dyn ide_db::FileDb)],
-) -> Vec<String> {
-    use hir_def::bodies::{CallableBodies, EffectTag};
-    use hir_def::callgraph::{CallGraph, WorkspaceCallGraph};
-
-    let bodies = CallableBodies::from_cst(cst_root);
-    let local_callgraph = CallGraph::from_callable_bodies(&bodies);
-
-    let ws_callgraph: Option<WorkspaceCallGraph> = if all_files.len() > 1 {
-        Some(WorkspaceCallGraph::from_callgraphs(
-            all_files.iter().filter_map(|(_, f)| f.callgraph()),
-        ))
-    } else {
-        None
-    };
-
-    let mut direct: std::collections::HashMap<String, std::collections::BTreeSet<EffectTag>> =
-        std::collections::HashMap::new();
-    for entry in bodies.entries() {
-        direct.entry(entry.name.clone()).or_default().extend(entry.effects.iter().copied());
-    }
-
-    let mut full = direct.clone();
-    for _ in 0..full.len() + 1 {
-        let mut changed = false;
-        let snapshot = full.clone();
-        for (caller, effects) in full.iter_mut() {
-            let callees: Vec<&str> = if let Some(ref ws) = ws_callgraph {
-                ws.callees_of(caller).collect()
-            } else {
-                local_callgraph.callees_of(caller).collect()
-            };
-            for callee in callees {
-                if let Some(callee_effects) = snapshot.get(callee) {
-                    for eff in callee_effects {
-                        if effects.insert(*eff) {
-                            changed = true;
-                        }
-                    }
-                }
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-
-    let effects = full.get(name).cloned().unwrap_or_default();
-    effects.iter().map(|t| t.as_str().to_string()).collect()
-}
-
-pub fn collect_effects_from_body(file: &dyn ide_db::FileDb, name: &str) -> Vec<String> {
-    use hir_def::bodies::CallableBodies;
-
-    let (cst_root, _) = syntax::parse_text(file.text());
-    let bodies = CallableBodies::from_cst(&cst_root);
-
-    let mut effects = Vec::new();
-    for entry in bodies.entries() {
-        if entry.name == name {
-            for tag in &entry.effects {
-                effects.push(tag.as_str().to_string());
-            }
-        }
-    }
-    effects.sort();
-    effects.dedup();
-    effects
-}
-
-/// Find the span of a binding's initializer value using Body arena.
-/// CST-native replacement for `declared_effects_for_def`.
-pub fn declared_effects_for_def_cst(file: &dyn ide_db::FileDb, name: &str) -> Vec<String> {
-    // Effects are stored in the val spec signature text.
-    // For now, delegate to EffectTag infrastructure.
-    collect_effects_from_body(file, name)
-}
-
-/// Find the value span of a let/var binding from source text.
-/// Looks for `= value` in the definition text. CST-native replacement
-/// for `find_binding_value_span`.
-fn find_binding_value_span_from_text(
-    source: &str,
-    decl_span: parser::Span,
-) -> Option<parser::Span> {
-    let def_text = source.get(decl_span.start..decl_span.end)?;
-    // Find standalone `=` (not `==`, `=>`, `!=`, `<=`, `>=`)
-    let bytes = def_text.as_bytes();
-    for (i, &b) in bytes.iter().enumerate() {
-        if b == b'=' {
-            let prev = if i > 0 { bytes[i - 1] } else { 0 };
-            let next = if i + 1 < bytes.len() { bytes[i + 1] } else { 0 };
-            if prev == b'!' || prev == b'<' || prev == b'>' {
-                continue;
-            }
-            if next == b'=' || next == b'>' {
-                continue;
-            }
-            let value_start = decl_span.start + i + 1;
-            let value_text = &def_text[i + 1..];
-            let trimmed_start = value_text.len() - value_text.trim_start().len();
-            let trimmed_end = value_text.len() - value_text.trim_end().len();
-            return Some(parser::Span::new(
-                value_start + trimmed_start,
-                decl_span.start + def_text.len() - trimmed_end,
-            ));
-        }
-    }
-    None
-}
-
-/// 投産-4: Semantic hover enrichment using SourceAnalyzer.
-///
-/// Resolves field access and method call expressions at the cursor to
-/// provide richer hover information. Called from the LSP handler layer
-/// where salsa database is available.
-///
-/// Returns additional markdown lines to append to hover, or None if
-/// no semantic enrichment is possible.
-pub fn hover_resolve_field_or_method(
-    db: &dyn salsa::Database,
-    file_text: base_db::FileText,
-    offset: usize,
-) -> Option<String> {
-    let sema = hir::Semantics::new(db);
-    let source = file_text.text(db);
-
-    // Extract the identifier at offset for display
-    let token_name = extract_hover_identifier(source, offset)?;
-
-    // Try field resolution
-    if let Some(_field_def_id) = sema.resolve_field(file_text, offset) {
-        // Try to find the parent type name by looking at the expression before the dot
-        let type_name = find_type_before_dot(source, offset);
-        return match type_name {
-            Some(ty) => Some(format!("field `{}` of `{}`", token_name, ty)),
-            None => Some(format!("field `{}`", token_name)),
-        };
-    }
-
-    // Try method/function call resolution
-    if let Some((_func_id, _target_file_id)) = sema.resolve_method_call(file_text, offset) {
-        // Try to get the return type from type inference
-        if let Some(ty) = sema.type_of_expr(file_text, offset) {
-            use hir_ty::display::HirDisplay;
-            return Some(format!("```sail\n{} : {}\n```", token_name, ty.display()));
-        }
-        return Some(format!("function `{}`", token_name));
-    }
-
-    None
-}
-
-/// Extract an identifier at a byte offset (for hover display).
-fn extract_hover_identifier(source: &str, offset: usize) -> Option<String> {
-    if offset >= source.len() {
-        return None;
-    }
-    let bytes = source.as_bytes();
-    if !(bytes[offset].is_ascii_alphanumeric() || bytes[offset] == b'_') {
-        return None;
-    }
-    let mut start = offset;
-    while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') {
-        start -= 1;
-    }
-    let mut end = offset;
-    while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
-        end += 1;
-    }
-    Some(source[start..end].to_string())
-}
-
-/// Try to find the type/expression name before a `.field` access.
-/// Scans backward from the field name past the dot to find the preceding identifier.
-fn find_type_before_dot(source: &str, field_offset: usize) -> Option<String> {
-    let bytes = source.as_bytes();
-    // Walk backward past the field name
-    let mut pos = field_offset;
-    while pos > 0 && (bytes[pos - 1].is_ascii_alphanumeric() || bytes[pos - 1] == b'_') {
-        pos -= 1;
-    }
-    // Expect a dot
-    if pos == 0 || bytes[pos - 1] != b'.' {
-        return None;
-    }
-    pos -= 1; // skip dot
-              // Skip whitespace before dot
-    while pos > 0 && bytes[pos - 1].is_ascii_whitespace() {
-        pos -= 1;
-    }
-    // Now read the identifier before the dot
-    if pos == 0 {
-        return None;
-    }
-    let end = pos;
-    while pos > 0 && (bytes[pos - 1].is_ascii_alphanumeric() || bytes[pos - 1] == b'_') {
-        pos -= 1;
-    }
-    if pos == end {
-        return None;
-    }
-    Some(source[pos..end].to_string())
 }

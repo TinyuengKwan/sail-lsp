@@ -250,6 +250,7 @@ fn run_check(root: &Path, verbose: bool, json: bool) -> i32 {
 // Output formatting
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn print_text(
     per_file: &[(String, Vec<ide_diagnostics::Diagnostic>)],
     n_files: usize,

@@ -177,11 +177,12 @@ fn ws_before(position: &Position, new: &SyntaxElement) -> Option<SyntaxToken> {
 
     // After `{` before a statement/definition → newline + indent.
     if prev.kind() == SyntaxKind::L_CURLY
-        && (is_definition_kind(new.kind()) || is_statement_kind(new.kind())) {
-            let mut indent = IndentLevel::from_element(prev);
-            indent += 1;
-            return Some(make::tokens::whitespace(&format!("\n{indent}")));
-        }
+        && (is_definition_kind(new.kind()) || is_statement_kind(new.kind()))
+    {
+        let mut indent = IndentLevel::from_element(prev);
+        indent += 1;
+        return Some(make::tokens::whitespace(&format!("\n{indent}")));
+    }
 
     ws_between(prev, new)
 }
@@ -218,10 +219,11 @@ fn ws_between(left: &SyntaxElement, right: &SyntaxElement) -> Option<SyntaxToken
 
     // Between two statements → newline + indent.
     if (is_statement_kind(left.kind()) || is_definition_kind(left.kind()))
-        && (is_statement_kind(right.kind()) || is_definition_kind(right.kind())) {
-            let indent = IndentLevel::from_element(right);
-            return Some(make::tokens::whitespace(&format!("\n{indent}")));
-        }
+        && (is_statement_kind(right.kind()) || is_definition_kind(right.kind()))
+    {
+        let indent = IndentLevel::from_element(right);
+        return Some(make::tokens::whitespace(&format!("\n{indent}")));
+    }
 
     // Default: single space.
     Some(make::tokens::single_space())

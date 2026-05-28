@@ -66,9 +66,9 @@ pub fn compute_match_usefulness(
     for arm in arms {
         let arm_rows = expand_arm_to_rows(arm);
         // Useless arm = no row in `arm_rows` extends the prefix.
-        let any_useful = arm_rows
-            .iter()
-            .any(|row| is_useful(&prefix, row.pats.as_slice(), std::slice::from_ref(scrutinee_ty), cx, 0));
+        let any_useful = arm_rows.iter().any(|row| {
+            is_useful(&prefix, row.pats.as_slice(), std::slice::from_ref(scrutinee_ty), cx, 0)
+        });
         if !any_useful && arm.guard_span.is_none() {
             report.redundant.push(arm.arm_span);
         }
@@ -377,8 +377,7 @@ fn specialize_ctor(matrix: &[Row], name: &str, arity: usize) -> Vec<Row> {
     for row in matrix {
         match &row.pats[0] {
             MatchPat::Wild => {
-                let mut pats: Vec<MatchPat> =
-                    std::iter::repeat_n(MatchPat::Wild, arity).collect();
+                let mut pats: Vec<MatchPat> = std::iter::repeat_n(MatchPat::Wild, arity).collect();
                 pats.extend_from_slice(&row.pats[1..]);
                 out.push(Row { pats, arm_span: row.arm_span, has_guard: row.has_guard });
             }
@@ -411,8 +410,7 @@ fn specialize_tuple(matrix: &[Row], arity: usize) -> Vec<Row> {
     for row in matrix {
         match &row.pats[0] {
             MatchPat::Wild => {
-                let mut pats: Vec<MatchPat> =
-                    std::iter::repeat_n(MatchPat::Wild, arity).collect();
+                let mut pats: Vec<MatchPat> = std::iter::repeat_n(MatchPat::Wild, arity).collect();
                 pats.extend_from_slice(&row.pats[1..]);
                 out.push(Row { pats, arm_span: row.arm_span, has_guard: row.has_guard });
             }
@@ -502,8 +500,7 @@ fn specialize_vec(matrix: &[Row], arity: usize) -> Vec<Row> {
     for row in matrix {
         match &row.pats[0] {
             MatchPat::Wild => {
-                let mut pats: Vec<MatchPat> =
-                    std::iter::repeat_n(MatchPat::Wild, arity).collect();
+                let mut pats: Vec<MatchPat> = std::iter::repeat_n(MatchPat::Wild, arity).collect();
                 pats.extend_from_slice(&row.pats[1..]);
                 out.push(Row { pats, arm_span: row.arm_span, has_guard: row.has_guard });
             }

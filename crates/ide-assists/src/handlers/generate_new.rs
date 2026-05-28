@@ -76,8 +76,8 @@ fn find_keyword_near(text: &str, offset: usize, kw: &str) -> Option<usize> {
     while let Some(pos) = window[search_from..].find(kw) {
         let abs = start + search_from + pos;
         let before_ok = abs == 0 || !text.as_bytes()[abs - 1].is_ascii_alphanumeric();
-        let after_ok = abs + kw_len >= text.len()
-            || !text.as_bytes()[abs + kw_len].is_ascii_alphanumeric();
+        let after_ok =
+            abs + kw_len >= text.len() || !text.as_bytes()[abs + kw_len].is_ascii_alphanumeric();
         if before_ok && after_ok {
             best = Some(abs);
         }

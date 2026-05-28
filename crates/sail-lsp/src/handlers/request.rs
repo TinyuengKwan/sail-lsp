@@ -645,8 +645,10 @@ pub(crate) fn handle_code_action(
     // --- Refactoring assists ---
     let ide_range = crate::from_proto::text_range(&line_index, params.range);
 
-    type RangeAssistFn =
-        fn(&dyn ide_db::FileDb, ide_db::line_index::TextRange) -> Option<Vec<ide_db::ide_types::IdeTextEdit>>;
+    type RangeAssistFn = fn(
+        &dyn ide_db::FileDb,
+        ide_db::line_index::TextRange,
+    ) -> Option<Vec<ide_db::ide_types::IdeTextEdit>>;
     let range_assists: &[(&str, CodeActionKind, RangeAssistFn)] = &[
         ("Invert if", CodeActionKind::REFACTOR_REWRITE, ide_assists::invert_if_edits),
         (

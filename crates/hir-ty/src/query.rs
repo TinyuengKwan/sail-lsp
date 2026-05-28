@@ -602,7 +602,7 @@ function main() : unit -> unit = {
         // Type-check file A with workspace context
         let result = crate::infer::check_file_with_workspace(
             &file_a as &dyn SourceFileInfo,
-            vec![&file_b, &file_a].into_iter(),
+            vec![&file_b, &file_a],
             true,
             crate::CancellationToken::never(),
         );

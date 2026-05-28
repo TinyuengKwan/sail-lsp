@@ -339,7 +339,7 @@ mod tests {
         let bodies = callable_bodies(&db, input);
         assert!(bodies.is_some(), "should build callable bodies");
         let bodies = bodies.as_ref().unwrap();
-        assert!(bodies.0.len() > 0, "should have at least one body");
+        assert!(!bodies.0.is_empty(), "should have at least one body");
     }
 
     #[test]

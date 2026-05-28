@@ -514,8 +514,7 @@ fn find_node_in(root: &SyntaxNode, original: &SyntaxNode) -> Option<SyntaxNode> 
     let target_range = original.text_range();
     let target_kind = original.kind();
 
-    root.descendants()
-        .find(|node| node.text_range() == target_range && node.kind() == target_kind)
+    root.descendants().find(|node| node.text_range() == target_range && node.kind() == target_kind)
 }
 
 /// Resolve annotations: find the annotated elements in the (possibly mutated) tree.

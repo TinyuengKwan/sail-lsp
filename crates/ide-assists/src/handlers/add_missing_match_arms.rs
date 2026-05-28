@@ -49,8 +49,7 @@ pub(crate) fn add_missing_match_arms(acc: &mut Assists, ctx: &AssistContext<'_>)
 
     // Check if the file has any enum definition
     for &id in item_tree.top_level_items() {
-        if id.item_kind(item_tree) == ItemKind::Enum || id.item_kind(item_tree) == ItemKind::Union
-        {
+        if id.item_kind(item_tree) == ItemKind::Enum || id.item_kind(item_tree) == ItemKind::Union {
             // Check inline variants
             let sig = id.signature(item_tree);
             if let Some(brace_start) = sig.find('{') {

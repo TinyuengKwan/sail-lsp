@@ -652,7 +652,9 @@ fn emit_struct_node(
     buf.push_str(&format!("impl AstNode for {pascal} {{\n"));
     buf.push_str(&format!("    fn can_cast(kind: SK) -> bool {{ kind == SK::{kind} }}\n"));
     buf.push_str("    fn cast(syntax: SyntaxNode) -> Option<Self> {\n");
-    buf.push_str("        if Self::can_cast(syntax.kind()) { Some(Self { syntax }) } else { None }\n");
+    buf.push_str(
+        "        if Self::can_cast(syntax.kind()) { Some(Self { syntax }) } else { None }\n",
+    );
     buf.push_str("    }\n");
     buf.push_str("    fn syntax(&self) -> &SyntaxNode { &self.syntax }\n");
     buf.push_str(&format!("    fn kind() -> SK {{ SK::{kind} }}\n"));
