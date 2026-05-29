@@ -280,8 +280,10 @@ fn url_to_vfs_path(url: &url::Url) -> VfsPath {
             return VfsPath::from(paths::AbsPathBuf::assert_utf8(path));
         }
     }
-    let synthetic = format!("/{}", url.as_str());
-    VfsPath::new(paths::AbsPathBuf::assert(paths::Utf8PathBuf::from(synthetic)))
+    // Fall back to a platform-independent virtual path. This covers non-`file`
+    // schemes and `file:` URLs that don't map to a valid native path (e.g.
+    // `file:///test.sail` on Windows, which has no drive letter).
+    VfsPath::new_virtual_path(format!("/{}", url.as_str()))
 }
 
 #[cfg(test)]
