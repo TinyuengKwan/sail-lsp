@@ -97,7 +97,7 @@ jobs:
     name: Publish Marketplace (${{ matrix.target }})
     runs-on: ubuntu-latest
     needs: bundle
-    if: github.event_name == 'push' || inputs.publish_marketplace
+    if: (github.event_name == 'push' || inputs.publish_marketplace) && secrets.VSCE_PAT != ''
     strategy:
       fail-fast: false
       matrix:
