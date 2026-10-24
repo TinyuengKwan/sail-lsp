@@ -15,9 +15,7 @@ pub struct ImportRequest {
     pub context: FileId,
     pub offset: usize,
     pub target: FileId,
-    pub declaration: usize,
     pub name: String,
-    pub in_type: bool,
     pub source_hash: u64,
     pub target_hash: u64,
 }
@@ -350,7 +348,6 @@ pub fn search(
     let source_id = base_db::preprocess::physical_file(db, file.file_id(db));
     let Some(&source) = input.files(db).get(&source_id) else { return vec![] };
     let Some((_, namespace)) = reference(db, source, offset) else { return vec![] };
-    let in_type = namespace == Namespace::Type;
     let views = views_at(db, source, offset);
     if views.is_empty() {
         return vec![];
@@ -383,7 +380,7 @@ pub fn search(
             .filter(|symbol| !symbol.private)
             .map(|symbol| (&symbol.name, symbol.namespace))
             .collect();
-        for (declaration, decl) in declarations.iter().enumerate().rev() {
+        for decl in declarations.iter().rev() {
             for symbol in &decl.symbols {
                 if !symbol.matches_namespace(namespace)
                     || if exact {
@@ -420,9 +417,7 @@ pub fn search(
                         context,
                         offset,
                         target: *id,
-                        declaration,
                         name: symbol.name.clone(),
-                        in_type,
                         source_hash,
                         target_hash: fingerprint(target.text(db)),
                     },
@@ -497,7 +492,7 @@ struct Visit<'a> {
 
 fn expanded<'a>(
     plan: &hir::preprocess::Plan,
-    outlines: &'a HashMap<FileId, Vec<Decl>>,
+    outlines: &HashMap<FileId, &'a [Decl]>,
 ) -> Vec<Visit<'a>> {
     let instances: HashMap<_, _> = plan
         .instances
@@ -615,9 +610,10 @@ pub fn resolve(
         return None;
     }
     let old_outlines: HashMap<_, _> =
-        input.files(db).iter().map(|(&id, &file)| (id, outline(db, file).clone())).collect();
+        input.files(db).iter().map(|(&id, &file)| (id, outline(db, file).as_slice())).collect();
+    let edited_outline = describe(&new_root);
     let mut new_outlines = old_outlines.clone();
-    new_outlines.insert(request.source, describe(&new_root));
+    new_outlines.insert(request.source, &edited_outline);
     let old_visits = expanded(before, &old_outlines);
     let new_visits = expanded(&after, &new_outlines);
     let old_explicit = explicit_vals(&old_visits);

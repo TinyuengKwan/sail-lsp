@@ -399,8 +399,7 @@ pub fn import_request(
 ) -> serde_json::Value {
     serde_json::json!({
         "source": request.source.index(), "context": request.context.index(), "offset": request.offset,
-        "target": request.target.index(), "declaration": request.declaration,
-        "name": request.name, "inType": request.in_type,
+        "target": request.target.index(), "name": request.name,
         "sourceHash": format!("{:x}", request.source_hash), "targetHash": format!("{:x}", request.target_hash),
     })
 }

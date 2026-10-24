@@ -126,57 +126,46 @@ impl<'db> OrderedScope<'db> {
 
     pub fn call_arities(&self, node: &SyntaxNode, name: &str) -> Option<Vec<(usize, usize)>> {
         let at = self.at(node)?;
-        fn collect(
+        fn signature_arities(
             scope: &OrderedScope<'_>,
             at: Declaration,
             name: &str,
-            visiting: &mut std::collections::HashSet<String>,
         ) -> Option<Vec<(usize, usize)>> {
             use syntax::SyntaxKind as SK;
-            if !visiting.insert(name.to_owned()) {
-                return None;
-            }
-            let result = (|| {
-                if let Some(members) =
-                    bindings::overload_leaf_members(scope.db, at, Name::new(name))
-                {
-                    let mut out = Vec::new();
-                    for member in members {
-                        out.extend(collect(scope, at, member.as_str(), visiting)?);
-                    }
-                    return (!out.is_empty()).then_some(out);
-                }
-                let declaration = bindings::resolve(
-                    scope.db,
-                    at,
-                    Name::new(name),
-                    bindings::Namespace::Callable,
-                )?;
-                let node = source_order::node(scope.db, declaration)?;
-                let arrow = node.descendants().find(|n| n.kind() == SK::TYPE_ARROW)?;
-                let mapping = arrow.children_with_tokens().any(|t| t.kind() == SK::DOUBLE_ARROW);
-                let mut out = Vec::new();
-                for side in arrow.children().take(if mapping { 2 } else { 1 }) {
-                    if mapping {
-                        let arity = mapping_payload_arity(scope.db, declaration, side, 0)?;
-                        if arity == 0 {
-                            out.push((0, 1));
-                        } else {
-                            out.push((arity, arity));
-                            if arity > 1 {
-                                out.push((1, 1));
-                            }
+            let declaration =
+                bindings::resolve(scope.db, at, Name::new(name), bindings::Namespace::Callable)?;
+            let node = source_order::node(scope.db, declaration)?;
+            let arrow = node.descendants().find(|n| n.kind() == SK::TYPE_ARROW)?;
+            let mapping = arrow.children_with_tokens().any(|t| t.kind() == SK::DOUBLE_ARROW);
+            let mut out = Vec::new();
+            for side in arrow.children().take(if mapping { 2 } else { 1 }) {
+                if mapping {
+                    let arity = mapping_payload_arity(scope.db, declaration, side, 0)?;
+                    if arity == 0 {
+                        out.push((0, 1));
+                    } else {
+                        out.push((arity, arity));
+                        if arity > 1 {
+                            out.push((1, 1));
                         }
-                        continue;
                     }
-                    out.extend(function_parameter_arities(side));
+                    continue;
                 }
-                (!out.is_empty()).then_some(out)
-            })();
-            visiting.remove(name);
-            result
+                out.extend(function_parameter_arities(side));
+            }
+            (!out.is_empty()).then_some(out)
         }
-        collect(self, at, name, &mut Default::default())
+        // The shared resolver already enforces Sail's bounded overload
+        // expansion and rejects cycles/deeper groups. Its results are leaves.
+        if let Some(members) = bindings::overload_leaf_members(self.db, at, Name::new(name)) {
+            let mut out = Vec::new();
+            for member in members {
+                out.extend(signature_arities(self, at, member.as_str())?);
+            }
+            (!out.is_empty()).then_some(out)
+        } else {
+            signature_arities(self, at, name)
+        }
     }
 }
 

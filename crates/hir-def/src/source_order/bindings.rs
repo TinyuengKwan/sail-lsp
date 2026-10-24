@@ -425,23 +425,6 @@ pub fn names_at(db: &dyn salsa::Database, file: FileText, ordinal: usize) -> Vec
     names
 }
 
-/// Candidate declarations for identity-based implementation searches. Reading
-/// this projection avoids reparsing every unrelated declaration on navigation.
-pub fn declarations_named(
-    db: &dyn salsa::Database,
-    name: Name,
-    namespace: Namespace,
-) -> Vec<Declaration> {
-    let Some(files) = WorkspaceFiles::try_get(db) else { return Vec::new() };
-    index(db, files, Program::Workspace)
-        .bindings
-        .get(&(name, namespace))
-        .into_iter()
-        .flatten()
-        .map(|(_, decl, _)| *decl)
-        .collect()
-}
-
 /// Name existence in this program, including later or inaccessible declarations.
 /// Such a name must not fall back to an unrelated workspace declaration.
 pub fn contains_name(db: &dyn salsa::Database, at: Declaration, name: &Name) -> bool {
@@ -454,6 +437,8 @@ pub fn contains_name(db: &dyn salsa::Database, at: Declaration, name: &Name) -> 
     })
 }
 
+/// Candidate declarations in the use site's program for identity-based
+/// implementation searches, including inline programs.
 pub fn declarations_named_at(
     db: &dyn salsa::Database,
     at: Declaration,

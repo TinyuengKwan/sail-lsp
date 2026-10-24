@@ -176,9 +176,7 @@ pub fn import_request(
         },
         target: physical("target")?,
         offset: usize::try_from(data.get("offset")?.as_u64()?).ok()?,
-        declaration: usize::try_from(data.get("declaration")?.as_u64()?).ok()?,
         name: data.get("name")?.as_str()?.to_owned(),
-        in_type: data.get("inType")?.as_bool()?,
         source_hash: u64::from_str_radix(data.get("sourceHash")?.as_str()?, 16).ok()?,
         target_hash: u64::from_str_radix(data.get("targetHash")?.as_str()?, 16).ok()?,
     })

@@ -3,6 +3,9 @@ Cargo.lock.bak
 *.swp
 *.swo
 .DS_Store
+__pycache__/
+*.pyc
+/sail_smt_cache
 /.claude
 
 # The packaged server binary is a build output — `npm run package:local`
