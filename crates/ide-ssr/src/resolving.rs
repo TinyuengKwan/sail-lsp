@@ -25,7 +25,6 @@ pub(crate) struct ResolvedRule {
 
 /// A pattern with resolved path information.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub(crate) struct ResolvedPattern {
     /// Placeholder metadata, keyed by stand-in name.
     pub(crate) placeholders_by_stand_in: FxHashMap<String, Placeholder>,
@@ -33,29 +32,30 @@ pub(crate) struct ResolvedPattern {
     pub(crate) node: SyntaxNode,
     /// Path nodes that resolved to a definition.
     /// Currently empty — stub for future semantic matching.
+    #[expect(dead_code)]
     pub(crate) resolved_paths: FxHashMap<SyntaxNodeKey, ResolvedPath>,
 }
 
 /// A resolved path — points to a definition.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub(crate) struct ResolvedPath {
     /// The semantic resolution of this path.
+    #[expect(dead_code)]
     pub(crate) resolution: hir::PathResolution,
     /// Depth of this path in the AST (for resolution priority).
+    #[expect(dead_code)]
     pub(crate) depth: u32,
 }
 
 /// Key for SyntaxNode in HashMap (by text range, since SyntaxNode doesn't impl Hash).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[allow(dead_code)]
 pub(crate) struct SyntaxNodeKey {
     range: rowan::TextRange,
     kind: parser::SyntaxKind,
 }
 
 impl SyntaxNodeKey {
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub(crate) fn from_node(node: &SyntaxNode) -> Self {
         Self { range: node.text_range(), kind: node.kind() }
     }

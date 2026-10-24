@@ -4,3 +4,8 @@ Cargo.lock.bak
 *.swo
 .DS_Store
 /.claude
+
+# The packaged server binary is a build output — `npm run package:local`
+# writes it. It was tracked, so every rebuild committed a new ~47 MB blob.
+editors/code/server/sail-lsp
+editors/code/server/sail-lsp.exe

@@ -9,9 +9,9 @@ pub(super) fn collect_hir_parameter_hints<'a>(
     current_file: &dyn FileDb,
     begin: usize,
     end: usize,
-    hints: &mut Vec<IdeDbInlayHint>,
+    hints: &mut Vec<InlayHint>,
 ) {
-    use hir_def::hir::Expr;
+    use hir::Expr;
 
     let Some(bodies) = current_file.bodies() else {
         return;
@@ -71,10 +71,10 @@ pub(super) fn collect_hir_parameter_hints<'a>(
                             if arg_text.trim() == param_name {
                                 continue;
                             }
-                            hints.push(IdeDbInlayHint {
+                            hints.push(InlayHint {
                                 offset: arg_span.start,
                                 label: format!("{param_name}:"),
-                                kind: IdeDbInlayHintKind::Parameter,
+                                kind: InlayHintKind::Parameter,
                                 tooltip: None,
                                 padding_left: Some(true),
                                 padding_right: Some(true),

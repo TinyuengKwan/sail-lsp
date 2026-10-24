@@ -13,6 +13,8 @@ pub enum Entry {
     Files(Vec<AbsPathBuf>),
     /// Directory scan with extension/exclusion filters.
     Directories(Directories),
+    /// Watch for new files without reading unrelated files into the VFS.
+    WatchDirectories(Directories),
 }
 
 /// Directory scanning configuration.
@@ -61,7 +63,7 @@ impl Entry {
     pub fn contains_file(&self, path: &AbsPath) -> bool {
         match self {
             Entry::Files(files) => files.iter().any(|f| f.as_path() == path),
-            Entry::Directories(dirs) => dirs.contains_file(path),
+            Entry::Directories(dirs) | Entry::WatchDirectories(dirs) => dirs.contains_file(path),
         }
     }
 
@@ -69,7 +71,7 @@ impl Entry {
     pub fn contains_dir(&self, path: &AbsPath) -> bool {
         match self {
             Entry::Files(_) => false,
-            Entry::Directories(dirs) => dirs.contains_dir(path),
+            Entry::Directories(dirs) | Entry::WatchDirectories(dirs) => dirs.contains_dir(path),
         }
     }
 }

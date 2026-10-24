@@ -7,12 +7,13 @@
 //! - Built-in types (int, nat, bool, string, unit, real, bits, etc.)
 //! - User-defined types from the workspace (struct, enum, union, bitfield, type aliases)
 
+use crate::item::CompletionItem;
 use ide_db::defs::{CompletionItemKind, SymbolKind};
-use ide_db::ide_types::{CompletionItem, CompletionRelevance};
 use parser::Token;
 
 #[allow(unused_imports)]
 use ide_db::FileDb;
+use url::Url;
 
 /// Built-in Sail types offered in type-annotation positions.
 const BUILTIN_TYPES: &[(&str, &str)] = &[
@@ -45,18 +46,7 @@ pub fn complete_type_pos(
     // 1. Built-in types
     for &(name, detail) in BUILTIN_TYPES {
         if name.starts_with(prefix) || prefix.is_empty() {
-            items.push(CompletionItem {
-                label: name.to_string(),
-                kind: CompletionItemKind::Struct,
-                detail: Some(detail.to_string()),
-                insert_text: None,
-                text_edit: None,
-                sort_text: None,
-                filter_text: None,
-                documentation: None,
-                deprecated: false,
-                relevance: CompletionRelevance::default(),
-            });
+            items.push(crate::render::render_type(name, CompletionItemKind::Struct).detail(detail));
         }
     }
 
@@ -69,18 +59,7 @@ pub fn complete_type_pos(
                 SymbolKind::TypeAlias => CompletionItemKind::Struct,
                 _ => CompletionItemKind::Struct,
             };
-            items.push(CompletionItem {
-                label: name.to_string(),
-                kind: ck,
-                detail: None,
-                insert_text: None,
-                text_edit: None,
-                sort_text: None,
-                filter_text: None,
-                documentation: None,
-                deprecated: false,
-                relevance: CompletionRelevance::default(),
-            });
+            items.push(crate::render::render_type(name, ck));
         }
     }
 
@@ -101,6 +80,36 @@ pub fn is_type_position(prev_token: Option<&Token>) -> bool {
         Some(Token::DoubleArrow) => true, // <->
         _ => false,
     }
+}
+
+/// Collect type names from all workspace files.
+pub(crate) fn collect_type_names(
+    ctx: &crate::context::CompletionContext<'_>,
+    all_files: &[(&Url, &dyn FileDb)],
+) -> Vec<(String, ide_db::defs::SymbolKind)> {
+    let mut type_names = Vec::new();
+    for (_, f) in all_files {
+        let Some(tree) = f.item_tree() else { continue };
+        for &id in tree.top_level_items() {
+            if !ctx.can_see_item(*f, tree, id) {
+                continue;
+            }
+            use hir::DefKind as D;
+            let kind = match id.def_kind(tree) {
+                D::ScatteredHead if id.scattered_type_kind(tree).is_some() => {
+                    ide_db::defs::SymbolKind::Enum
+                }
+                D::Struct | D::Bitfield => ide_db::defs::SymbolKind::Struct,
+                D::Enum | D::Union => ide_db::defs::SymbolKind::Enum,
+                // `newtype` names a type too, and the scrape's list left it
+                // out.
+                D::TypeAlias | D::Newtype => ide_db::defs::SymbolKind::TypeAlias,
+                _ => continue,
+            };
+            type_names.push((id.name(tree).to_string(), kind));
+        }
+    }
+    type_names
 }
 
 #[cfg(test)]

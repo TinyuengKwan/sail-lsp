@@ -4,7 +4,54 @@
 //! structural selection (Shift+Alt+Right in VS Code).
 
 use base_db::TextRange;
+use ide_db::ide_types::SelectionRange;
 use ide_db::FileDb;
+
+/// The whole `textDocument/selectionRange` chain for one cursor position.
+///
+/// rust-analyzer builds this by calling `Analysis::extend_selection` in a
+/// loop until it stops growing (`handle_selection_range`), so the chain has
+/// exactly the granularity the CST has. This lives in `ide` rather than in
+/// the handler because a handler here converts and does not decide.
+///
+/// The previous implementation scraped the token stream instead: the token
+/// under the cursor, every bracket pair spanning it, the enclosing
+/// top-level item, the line, the file. Everything between a bracket pair
+/// and its item was missing — a binary operation, a `let` statement, a
+/// match arm, an argument — and "the line" is not a syntactic unit at all.
+pub fn selection_range(file: &dyn FileDb, offset: usize) -> Option<SelectionRange> {
+    let text = file.text();
+    if text.is_empty() {
+        return None;
+    }
+    let offset = offset.min(text.len());
+
+    let mut ranges = vec![base_db::text_range(offset, offset)];
+    loop {
+        let cur = *ranges.last().expect("seeded above");
+        let next = extend_selection(file, cur);
+        if next == cur || !next.contains_range(cur) {
+            break;
+        }
+        ranges.push(next);
+        // The file's own range is the fixed point; a malformed tree that
+        // never reaches it must not spin.
+        if ranges.len() > 128 {
+            break;
+        }
+    }
+    // An empty seed is a cursor, not a selection: LSP wants the innermost
+    // *node*, so drop it once something real sits above it.
+    if ranges.len() > 1 && ranges[0].is_empty() {
+        ranges.remove(0);
+    }
+
+    let mut parent: Option<Box<SelectionRange>> = None;
+    for range in ranges.into_iter().rev() {
+        parent = Some(Box::new(SelectionRange { range, parent }));
+    }
+    parent.map(|node| *node)
+}
 
 /// Extend the selection range to the next larger CST node.
 ///
@@ -23,10 +70,22 @@ pub fn extend_selection(file: &dyn FileDb, range: TextRange) -> TextRange {
 
     let rowan_range = range;
 
+    use parser::SyntaxKind as SK;
+
+    // An empty range is a cursor, and a cursor sits *between* two tokens.
+    // `covering_element` answers with whichever the offset happens to touch
+    // first, so a cursor on the `1` of `let x = 1 + 2` came back as the
+    // whitespace before it and the whole chain started one node too high.
+    // rust-analyzer picks by priority instead (`extend_selection.rs`):
+    // trivia loses to anything, and a word loses to nothing.
+    if rowan_range.is_empty() {
+        if let Some(token) = pick_token_at(&root, rowan_range.start()) {
+            return token.text_range();
+        }
+    }
+
     // Find the smallest node covering the range
     let covering = root.covering_element(rowan_range);
-
-    use parser::SyntaxKind as SK;
 
     let node = match covering {
         rowan::NodeOrToken::Token(token) => {
@@ -97,42 +156,59 @@ pub fn extend_selection(file: &dyn FileDb, range: TextRange) -> TextRange {
         }
     };
 
+    // The parent can have exactly the range it was handed: `covering_element`
+    // answers with the deepest element, so a literal comes back as the
+    // `NUM_LIT` token whose parent `LITERAL_EXPR` spans the same byte. Landing
+    // there is not an extension, and the chain stopped at the token because of
+    // it. Climb until the range actually grows.
+    let mut node = node;
+    while node.text_range() == rowan_range {
+        match node.parent() {
+            Some(p) => node = p,
+            None => return range,
+        }
+    }
+
     let result = node.text_range();
     base_db::text_range(u32::from(result.start()) as usize, u32::from(result.end()) as usize)
 }
 
-/// Shrink the selection range to the next smaller CST node.
+/// The token a cursor at `offset` belongs to.
 ///
-/// Inverse of extend_selection: finds the largest child node
-/// that overlaps with the current range.
-pub fn shrink_selection(file: &dyn FileDb, range: TextRange) -> TextRange {
-    let text = file.text();
-    if text.is_empty() || range.is_empty() {
-        return range;
-    }
-
-    let (root, _) = syntax::parse_text(text);
-    let rowan_range = range;
-
-    let covering = root.covering_element(rowan_range);
-    let node = match covering {
-        rowan::NodeOrToken::Node(n) => n,
-        rowan::NodeOrToken::Token(_) => return range,
-    };
-
-    // Find first child that's smaller than current range
-    for child in node.children() {
-        let child_range = child.text_range();
-        if child_range.len() < rowan_range.len() && !child_range.is_empty() {
-            return base_db::text_range(
-                u32::from(child_range.start()) as usize,
-                u32::from(child_range.end()) as usize,
-            );
+/// Between two tokens the more interesting one wins, as in rust-analyzer:
+/// a name or a keyword over punctuation, punctuation over trivia.
+fn pick_token_at(
+    root: &syntax::SyntaxNode,
+    offset: rowan::TextSize,
+) -> Option<syntax::SyntaxToken> {
+    use parser::SyntaxKind as SK;
+    fn priority(kind: parser::SyntaxKind) -> u8 {
+        if kind.is_trivia() || kind == SK::DOC_COMMENT {
+            0
+        } else if matches!(kind, SK::IDENT | SK::STRING_LIT | SK::NUM_LIT) {
+            3
+        } else {
+            2
         }
     }
-
-    range
+    match root.token_at_offset(offset) {
+        rowan::TokenAtOffset::None => None,
+        rowan::TokenAtOffset::Single(t) => Some(t),
+        rowan::TokenAtOffset::Between(left, right) => {
+            if priority(right.kind()) >= priority(left.kind()) {
+                Some(right)
+            } else {
+                Some(left)
+            }
+        }
+    }
 }
+
+// There is no `shrink_selection`. LSP has no shrink request: the server
+// answers `textDocument/selectionRange` with a *chain* — a range and its
+// parent, and its parent — and a client shrinks by walking back down the
+// chain it already has. A function that recomputed a smaller range served
+// an operation that does not exist, which is why it had no caller.
 
 /// Expand selection to word boundaries within a string/comment token.
 ///

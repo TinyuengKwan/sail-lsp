@@ -6,6 +6,11 @@ edition = "2021"
 license = "MIT"
 publish = false
 
+[features]
+default = ["z3-solver"]
+# Forwarded so the crates above can enable it without naming hir-ty.
+z3-solver = ["hir-ty/z3-solver"]
+
 [lib]
 
 [dependencies]
@@ -15,7 +20,7 @@ parser.workspace = true
 syntax.workspace = true
 hir-expand.workspace = true
 hir-def.workspace = true
-hir-ty.workspace = true
+hir-ty = { workspace = true, default-features = false }
 rustc-hash.workspace = true
 either.workspace = true
 # NOTE: hir does NOT depend on ide-db or ide (RA architecture).

@@ -125,7 +125,11 @@ pub fn ty_bit() -> SyntaxNode {
 }
 
 /// Create an expression from text.
-fn expr_from_text(text: &str) -> SyntaxNode {
+///
+/// rust-analyzer's `make::expr_from_text` is public for the same reason:
+/// an assist that moves an existing expression needs a detached copy of
+/// it, and rowan will not splice a node that belongs to another tree.
+pub fn expr_from_text(text: &str) -> SyntaxNode {
     let (root, _) = parsing::parse_text(&format!("function __make() = {text}\n"));
     // Find first expression-like node after the `=`.
     root.descendants()

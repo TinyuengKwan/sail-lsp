@@ -104,7 +104,7 @@ impl Position {
     }
 
     /// The parent node that this position is within.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub(crate) fn parent(&self) -> SyntaxNode {
         match &self.repr {
             PositionRepr::FirstChild(parent) => parent.clone(),
@@ -114,7 +114,7 @@ impl Position {
 
     /// Returns `(parent, child_index)` where `child_index` is where the new
     /// element(s) should be inserted.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub(crate) fn place(&self) -> (SyntaxNode, usize) {
         match &self.repr {
             PositionRepr::FirstChild(parent) => (parent.clone(), 0),
@@ -170,7 +170,7 @@ impl Change {
     }
 
     /// The parent node that this change operates on.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     fn target_parent(&self) -> SyntaxNode {
         match self {
             Change::Insert(pos, _) | Change::InsertAll(pos, _) => pos.parent(),
@@ -454,5 +454,30 @@ mod tests {
         let edit = editor.finish();
         let found = edit.find_annotation(ann);
         assert!(!found.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod editing_a_file {
+    use super::*;
+
+    /// The editor's own first use.
+    ///
+    /// It had two tests of its own and no caller anywhere, and this — one
+    /// node replaced in one file — panicked: rowan detaches whatever is
+    /// being attached, and a node from `ast::make` belongs to the tree that
+    /// parsed the snippet, so detaching it hit an immutable tree.
+    #[test]
+    fn replace_a_node_in_a_file() {
+        let (root, _) = crate::parse_text("val f : int -> int\nfunction f(x) = (x + 1)\n");
+        let target = root
+            .descendants()
+            .find(|n| n.kind() == parser::SyntaxKind::TUPLE_EXPR)
+            .expect("the parens");
+        let inner = crate::ast::make::expr_from_text("x + 1");
+        let (mut editor, _) = SyntaxEditor::new(root.clone());
+        editor.replace(target, inner);
+        let edit = editor.finish();
+        assert_eq!(edit.new_root().to_string(), "val f : int -> int\nfunction f(x) = x + 1\n");
     }
 }

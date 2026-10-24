@@ -1,0 +1,57 @@
+SOURCE_FILE@0..65
+  CALLABLE_DEF@0..64
+    KW_FUNCTION@0..8 "function"
+    WHITESPACE@8..9 " "
+    IDENT@9..10 "t"
+    UNIT@10..12 "()"
+    WHITESPACE@12..13 " "
+    EQ@13..14 "="
+    WHITESPACE@14..15 " "
+    BLOCK_EXPR@15..64
+      L_CURLY@15..16 "{"
+      WHITESPACE@16..17 " "
+      BLOCK_ITEM@17..62
+        FOREACH_EXPR@17..62
+          KW_FOREACH@17..24 "foreach"
+          WHITESPACE@24..25 " "
+          L_PAREN@25..26 "("
+          IDENT@26..27 "i"
+          WHITESPACE@27..28 " "
+          KW_FROM@28..32 "from"
+          WHITESPACE@32..33 " "
+          LITERAL_EXPR@33..34
+            NUM_LIT@33..34 "0"
+          WHITESPACE@34..35 " "
+          KW_TO@35..37 "to"
+          WHITESPACE@37..38 " "
+          LITERAL_EXPR@38..40
+            NUM_LIT@38..40 "32"
+          WHITESPACE@40..41 " "
+          KW_BY@41..43 "by"
+          WHITESPACE@43..44 " "
+          LITERAL_EXPR@44..45
+            NUM_LIT@44..45 "1"
+          WHITESPACE@45..46 " "
+          KW_IN@46..48 "in"
+          WHITESPACE@48..49 " "
+          TYPE_NAMED@49..52
+            KW_INC@49..52 "inc"
+          R_PAREN@52..53 ")"
+          WHITESPACE@53..54 " "
+          BLOCK_EXPR@54..62
+            L_CURLY@54..55 "{"
+            WHITESPACE@55..56 " "
+            BLOCK_ITEM@56..60
+              CALL_EXPR@56..60
+                IDENT_EXPR@56..57
+                  IDENT@56..57 "g"
+                ARG_LIST@57..60
+                  L_PAREN@57..58 "("
+                  IDENT_EXPR@58..59
+                    IDENT@58..59 "i"
+                  R_PAREN@59..60 ")"
+            WHITESPACE@60..61 " "
+            R_CURLY@61..62 "}"
+      WHITESPACE@62..63 " "
+      R_CURLY@63..64 "}"
+  WHITESPACE@64..65 "\n"

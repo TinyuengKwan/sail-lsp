@@ -1,8 +1,9 @@
+mod types;
+pub use types::*;
 mod highlight;
 pub mod html;
 mod tags;
 
-use ide_db::ide_types::{HlRange, HlRanges, HlRangesDelta, HlRangesEdit};
 use ide_db::line_index::TextRange;
 use ide_db::FileDb;
 
@@ -40,48 +41,12 @@ pub const TOKEN_MODIFIERS: &[&str] = &[
     "controlFlow",   // bit 6
 ];
 
-fn semantic_tokens_result_id(file: &dyn FileDb, token_count: usize) -> String {
-    format!("{:x}:{:x}", file.text().len(), token_count)
-}
-
 pub fn compute_semantic_tokens(file: &dyn FileDb) -> HlRanges {
     highlight::compute_semantic_tokens_filtered(file, None)
 }
 
 pub fn compute_semantic_tokens_range(file: &dyn FileDb, range: &TextRange) -> HlRanges {
     highlight::compute_semantic_tokens_filtered(file, Some(range))
-}
-
-pub fn compute_semantic_tokens_delta(previous: &HlRanges, current: &HlRanges) -> HlRangesDelta {
-    let previous_data = &previous.data;
-    let current_data = &current.data;
-
-    let mut prefix = 0_usize;
-    let prefix_limit = previous_data.len().min(current_data.len());
-    while prefix < prefix_limit && previous_data[prefix] == current_data[prefix] {
-        prefix += 1;
-    }
-
-    let mut suffix = 0_usize;
-    while suffix + prefix < previous_data.len()
-        && suffix + prefix < current_data.len()
-        && previous_data[previous_data.len() - 1 - suffix]
-            == current_data[current_data.len() - 1 - suffix]
-    {
-        suffix += 1;
-    }
-
-    let edits = if prefix == previous_data.len() && prefix == current_data.len() {
-        Vec::new()
-    } else {
-        vec![HlRangesEdit {
-            start: prefix as u32,
-            delete_count: (previous_data.len() - prefix - suffix) as u32,
-            data: Some(current_data[prefix..(current_data.len() - suffix)].to_vec()),
-        }]
-    };
-
-    HlRangesDelta { result_id: current.result_id.clone(), edits }
 }
 
 #[cfg(test)]
@@ -120,20 +85,20 @@ mod tests {
         }
     }
 
-    impl hir_def::callgraph::WorkspaceFile for TestFile {
+    impl hir::callgraph::WorkspaceFile for TestFile {
         fn content_hash(&self) -> u64 {
             0
         }
-        fn callgraph(&self) -> Option<&hir_def::callgraph::CallGraph> {
+        fn callgraph(&self) -> Option<&hir::callgraph::CallGraph> {
             None
         }
     }
 
-    impl hir_def::callgraph::SourceFileInfo for TestFile {
+    impl hir::callgraph::SourceFileInfo for TestFile {
         fn text(&self) -> &str {
             &self.text
         }
-        fn item_tree(&self) -> Option<&hir_def::ItemTree> {
+        fn item_tree(&self) -> Option<&hir::ItemTree> {
             None
         }
     }
@@ -211,15 +176,5 @@ mod tests {
     #[test]
     fn classifies_keywords_without_debug_string_hack() {
         assert_eq!(token_type_index(&parser::Token::KwFunction, None), Some(0));
-    }
-
-    #[test]
-    fn semantic_token_delta_uses_incremental_edit() {
-        let old_file = TestFile::new("let x = 1");
-        let new_file = TestFile::new("let xyz = 100");
-        let previous = compute_semantic_tokens(&old_file);
-        let current = compute_semantic_tokens(&new_file);
-        let delta = compute_semantic_tokens_delta(&previous, &current);
-        assert!(!delta.edits.is_empty());
     }
 }

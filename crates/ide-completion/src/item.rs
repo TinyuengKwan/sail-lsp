@@ -1,220 +1,271 @@
 //! Completion item representation.
-//! The `CompletionItem` is the primary output of the completion engine.
-//! It contains all information needed to render a completion suggestion
-//! in the editor.
+//!
+//! The `CompletionItem` is the primary output of the completion engine, and
+//! it lives here — in the crate that produces it — as rust-analyzer's does.
 
 use ide_db::defs::CompletionItemKind;
-use ide_db::documentation::Documentation;
-use ide_db::ide_types::CompletionRelevance;
-use ide_db::line_index::TextRange;
 
-/// Structured label for a completion item.
+/// Relevance scoring for completion items.
 ///
-/// ```text
-/// pub struct CompletionItemLabel {
-///     pub primary: SmolStr,
-///     pub detail_left: Option<String>,
-///     pub detail_right: Option<String>,
-/// }
-/// ```
-///
-/// `detail_left` renders next to the label (e.g., return type);
-/// `detail_right` renders on the far right (e.g., source module).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CompletionItemLabel {
-    /// Primary display text (e.g., function name).
-    pub primary: String,
-    /// Detail shown left of the label (e.g., `: int`).
-    pub detail_left: Option<String>,
-    /// Detail shown right of the label (e.g., source file).
-    pub detail_right: Option<String>,
+/// Each field adjusts the item's score relative to BASE_SCORE.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CompletionRelevance {
+    /// Identifier name exactly matches expected parameter/variable name.
+    pub exact_name_match: bool,
+    /// Type matches the expected type at cursor position.
+    pub type_match: Option<CompletionRelevanceTypeMatch>,
+    /// Item is a local variable (not workspace-level).
+    pub is_local: bool,
+    /// Exact postfix template match.
+    pub postfix_match: Option<CompletionRelevancePostfixMatch>,
+    /// Item requires cross-file resolution (e.g., from another $include).
+    pub requires_import: bool,
+    /// Item is a private field but editable (e.g., same module).
+    pub is_private_editable: bool,
+    /// Item is deprecated.
+    pub is_deprecated: bool,
+    /// Function-specific relevance factors.
+    pub function: Option<CompletionRelevanceFn>,
 }
 
-impl CompletionItemLabel {
-    pub fn new(primary: impl Into<String>) -> Self {
-        Self { primary: primary.into(), detail_left: None, detail_right: None }
-    }
+/// Type match quality.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionRelevanceTypeMatch {
+    /// Type could unify with expected (generic match).
+    CouldUnify,
+    /// Exact type match.
+    Exact,
 }
 
-impl From<String> for CompletionItemLabel {
-    fn from(s: String) -> Self {
-        Self::new(s)
-    }
+/// Postfix completion match quality.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionRelevancePostfixMatch {
+    /// Postfix trigger exists but isn't an exact match.
+    NonExact,
+    /// Exact postfix match (e.g., `.if` on a boolean expression).
+    Exact,
 }
 
-impl From<&str> for CompletionItemLabel {
-    fn from(s: &str) -> Self {
-        Self::new(s)
-    }
+/// Function-specific relevance factors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompletionRelevanceFn {
+    /// Function takes at least one parameter.
+    pub has_params: bool,
+    /// Function has a self/receiver parameter.
+    pub has_self_param: bool,
+    /// How the return type relates to the expected type.
+    pub return_type: CompletionRelevanceReturnType,
 }
 
-/// A single completion suggestion.
-/// This is the ide-completion-internal representation. The LSP layer
-/// converts it to `lsp_types::CompletionItem` via `to_proto`.
-#[derive(Debug, Clone)]
-pub struct CompletionItem {
-    /// Structured label with primary text + detail annotations.
-    pub label: CompletionItemLabel,
-    /// The range of source text to replace when applying.
-    pub source_range: TextRange,
-    /// The text to insert (may differ from label for snippets).
-    pub text_edit: Option<String>,
-    /// Whether this is a snippet (contains `$0`, `$1`, etc.).
-    pub is_snippet: bool,
-    /// The kind of completion (function, variable, keyword, etc.).
-    pub kind: CompletionItemKind,
-    /// Alternative lookup text (for fuzzy matching).
-    pub lookup: Option<String>,
-    /// Short detail string shown alongside label.
-    pub detail: Option<String>,
-    /// Documentation shown in popup.
-    pub documentation: Option<Documentation>,
-    /// Whether this item is deprecated.
-    pub deprecated: bool,
-    /// Whether completing this item should trigger parameter info.
-    pub trigger_call_info: bool,
-    /// Relevance scoring for sorting.
-    pub relevance: CompletionRelevance,
-    /// Text used for sorting (hex-encoded relevance score).
-    pub sort_text: Option<String>,
+/// How a function's return type relates to the expected type at cursor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CompletionRelevanceReturnType {
+    /// No special relationship.
+    #[default]
+    Other,
+    /// Returns the type being constructed (e.g., `Vec::new() -> Vec`).
+    DirectConstructor,
+    /// Returns a wrapper containing the type (e.g., `Some(x) -> option(x)`).
+    Constructor,
+    /// Returns Self or &mut Self (builder pattern).
+    Builder,
 }
 
-impl Default for CompletionItem {
-    fn default() -> Self {
-        Self {
-            label: CompletionItemLabel::new(""),
-            source_range: base_db::text_range(0, 0),
-            text_edit: None,
-            is_snippet: false,
-            kind: CompletionItemKind::Variable,
-            lookup: None,
-            detail: None,
-            documentation: None,
-            deprecated: false,
-            trigger_call_info: false,
-            relevance: CompletionRelevance::default(),
-            sort_text: None,
+impl CompletionRelevance {
+    /// Base score — midpoint of u32 range.
+    const BASE_SCORE: u32 = u32::MAX / 2;
+
+    /// Compute the numeric score for sorting.
+    ///
+    /// Higher score = more relevant = sorted first.
+    pub fn score(&self) -> u32 {
+        let mut score = Self::BASE_SCORE;
+
+        if self.exact_name_match {
+            score += 20;
         }
+        if self.is_local {
+            score += 3;
+        }
+        if !self.is_private_editable {
+            score += 1;
+        }
+        if self.requires_import {
+            score = score.saturating_sub(5);
+        }
+        if self.is_deprecated {
+            score = score.saturating_sub(3);
+        }
+
+        match self.postfix_match {
+            Some(CompletionRelevancePostfixMatch::Exact) => score += 100,
+            Some(CompletionRelevancePostfixMatch::NonExact) => {
+                score = score.saturating_sub(5);
+            }
+            None => {}
+        }
+
+        match self.type_match {
+            Some(CompletionRelevanceTypeMatch::Exact) => score += 18,
+            Some(CompletionRelevanceTypeMatch::CouldUnify) => score += 5,
+            None => {}
+        }
+
+        // Function-specific factors
+        if let Some(ref fn_rel) = self.function {
+            match fn_rel.return_type {
+                CompletionRelevanceReturnType::DirectConstructor => score += 15,
+                CompletionRelevanceReturnType::Builder => score += 10,
+                CompletionRelevanceReturnType::Constructor => score += 5,
+                CompletionRelevanceReturnType::Other => {}
+            }
+            if fn_rel.has_params {
+                score = score.saturating_sub(1);
+            }
+            if fn_rel.has_self_param {
+                score = score.max(1);
+            }
+        }
+
+        score
     }
+
+    // There is no `is_relevant`. Sorting reads `score()`; nothing asks
+    // the yes/no question, and a threshold on a score that only orders is
+    // a decision nobody made.
+}
+
+/// A completion item.
+///
+/// Shared by providers, analysis and protocol conversion. Declaration origins
+/// survive lazy resolution; auto-include candidates carry a request whose
+/// additional edits are computed and validated against current inputs.
+#[derive(Clone, Debug)]
+pub struct CompletionItem {
+    /// Requesting file, retained across the LSP completion/resolve round trip.
+    pub scope_file: Option<base_db::FileId>,
+    /// Selected semantic declaration, retained for lazy documentation.
+    pub origin: Option<CompletionOrigin>,
+    /// A candidate is resolved against current source/configuration before
+    /// publishing its include edit. Kept through the protocol round trip.
+    pub import: Option<ide_db::imports::import_assets::ImportRequest>,
+    pub additional_text_edits: Vec<ide_db::text_edit::TextEdit>,
+    pub label: String,
+    pub kind: CompletionItemKind,
+    pub detail: Option<String>,
+    pub documentation: Option<String>,
+    pub insert_text: Option<String>,
+    pub sort_text: Option<String>,
+    pub filter_text: Option<String>,
+    pub deprecated: bool,
+    /// Relevance scoring.
+    pub relevance: CompletionRelevance,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompletionOrigin {
+    pub file: base_db::FileId,
+    pub declaration: usize,
+    pub namespace: hir::source_order::bindings::Namespace,
 }
 
 impl CompletionItem {
-    /// Create a new completion item with minimal fields.
-    pub fn new(
-        kind: CompletionItemKind,
-        source_range: TextRange,
-        label: impl Into<String>,
-    ) -> Self {
-        Self { label: CompletionItemLabel::new(label), source_range, kind, ..Default::default() }
+    /// A completion with nothing but a name and a kind.
+    ///
+    /// rust-analyzer builds every item through `render`, which is why its
+    /// `CompletionItem` has a builder rather than nine fields to fill in.
+    /// Ours were nine-field literals repeated at every provider — the same
+    /// six defaults each time — while `render/` sat beside them with
+    /// `#[expect(dead_code)]`.
+    pub(crate) fn new(kind: CompletionItemKind, label: impl Into<String>) -> Self {
+        Self {
+            scope_file: None,
+            origin: None,
+            import: None,
+            additional_text_edits: Vec::new(),
+            label: label.into(),
+            kind,
+            detail: None,
+            documentation: None,
+            insert_text: None,
+            sort_text: None,
+            filter_text: None,
+            deprecated: false,
+            relevance: CompletionRelevance::default(),
+        }
     }
 
-    /// The primary label text (convenience accessor).
-    pub fn label_text(&self) -> &str {
-        &self.label.primary
-    }
-
-    /// Builder method: set the detail string.
-    pub fn detail(mut self, detail: impl Into<String>) -> Self {
+    pub(crate) fn detail(mut self, detail: impl Into<String>) -> Self {
         self.detail = Some(detail.into());
         self
     }
 
-    /// Builder method: set the text edit.
-    pub fn text_edit(mut self, text: impl Into<String>) -> Self {
-        self.text_edit = Some(text.into());
+    pub(crate) fn documentation(mut self, doc: impl Into<String>) -> Self {
+        self.documentation = Some(doc.into());
         self
     }
 
-    /// Builder method: set documentation.
-    pub fn documentation(mut self, doc: Documentation) -> Self {
-        self.documentation = Some(doc);
+    /// What to type in place of the label — a snippet, or a call with its
+    /// parentheses already there.
+    pub(crate) fn insert_text(mut self, text: impl Into<String>) -> Self {
+        self.insert_text = Some(text.into());
         self
     }
 
-    /// Builder method: set documentation from string (convenience).
-    pub fn documentation_str(mut self, doc: impl Into<String>) -> Self {
-        self.documentation = Some(Documentation::new(doc.into()));
+    pub(crate) fn sort_text(mut self, text: impl Into<String>) -> Self {
+        self.sort_text = Some(text.into());
         self
     }
 
-    /// Builder method: set relevance.
-    pub fn set_relevance(mut self, relevance: CompletionRelevance) -> Self {
+    pub(crate) fn filter_text(mut self, text: impl Into<String>) -> Self {
+        self.filter_text = Some(text.into());
+        self
+    }
+
+    pub(crate) fn relevance(mut self, relevance: CompletionRelevance) -> Self {
         self.relevance = relevance;
         self
     }
-
-    /// Builder method: mark as deprecated.
-    pub fn set_deprecated(mut self, deprecated: bool) -> Self {
-        self.deprecated = deprecated;
-        self
-    }
-
-    /// Builder method: set lookup text.
-    pub fn lookup_by(mut self, lookup: impl Into<String>) -> Self {
-        self.lookup = Some(lookup.into());
-        self
-    }
-
-    /// Builder method: mark as snippet.
-    pub fn snippet(mut self, snippet_text: impl Into<String>) -> Self {
-        self.text_edit = Some(snippet_text.into());
-        self.is_snippet = true;
-        self
-    }
-
-    /// Builder method: set label detail_left.
-    pub fn label_detail_left(mut self, detail: impl Into<String>) -> Self {
-        self.label.detail_left = Some(detail.into());
-        self
-    }
-
-    /// Builder method: set label detail_right.
-    pub fn label_detail_right(mut self, detail: impl Into<String>) -> Self {
-        self.label.detail_right = Some(detail.into());
-        self
-    }
 }
 
-/// Convert from legacy IdeCompletionItem to the CompletionItem.
+/// Deduplicate, score, and sort completion items.
 ///
-/// This allows providers still using the old type to feed into the
-/// Completions accumulator. Will be removed when all providers are migrated.
-impl From<ide_db::ide_types::CompletionItem> for CompletionItem {
-    fn from(old: ide_db::ide_types::CompletionItem) -> Self {
-        Self {
-            label: CompletionItemLabel::new(&old.label),
-            source_range: base_db::text_range(0, 0), // placeholder — providers should set this
-            text_edit: old.insert_text,
-            is_snippet: false,
-            kind: old.kind,
-            lookup: old.filter_text,
-            detail: old.detail,
-            documentation: old.documentation.map(Documentation::new),
-            deprecated: old.deprecated,
-            trigger_call_info: false,
-            relevance: old.relevance,
-            sort_text: old.sort_text,
-        }
-    }
-}
+/// 1. Deduplicate by label
+/// 2. Sort by `relevance.score()` (descending), then alphabetical
+/// 3. Assign hex sort_text via XOR-inversion (`score ^ 0xFFFFFFFF`)
+/// 4. Truncate to MAX_COMPLETIONS
+pub(crate) fn deduplicate_and_sort(items: &mut Vec<CompletionItem>, _prefix: &str) {
+    // A type and value can share a spelling, including generated enum names.
+    // Locals still take precedence over same-named global values.
+    let mut seen = std::collections::HashSet::new();
+    items.retain(|item| {
+        seen.insert((
+            item.label.clone(),
+            matches!(
+                item.kind,
+                CompletionItemKind::Struct
+                    | CompletionItemKind::Enum
+                    | CompletionItemKind::TypeParameter
+            ),
+            item.import.as_ref().map(|request| request.target),
+        ))
+    });
 
-impl CompletionItem {
-    /// Convert to the IDE-layer completion item type.
-    ///
-    /// Bridges ide-completion's CompletionItem to
-    /// ide-db's IdeCompletionItem (LSP layer).
-    pub fn to_ide(&self) -> ide_db::ide_types::CompletionItem {
-        ide_db::ide_types::CompletionItem {
-            label: self.label.primary.clone(),
-            kind: self.kind,
-            detail: self.detail.clone(),
-            documentation: self.documentation.as_ref().map(|d| d.as_str().to_owned()),
-            insert_text: self.text_edit.clone(),
-            text_edit: None,
-            sort_text: self.sort_text.clone(),
-            filter_text: self.lookup.clone(),
-            deprecated: self.deprecated,
-            relevance: self.relevance,
-        }
+    // Sort by relevance score (descending), then alphabetical
+    items.sort_by(|a, b| {
+        b.relevance.score().cmp(&a.relevance.score()).then_with(|| a.label.cmp(&b.label))
+    });
+
+    // Truncate
+    const MAX_COMPLETIONS: usize = 200;
+    if items.len() > MAX_COMPLETIONS {
+        items.truncate(MAX_COMPLETIONS);
+    }
+
+    // Assign sort_text: invert the score so that higher scores sort first
+    // in lexicographic order (`score ^ 0xFFFFFFFF` -> lower hex = better).
+    for item in items.iter_mut() {
+        let sort_score = item.relevance.score() ^ 0xFF_FF_FF_FF;
+        item.sort_text = Some(format!("{sort_score:08x}"));
     }
 }

@@ -1,8 +1,7 @@
 use std::collections::HashSet;
 
-use crate::type_error::TypeError;
 use crate::types::DiagnosticCode;
-use hir_def::diagnostics::{Diagnostic, Severity};
+use hir::diagnostics::{Diagnostic, Severity};
 use ide_db::FileDb;
 use parser::Span;
 
@@ -74,44 +73,8 @@ pub fn render_message(file: &dyn FileDb, message: &Message) -> String {
     lines.join("\n")
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Error {
-    Syntax { span: Span, message: String },
-    Lex { span: Span, message: String },
-    Type { span: Span, error: TypeError },
-}
-
 fn range(_file: &dyn FileDb, span: Span) -> ide_db::line_index::TextRange {
     base_db::text_range(span.start, span.end)
-}
-
-fn message_with_hint(message: String, hint: Option<String>) -> String {
-    match hint {
-        Some(hint) if !hint.is_empty() && !message.is_empty() => format!("{message}\n\n{hint}"),
-        Some(hint) => hint,
-        None => message,
-    }
-}
-
-pub fn diagnostic_for_error(file: &dyn FileDb, code: DiagnosticCode, error: Error) -> Diagnostic {
-    match error {
-        Error::Syntax { span, message } => {
-            Diagnostic::new(code, message, range(file, span), Severity::Error)
-        }
-        Error::Lex { span, message } => {
-            Diagnostic::new(code, message, range(file, span), Severity::Error)
-        }
-        Error::Type { span, error } => {
-            let (message, hint) = error.message();
-            let message = render_message(file, &message);
-            Diagnostic::new(
-                code,
-                message_with_hint(message, hint),
-                range(file, span),
-                Severity::Error,
-            )
-        }
-    }
 }
 
 pub fn diagnostic_for_message(
@@ -141,7 +104,7 @@ pub fn unnecessary_warning(
     severity: Severity,
 ) -> Diagnostic {
     diagnostic_for_message(file, code, span, severity, explanation)
-        .with_tags(vec![hir_def::diagnostics::DiagnosticTag::Unnecessary])
+        .with_tags(vec![hir::diagnostics::DiagnosticTag::Unnecessary])
 }
 
 pub struct WarningEmitter {

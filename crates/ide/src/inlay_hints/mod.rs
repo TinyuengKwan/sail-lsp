@@ -3,6 +3,8 @@
 //! values with `InlayKind` tags. Hints can be lazy-resolved via
 //! `inlay_hints_resolve()`.
 
+mod types;
+pub use types::*;
 mod bind_pat;
 mod call_effect;
 mod caller_count;
@@ -13,7 +15,6 @@ mod effect;
 mod param_name;
 
 use base_db::TextRange;
-use ide_db::ide_types::{InlayHint as IdeDbInlayHint, InlayHintKind as IdeDbInlayHintKind};
 use ide_db::FileDb;
 use parser::Span;
 use url::Url;
@@ -43,35 +44,10 @@ pub enum InlayKind {
     ConstantValue,
 }
 
-/// Position of inlay hint relative to the anchor range.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum InlayHintPosition {
-    /// Before the range (e.g., parameter name before argument).
-    Before,
-    /// After the range (e.g., type after binding name).
-    After,
-}
-
-/// A single inlay hint.
-#[derive(Debug, Clone)]
-pub struct InlayHint {
-    /// Byte-offset range this hint applies to.
-    pub range: TextRange,
-    /// Position relative to range.
-    pub position: InlayHintPosition,
-    /// Padding before label.
-    pub pad_left: bool,
-    /// Padding after label.
-    pub pad_right: bool,
-    /// Kind of this hint.
-    pub kind: InlayKind,
-    /// Display label text.
-    pub label: String,
-    /// Tooltip text (lazy-resolvable).
-    pub tooltip: Option<String>,
-    /// Extra data for resolution.
-    pub data: Option<serde_json::Value>,
-}
+// `InlayHintPosition` and a second `InlayHint` — range, position,
+// pad_left/pad_right — used to sit here, in rust-analyzer's shape, with no
+// constructor: every provider builds the one the server converts, which
+// lived in `ide-db` and now lives beside them in `types.rs`.
 
 /// Configuration for inlay hint computation.
 #[derive(Clone, Debug)]
@@ -119,8 +95,16 @@ pub fn inlay_hints_ide(
     current_uri: &Url,
     current_file: &dyn FileDb,
     range: TextRange,
-) -> Vec<IdeDbInlayHint> {
-    inlay_hints_ide_with_types(all_files, current_uri, current_file, range, None, None)
+) -> Vec<InlayHint> {
+    inlay_hints_ide_with_types(
+        all_files,
+        current_uri,
+        current_file,
+        range,
+        None,
+        None,
+        &InlayHintsConfig::default(),
+    )
 }
 
 /// Inlay hints with optional salsa-provided TypeCheckResult for type hints.
@@ -130,48 +114,67 @@ pub fn inlay_hints_ide_with_types(
     current_uri: &Url,
     current_file: &dyn FileDb,
     range: TextRange,
-    type_check: Option<&hir_ty::infer::TypeCheckResult>,
+    type_check: Option<&hir::TypeCheckResult>,
     transitive_effects: Option<
-        &std::collections::HashMap<String, std::collections::BTreeSet<hir_def::EffectTag>>,
+        &std::collections::HashMap<String, std::collections::BTreeSet<hir::EffectTag>>,
     >,
-) -> Vec<IdeDbInlayHint> {
+    config: &InlayHintsConfig,
+) -> Vec<InlayHint> {
     let begin = base_db::range_start(range);
     let end = base_db::range_end(range);
     let mut hints = Vec::new();
 
-    param_name::collect_hir_parameter_hints(
-        all_files,
-        current_uri,
-        current_file,
-        begin,
-        end,
-        &mut hints,
-    );
-    caller_count::collect_callgraph_caller_hints(all_files, current_file, begin, end, &mut hints);
-    closing_brace::collect_closing_brace_hints(current_file, begin, end, &mut hints);
-    bind_pat::collect_type_hints(current_file, begin, end, &mut hints, type_check);
-    // Use salsa-cached transitive effects from transitive_effects
-    // instead of rebuilding workspace callgraph + fixed-point on every call.
-    effect::collect_effect_hints(current_file, begin, end, &mut hints, transitive_effects);
-    call_effect::collect_call_effect_hints(
-        all_files,
-        current_file,
-        begin,
-        end,
-        &mut hints,
-        transitive_effects,
-    );
-
-    let config = InlayHintsConfig::default();
-    chaining::collect_chaining_hints(all_files, current_file, begin, end, &mut hints, &config);
-    discriminant::collect_discriminant_hints(current_file, begin, end, &mut hints, &config);
+    // Each collector answers to its own flag. The config was previously
+    // built here with `Default::default()`, so the settings the client sent
+    // were parsed by the server, converted, and then dropped: turning inlay
+    // hints off in the editor did nothing.
+    if config.parameter_hints {
+        param_name::collect_hir_parameter_hints(
+            all_files,
+            current_uri,
+            current_file,
+            begin,
+            end,
+            &mut hints,
+        );
+    }
+    if config.caller_count_hints {
+        caller_count::collect_callgraph_caller_hints(
+            all_files,
+            current_file,
+            begin,
+            end,
+            &mut hints,
+        );
+    }
+    if config.closing_brace_hints_min_lines.is_some() {
+        closing_brace::collect_closing_brace_hints(current_file, begin, end, &mut hints);
+    }
+    if config.type_hints {
+        bind_pat::collect_type_hints(current_file, begin, end, &mut hints, type_check);
+    }
+    if config.effect_hints {
+        // Use salsa-cached transitive effects from transitive_effects
+        // instead of rebuilding workspace callgraph + fixed-point on every call.
+        effect::collect_effect_hints(current_file, begin, end, &mut hints, transitive_effects);
+        call_effect::collect_call_effect_hints(
+            all_files,
+            current_file,
+            begin,
+            end,
+            &mut hints,
+            transitive_effects,
+        );
+    }
+    chaining::collect_chaining_hints(all_files, current_file, begin, end, &mut hints, config);
+    discriminant::collect_discriminant_hints(current_file, begin, end, &mut hints, config);
 
     hints.sort_by(|lhs, rhs| lhs.offset.cmp(&rhs.offset).then(lhs.label.cmp(&rhs.label)));
     hints
 }
 
 /// Resolve an inlay hint by adding tooltip text based on the data field.
-pub fn resolve_inlay_hint(hint: &mut IdeDbInlayHint) {
+pub fn resolve_inlay_hint(hint: &mut InlayHint) {
     if hint.tooltip.is_none() {
         if let Some(data) = hint.data.as_ref() {
             let kind = data.get("kind").and_then(|value| value.as_str()).unwrap_or("");
@@ -195,7 +198,7 @@ pub fn resolve_inlay_hint(hint: &mut IdeDbInlayHint) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hir_def::callgraph::SourceFileInfo;
+    use hir::callgraph::SourceFileInfo;
     use ide_db::test_utils::TestFile;
 
     fn full_range(file: &TestFile) -> TextRange {
@@ -279,7 +282,7 @@ function main() = add(1, 2)
 
         let labels = hints
             .iter()
-            .filter(|hint| hint.kind == IdeDbInlayHintKind::Parameter)
+            .filter(|hint| hint.kind == InlayHintKind::Parameter)
             .map(|h| h.label.clone())
             .collect::<Vec<_>>();
         assert_eq!(labels, vec!["x:", "y:"]);
@@ -302,21 +305,20 @@ let typed : int = 2
 
         let type_hints = hints
             .iter()
-            .filter(|hint| hint.kind == IdeDbInlayHintKind::Type)
+            .filter(|hint| hint.kind == InlayHintKind::Type)
             .map(|h| h.label.clone())
             .collect::<Vec<_>>();
-        // Type hints require a running type checker (not available in TestFile).
-        // When type check is wired into TestFile, these will be non-empty.
-        // For now, verify the mechanism exists but produces no hints without inference.
-        assert!(type_hints.is_empty() || type_hints == vec![": int", ": int"]);
+        // `let top = 0` gets an inferred hint; `let typed : int = 2` is
+        // already annotated, so it gets none.
+        assert_eq!(type_hints, vec![": atom(1)"]);
     }
 
     #[test]
     fn resolves_type_hint_tooltip() {
-        let mut hint = IdeDbInlayHint {
+        let mut hint = InlayHint {
             offset: 0,
             label: ": int".to_string(),
-            kind: IdeDbInlayHintKind::Type,
+            kind: InlayHintKind::Type,
             tooltip: None,
             padding_left: None,
             padding_right: None,

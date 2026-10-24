@@ -34,7 +34,7 @@ struct DependentChange {
 /// Records a change whose target has already been processed (independent change),
 /// so dependent changes can find their targets within it.
 #[derive(Debug)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 struct ChangedAncestor {
     kind: ChangedAncestorKind,
     /// Index into the original `changes` vec.
@@ -42,7 +42,7 @@ struct ChangedAncestor {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 enum ChangedAncestorKind {
     /// A single element was replaced.
     Single { old_node: SyntaxNode },
@@ -54,7 +54,7 @@ enum ChangedAncestorKind {
 /// O(1) mapping from original nodes to their mutable counterparts via
 /// `SyntaxNodePtr`.
 struct TreeMutator {
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     immutable: SyntaxNode,
     mutable_clone: SyntaxNode,
 }
@@ -93,6 +93,21 @@ impl TreeMutator {
                 find_element_in(&self.mutable_clone, elem)
             }
         }
+    }
+}
+
+/// An element rowan will let us splice in.
+///
+/// rowan detaches whatever is being attached, and detaching an immutable
+/// node panics — so a replacement built by `ast::make`, which parses a
+/// snippet and hands back a node of *that* tree, cannot be inserted as it
+/// comes. Cloning it for update here means a caller does not have to know
+/// that; it is the difference between this editor working and panicking on
+/// its first use.
+fn attachable(element: &SyntaxElement) -> SyntaxElement {
+    match element {
+        rowan::NodeOrToken::Node(node) => node.clone_for_update().into(),
+        rowan::NodeOrToken::Token(token) => token.clone().into(),
     }
 }
 
@@ -163,12 +178,12 @@ pub(super) fn apply_edits(editor: SyntaxEditor) -> SyntaxEdit {
         match change {
             Change::Insert(position, element) => {
                 let mapped_pos = map_position_mut(&tree_mutator, position);
-                ted::insert_raw(mapped_pos, element.clone());
+                ted::insert_raw(mapped_pos, attachable(element));
                 changed_elements.push(element.clone());
             }
             Change::InsertAll(position, elements) => {
                 let mapped_pos = map_position_mut(&tree_mutator, position);
-                ted::insert_all_raw(mapped_pos, elements.clone());
+                ted::insert_all_raw(mapped_pos, elements.iter().map(attachable).collect());
                 changed_elements.extend(elements.clone());
             }
             Change::Replace(old, new) => {
@@ -177,7 +192,7 @@ pub(super) fn apply_edits(editor: SyntaxEditor) -> SyntaxEdit {
                         Some(new_elem) => {
                             // Track for dependent changes.
                             changed_ancestors.insert(idx, vec![new_elem.clone()]);
-                            ted::replace(mapped_old, new_elem.clone());
+                            ted::replace(mapped_old, attachable(new_elem));
                             changed_elements.push(new_elem.clone());
                         }
                         None => {
@@ -189,7 +204,10 @@ pub(super) fn apply_edits(editor: SyntaxEditor) -> SyntaxEdit {
             Change::ReplaceWithMany(old, new_elements) => {
                 if let Some(mapped_old) = tree_mutator.make_element_mut(old) {
                     changed_ancestors.insert(idx, new_elements.clone());
-                    ted::replace_with_many(mapped_old, new_elements.clone());
+                    ted::replace_with_many(
+                        mapped_old,
+                        new_elements.iter().map(attachable).collect(),
+                    );
                     changed_elements.extend(new_elements.clone());
                 }
             }
@@ -199,7 +217,10 @@ pub(super) fn apply_edits(editor: SyntaxEditor) -> SyntaxEdit {
                     tree_mutator.make_element_mut(range.end()),
                 ) {
                     changed_ancestors.insert(idx, new_elements.clone());
-                    ted::replace_all(mapped_start..=mapped_end, new_elements.clone());
+                    ted::replace_all(
+                        mapped_start..=mapped_end,
+                        new_elements.iter().map(attachable).collect(),
+                    );
                     changed_elements.extend(new_elements.clone());
                 }
             }
@@ -241,7 +262,7 @@ pub(super) fn apply_edits(editor: SyntaxEditor) -> SyntaxEdit {
                 if let Some(mapped_old) = found {
                     match new {
                         Some(new_elem) => {
-                            ted::replace(mapped_old, new_elem.clone());
+                            ted::replace(mapped_old, attachable(new_elem));
                             changed_elements.push(new_elem.clone());
                         }
                         None => {
@@ -254,7 +275,10 @@ pub(super) fn apply_edits(editor: SyntaxEditor) -> SyntaxEdit {
                 let found = find_element_in_new(old, parent_new_elements)
                     .or_else(|| find_element_in(&tree_mutator.mutable_clone, old));
                 if let Some(mapped_old) = found {
-                    ted::replace_with_many(mapped_old, new_elements.clone());
+                    ted::replace_with_many(
+                        mapped_old,
+                        new_elements.iter().map(attachable).collect(),
+                    );
                     changed_elements.extend(new_elements.clone());
                 }
             }
@@ -264,7 +288,10 @@ pub(super) fn apply_edits(editor: SyntaxEditor) -> SyntaxEdit {
                 let end = find_element_in_new(range.end(), parent_new_elements)
                     .or_else(|| find_element_in(&tree_mutator.mutable_clone, range.end()));
                 if let (Some(mapped_start), Some(mapped_end)) = (start, end) {
-                    ted::replace_all(mapped_start..=mapped_end, new_elements.clone());
+                    ted::replace_all(
+                        mapped_start..=mapped_end,
+                        new_elements.iter().map(attachable).collect(),
+                    );
                     changed_elements.extend(new_elements.clone());
                 }
             }
@@ -509,7 +536,7 @@ fn find_element_in(root: &SyntaxNode, original: &SyntaxElement) -> Option<Syntax
 }
 
 /// Find a node in a tree by matching its text range and kind.
-#[allow(dead_code)]
+#[expect(dead_code)]
 fn find_node_in(root: &SyntaxNode, original: &SyntaxNode) -> Option<SyntaxNode> {
     let target_range = original.text_range();
     let target_kind = original.kind();

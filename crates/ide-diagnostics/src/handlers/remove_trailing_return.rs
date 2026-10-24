@@ -6,7 +6,7 @@
 //! Fix: remove the `return` keyword (unresolved — resolved via codeAction/resolve).
 
 use crate::Diagnostic;
-use hir_def::diagnostics::{DiagnosticCode, Severity};
+use hir::diagnostics::{DiagnosticCode, Severity};
 use ide_db::assists::Assist;
 
 use crate::{DiagnosticsContext, RemoveTrailingReturn};
@@ -17,7 +17,7 @@ pub(crate) fn remove_trailing_return(
     d: &RemoveTrailingReturn,
 ) -> Diagnostic {
     Diagnostic::new(
-        DiagnosticCode::SailLint("unreachable-code", Severity::Hint),
+        DiagnosticCode::SailLint("remove-trailing-return", Severity::Hint),
         "unnecessary trailing `return`".to_string(),
         crate::node_file_range(&d.node),
     )

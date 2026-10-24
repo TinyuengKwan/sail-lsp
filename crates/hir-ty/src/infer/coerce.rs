@@ -4,7 +4,7 @@
 //!
 //! - A numeric subtype is used where its supertype is expected
 //!   (e.g., `nat` where `int` is expected, `atom(5)` where `range(0, 10)` is expected)
-//! - A bitvector is implicitly widened/narrowed (when constraint permits)
+//! - Bitvector widths are proved equal by constraints
 //! - An existential type is unpacked
 //!
 //! This module provides the entry point `try_coerce` that is called
@@ -37,14 +37,20 @@ pub enum CoercionKind {
 #[derive(Clone, Debug)]
 pub enum CoerceResult {
     /// Coercion succeeded — the `from` type can be implicitly converted to `to`.
+    ///
+    /// The kind is read by this crate's tests and by nothing else yet;
+    /// `expect` cannot say that, because the lint fires in the lib build
+    /// and not in the test build.
     Ok(#[allow(dead_code)] CoercionKind),
+    /// Accepted for inference recovery; a retained obligation is still unproved.
+    Deferred(#[allow(dead_code)] CoercionKind),
     /// Coercion failed — the types are incompatible.
     Fail,
 }
 
 impl CoerceResult {
     pub fn is_ok(&self) -> bool {
-        matches!(self, CoerceResult::Ok(_))
+        matches!(self, CoerceResult::Ok(_) | CoerceResult::Deferred(_))
     }
 }
 
@@ -53,8 +59,8 @@ impl CoerceResult {
 /// It uses `subtype::is_subtype` to check if `from_ty` is a subtype
 /// of `to_ty` under Sail's numeric subtyping rules.
 ///
-/// Returns `CoerceResult::Ok(kind)` if a coercion exists, or
-/// `CoerceResult::Fail` if the types are truly incompatible.
+/// Returns `Ok` for a proof, `Deferred` for an outstanding obligation,
+/// or `Fail` for an incompatible relation.
 pub(super) fn try_coerce(table: &mut InferenceTable, from_ty: &Ty, to_ty: &Ty) -> CoerceResult {
     let from = table.shallow_resolve(from_ty);
     let to = table.shallow_resolve(to_ty);
@@ -64,31 +70,13 @@ pub(super) fn try_coerce(table: &mut InferenceTable, from_ty: &Ty, to_ty: &Ty) -
         return CoerceResult::Ok(CoercionKind::NumericSubtype);
     }
 
-    // Check subtype in both directions. Sail's unify is symmetric —
-    // `range(0,15)` and `int` should unify regardless of which side
-    // is expected vs actual.
+    // Conversion is directional: actual <: expected. A reverse conversion
+    // cannot rescue a failed narrowing check.
     match is_subtype(table, &from, &to) {
-        SubtypeResult::Ok => {
-            let kind = classify_coercion(&from, &to);
-            return CoerceResult::Ok(kind);
-        }
+        SubtypeResult::Ok => CoerceResult::Ok(classify_coercion(&from, &to)),
         SubtypeResult::NeedsConstraint(obligation) => {
-            table.push_obligation(obligation);
-            let kind = classify_coercion(&from, &to);
-            return CoerceResult::Ok(kind);
-        }
-        SubtypeResult::Fail => {}
-    }
-    // Try reverse direction: to <: from
-    match is_subtype(table, &to, &from) {
-        SubtypeResult::Ok => {
-            let kind = classify_coercion(&to, &from);
-            CoerceResult::Ok(kind)
-        }
-        SubtypeResult::NeedsConstraint(obligation) => {
-            table.push_obligation(obligation);
-            let kind = classify_coercion(&to, &from);
-            CoerceResult::Ok(kind)
+            table.push_subtype_obligation(obligation);
+            CoerceResult::Deferred(classify_coercion(&from, &to))
         }
         SubtypeResult::Fail => CoerceResult::Fail,
     }
@@ -125,7 +113,7 @@ fn classify_coercion(from: &Ty, to: &Ty) -> CoercionKind {
         // tuple → tuple
         (TyKind::Tuple(_), TyKind::Tuple(_)) => CoercionKind::TupleCoerce,
         // abstract → scalar/adt
-        (TyKind::Abstract { .. }, TyKind::Scalar(_) | TyKind::Adt(_, _)) => {
+        (TyKind::Abstract { .. }, TyKind::Scalar(_) | TyKind::Named(_, _)) => {
             CoercionKind::AbstractKind
         }
         // Default
@@ -151,16 +139,9 @@ mod tests {
     }
 
     #[test]
-    fn int_and_nat_are_bidirectionally_compatible() {
-        // In Sail's LSP, numeric types are treated as compatible in both
-        // directions (the LSP can't verify exact numeric constraints).
-        // This mirrors the conservative approach: no false-positive
-        // type errors for numeric subtype relationships.
+    fn unrefined_int_does_not_coerce_to_nat() {
         let mut table = InferenceTable::default();
-        let int = Ty::named("int");
-        let nat = Ty::named("nat");
-        let result = try_coerce(&mut table, &int, &nat);
-        assert!(result.is_ok()); // LSP accepts int ↔ nat bidirectionally
+        assert!(!try_coerce(&mut table, &Ty::named("int"), &Ty::named("nat")).is_ok());
     }
 
     #[test]

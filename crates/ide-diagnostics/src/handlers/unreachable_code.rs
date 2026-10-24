@@ -2,7 +2,7 @@
 //! Fix : remove unreachable code.
 
 use crate::Diagnostic;
-use hir_def::diagnostics::{DiagnosticCode, Severity};
+use hir::diagnostics::{DiagnosticCode, Severity};
 use ide_db::assists::Assist;
 use ide_db::source_change::SourceChange;
 use ide_db::text_edit::TextEdit;

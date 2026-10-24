@@ -1,16 +1,16 @@
 //! `generate_val_spec` assist.
 
 use crate::assist_context::{AssistContext, AssistId, AssistKind, Assists};
-use ide_db::text_edit::TextEdit;
 
 pub(crate) fn generate_val_spec(acc: &mut Assists, ctx: &AssistContext<'_>) -> Option<()> {
     use parser::SyntaxKind as SK;
 
-    let text = ctx.file.text();
     let offset = ctx.offset();
 
     // Parse CST and find the callable at cursor
-    let (cst_root, _) = syntax::parse_text(text);
+    // The tree the assist run already parsed. Parsing the text a second
+    // time here built one unrelated to it.
+    let cst_root = ctx.source_file()?.clone();
 
     // Find the CALLABLE_DEF node containing the cursor
     let mut target_node = None;
@@ -57,42 +57,94 @@ pub(crate) fn generate_val_spec(acc: &mut Assists, ctx: &AssistContext<'_>) -> O
         return None; // Already has a val spec
     }
 
-    // Extract parameter names from PARAM_LIST
-    let mut params = Vec::new();
+    // Extract parameter names from PARAM_LIST, with the span of each so
+    // inference can be asked what it is.
+    let mut params: Vec<(String, parser::Span)> = Vec::new();
     for child in node.children() {
         if child.kind() == SK::PARAM_LIST {
             for tok in child.descendants_with_tokens().filter_map(|el| el.into_token()) {
                 if tok.kind() == SK::IDENT {
-                    params.push(tok.text().to_string());
+                    let range = tok.text_range();
+                    params.push((
+                        tok.text().to_string(),
+                        parser::Span::new(usize::from(range.start()), usize::from(range.end())),
+                    ));
                 }
             }
             break;
         }
     }
 
+    // What inference makes of each parameter and of the body.
+    //
+    // This wrote `_` for every one of them, so the generated `val` never
+    // type-checked and the user had to fill it in by hand. Sixty-four
+    // handlers and not one asked `ctx.sema()` anything — the accessor had
+    // no caller at all — while rust-analyzer's assists use `ctx.sema` in 89
+    // of its 134.
+    let sema = ctx.sema();
+    let bodies = ctx.file.bodies();
+    let type_of = |span: parser::Span| -> String {
+        let Some((sema, _, ft)) = sema.as_ref() else { return "_".to_owned() };
+        match sema.binding_type_text(*ft, span, bodies) {
+            Some(ty) if ty != "unknown" && ty != "error" => ty,
+            _ => "_".to_owned(),
+        }
+    };
+
     // Build the val spec text
     let param_types = if params.is_empty() {
         "unit".to_string()
     } else {
-        let placeholders: Vec<_> = params.iter().map(|_| "_".to_string()).collect();
-        if placeholders.len() == 1 {
-            placeholders[0].clone()
+        let types: Vec<_> = params.iter().map(|(_, span)| type_of(*span)).collect();
+        if types.len() == 1 {
+            types[0].clone()
         } else {
-            format!("({})", placeholders.join(", "))
+            format!("({})", types.join(", "))
         }
     };
-    let val_text = format!("val {} : {} -> _\n", name, param_types);
+    let ret_ty = node
+        .children()
+        .find(|c| !matches!(c.kind(), SK::PARAM_LIST) && usize::from(c.text_range().start()) > 0)
+        .and_then(|body| {
+            let (sema, _, ft) = sema.as_ref()?;
+            let range = body.text_range();
+            sema.expr_type_text(
+                *ft,
+                parser::Span::new(usize::from(range.start()), usize::from(range.end())),
+                bodies,
+            )
+        })
+        .filter(|ty| ty != "unknown" && ty != "error")
+        .unwrap_or_else(|| "_".to_owned());
+    // Whatever inference could not name comes out as `_`, and that is
+    // what has to be typed — so for a client that can expand snippets the
+    // `_`s are the tabstops, in order.
+    let val_text = match ctx.config.snippet_cap {
+        Some(_) => {
+            let body = format!("{param_types} -> {ret_ty}");
+            let mut out = String::with_capacity(body.len());
+            for (stop, part) in body.split('_').enumerate() {
+                if stop > 0 {
+                    out.push_str(&format!("${{{stop}:_}}"));
+                }
+                out.push_str(part);
+            }
+            format!("val {name} : {out}\n")
+        }
+        None => format!("val {name} : {param_types} -> {ret_ty}\n"),
+    };
 
     // Insert before the function definition
     let insert_offset = usize::from(node.text_range().start());
-    let edit =
-        TextEdit { range: base_db::text_range(insert_offset, insert_offset), new_text: val_text };
-
-    acc.add_with_edits(
+    acc.add(
         AssistId("generate_val_spec", AssistKind::Generate),
         format!("Generate `val {name} : ...`"),
         ctx.range,
-        vec![edit],
+        |builder| match ctx.config.snippet_cap {
+            Some(_) => builder.insert_snippet(insert_offset, val_text),
+            None => builder.insert(insert_offset, val_text),
+        },
     );
     Some(())
 }
@@ -109,10 +161,43 @@ pub(crate) fn generate_val_spec(acc: &mut Assists, ctx: &AssistContext<'_>) -> O
 mod tests {
     use super::*;
     use crate::tests::check_assist;
+    use expect_test::expect;
+
+    /// A function whose body pins the type: the `val` comes out usable.
+    #[test]
+    fn fills_in_what_inference_knows() {
+        check_assist(
+            generate_val_spec,
+            "function $0answer() = 42\n",
+            expect![[r#"
+            val answer : unit -> int
+            function answer() = 42
+        "#]],
+        );
+    }
 
     #[test]
-    fn smoke() {
-        let labels = check_assist(generate_val_spec, "source code\n", 0);
-        let _ = labels; // verify no panic
+    fn applies() {
+        check_assist(
+            generate_val_spec,
+            "function $0add(x, y) = x + y\n",
+            expect![[r#"
+            val add : (_, _) -> _
+            function add(x, y) = x + y
+        "#]],
+        );
+    }
+
+    /// Whatever inference could not name is a `_`, and each is a tabstop.
+    #[test]
+    fn the_holes_are_tabstops() {
+        crate::tests::check_assist_with_snippets(
+            generate_val_spec,
+            "function f$0oo(x) = x\n",
+            expect_test::expect![[r#"
+                val foo : ${1:_} -> ${2:_}
+                function foo(x) = x
+            "#]],
+        );
     }
 }

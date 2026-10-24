@@ -121,7 +121,7 @@ pub struct SymbolOccurrence {
     pub target_span: Option<Span>,
 }
 
-#[allow(dead_code)]
+#[expect(dead_code)]
 fn push_decl(
     parsed: &mut ParsedFile,
     kind: DeclKind,

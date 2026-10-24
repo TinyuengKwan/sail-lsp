@@ -2,7 +2,7 @@
 //! Fix: suggest similar names from workspace index (Levenshtein distance).
 
 use crate::Diagnostic;
-use hir_def::diagnostics::DiagnosticCode;
+use hir::diagnostics::DiagnosticCode;
 use ide_db::assists::Assist;
 
 use crate::{DiagnosticsContext, UnresolvedIdent};

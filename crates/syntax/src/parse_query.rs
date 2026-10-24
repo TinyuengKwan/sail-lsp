@@ -142,6 +142,9 @@ impl std::hash::Hash for ParsedFileData {
 /// and only re-runs when `file_text.text()` changes.
 #[salsa::tracked(returns(ref))]
 pub fn parse_file(db: &dyn salsa::Database, input: FileText) -> ParsedFileData {
+    if let Some(source) = base_db::preprocess::source_text(db, input.file_id(db)) {
+        return parse_file(db, source).clone();
+    }
     let text = input.text(db);
 
     // Step 1: lex (hand-written tokenizer)
@@ -162,19 +165,63 @@ pub fn parse_file(db: &dyn salsa::Database, input: FileText) -> ParsedFileData {
     };
     let green = Some(Arc::new(root.green().into()));
 
-    // Step 3: Convert parse errors to SyntaxError.
-    //   errors: if errors.is_empty() { None } else { Some(errors.into()) }
-    let errors = if raw_errors.is_empty() {
-        None
-    } else {
-        let syntax_errors: Vec<SyntaxError> = raw_errors
-            .iter()
-            .map(|e| crate::parsing::parse_error_to_syntax_error(e, text.as_ref()))
-            .collect();
-        Some(syntax_errors.into())
-    };
+    // Step 3: parse errors + tree-level validation, in one set.
+    //
+    // `Parse::errors()` runs validation for callers that hold a `Parse`, but
+    // this query is the one the server and the diagnostics pipeline read, so
+    // validation has to happen here too or it never runs at all.
+    let mut syntax_errors: Vec<SyntaxError> = raw_errors
+        .iter()
+        .map(|e| crate::parsing::parse_error_to_syntax_error(e, text.as_ref()))
+        .collect();
+    crate::validation::validate(&root, &mut syntax_errors);
+    let errors = if syntax_errors.is_empty() { None } else { Some(syntax_errors.into()) };
 
     ParsedFileData { tokens: Arc::new(tokens), green, errors }
+}
+
+/// Keep source positions while removing declarations in inactive branches.
+/// The raw CST remains available for editing, formatting and syntax errors.
+#[salsa::tracked(returns(ref))]
+pub fn semantic_parse_file(db: &dyn salsa::Database, input: FileText) -> ParsedFileData {
+    let parsed = parse_file(db, input);
+    let Some(regions) = base_db::preprocess::file_regions(db, input.file_id(db)) else {
+        return parsed.clone();
+    };
+    let Some(root) = parsed.syntax_node() else { return parsed.clone() };
+    let mut index = 0;
+    let mut text = input.text(db).as_bytes().to_vec();
+    let mut changed = false;
+    for node in root.children() {
+        let event = crate::preprocess::Event::from_node(&node);
+        let enabled = regions.get(index).copied().unwrap_or(false);
+        if !enabled || event.as_ref().is_some_and(|e| e.consumed()) {
+            let range = node.text_range();
+            for byte in &mut text[usize::from(range.start())..usize::from(range.end())] {
+                if !matches!(*byte, b'\n' | b'\r') {
+                    *byte = b' ';
+                }
+            }
+            changed = true;
+        }
+        if event.is_some() {
+            index += 1;
+        }
+    }
+    if !changed {
+        return parsed.clone();
+    }
+    let text = String::from_utf8(text).expect("whole CST nodes have UTF-8 boundaries");
+    let (root, _) = if let Some(fixities) = base_db::WorkspaceFixities::try_get(db) {
+        crate::parsing::parse_text_with_fixities(&text, fixities.fixities(db).clone())
+    } else {
+        crate::parsing::parse_text(&text)
+    };
+    ParsedFileData {
+        tokens: Arc::new(parser::tokenize(&text)),
+        green: Some(Arc::new(root.green().into())),
+        errors: parsed.errors.clone(),
+    }
 }
 
 /// Firewall query: extract parse errors from the cached parse result.
@@ -225,7 +272,7 @@ pub fn parsed_file(db: &dyn salsa::Database, input: FileText) -> Option<ArcParse
     if text.is_empty() {
         return None;
     }
-    let (root, _) = crate::parsing::parse_text(text.as_ref());
+    let root = semantic_parse_file(db, input).syntax_node()?;
     Some(ArcParsedFile(Arc::new(crate::cst_lower::parsed_file_from_cst(&root, text.as_ref()))))
 }
 

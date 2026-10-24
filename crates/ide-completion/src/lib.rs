@@ -1,13 +1,22 @@
 //! Completion engine for Sail.
 //!
+//! An older engine used to live here beside this one —
+//! `completion_items_ide`, `determine_completion_context`,
+//! `completion_score`, `upsert_candidate` and the rest, each behind
+//! `#[expect(dead_code)]` because the server calls `completions()` instead.
+//! What kept it alive was a test helper that called *it*, so twenty tests
+//! were describing a path no editor reaches. Pointing them at
+//! `completions()` immediately found one thing the live engine did not do:
+//! complete an enum member written unqualified.
+//!
 //! Provider dispatch: `CompletionContext` -> `CompletionAnalysis` -> providers.
 //! 11 providers: keyword, expr, dot, pattern, item_list, flyimport, postfix,
 //! pragma, record, snippet, type_.
 
-use ide_db::ide_types::{CompletionItem as IdeDbCompletionItem, CompletionItemKind};
-use ide_db::{builtin_docs, extract_comments, function_snippet, FileDb};
+use crate::item::CompletionItem;
+use ide_db::defs::CompletionItemKind;
+use ide_db::{builtin_docs, FileDb};
 
-use std::collections::{BTreeMap, HashMap};
 use url::Url;
 
 use completions::Completions;
@@ -17,16 +26,15 @@ use completions::Completions;
 mod completions;
 mod config;
 mod context;
-mod item;
-#[allow(dead_code)]
+pub mod item;
 mod render;
 mod snippet;
 
 pub use crate::{
     config::{CallableSnippets, CompletionConfig, CompletionFieldsToResolve, SnippetCap},
-    item::{CompletionItem, CompletionItemLabel},
     snippet::{Snippet, SnippetScope},
 };
+pub use context::completion_prefix;
 
 /// Main completion entry point.
 ///
@@ -45,7 +53,7 @@ pub fn completions(
     prefix: &str,
     keywords: &[&str],
     builtins: &[&str],
-) -> Vec<IdeDbCompletionItem> {
+) -> Vec<CompletionItem> {
     let (ctx, analysis) =
         context::CompletionContext::new(db, file, file_text, text, offset, prefix);
     let mut completions = Completions::default();
@@ -64,79 +72,81 @@ pub fn completions(
                     keywords,
                     builtins,
                 );
+                completions::pragma::complete_pragma(acc, &ctx);
+                completions::snippet::complete_snippet(acc, &ctx);
             }
-            context::CompletionAnalysis::Name(_name_ctx) => {
-                // Name definition site — no completions yet.
+            // A name being *defined* is not a reference to anything, and
+            // no text inside a string literal is. Both arms used to be
+            // unreachable — `analyze` answered `NameRef` for every
+            // position — so `function fo|` and `"fo|"` were both offered
+            // every symbol in the workspace.
+            context::CompletionAnalysis::Name(name_ctx) => {
+                completions::name::complete_name(acc, &ctx, all_files, name_ctx);
             }
-            context::CompletionAnalysis::String => {
-                // Inside string literal — no completions.
-            }
+            context::CompletionAnalysis::String | context::CompletionAnalysis::Comment => {}
         }
-
-        completions::pragma::complete_pragma(acc, &ctx);
-        completions::snippet::complete_snippet(acc, &ctx);
     }
 
-    // Convert CompletionItem → IdeDbCompletionItem (LSP boundary)
-    let completion_items: Vec<item::CompletionItem> = completions.into();
-    let mut items: Vec<IdeDbCompletionItem> = completion_items.iter().map(|i| i.to_ide()).collect();
-
-    // Deduplicate + sort + truncate
-    deduplicate_and_sort(&mut items, prefix);
+    let mut items: Vec<CompletionItem> = completions.into();
+    for item in &mut items {
+        item.scope_file = file_text.map(|ft| ft.file_id(db));
+        if item.import.is_none()
+            && !item.relevance.is_local
+            && matches!(
+                item.kind,
+                CompletionItemKind::Function
+                    | CompletionItemKind::Variable
+                    | CompletionItemKind::Struct
+                    | CompletionItemKind::Enum
+                    | CompletionItemKind::TypeParameter
+                    | CompletionItemKind::Constant
+            )
+        {
+            use hir::source_order::{
+                self,
+                bindings::{self, Namespace},
+            };
+            if file_text.is_some_and(|ft| source_order::declarations_for(db, ft).is_some()) {
+                item.origin = file_text
+                    .and_then(|ft| {
+                        source_order::at_offset(db, ft, offset)
+                            .or_else(|| source_order::at_offset(db, ft, offset.saturating_sub(1)))
+                    })
+                    .and_then(|at| {
+                        let namespaces = if let Some(role) = ctx.instantiation_role() {
+                            let namespace = match role {
+                                syntax::InstantiationReference::Outcome => Namespace::Outcome,
+                                syntax::InstantiationReference::Type => Namespace::Type,
+                                syntax::InstantiationReference::Callable => Namespace::Callable,
+                            };
+                            [namespace, namespace]
+                        } else if matches!(
+                            item.kind,
+                            CompletionItemKind::Struct
+                                | CompletionItemKind::Enum
+                                | CompletionItemKind::TypeParameter
+                        ) {
+                            [Namespace::Type, Namespace::Value]
+                        } else {
+                            [Namespace::Value, Namespace::Type]
+                        };
+                        namespaces.into_iter().find_map(|namespace| {
+                            let decl =
+                                bindings::resolve(db, at, hir::Name::new(&item.label), namespace)?;
+                            hir::def_at_declaration_in_namespace(db, decl, &item.label, namespace)?;
+                            Some((decl, namespace))
+                        })
+                    })
+                    .map(|(decl, namespace)| item::CompletionOrigin {
+                        file: decl.file.file_id(db),
+                        declaration: decl.index,
+                        namespace,
+                    });
+            }
+        }
+    }
+    crate::item::deduplicate_and_sort(&mut items, prefix);
     items
-}
-
-/// Deduplicate, score, and sort completion items.
-///
-/// 1. Deduplicate by label
-/// 2. Sort by `relevance.score()` (descending), then alphabetical
-/// 3. Assign hex sort_text via XOR-inversion (`score ^ 0xFFFFFFFF`)
-/// 4. Truncate to MAX_COMPLETIONS
-fn deduplicate_and_sort(items: &mut Vec<IdeDbCompletionItem>, _prefix: &str) {
-    // Dedup by label
-    let mut seen = std::collections::HashSet::new();
-    items.retain(|item| seen.insert(item.label.clone()));
-
-    // Sort by relevance score (descending), then alphabetical
-    items.sort_by(|a, b| {
-        b.relevance.score().cmp(&a.relevance.score()).then_with(|| a.label.cmp(&b.label))
-    });
-
-    // Truncate
-    const MAX_COMPLETIONS: usize = 200;
-    if items.len() > MAX_COMPLETIONS {
-        items.truncate(MAX_COMPLETIONS);
-    }
-
-    // Assign sort_text: invert the score so that higher scores sort first
-    // in lexicographic order (`score ^ 0xFFFFFFFF` -> lower hex = better).
-    for item in items.iter_mut() {
-        let sort_score = item.relevance.score() ^ 0xFF_FF_FF_FF;
-        item.sort_text = Some(format!("{sort_score:08x}"));
-    }
-}
-
-/// Collect type names from all workspace files.
-fn collect_type_names(
-    all_files: &[(&Url, &dyn FileDb)],
-) -> Vec<(String, ide_db::defs::SymbolKind)> {
-    let mut type_names = Vec::new();
-    for (_, f) in all_files {
-        if let Some(parsed) = f.parsed() {
-            for decl in &parsed.decls {
-                let kind = match decl.kind {
-                    syntax::parser_lower::DeclKind::Struct => ide_db::defs::SymbolKind::Struct,
-                    syntax::parser_lower::DeclKind::Enum => ide_db::defs::SymbolKind::Enum,
-                    syntax::parser_lower::DeclKind::Union => ide_db::defs::SymbolKind::Enum,
-                    syntax::parser_lower::DeclKind::Type => ide_db::defs::SymbolKind::TypeAlias,
-                    syntax::parser_lower::DeclKind::Bitfield => ide_db::defs::SymbolKind::Struct,
-                    _ => continue,
-                };
-                type_names.push((decl.name.clone(), kind));
-            }
-        }
-    }
-    type_names
 }
 
 /// Completion position context — re-exported from context module.
@@ -144,720 +154,8 @@ fn collect_type_names(
 #[allow(unused_imports)]
 pub(crate) use context::CompletionPosition;
 
-/// Determine completion context from text and offset.
-/// Enhanced from pure text heuristic to token-aware analysis.
-#[allow(dead_code)]
-fn determine_completion_context(text: &str, offset: usize, prefix: &str) -> CompletionPosition {
-    let before = &text[..offset];
-    let trimmed = before.trim_end();
-    let trimmed = trimmed.strip_suffix(prefix).unwrap_or(trimmed).trim_end();
-
-    // Type annotation position: after `:` or `->`
-    if trimmed.ends_with(':') || trimmed.ends_with("->") {
-        return CompletionPosition::TypeAnnotation;
-    }
-
-    // Pattern position: after `match ... {`, or after `|` in match, or after `let`/`var` before `=`
-    // Check for common pattern contexts
-    if trimmed.ends_with("=>") {
-        // After match arm `=> ` — expression position
-        return CompletionPosition::Expression;
-    }
-
-    // Brace depth for top-level detection
-    let mut brace_depth = 0i32;
-    let _in_match = false;
-    let bytes = text.as_bytes();
-    let mut i = 0usize;
-    while i < offset {
-        match bytes[i] {
-            b'{' => brace_depth += 1,
-            b'}' => brace_depth -= 1,
-            _ => {}
-        }
-        i += 1;
-    }
-
-    if brace_depth <= 0 {
-        return CompletionPosition::TopLevel;
-    }
-
-    // Check if we're in a pattern context (after match keyword + `{`)
-    // Simple heuristic: look for `match` followed by `{` before our position
-    let before_brace = before.rfind('{').unwrap_or(0);
-    let context_text = &text[..before_brace].trim_end();
-    if context_text.ends_with("catch") || context_text.ends_with("match") {
-        // Could be in pattern position (match arm or catch clause)
-        // Check if we're right after `{` or after `=>`
-        let after_brace = &text[before_brace + 1..offset].trim_start();
-        if !after_brace.contains("=>") {
-            return CompletionPosition::Pattern;
-        }
-    }
-
-    CompletionPosition::Expression
-}
-
-#[derive(Clone)]
-#[allow(dead_code)]
-struct CompletionCandidate {
-    kind: CompletionItemKind,
-    detail: Option<String>,
-    snippet: Option<String>,
-}
-
-fn is_identifier_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'?' | b'\'' | b'~')
-}
-
-pub fn completion_prefix(text: &str, offset: usize) -> &str {
-    let offset = offset.min(text.len());
-    let bytes = text.as_bytes();
-    let mut start = offset;
-
-    while start > 0 && is_identifier_byte(bytes[start - 1]) {
-        start -= 1;
-    }
-
-    &text[start..offset]
-}
-
-pub fn completion_trigger_characters() -> Vec<String> {
-    vec![
-        ".".to_string(),
-        ":".to_string(),
-        "(".to_string(),
-        "_".to_string(),
-        "?".to_string(),
-        "~".to_string(),
-        "'".to_string(),
-        "@".to_string(),
-        "$".to_string(),
-    ]
-}
-
-#[allow(dead_code)]
-fn completion_kind_priority(kind: &CompletionItemKind) -> u8 {
-    match kind {
-        CompletionItemKind::Keyword => 8,
-        CompletionItemKind::Function => 7,
-        // Method would be 6 but we don't have it; Function covers it
-        CompletionItemKind::Enum => 5,
-        CompletionItemKind::Struct => 4,
-        CompletionItemKind::Constant => 3,
-        CompletionItemKind::TypeParameter => 2,
-        CompletionItemKind::Variable => 1,
-        _ => 0,
-    }
-}
-
-#[allow(dead_code)]
-fn upsert_candidate(
-    candidates: &mut BTreeMap<String, CompletionCandidate>,
-    label: String,
-    candidate: CompletionCandidate,
-) {
-    match candidates.get(&label) {
-        Some(existing)
-            if completion_kind_priority(&existing.kind)
-                >= completion_kind_priority(&candidate.kind) => {}
-        _ => {
-            candidates.insert(label, candidate);
-        }
-    }
-}
-
-#[allow(dead_code)]
-fn completion_score(label: &str, prefix: &str) -> u8 {
-    if prefix.is_empty() {
-        return 0;
-    }
-    if label == prefix {
-        return 0;
-    }
-    if label.starts_with(prefix) {
-        return 1;
-    }
-    2
-}
-
-/// Completion — returns internal IdeDbCompletionItem.
-#[allow(dead_code)]
-pub(crate) fn completion_items_ide(
-    all_files: &[(&Url, &dyn FileDb)],
-    current_uri: &Url,
-    text: &str,
-    offset: usize,
-    prefix: &str,
-    keywords: &[&str],
-    builtins: &[&str],
-) -> Vec<IdeDbCompletionItem> {
-    let prefix_lower = prefix.to_ascii_lowercase();
-
-    // Enhanced context detection.
-    // Uses token analysis for more accurate position classification.
-    let ctx = determine_completion_context(text, offset, prefix);
-    let is_type_position = ctx == CompletionPosition::TypeAnnotation;
-    let is_top_level = ctx == CompletionPosition::TopLevel;
-
-    let mut candidates: BTreeMap<String, CompletionCandidate> = BTreeMap::new();
-    let mut call_signatures: HashMap<String, Vec<ide_db::Parameter>> = HashMap::new();
-    for (_, candidate_file) in all_files {
-        if let Some(index) = candidate_file.signature_index() {
-            for sig in index.values() {
-                call_signatures.entry(sig.name.clone()).or_insert_with(|| sig.params.clone());
-            }
-        }
-    }
-
-    for keyword in keywords {
-        let is_top_level_kw = matches!(
-            *keyword,
-            "function" | "val" | "enum" | "struct" | "union" | "type" | "register" | "overload"
-        );
-        let is_local_kw = matches!(
-            *keyword,
-            "let" | "var" | "if" | "else" | "match" | "return" | "foreach" | "while"
-        );
-
-        if (is_top_level && is_top_level_kw)
-            || (!is_top_level && is_local_kw)
-            || (!is_top_level_kw && !is_local_kw)
-        {
-            let snippet = match *keyword {
-                "foreach" if !is_top_level => {
-                    Some("foreach (${1:i} from ${2:0} to ${3:n}) {\n\t$0\n}".to_string())
-                }
-                "if" if !is_top_level => Some("if ${1:condition} then {\n\t$0\n}".to_string()),
-                "match" if !is_top_level => {
-                    Some("match ${1:x} {\n\t${2:case} => $0\n}".to_string())
-                }
-                "while" if !is_top_level => Some("while ${1:condition} do {\n\t$0\n}".to_string()),
-                "let" if !is_top_level => Some("let ${1:x} = $0".to_string()),
-                "var" if !is_top_level => Some("var ${1:x} = $0".to_string()),
-                "then" if !is_top_level => Some("then {\n\t$0\n}".to_string()),
-                "else" if !is_top_level => Some("else {\n\t$0\n}".to_string()),
-                "do" if !is_top_level => Some("do {\n\t$0\n}".to_string()),
-                "try" if !is_top_level => {
-                    Some("try {\n\t$0\n} catch {\n\t${1:_} => ()\n}".to_string())
-                }
-                "function" if is_top_level => {
-                    Some("function ${1:name}(${2:args}) = $0".to_string())
-                }
-                "val" if is_top_level => Some("val ${1:name} : $0".to_string()),
-                "struct" if is_top_level => {
-                    Some("struct ${1:name} = {\n\t${2:field} : $0\n}".to_string())
-                }
-                "enum" if is_top_level => Some("enum ${1:name} = { $0 }".to_string()),
-                "union" if is_top_level => {
-                    Some("union ${1:name} = {\n\t${2:Variant} : $0\n}".to_string())
-                }
-                "register" if is_top_level => Some("register ${1:name} : $0".to_string()),
-                _ => None,
-            };
-            upsert_candidate(
-                &mut candidates,
-                (*keyword).to_string(),
-                CompletionCandidate {
-                    kind: CompletionItemKind::Keyword,
-                    detail: Some("keyword".to_string()),
-                    snippet,
-                },
-            );
-        }
-    }
-
-    for builtin in builtins {
-        let kind = if builtin.chars().next().is_some_and(|ch| ch.is_ascii_uppercase()) {
-            CompletionItemKind::Struct
-        } else {
-            CompletionItemKind::Constant
-        };
-        upsert_candidate(
-            &mut candidates,
-            (*builtin).to_string(),
-            CompletionCandidate { kind, detail: Some("builtin".to_string()), snippet: None },
-        );
-    }
-
-    for (candidate_uri, candidate_file) in all_files {
-        if let Some(parsed) = candidate_file.parsed() {
-            for decl in &parsed.decls {
-                if decl.scope != syntax::parser_lower::Scope::TopLevel {
-                    continue;
-                }
-                let (name, kind, detail) = match decl.kind {
-                    syntax::parser_lower::DeclKind::Function => (
-                        decl.name.clone(),
-                        CompletionItemKind::Function,
-                        Some("function".to_string()),
-                    ),
-                    syntax::parser_lower::DeclKind::Value => (
-                        decl.name.clone(),
-                        CompletionItemKind::Function,
-                        Some("value specification".to_string()),
-                    ),
-                    syntax::parser_lower::DeclKind::Mapping => (
-                        decl.name.clone(),
-                        CompletionItemKind::Function,
-                        Some("mapping".to_string()),
-                    ),
-                    syntax::parser_lower::DeclKind::Overload => (
-                        decl.name.clone(),
-                        CompletionItemKind::Function,
-                        Some("overload".to_string()),
-                    ),
-                    syntax::parser_lower::DeclKind::Type
-                    | syntax::parser_lower::DeclKind::Struct
-                    | syntax::parser_lower::DeclKind::Union
-                    | syntax::parser_lower::DeclKind::Bitfield
-                    | syntax::parser_lower::DeclKind::Newtype => {
-                        (decl.name.clone(), CompletionItemKind::Struct, Some("type".to_string()))
-                    }
-                    syntax::parser_lower::DeclKind::Enum => {
-                        (decl.name.clone(), CompletionItemKind::Enum, Some("enum".to_string()))
-                    }
-                    syntax::parser_lower::DeclKind::Register => (
-                        decl.name.clone(),
-                        CompletionItemKind::Variable,
-                        Some("register".to_string()),
-                    ),
-                    syntax::parser_lower::DeclKind::EnumMember => (
-                        decl.name.clone(),
-                        CompletionItemKind::EnumMember,
-                        Some("enum member".to_string()),
-                    ),
-                    syntax::parser_lower::DeclKind::Let => (
-                        decl.name.clone(),
-                        CompletionItemKind::Variable,
-                        Some("let binding".to_string()),
-                    ),
-                    syntax::parser_lower::DeclKind::Var => (
-                        decl.name.clone(),
-                        CompletionItemKind::Variable,
-                        Some("var binding".to_string()),
-                    ),
-                    syntax::parser_lower::DeclKind::Parameter => continue,
-                };
-                let snippet = if matches!(kind, CompletionItemKind::Function) {
-                    call_signatures.get(&name).map(|params| function_snippet(&name, params))
-                } else {
-                    None
-                };
-                upsert_candidate(
-                    &mut candidates,
-                    name,
-                    CompletionCandidate { kind, detail, snippet },
-                );
-            }
-            if *candidate_uri == current_uri {
-                for occurrence in &parsed.symbol_occurrences {
-                    if occurrence.role.is_none()
-                        || occurrence.scope != Some(syntax::parser_lower::Scope::Local)
-                    {
-                        continue;
-                    }
-                    match occurrence.kind {
-                        syntax::parser_lower::SymbolOccurrenceKind::Value => {
-                            upsert_candidate(
-                                &mut candidates,
-                                occurrence.name.clone(),
-                                CompletionCandidate {
-                                    kind: CompletionItemKind::Variable,
-                                    detail: Some("binding".to_string()),
-                                    snippet: None,
-                                },
-                            );
-                        }
-                        syntax::parser_lower::SymbolOccurrenceKind::TypeVar => {
-                            upsert_candidate(
-                                &mut candidates,
-                                occurrence.name.clone(),
-                                CompletionCandidate {
-                                    kind: CompletionItemKind::TypeParameter,
-                                    detail: Some("type parameter".to_string()),
-                                    snippet: None,
-                                },
-                            );
-                        }
-                        syntax::parser_lower::SymbolOccurrenceKind::Type => {}
-                    }
-                }
-            }
-        }
-    }
-
-    let mut items = candidates
-        .into_iter()
-        .filter_map(|(label, candidate)| {
-            // Context-aware filtering: in type position, only suggest types
-            if is_type_position {
-                match candidate.kind {
-                    CompletionItemKind::Function
-                    | CompletionItemKind::Variable
-                    | CompletionItemKind::Keyword => return None,
-                    _ => {}
-                }
-            }
-            let label_lower = label.to_ascii_lowercase();
-            let score = completion_score(&label_lower, &prefix_lower);
-            if score >= 2 {
-                return None;
-            }
-
-            let _has_snippet = candidate.snippet.is_some();
-            let _detail = candidate.detail.clone().unwrap_or_else(|| "symbol".to_string());
-            let _kind_name = format!("{:?}", candidate.kind);
-
-            Some((
-                score,
-                completion_kind_priority(&candidate.kind),
-                IdeDbCompletionItem {
-                    label: label.clone(),
-                    kind: candidate.kind,
-                    detail: candidate.detail,
-                    documentation: None,
-                    filter_text: Some(label.clone()),
-                    insert_text: Some(candidate.snippet.unwrap_or(label)),
-                    text_edit: None,
-                    sort_text: None, // filled below
-                    deprecated: false,
-                    relevance: Default::default(),
-                },
-            ))
-        })
-        .collect::<Vec<_>>();
-
-    items.sort_by(|(score_a, priority_a, item_a), (score_b, priority_b, item_b)| {
-        score_a
-            .cmp(score_b)
-            .then_with(|| priority_b.cmp(priority_a))
-            .then_with(|| item_a.label.cmp(&item_b.label))
-    });
-
-    const MAX_COMPLETIONS: usize = 200;
-    if items.len() > MAX_COMPLETIONS {
-        items.truncate(MAX_COMPLETIONS);
-    }
-
-    items
-        .into_iter()
-        .enumerate()
-        .map(|(index, (_, _, mut item))| {
-            item.sort_text = Some(format!("{index:04}_{}", item.label.to_ascii_lowercase()));
-            item
-        })
-        .collect()
-}
-
-/// Extract the receiver expression text before a dot.
-pub(crate) fn extract_receiver_expr(text: &str, dot_pos: usize) -> &str {
-    let bytes = text.as_bytes();
-    let mut end = dot_pos;
-    // Skip whitespace before the dot
-    while end > 0 && bytes[end - 1].is_ascii_whitespace() {
-        end -= 1;
-    }
-    if end == 0 {
-        return "";
-    }
-
-    // Handle closing brackets by finding the matching open
-    let last_byte = bytes[end - 1];
-    if last_byte == b')' || last_byte == b']' {
-        let open = if last_byte == b')' { b'(' } else { b'[' };
-        let mut depth = 1i32;
-        let mut pos = end - 2;
-        loop {
-            if bytes[pos] == last_byte {
-                depth += 1;
-            } else if bytes[pos] == open {
-                depth -= 1;
-                if depth == 0 {
-                    // Now also grab the identifier before the open paren
-                    let mut start = pos;
-                    while start > 0
-                        && (bytes[start - 1].is_ascii_alphanumeric()
-                            || bytes[start - 1] == b'_'
-                            || bytes[start - 1] == b'?')
-                    {
-                        start -= 1;
-                    }
-                    return &text[start..end];
-                }
-            }
-            if pos == 0 {
-                break;
-            }
-            pos -= 1;
-        }
-        return "";
-    }
-
-    // Otherwise, grab an identifier
-    let mut start = end;
-    while start > 0
-        && (bytes[start - 1].is_ascii_alphanumeric()
-            || bytes[start - 1] == b'_'
-            || bytes[start - 1] == b'?'
-            || bytes[start - 1] == b'\'')
-    {
-        start -= 1;
-    }
-    &text[start..end]
-}
-
-/// Generate postfix completions (e.g. `expr.if` -> `if expr then { }`)
-pub(crate) fn postfix_completions(
-    text: &str,
-    offset: usize,
-    prefix: &str,
-) -> Vec<IdeDbCompletionItem> {
-    // Find the dot before the prefix
-    let prefix_start = offset - prefix.len();
-    if prefix_start == 0 {
-        return Vec::new();
-    }
-    let before = &text[..prefix_start];
-    if !before.ends_with('.') {
-        return Vec::new();
-    }
-
-    // Extract the receiver expression (text before the dot)
-    let dot_pos = prefix_start - 1;
-    let receiver = extract_receiver_expr(text, dot_pos);
-    if receiver.is_empty() {
-        return Vec::new();
-    }
-
-    let prefix_lower = prefix.to_ascii_lowercase();
-
-    let postfix_templates: &[(&str, &str, &str)] = &[
-        ("if", "if {} then {{\n\t$0\n}}", "Wrap in if-then"),
-        ("match", "match {} {{\n\t${{1:_}} => $0\n}}", "Wrap in match"),
-        ("let", "let ${{1:x}} = {}", "Bind to let"),
-        ("not", "~({})", "Negate expression"),
-        ("return", "return {}", "Return expression"),
-        ("dbg", "/* DBG */ {}", "Debug wrapper"),
-        ("foreach", "foreach (${{1:i}} from ${{2:0}} to {}) {{\n\t$0\n}}", "Wrap in foreach"),
-        ("assert", "assert({}, ${{1:\"assertion failed\"}})", "Wrap in assert"),
-        ("while", "while {} do {{\n\t$0\n}}", "Wrap in while-do"),
-        ("var", "var ${{1:x}} = {}", "Bind to var (mutable)"),
-        ("throw", "throw {}", "Throw expression"),
-        ("exit", "exit({})", "Exit with expression"),
-        ("some", "Some({})", "Wrap in Some"),
-        ("unsigned", "unsigned({})", "Convert to unsigned"),
-        ("signed", "signed({})", "Convert to signed"),
-    ];
-
-    let mut items = Vec::new();
-    for (trigger, template, detail) in postfix_templates {
-        if !trigger.starts_with(&prefix_lower) && !prefix_lower.is_empty() {
-            continue;
-        }
-
-        let snippet = template.replace("{}", receiver);
-
-        items.push(IdeDbCompletionItem {
-            label: format!(".{trigger}"),
-            kind: CompletionItemKind::Snippet,
-            detail: Some(detail.to_string()),
-            documentation: None,
-            filter_text: Some(trigger.to_string()),
-            insert_text: Some(snippet),
-            text_edit: None,
-            sort_text: Some(format!("0000_{trigger}")),
-            deprecated: false,
-            relevance: Default::default(),
-        });
-    }
-    items
-}
-
-/// Field completion after `.`: suggest struct field names when the receiver
-/// type is a known struct/record. Also suggests bitfield field names.
-pub(crate) fn field_completions(
-    files: &[(&url::Url, &dyn ide_db::FileDb)],
-    current_file: &dyn ide_db::FileDb,
-    text: &str,
-    offset: usize,
-    prefix: &str,
-) -> Vec<IdeDbCompletionItem> {
-    let prefix_start = offset.saturating_sub(prefix.len());
-    if prefix_start == 0 {
-        return Vec::new();
-    }
-    let before = &text[..prefix_start];
-    if !before.ends_with('.') {
-        return Vec::new();
-    }
-
-    // Extract receiver name (identifier before the dot)
-    let dot_pos = prefix_start - 1;
-    let receiver = extract_receiver_expr(text, dot_pos);
-    if receiver.is_empty() {
-        return Vec::new();
-    }
-
-    let prefix_lower = prefix.to_ascii_lowercase();
-    let mut items = Vec::new();
-
-    // Look up the receiver's type from binding_type_text
-    let receiver_span = parser::Span::new(dot_pos - receiver.len(), dot_pos);
-    let ty_text = current_file
-        .binding_type_text(receiver_span)
-        .or_else(|| current_file.cached_expr_type_text(receiver_span));
-
-    if let Some(ref ty_name) = ty_text {
-        // Search all files for struct/record/bitfield with matching type name
-        for (_, file) in files {
-            if let Some(parsed) = file.parsed() {
-                // Find struct fields from declarations
-                for decl in &parsed.decls {
-                    if (decl.name == *ty_name || ty_name.starts_with(&decl.name))
-                        && matches!(
-                            decl.kind,
-                            syntax::parser_lower::DeclKind::Struct
-                                | syntax::parser_lower::DeclKind::Bitfield
-                        )
-                    {
-                        // Extract field names from the definition text
-                        let def_text =
-                            file.text().get(decl.span.start..decl.span.end).unwrap_or("");
-                        for field in extract_struct_fields(def_text) {
-                            if !prefix_lower.is_empty()
-                                && !field.to_ascii_lowercase().starts_with(&prefix_lower)
-                            {
-                                continue;
-                            }
-                            items.push(IdeDbCompletionItem {
-                                label: field.clone(),
-                                kind: CompletionItemKind::Field,
-                                detail: Some(format!("field of {}", decl.name)),
-                                documentation: None,
-                                insert_text: None,
-                                text_edit: None,
-                                sort_text: Some(format!("0{field}")),
-                                filter_text: None,
-                                deprecated: false,
-                                relevance: Default::default(),
-                            });
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    items
-}
-
-/// Extract field names from a struct/bitfield definition text.
-pub(crate) fn extract_struct_fields(text: &str) -> Vec<String> {
-    let mut fields = Vec::new();
-    let Some(brace_start) = text.find('{') else {
-        return fields;
-    };
-    let Some(brace_end) = text.rfind('}') else {
-        return fields;
-    };
-    if brace_start >= brace_end {
-        return fields;
-    }
-    let inner = &text[brace_start + 1..brace_end];
-    for part in inner.split(',') {
-        let part = part.trim();
-        if let Some(colon_pos) = part.find(':') {
-            let name = part[..colon_pos].trim();
-            if !name.is_empty()
-                && name.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
-            {
-                fields.push(name.to_string());
-            }
-        }
-    }
-    fields
-}
-
-/// Pragma name completion: triggered when cursor is right after `@` or `$`.
-pub(crate) fn pragma_completions(text: &str, offset: usize) -> Vec<IdeDbCompletionItem> {
-    if offset == 0 {
-        return Vec::new();
-    }
-    let bytes = text.as_bytes();
-
-    // Look back to find @ or $ that starts a pragma
-    let mut start = offset;
-    while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_') {
-        start -= 1;
-    }
-    if start == 0 {
-        return Vec::new();
-    }
-
-    let trigger = bytes[start - 1];
-    if trigger != b'@' && trigger != b'$' {
-        return Vec::new();
-    }
-
-    let prefix = &text[start..offset];
-
-    ide_db::KNOWN_PRAGMAS
-        .iter()
-        .filter(|name| name.starts_with(prefix))
-        .map(|name| IdeDbCompletionItem {
-            label: format!("{}{name}", trigger as char),
-            kind: CompletionItemKind::Keyword,
-            detail: Some("Sail pragma".to_string()),
-            documentation: None,
-            filter_text: Some(name.to_string()),
-            insert_text: Some(name.to_string()),
-            text_edit: None,
-            sort_text: Some(format!("aaaa_{name}")),
-            deprecated: false,
-            relevance: Default::default(),
-        })
-        .collect()
-}
-
-/// Built-in Sail code snippet templates.
-pub(crate) fn snippet_completions(prefix: &str, is_top_level: bool) -> Vec<IdeDbCompletionItem> {
-    use snippet::{SnippetScope, SAIL_SNIPPETS};
-
-    let prefix_lower = prefix.to_ascii_lowercase();
-    let scope = if is_top_level { SnippetScope::Item } else { SnippetScope::Expr };
-
-    let mut items = Vec::new();
-    for snip in SAIL_SNIPPETS {
-        // Filter by scope: Item snippets at top-level, Expr snippets in expressions.
-        // Type snippets are shown in both contexts.
-        if snip.scope != scope && snip.scope != SnippetScope::Type {
-            continue;
-        }
-        if !prefix_lower.is_empty() && !snip.prefix.starts_with(&prefix_lower) {
-            continue;
-        }
-        items.push(IdeDbCompletionItem {
-            label: snip.prefix.to_string(),
-            kind: CompletionItemKind::Snippet,
-            detail: Some(snip.description.to_string()),
-            documentation: None,
-            filter_text: Some(snip.prefix.to_string()),
-            insert_text: Some(snip.body.to_string()),
-            text_edit: None,
-            sort_text: Some(format!("zzzz_{}", snip.prefix)),
-            deprecated: false,
-            relevance: Default::default(),
-        });
-    }
-    items
-}
-
 /// Resolve a completion item by adding documentation.
-pub fn resolve_completion_item_ide(
-    item: &mut IdeDbCompletionItem,
-    all_files: &[(&Url, &dyn FileDb)],
-) {
+pub fn resolve_completion_item_ide(item: &mut CompletionItem, all_files: &[(&Url, &dyn FileDb)]) {
     if let Some(doc) = builtin_docs(&item.label) {
         item.documentation = Some(format!("`{}`\n\n{}", item.label, doc));
         return;
@@ -867,15 +165,15 @@ pub fn resolve_completion_item_ide(
     let mut markdown = Vec::new();
 
     for (_, file) in all_files {
-        if let Some(parsed) = file.parsed() {
-            if let Some(decl) = parsed
-                .decls
-                .iter()
-                .find(|d| d.name == *name && d.scope == syntax::parser_lower::Scope::TopLevel)
+        if let Some(tree) = file.item_tree() {
+            if let Some(id) =
+                tree.top_level_items().iter().find(|id| id.name(tree).as_str() == *name)
             {
                 let kind_name = format!("{:?}", item.kind);
                 markdown.push(format!("**{kind_name}** **{name}**"));
-                if let Some(comments) = extract_comments(file.text(), decl.span.start) {
+                // The doc the item tree recorded, not a backwards scan
+                // through the source for `///` above the definition.
+                if let Some(comments) = id.doc(tree).map(str::to_string) {
                     markdown.push("___".to_string());
                     markdown.push(comments);
                 }
@@ -886,7 +184,7 @@ pub fn resolve_completion_item_ide(
 
     // Show all overload signatures when available
     let all_sigs =
-        ide_db::symbol_index::find_all_callable_signatures(all_files.iter().copied(), name);
+        ide_db::signatures::find_all_callable_signatures(all_files.iter().copied(), name);
     if !all_sigs.is_empty() {
         markdown.push("___".to_string());
         if all_sigs.len() > 1 {
@@ -912,7 +210,7 @@ mod cursor_tests {
 
     /// Helper: parse a fixture, find the cursor file, build a TestFile,
     /// then run field_completions at the cursor offset.
-    fn complete_at_cursor(fixture_text: &str) -> Vec<ide_db::ide_types::CompletionItem> {
+    fn complete_at_cursor(fixture_text: &str) -> Vec<crate::item::CompletionItem> {
         let fixture = MultiFileFixture::parse(fixture_text);
         let pos = fixture.cursor_position();
 
@@ -928,11 +226,21 @@ mod cursor_tests {
         let offset: usize = pos.offset.into();
         let prefix = super::completion_prefix(&cursor_file.text, offset);
 
-        super::field_completions(&all_files, &test_file, &cursor_file.text, offset, prefix)
+        crate::completions::dot::field_completions(
+            &all_files,
+            &test_file,
+            &cursor_file.text,
+            offset,
+            prefix,
+        )
     }
 
-    /// Helper: run full completion_items_ide at the cursor position.
-    fn complete_full_at_cursor(fixture_text: &str) -> Vec<ide_db::ide_types::CompletionItem> {
+    /// Run the completion the server runs, at the cursor.
+    ///
+    /// This used to call `completion_items_ide` — an older engine that the
+    /// server does not use — so the tests below were describing a code path
+    /// no editor reaches, and keeping it alive behind `#[expect(dead_code)]`.
+    fn complete_full_at_cursor(fixture_text: &str) -> Vec<crate::item::CompletionItem> {
         let fixture = MultiFileFixture::parse(fixture_text);
         let pos = fixture.cursor_position();
 
@@ -966,9 +274,15 @@ mod cursor_tests {
         ];
         let builtins = &["true", "false", "bitzero", "bitone", "unit"];
 
-        super::completion_items_ide(
+        let file = &test_files[cursor_idx].1;
+        let (db, file_text) =
+            ide_db::FileDb::file_text(file).expect("the test file has a database");
+        super::completions(
+            db,
+            Some(file_text),
             &all_files,
             current_uri,
+            file,
             &cursor_file.text,
             offset,
             prefix,
@@ -1110,7 +424,8 @@ mod cursor_tests {
         let offset: usize = pos.offset.into();
         let prefix = super::completion_prefix(&cursor_file.text, offset);
 
-        let items = super::postfix_completions(&cursor_file.text, offset, prefix);
+        let items =
+            crate::completions::postfix::postfix_completions(&cursor_file.text, offset, prefix);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         assert!(labels.contains(&".if"), "expected '.if' postfix in {labels:?}");
     }
@@ -1128,7 +443,7 @@ mod cursor_tests {
         let cursor_file = fixture.files.iter().find(|f| f.file_id == pos.file_id).unwrap();
 
         let offset: usize = pos.offset.into();
-        let items = super::pragma_completions(&cursor_file.text, offset);
+        let items = crate::completions::pragma::pragma_completions(&cursor_file.text, offset);
         // Pragma completions may be empty if no prefix after @, but the
         // function should not panic and should return valid results
         assert!(
@@ -1201,5 +516,86 @@ mod cursor_tests {
             labels.contains(&"prelude_helper"),
             "expected 'prelude_helper' from included file in {labels:?}"
         );
+    }
+
+    /// A name being defined, and the inside of a string, are not places
+    /// where the workspace's symbols belong.
+    ///
+    /// `analyze` answered `NameRef` for every position, so the `Name` and
+    /// `String` arms of `CompletionAnalysis` — RA's model, carried over
+    /// whole — were unreachable. Typing the name of a new function was
+    /// offered every function that already exists.
+    #[test]
+    fn a_name_being_defined_is_not_a_reference() {
+        let items = complete_full_at_cursor(
+            "
+            //- /main.sail
+            function helper() = 1
+            function main() = {
+                let hel$0
+            }
+        ",
+        );
+        assert!(
+            !items.iter().any(|i| i.label == "helper"),
+            "offered an existing name where a new one is being defined: {:?}",
+            items.iter().map(|i| &i.label).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn nothing_completes_inside_a_string() {
+        let items = complete_full_at_cursor(
+            "
+            //- /main.sail
+            function helper() = 1
+            function main() = {
+                print(\"hel$0\")
+            }
+        ",
+        );
+        assert!(
+            items.is_empty(),
+            "completed inside a string literal: {:?}",
+            items.iter().map(|i| &i.label).collect::<Vec<_>>()
+        );
+    }
+
+    /// The position is still a reference where it always was.
+    #[test]
+    fn an_ordinary_position_still_completes() {
+        let items = complete_full_at_cursor(
+            "
+            //- /main.sail
+            function helper() = 1
+            function main() = {
+                hel$0
+            }
+        ",
+        );
+        assert!(
+            items.iter().any(|i| i.label == "helper"),
+            "the new position arms swallowed an ordinary reference: {:?}",
+            items.iter().map(|i| &i.label).collect::<Vec<_>>()
+        );
+    }
+
+    /// The one thing that *does* belong where a name is being defined: a
+    /// `val` spec with no `function` yet. RA completes a trait method
+    /// inside an `impl` for the same reason.
+    #[test]
+    fn a_val_without_a_function_completes_at_the_definition_site() {
+        let items = complete_full_at_cursor(
+            "
+            //- /main.sail
+            val pending_op : (int, int) -> int
+            function already(x : int) -> int = x
+            val already : int -> int
+            function pend$0
+        ",
+        );
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"pending_op"), "the declaration went unoffered: {labels:?}");
+        assert!(!labels.contains(&"already"), "offered a name that is already defined: {labels:?}");
     }
 }

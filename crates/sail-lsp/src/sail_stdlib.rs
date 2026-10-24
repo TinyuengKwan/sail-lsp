@@ -12,6 +12,14 @@ use std::path::{Path, PathBuf};
 /// All `.sail` files from `sail/lib/`, embedded at compile time.
 static SAIL_STDLIB: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/data/sail-lib");
 
+pub(crate) const SAIL_STDLIB_REVISION: &str = include_str!("../data/sail-lib-revision");
+
+/// Different library revisions must not share an extraction directory:
+/// removed upstream files would otherwise remain visible after an upgrade.
+pub(crate) fn cache_dir() -> PathBuf {
+    std::env::temp_dir().join(format!("sail-lsp-stdlib-{}", SAIL_STDLIB_REVISION.trim()))
+}
+
 /// Materialise the embedded stdlib into `parent_dir/lib/` and return the path
 /// that should be used as the effective `SAIL_DIR` (i.e. `parent_dir` itself,
 /// so that `$SAIL_DIR/lib/<file>` works).
@@ -52,12 +60,27 @@ mod tests {
 
     #[test]
     fn materialise_round_trip() {
-        let tmp = std::env::temp_dir().join("sail_lsp_stdlib_test");
+        let tmp = std::env::temp_dir().join(format!("sail_lsp_stdlib_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         let sail_dir = materialise_stdlib(&tmp).unwrap();
         assert!(sail_dir.join("lib").join("prelude.sail").exists());
         assert!(sail_dir.join("lib").join("float").join("common.sail").exists());
+        assert!(sail_dir.join("lib/core/corelib.sail").exists());
+        assert!(sail_dir.join("lib/asl_compat.sail").exists());
+        assert!(!sail_dir.join("lib/regfp.sail").exists());
+        assert!(!sail_dir.join("lib/instr_kinds.sail").exists());
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn extraction_cache_is_versioned() {
+        assert!(cache_dir()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .ends_with(SAIL_STDLIB_REVISION.trim()));
+        assert_ne!(cache_dir(), std::env::temp_dir().join("sail-lsp-stdlib"));
     }
 }

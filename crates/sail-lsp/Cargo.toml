@@ -7,7 +7,7 @@ license = "MIT"
 
 [features]
 default = ["z3-solver"]
-z3-solver = ["hir-ty/z3-solver", "dep:z3"]
+z3-solver = ["hir/z3-solver", "dep:z3"]
 vendored = ["z3/vendored"]
 [lib]
 name = "sail_lsp"
@@ -25,11 +25,10 @@ profile.workspace = true
 parser.workspace = true
 syntax.workspace = true
 url.workspace = true
-hir-expand.workspace = true
-hir-def.workspace = true
 project-model.workspace = true
-hir.workspace = true
-hir-ty.workspace = true
+# Depends only on the top-level `hir` package, as in rust-analyzer.
+# Anything from a `hir-xxx` subpackage is re-exported there.
+hir = { workspace = true, default-features = false }
 ide-db.workspace = true
 ide.workspace = true
 ide-assists.workspace = true
@@ -37,11 +36,11 @@ ide-diagnostics.workspace = true
 ide-ssr.workspace = true
 stdx.workspace = true
 vfs.workspace = true
+vfs-notify.workspace = true
 paths.workspace = true
 rustc-hash.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-rayon.workspace = true
 z3 = { workspace = true, optional = true }
 include_dir.workspace = true
 tracing.workspace = true
@@ -50,3 +49,4 @@ tracing-tree.workspace = true
 
 [dev-dependencies]
 ide-db = { workspace = true, features = ["test-utils"] }
+ide = { workspace = true, features = ["test-utils"] }

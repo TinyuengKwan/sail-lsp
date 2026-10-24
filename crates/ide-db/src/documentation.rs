@@ -62,61 +62,47 @@ impl std::ops::Deref for Documentation {
 /// Sail simplification: no `HasAttrs` bound (Sail has no attributes),
 /// takes `&self` instead of `self` (no Copy requirement).
 pub trait HasDocs {
-    fn docs(&self, db: &dyn hir_def::db::DefDatabase) -> Option<Documentation>;
+    fn docs(&self, db: &dyn salsa::Database) -> Option<Documentation>;
 }
 
 /// Helper: look up doc comment from ItemTree for a DefLocation.
-fn docs_from_loc(
-    db: &dyn hir_def::db::DefDatabase,
-    loc: &hir::DefLocation,
-) -> Option<Documentation> {
-    let item_tree = hir_def::def_query::file_item_tree(db, loc.file_text).as_ref()?;
-    let def_map = hir_def::def_query::crate_def_map(db, loc.file_text).as_ref()?;
-    let raw_id = loc.raw_def_id();
-    let def_data = def_map.0.get(raw_id)?;
-    let mod_item = item_tree.top_level_items().get(def_data.item_tree_index)?;
-    mod_item.doc(item_tree).map(|s| Documentation::new(s.to_string()))
+fn docs_from_loc(db: &dyn salsa::Database, loc: &hir::DefLocation) -> Option<Documentation> {
+    loc.doc_text(db).map(Documentation::new)
 }
 
 // Implements HasDocs for each hir type that wraps a DefLocation.
 impl HasDocs for hir::Function {
-    fn docs(&self, db: &dyn hir_def::db::DefDatabase) -> Option<Documentation> {
-        docs_from_loc(db, &hir::ModuleDef::Function(*self).location())
+    fn docs(&self, db: &dyn salsa::Database) -> Option<Documentation> {
+        docs_from_loc(db, &hir::Def::Function(*self).location())
     }
 }
 
-impl HasDocs for hir::Adt {
-    fn docs(&self, db: &dyn hir_def::db::DefDatabase) -> Option<Documentation> {
-        docs_from_loc(db, &hir::ModuleDef::TypeDef(*self).location())
-    }
-}
-
-impl HasDocs for hir::AdtId {
-    fn docs(&self, db: &dyn hir_def::db::DefDatabase) -> Option<Documentation> {
-        self.type_def().docs(db)
+impl HasDocs for hir::TypeDef {
+    fn docs(&self, db: &dyn salsa::Database) -> Option<Documentation> {
+        docs_from_loc(db, &hir::Def::TypeDef(*self).location())
     }
 }
 
 impl HasDocs for hir::Register {
-    fn docs(&self, db: &dyn hir_def::db::DefDatabase) -> Option<Documentation> {
-        docs_from_loc(db, &hir::ModuleDef::Register(*self).location())
+    fn docs(&self, db: &dyn salsa::Database) -> Option<Documentation> {
+        docs_from_loc(db, &hir::Def::Register(*self).location())
     }
 }
 
 impl HasDocs for hir::Mapping {
-    fn docs(&self, db: &dyn hir_def::db::DefDatabase) -> Option<Documentation> {
-        docs_from_loc(db, &hir::ModuleDef::Mapping(*self).location())
+    fn docs(&self, db: &dyn salsa::Database) -> Option<Documentation> {
+        docs_from_loc(db, &hir::Def::Mapping(*self).location())
     }
 }
 
-impl HasDocs for hir::ModuleDef {
-    fn docs(&self, db: &dyn hir_def::db::DefDatabase) -> Option<Documentation> {
+impl HasDocs for hir::Def {
+    fn docs(&self, db: &dyn salsa::Database) -> Option<Documentation> {
         match self {
-            hir::ModuleDef::Function(f) => f.docs(db),
-            hir::ModuleDef::TypeDef(t) => t.docs(db),
-            hir::ModuleDef::Register(r) => r.docs(db),
-            hir::ModuleDef::Mapping(m) => m.docs(db),
-            hir::ModuleDef::Let(loc) | hir::ModuleDef::Overload(loc) => docs_from_loc(db, loc),
+            hir::Def::Function(f) => f.docs(db),
+            hir::Def::TypeDef(t) => t.docs(db),
+            hir::Def::Register(r) => r.docs(db),
+            hir::Def::Mapping(m) => m.docs(db),
+            other => docs_from_loc(db, &other.location()),
         }
     }
 }

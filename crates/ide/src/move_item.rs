@@ -132,3 +132,40 @@ mod tests {
         assert!(edits.is_none(), "first item can't move up");
     }
 }
+
+#[cfg(test)]
+mod analysis_tests {
+    use crate::fixture;
+    use crate::MoveDirection;
+
+    /// Through `Analysis`, which is the door the server now has.
+    ///
+    /// The module was re-exported from `ide` and the server never named it,
+    /// so the tests above measured code no editor could reach.
+    #[test]
+    fn a_definition_swaps_with_its_neighbour() {
+        let source = "function a() = 1\nfunction b() = 2\n";
+        let (analysis, files) = fixture::analysis(source);
+        let url = analysis.url_for_file_id(files[0].0).expect("fixture file has a url");
+
+        let on_a = source.find('a').expect("fixture");
+        let edits = analysis.move_item(url, on_a, MoveDirection::Down).unwrap();
+        assert!(!edits.is_empty(), "the first of two definitions can move down");
+
+        let mut moved = source.to_owned();
+        for edit in edits.iter().rev() {
+            moved.replace_range(
+                base_db::range_start(edit.range)..base_db::range_end(edit.range),
+                &edit.new_text,
+            );
+        }
+        assert!(
+            moved.find("function b").expect("b survives")
+                < moved.find("function a").expect("a survives"),
+            "the two did not swap: {moved:?}"
+        );
+
+        // Nothing above the first one to swap with.
+        assert!(analysis.move_item(url, on_a, MoveDirection::Up).unwrap().is_empty());
+    }
+}

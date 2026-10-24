@@ -9,7 +9,8 @@
 //! - Tuple patterns
 
 use super::Completions;
-use ide_db::ide_types::{CompletionItem, CompletionItemKind};
+use crate::item::CompletionItem;
+use ide_db::defs::CompletionItemKind;
 use ide_db::FileDb;
 use url::Url;
 
@@ -30,76 +31,86 @@ pub(crate) fn complete_pattern(
 
     // 1. Wildcard `_` — always available in patterns
     if prefix_lower.is_empty() || "_".starts_with(&prefix_lower) {
-        acc.add(CompletionItem {
-            label: "_".to_string(),
-            kind: CompletionItemKind::Keyword,
-            detail: Some("wildcard pattern".to_string()),
-            documentation: None,
-            insert_text: Some("_".to_string()),
-            text_edit: None,
-            sort_text: Some("zzz_wildcard".to_string()), // sort last
-            filter_text: Some("_".to_string()),
-            deprecated: false,
-            relevance: Default::default(),
-        });
+        acc.add(
+            CompletionItem::new(CompletionItemKind::Keyword, "_")
+                .detail("wildcard pattern")
+                .insert_text("_")
+                // The wildcard is always applicable and almost never what
+                // the cursor wants first.
+                .sort_text("zzz_wildcard")
+                .filter_text("_"),
+        );
     }
 
     // 2. Boolean literals
     for lit in &["true", "false"] {
         if prefix_lower.is_empty() || lit.starts_with(&prefix_lower) {
-            acc.add(CompletionItem {
-                label: lit.to_string(),
-                kind: CompletionItemKind::Keyword,
-                detail: Some("boolean pattern".to_string()),
-                documentation: None,
-                insert_text: Some(lit.to_string()),
-                text_edit: None,
-                sort_text: None,
-                filter_text: Some(lit.to_string()),
-                deprecated: false,
-                relevance: Default::default(),
-            });
+            acc.add(
+                CompletionItem::new(CompletionItemKind::Keyword, *lit)
+                    .detail("boolean pattern")
+                    .insert_text(*lit)
+                    .filter_text(*lit),
+            );
         }
     }
 
     // 3. Enum members and union constructors from workspace
     let mut seen = std::collections::HashSet::new();
     for (_uri, file) in all_files {
-        if let Some(parsed) = file.parsed() {
-            for decl in &parsed.decls {
-                if decl.scope != syntax::parser_lower::Scope::TopLevel {
-                    continue;
-                }
-                // Only include constructors (enum members, union variants)
-                let is_constructor =
-                    matches!(decl.kind, syntax::parser_lower::DeclKind::EnumMember);
-                if !is_constructor {
-                    continue;
-                }
-                if !prefix_lower.is_empty()
-                    && !decl.name.to_ascii_lowercase().starts_with(&prefix_lower)
+        if let Some(tree) = file.item_tree() {
+            // The members of every `enum` and `union`, which the item tree
+            // carries as the definition's fields.
+            let members = tree
+                .top_level_items()
+                .iter()
+                .filter(|id| {
+                    matches!(
+                        id.def_kind(tree),
+                        hir::DefKind::Enum | hir::DefKind::Union | hir::DefKind::Newtype
+                    ) || id.scattered_type_kind(tree).is_some()
+                })
+                .flat_map(|id| {
+                    id.fields(tree)
+                        .iter()
+                        .filter(|f| ctx.can_see_member(*file, f))
+                        .map(|f| f.name.to_string())
+                });
+            for name in members {
+                if !prefix_lower.is_empty() && !name.to_ascii_lowercase().starts_with(&prefix_lower)
                 {
                     continue;
                 }
-                if !seen.insert(decl.name.clone()) {
+                if !seen.insert(name.clone()) {
                     continue;
                 }
-                acc.add(CompletionItem {
-                    label: decl.name.clone(),
-                    kind: CompletionItemKind::EnumMember,
-                    detail: Some("enum member".to_string()),
-                    documentation: None,
-                    insert_text: Some(decl.name.clone()),
-                    text_edit: None,
-                    sort_text: None,
-                    filter_text: Some(decl.name.clone()),
-                    deprecated: false,
-                    relevance: Default::default(),
-                });
+                acc.add(
+                    crate::render::pattern::render_variant_pat(
+                        &name,
+                        Some("enum member"),
+                        Some(&name),
+                    )
+                    .filter_text(name),
+                );
             }
 
-            // Also add union constructor names from ParsedFile
-            for ctor in &parsed.union_constructor_names {
+            // A union's constructors take arguments, so they are offered
+            // with parentheses. Same source as the members above — a
+            // `union`'s fields *are* its constructors.
+            let ctors: Vec<String> = tree
+                .top_level_items()
+                .iter()
+                .filter(|id| {
+                    matches!(id.def_kind(tree), hir::DefKind::Union | hir::DefKind::Newtype)
+                        || id.scattered_type_kind(tree) == Some(hir::TypeDefShape::Union)
+                })
+                .flat_map(|id| {
+                    id.fields(tree)
+                        .iter()
+                        .filter(|f| ctx.can_see_member(*file, f))
+                        .map(|f| f.name.to_string())
+                })
+                .collect();
+            for ctor in &ctors {
                 if !prefix_lower.is_empty() && !ctor.to_ascii_lowercase().starts_with(&prefix_lower)
                 {
                     continue;
@@ -107,19 +118,15 @@ pub(crate) fn complete_pattern(
                 if !seen.insert(ctor.clone()) {
                     continue;
                 }
-                acc.add(CompletionItem {
-                    label: ctor.clone(),
-                    kind: CompletionItemKind::EnumMember,
-                    detail: Some("union constructor".to_string()),
-                    documentation: None,
-                    // Offer with parens for constructors that take arguments
-                    insert_text: Some(format!("{}($0)", ctor)),
-                    text_edit: None,
-                    sort_text: None,
-                    filter_text: Some(ctor.clone()),
-                    deprecated: false,
-                    relevance: Default::default(),
-                });
+                // Offered with parens, for the constructors that take arguments.
+                acc.add(
+                    crate::render::pattern::render_variant_pat(
+                        ctor,
+                        Some("union constructor"),
+                        Some(&format!("{ctor}($0)")),
+                    )
+                    .filter_text(ctor),
+                );
             }
         }
     }

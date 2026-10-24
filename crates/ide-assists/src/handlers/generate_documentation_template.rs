@@ -1,7 +1,7 @@
 //! `generate_documentation_template` assist — generate a doc comment template for a function.
 
 use crate::assist_context::{AssistContext, AssistId, AssistKind, Assists};
-use ide_db::text_edit::TextEdit;
+use parser::SyntaxKind as SK;
 
 pub(crate) fn generate_documentation_template(
     acc: &mut Assists,
@@ -9,52 +9,91 @@ pub(crate) fn generate_documentation_template(
 ) -> Option<()> {
     let text = ctx.source_text();
     let offset = ctx.offset();
+    let root = ctx.source_file()?;
 
-    // Find "function" keyword near cursor
-    let func_start = find_function_keyword(text, offset)?;
+    // The function the cursor is in.
+    //
+    // The word `function` used to be looked for in a ±200-byte window —
+    // the *last* one in it, comment and string literal included — then
+    // the name by scanning to the first non-identifier character, the
+    // parameters by counting parens, and the return type by searching the
+    // remaining text for `->` and stopping at the first `=` or newline.
+    // That last one takes the `=` of a default argument and the `->` of a
+    // function type written as a parameter.
+    let def = root
+        .children()
+        .filter(|n| {
+            n.kind() == SK::CALLABLE_DEF
+                && usize::from(n.text_range().start()) <= offset
+                && offset <= usize::from(n.text_range().end())
+        })
+        .last()?;
+    if !def
+        .children_with_tokens()
+        .filter_map(|el| el.into_token())
+        .any(|t| t.kind() == SK::KW_FUNCTION)
+    {
+        return None;
+    }
+    let func_start = usize::from(def.text_range().start());
 
-    // Parse: function <name>(<params>) -> <ret_ty> = ...
-    let after_kw = func_start + "function".len();
-    let rest = text[after_kw..].trim_start();
-    let name_offset = after_kw + (text[after_kw..].len() - rest.len());
+    let func_name = def
+        .children_with_tokens()
+        .filter_map(|el| el.into_token())
+        .find(|t| t.kind() == SK::IDENT)?
+        .text()
+        .to_owned();
 
-    // Extract function name
-    let name_end = rest.find(|c: char| !c.is_alphanumeric() && c != '_')?;
-    let func_name = &rest[..name_end];
+    // A parameter is `name : type`; the names are the `IDENT`s that a
+    // `COLON` follows.
+    let params: Vec<String> = def
+        .children()
+        .find(|n| n.kind() == SK::PARAM_LIST)
+        .map(|list| {
+            let elements: Vec<_> = list.children_with_tokens().collect();
+            elements
+                .iter()
+                .enumerate()
+                .filter_map(|(i, el)| {
+                    let token = el.as_token()?;
+                    if token.kind() != SK::IDENT {
+                        return None;
+                    }
+                    let next = elements[i + 1..]
+                        .iter()
+                        .find(|el| !el.kind().is_trivia())
+                        .map(|el| el.kind())?;
+                    (next == SK::COLON).then(|| token.text().to_owned())
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
-    // Find params between parens
-    let paren_open_rel = rest[name_end..].find('(')?;
-    let paren_open = name_offset + name_end + paren_open_rel;
-    let paren_close = find_matching_paren(text, paren_open)?;
+    // The return type is the node after `->`.
+    let ret_ty = def
+        .children_with_tokens()
+        .skip_while(|el| el.kind() != SK::R_ARROW)
+        .filter_map(|el| el.into_node())
+        .next()
+        .map(|n| n.text().to_string());
 
-    let params_str = &text[paren_open + 1..paren_close];
-
-    // Parse parameters: "x : int, y : bits(32)"
-    let params = parse_params(params_str);
-
-    // Find return type: -> <type>
-    let after_paren = &text[paren_close + 1..];
-    let ret_ty = if let Some(arrow) = after_paren.find("->") {
-        let after_arrow = after_paren[arrow + 2..].trim_start();
-        // Return type ends at '=' or newline
-        let end = after_arrow.find(['=', '\n']).unwrap_or(after_arrow.len());
-        Some(after_arrow[..end].trim().to_string())
-    } else {
-        None
-    };
-
-    // Get indentation of the function line
     let line_start = text[..func_start].rfind('\n').map_or(0, |p| p + 1);
     let indent = &text[line_start..func_start];
 
-    // Build doc comment
     let mut doc = String::new();
     doc.push_str(indent);
     doc.push_str("/** ");
-    doc.push_str(func_name);
+    doc.push_str(&func_name);
+    // The summary is the one part a template cannot write, so that is
+    // where the cursor goes.
+    if ctx.config.snippet_cap.is_some() {
+        doc.push_str(" $0");
+    }
     doc.push('\n');
+    doc.push_str(indent);
+    doc.push_str(" *\n");
 
-    for (name, _ty) in &params {
+    for name in &params {
         doc.push_str(indent);
         doc.push_str(" * @param ");
         doc.push_str(name);
@@ -73,114 +112,65 @@ pub(crate) fn generate_documentation_template(
     doc.push_str(indent);
     doc.push_str(" */\n");
 
-    acc.add_with_edits(
+    acc.add(
         AssistId("generate_documentation_template", AssistKind::RefactorRewrite),
         "Generate documentation template",
         ctx.range,
-        vec![TextEdit { range: base_db::text_range(func_start, func_start), new_text: doc }],
+        |builder| match ctx.config.snippet_cap {
+            Some(_) => builder.insert_snippet(func_start, doc),
+            None => builder.insert(func_start, doc),
+        },
     );
     Some(())
-}
-
-fn find_function_keyword(text: &str, offset: usize) -> Option<usize> {
-    let start = offset.saturating_sub(200);
-    let end = text.len().min(offset + 200);
-    let window = &text[start..end];
-    let kw = "function";
-    let mut best = None;
-    let mut search_from = 0;
-    while let Some(pos) = window[search_from..].find(kw) {
-        let abs = start + search_from + pos;
-        let before_ok = abs == 0 || !text.as_bytes()[abs - 1].is_ascii_alphanumeric();
-        let after_ok = abs + kw.len() >= text.len()
-            || !text.as_bytes()[abs + kw.len()].is_ascii_alphanumeric();
-        if before_ok && after_ok {
-            best = Some(abs);
-        }
-        search_from += pos + 1;
-    }
-    best
-}
-
-fn find_matching_paren(text: &str, open: usize) -> Option<usize> {
-    let mut depth = 1i32;
-    let mut i = open + 1;
-    let bytes = text.as_bytes();
-    while i < text.len() && depth > 0 {
-        match bytes[i] {
-            b'(' => depth += 1,
-            b')' => depth -= 1,
-            _ => {}
-        }
-        if depth == 0 {
-            return Some(i);
-        }
-        i += 1;
-    }
-    None
-}
-
-fn parse_params(params_str: &str) -> Vec<(String, String)> {
-    if params_str.trim().is_empty() {
-        return Vec::new();
-    }
-
-    let mut result = Vec::new();
-    // Split on commas, but respect nested parens
-    let mut depth = 0i32;
-    let mut current = String::new();
-    for ch in params_str.chars() {
-        match ch {
-            '(' => {
-                depth += 1;
-                current.push(ch);
-            }
-            ')' => {
-                depth -= 1;
-                current.push(ch);
-            }
-            ',' if depth == 0 => {
-                if let Some(p) = parse_single_param(&current) {
-                    result.push(p);
-                }
-                current.clear();
-            }
-            _ => current.push(ch),
-        }
-    }
-    if let Some(p) = parse_single_param(&current) {
-        result.push(p);
-    }
-    result
-}
-
-fn parse_single_param(s: &str) -> Option<(String, String)> {
-    let s = s.trim();
-    if s.is_empty() {
-        return None;
-    }
-    // "name : type" or just "name"
-    if let Some(colon) = s.find(':') {
-        let name = s[..colon].trim().to_string();
-        let ty = s[colon + 1..].trim().to_string();
-        Some((name, ty))
-    } else {
-        Some((s.to_string(), String::new()))
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::check_assist;
+    use crate::tests::{check_assist, check_assist_not_applicable};
+    use expect_test::expect;
 
     #[test]
-    fn smoke() {
-        let labels = check_assist(
+    fn applies() {
+        check_assist(
             generate_documentation_template,
-            "function foo(x : int, y : bits(32)) -> int = x\n",
-            0,
+            "function f$0oo(x : int, y : bits(32)) -> bool = true\n",
+            expect![[r#"
+            /** foo
+             *
+             * @param x
+             * @param y
+             * @returns bool
+             */
+            function foo(x : int, y : bits(32)) -> bool = true
+        "#]],
         );
-        let _ = labels;
+    }
+
+    /// The summary is the one line the template cannot write.
+    #[test]
+    fn leaves_the_cursor_in_the_summary() {
+        crate::tests::check_assist_with_snippets(
+            generate_documentation_template,
+            "function f$0oo(x : int) -> bool = true\n",
+            expect![[r#"
+                /** foo $0
+                 *
+                 * @param x
+                 * @returns bool
+                 */
+                function foo(x : int) -> bool = true
+            "#]],
+        );
+    }
+
+    /// The window search took the last `function` in ±200 bytes, wherever
+    /// it was.
+    #[test]
+    fn a_comment_naming_a_function_is_not_one() {
+        check_assist_not_applicable(
+            generate_documentation_template,
+            "// a comment about function bar$0\n",
+        );
     }
 }

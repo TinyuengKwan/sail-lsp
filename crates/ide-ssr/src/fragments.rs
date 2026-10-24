@@ -65,45 +65,7 @@ pub(crate) fn item(s: &str) -> Option<SyntaxNode> {
     root.children().next()
 }
 
-fn is_expr_kind(kind: SyntaxKind) -> bool {
-    matches!(
-        kind,
-        SyntaxKind::CALL_EXPR
-            | SyntaxKind::IF_EXPR
-            | SyntaxKind::MATCH_EXPR
-            | SyntaxKind::LET_EXPR
-            | SyntaxKind::BLOCK_EXPR
-            | SyntaxKind::LITERAL_EXPR
-            | SyntaxKind::IDENT_EXPR
-            | SyntaxKind::TUPLE_EXPR
-            | SyntaxKind::FIELD_ACCESS_EXPR
-            | SyntaxKind::INDEX_EXPR
-            | SyntaxKind::RETURN_EXPR
-            | SyntaxKind::FOREACH_EXPR
-            | SyntaxKind::VECTOR_EXPR
-            | SyntaxKind::STRUCT_EXPR
-            | SyntaxKind::ASSIGN_EXPR
-            | SyntaxKind::BIN_EXPR
-            | SyntaxKind::PREFIX_EXPR
-            | SyntaxKind::REF_EXPR
-            | SyntaxKind::CAST_EXPR
-            | SyntaxKind::CONSTRAINT_EXPR
-            | SyntaxKind::ASSERT_EXPR
-            | SyntaxKind::CONFIG_EXPR
-            | SyntaxKind::EXIT_EXPR
-            | SyntaxKind::LIST_EXPR
-            | SyntaxKind::REPEAT_EXPR
-            | SyntaxKind::SIZEOF_EXPR
-            | SyntaxKind::SUBRANGE_EXPR
-            | SyntaxKind::THROW_EXPR
-            | SyntaxKind::TRY_EXPR
-            | SyntaxKind::TYVAR_EXPR
-            | SyntaxKind::UPDATE_EXPR
-            | SyntaxKind::VAR_EXPR
-            | SyntaxKind::VECTOR_UPDATE_EXPR
-            | SyntaxKind::WHILE_EXPR
-    )
-}
+use ide_db::syntax_helpers::node_ext::is_expr_kind;
 
 fn is_pat_kind(kind: SyntaxKind) -> bool {
     matches!(

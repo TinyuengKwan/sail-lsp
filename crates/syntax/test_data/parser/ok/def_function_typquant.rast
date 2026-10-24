@@ -1,0 +1,129 @@
+SOURCE_FILE@0..202
+  DEFAULT_DEF@0..17
+    KW_DEFAULT@0..7 "default"
+    WHITESPACE@7..8 " "
+    KW_ORDER@8..13 "Order"
+    WHITESPACE@13..14 " "
+    KW_DEC@14..17 "dec"
+  WHITESPACE@17..19 "\n\n"
+  CALLABLE_DEF@19..118
+    KW_FUNCTION@19..27 "function"
+    WHITESPACE@27..28 " "
+    IDENT@28..37 "mmio_read"
+    WHITESPACE@37..38 " "
+    KW_FORALL@38..44 "forall"
+    WHITESPACE@44..45 " "
+    TYPE_PARAM_LIST@45..47
+      TYPE_PARAM@45..47
+        TY_VAR@45..47 "'n"
+    COMMA@47..48 ","
+    WHITESPACE@48..49 " "
+    TYPE_APP@49..60
+      TYPE_NAMED@49..50
+        NUM_LIT@49..50 "0"
+      WHITESPACE@50..51 " "
+      L_ANGLE@51..52 "<"
+      WHITESPACE@52..53 " "
+      TYPE_APP@53..60
+        TYPE_VAR@53..55
+          TY_VAR@53..55 "'n"
+        WHITESPACE@55..56 " "
+        LE@56..58 "<="
+        WHITESPACE@58..59 " "
+        TYPE_NAMED@59..60
+          NUM_LIT@59..60 "8"
+    WHITESPACE@60..61 " "
+    DOT@61..62 "."
+    WHITESPACE@62..63 " "
+    PARAM_LIST@63..80
+      L_PAREN@63..64 "("
+      IDENT@64..69 "width"
+      WHITESPACE@69..70 " "
+      COLON@70..71 ":"
+      WHITESPACE@71..72 " "
+      TYPE_APP@72..79
+        TYPE_NAMED@72..75
+          IDENT@72..75 "int"
+        L_PAREN@75..76 "("
+        TYPE_VAR@76..78
+          TY_VAR@76..78 "'n"
+        R_PAREN@78..79 ")"
+      R_PAREN@79..80 ")"
+    WHITESPACE@80..81 " "
+    R_ARROW@81..83 "->"
+    WHITESPACE@83..84 " "
+    TYPE_APP@84..96
+      TYPE_NAMED@84..88
+        IDENT@84..88 "bits"
+      L_PAREN@88..89 "("
+      TYPE_NAMED@89..95
+        NUM_LIT@89..90 "8"
+        WHITESPACE@90..91 " "
+        STAR@91..92 "*"
+        WHITESPACE@92..93 " "
+        TY_VAR@93..95 "'n"
+      R_PAREN@95..96 ")"
+    WHITESPACE@96..97 " "
+    EQ@97..98 "="
+    WHITESPACE@98..101 "\n  "
+    CALL_EXPR@101..118
+      IDENT_EXPR@101..111
+        IDENT@101..111 "clint_load"
+      ARG_LIST@111..118
+        L_PAREN@111..112 "("
+        IDENT_EXPR@112..117
+          IDENT@112..117 "width"
+        R_PAREN@117..118 ")"
+  WHITESPACE@118..120 "\n\n"
+  CALLABLE_DEF@120..201
+    KW_FUNCTION@120..128 "function"
+    WHITESPACE@128..129 " "
+    IDENT@129..137 "tlb_hash"
+    WHITESPACE@137..138 " "
+    KW_FORALL@138..144 "forall"
+    WHITESPACE@144..145 " "
+    TYPE_PARAM_LIST@145..147
+      TYPE_PARAM@145..147
+        TY_VAR@145..147 "'v"
+    COMMA@147..148 ","
+    WHITESPACE@148..149 " "
+    TYPE_APP@149..163
+      TYPE_NAMED@149..159
+        IDENT@149..159 "is_sv_mode"
+      L_PAREN@159..160 "("
+      TYPE_VAR@160..162
+        TY_VAR@160..162 "'v"
+      R_PAREN@162..163 ")"
+    WHITESPACE@163..164 " "
+    DOT@164..165 "."
+    WHITESPACE@165..166 " "
+    PARAM_LIST@166..182
+      L_PAREN@166..167 "("
+      IDENT@167..171 "mode"
+      WHITESPACE@171..172 " "
+      COLON@172..173 ":"
+      WHITESPACE@173..174 " "
+      TYPE_APP@174..181
+        TYPE_NAMED@174..177
+          IDENT@174..177 "int"
+        L_PAREN@177..178 "("
+        TYPE_VAR@178..180
+          TY_VAR@178..180 "'v"
+        R_PAREN@180..181 ")"
+      R_PAREN@181..182 ")"
+    WHITESPACE@182..183 " "
+    R_ARROW@183..185 "->"
+    WHITESPACE@185..186 " "
+    TYPE_APP@186..193
+      TYPE_NAMED@186..190
+        IDENT@186..190 "bits"
+      L_PAREN@190..191 "("
+      TYPE_NAMED@191..192
+        NUM_LIT@191..192 "4"
+      R_PAREN@192..193 ")"
+    WHITESPACE@193..194 " "
+    EQ@194..195 "="
+    WHITESPACE@195..198 "\n  "
+    LITERAL_EXPR@198..201
+      HEX_LIT@198..201 "0x0"
+  WHITESPACE@201..202 "\n"

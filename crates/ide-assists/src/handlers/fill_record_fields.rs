@@ -21,10 +21,22 @@ pub(crate) fn fill_record_fields(acc: &mut Assists, ctx: &AssistContext<'_>) -> 
 mod tests {
     use super::*;
     use crate::tests::check_assist;
+    use expect_test::expect;
 
+    /// This declined on a struct literal missing a field — the case it
+    /// exists for — because `add_missing_fields`, which it delegates to,
+    /// took the literal's first `IDENT` for the struct's name. In Sail
+    /// that is the first *field*.
     #[test]
-    fn smoke() {
-        let labels = check_assist(fill_record_fields, "source code\n", 0);
-        let _ = labels; // verify no panic
+    fn applies() {
+        check_assist(
+            fill_record_fields,
+            "struct S = { a : int, b : int }\nval f : unit -> S\nfunction f() = struct { $0a = 1 }\n",
+            expect![[r#"
+                struct S = { a : int, b : int }
+                val f : unit -> S
+                function f() = struct { a = 1, b = () }
+            "#]],
+        );
     }
 }

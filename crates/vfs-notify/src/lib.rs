@@ -1,11 +1,8 @@
 //! An implementation of `loader::Handle`, based on `walkdir` and `notify`.
 //!
-//! The file watching bits here are untested and quite probably buggy. For this
-//! reason, by default we don't watch files and rely on editor's file watching
-//! capabilities.
-//!
-//! Hopefully, one day a reliable file watching/walking crate appears on
-//! crates.io, and we can reduce this to trivial glue code.
+//! Native subscriptions cover explicit dependencies, including missing files
+//! outside workspace folders. Parent watches and reads after registration
+//! preserve updates across file replacement and directory recreation.
 
 use std::{
     fs,
@@ -16,7 +13,7 @@ use std::{
 use crossbeam_channel::{select, unbounded, Receiver, Sender};
 use notify::{event::AccessKind, Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use paths::{AbsPath, AbsPathBuf, Utf8PathBuf};
-use rayon::iter::{IndexedParallelIterator as _, IntoParallelIterator as _, ParallelIterator};
+use rayon::iter::{IntoParallelIterator as _, ParallelIterator};
 use rustc_hash::FxHashSet;
 use vfs::loader::{self, LoadingProgress};
 use walkdir::WalkDir;
@@ -131,30 +128,49 @@ impl NotifyActor {
                             dir: None,
                         });
 
-                        let (entry_tx, entry_rx) = unbounded();
-                        let (watch_tx, watch_rx) = unbounded();
-                        let processed = AtomicUsize::new(0);
-
-                        config.load.into_par_iter().enumerate().for_each(|(i, entry)| {
-                            let do_watch = config.watch.contains(&i);
-                            if do_watch {
-                                _ = entry_tx.send(entry.clone());
+                        // Subscribe before reading: a change between the disk read
+                        // and registration must not disappear. Parent watches survive
+                        // atomic replacement and observe previously missing paths.
+                        let mut watch_roots = FxHashSet::default();
+                        for &index in &config.watch {
+                            match &config.load[index] {
+                                loader::Entry::Files(files) => {
+                                    self.seen_paths.extend(files.iter().cloned());
+                                    self.watched_file_entries.extend(files.iter().cloned());
+                                    for file in files {
+                                        if let Some(parent) = existing_watch_parent(file.as_ref()) {
+                                            watch_roots.insert(parent.to_path_buf());
+                                        }
+                                    }
+                                }
+                                loader::Entry::Directories(dirs)
+                                | loader::Entry::WatchDirectories(dirs) => {
+                                    self.watched_dir_entries.push(dirs.clone());
+                                    for root in &dirs.include {
+                                        let path: &Path = root.as_ref();
+                                        if let Some(parent) = path.ancestors().find(|p| p.is_dir())
+                                        {
+                                            watch_roots.insert(parent.to_path_buf());
+                                        }
+                                    }
+                                }
                             }
-                            let files = Self::load_entry(
-                                |f| _ = watch_tx.send(f.to_owned()),
-                                entry,
-                                do_watch,
-                                |file| {
-                                    self.send(loader::Message::Progress {
-                                        n_total,
-                                        n_done: LoadingProgress::Progress(
-                                            processed.load(std::sync::atomic::Ordering::Relaxed),
-                                        ),
-                                        dir: Some(file),
-                                        config_version,
-                                    });
-                                },
-                            );
+                        }
+                        for path in watch_roots {
+                            self.watch(&path);
+                        }
+                        let processed = AtomicUsize::new(0);
+                        config.load.into_par_iter().for_each(|entry| {
+                            let files = Self::load_entry(entry, |file| {
+                                self.send(loader::Message::Progress {
+                                    n_total,
+                                    n_done: LoadingProgress::Progress(
+                                        processed.load(std::sync::atomic::Ordering::Relaxed),
+                                    ),
+                                    dir: Some(file),
+                                    config_version,
+                                });
+                            });
                             self.send(loader::Message::Loaded { files });
                             self.send(loader::Message::Progress {
                                 n_total,
@@ -165,23 +181,6 @@ impl NotifyActor {
                                 dir: None,
                             });
                         });
-
-                        drop(watch_tx);
-                        for path in watch_rx {
-                            self.watch(&path);
-                        }
-
-                        drop(entry_tx);
-                        for entry in entry_rx {
-                            match entry {
-                                loader::Entry::Files(files) => {
-                                    self.watched_file_entries.extend(files)
-                                }
-                                loader::Entry::Directories(dir) => {
-                                    self.watched_dir_entries.push(dir)
-                                }
-                            }
-                        }
 
                         self.send(loader::Message::Progress {
                             n_total,
@@ -205,7 +204,7 @@ impl NotifyActor {
                                 | EventKind::Remove(_)
                                 | EventKind::Access(AccessKind::Open(_))
                         ) {
-                            let abs_paths: Vec<AbsPathBuf> = event
+                            let mut abs_paths: Vec<AbsPathBuf> = event
                                 .paths
                                 .into_iter()
                                 .filter_map(|path| {
@@ -217,6 +216,48 @@ impl NotifyActor {
                                     Some(abs.normalize())
                                 })
                                 .collect();
+
+                            if matches!(event.kind, EventKind::Access(_)) {
+                                abs_paths.retain(|path| !(path.as_ref() as &Path).is_dir());
+                            }
+
+                            // A directory may be created, removed or renamed as a unit.
+                            // Re-read explicitly watched descendants, including paths that
+                            // were missing when the watch was registered.
+                            let descendants: Vec<_> = self
+                                .watched_file_entries
+                                .iter()
+                                .filter(|file| {
+                                    abs_paths.iter().any(|p| *file != p && file.starts_with(p))
+                                })
+                                .cloned()
+                                .collect();
+                            // Recursive backends may deliver a directory event
+                            // before installing watches on its children. A file
+                            // created after our read but before that installation
+                            // would then produce no event. Synchronize registration
+                            // with the backend before re-reading explicit children.
+                            // Also handle a removed directory already recreated by
+                            // the time its queued removal reaches this actor.
+                            if matches!(
+                                event.kind,
+                                EventKind::Create(_)
+                                    | EventKind::Remove(_)
+                                    | EventKind::Modify(notify::event::ModifyKind::Name(_))
+                            ) {
+                                let parents: FxHashSet<_> = descendants
+                                    .iter()
+                                    .filter_map(|file| {
+                                        existing_watch_parent(file.as_ref()).map(Path::to_path_buf)
+                                    })
+                                    .collect();
+                                for parent in parents {
+                                    self.watch(&parent);
+                                }
+                            }
+                            abs_paths.extend(descendants);
+                            abs_paths.sort();
+                            abs_paths.dedup();
 
                             let mut saw_new_file = false;
                             for abs_path in &abs_paths {
@@ -247,6 +288,10 @@ impl NotifyActor {
                                             .any(|dir| dir.contains_file(&path)))
                                     {
                                         return None;
+                                    }
+
+                                    if self.watched_file_entries.contains(&path) {
+                                        return Some((path.clone(), read(&path)));
                                     }
 
                                     // For removed files, fs::metadata() will return Err, but
@@ -283,22 +328,18 @@ impl NotifyActor {
     }
 
     fn load_entry(
-        mut watch: impl FnMut(&Path),
         entry: loader::Entry,
-        do_watch: bool,
         send_message: impl Fn(AbsPathBuf),
     ) -> Vec<(AbsPathBuf, Option<Vec<u8>>)> {
         match entry {
             loader::Entry::Files(files) => files
                 .into_iter()
                 .map(|file| {
-                    if do_watch {
-                        watch(file.as_ref());
-                    }
                     let contents = read(file.as_path());
                     (file, contents)
                 })
                 .collect::<Vec<_>>(),
+            loader::Entry::WatchDirectories(_) => Vec::new(),
             loader::Entry::Directories(dirs) => {
                 let mut res = Vec::new();
 
@@ -330,9 +371,6 @@ impl NotifyActor {
                         .ok()?;
                         if depth < 2 && is_dir {
                             send_message(abs_path.clone());
-                        }
-                        if is_dir && do_watch {
-                            watch(abs_path.as_ref());
                         }
                         if !is_file {
                             return None;
@@ -366,6 +404,10 @@ impl NotifyActor {
     }
 }
 
+fn existing_watch_parent(path: &Path) -> Option<&Path> {
+    path.parent()?.ancestors().find(|p| p.is_dir())
+}
+
 fn read(path: &AbsPath) -> Option<Vec<u8>> {
     std::fs::read(path).ok()
 }
@@ -390,4 +432,126 @@ fn path_might_be_cyclic(path: &Path) -> bool {
         destination.components().all(|c| matches!(c, Component::CurDir | Component::ParentDir));
 
     is_relative_parent || path.starts_with(destination)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use loader::Handle;
+    use std::time::{Duration, Instant};
+
+    struct Fixture(std::path::PathBuf);
+    impl Fixture {
+        fn new() -> Self {
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "sail-watch-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+        fn path(&self, name: &str) -> AbsPathBuf {
+            AbsPathBuf::assert_utf8(self.0.join(name))
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn ready(rx: &Receiver<loader::Message>) {
+        let until = Instant::now() + Duration::from_secs(10);
+        loop {
+            if matches!(
+                rx.recv_timeout(until.saturating_duration_since(Instant::now())).unwrap(),
+                loader::Message::Progress { n_done: LoadingProgress::Finished, .. }
+            ) {
+                return;
+            }
+        }
+    }
+    fn changed(rx: &Receiver<loader::Message>, path: &AbsPathBuf, expected: Option<&[u8]>) {
+        let until = Instant::now() + Duration::from_secs(10);
+        loop {
+            let message = rx
+                .recv_timeout(until.saturating_duration_since(Instant::now()))
+                .unwrap_or_else(|_| panic!("no matching change for {path}: {expected:?}"));
+            if let loader::Message::Changed { files } = message {
+                if files.iter().any(|(p, bytes)| p == path && bytes.as_deref() == expected) {
+                    return;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_watches_recover_missing_paths_replacements_and_deleted_directories() {
+        let f = Fixture::new();
+        let path = f.path("missing/nested/lib.sail");
+        let (tx, rx) = unbounded();
+        let mut handle = NotifyHandle::spawn(tx);
+        handle.set_config(loader::Config {
+            version: 1,
+            load: vec![loader::Entry::Files(vec![path.clone()])],
+            watch: vec![0],
+        });
+        ready(&rx);
+        fs::create_dir_all(f.0.join("missing/nested")).unwrap();
+        fs::write(&path, b"val a : int").unwrap();
+        changed(&rx, &path, Some(b"val a : int"));
+
+        let replacement = f.path("replacement.tmp");
+        fs::write(&replacement, b"val b : int").unwrap();
+        // Windows rename cannot replace an existing destination. Both steps
+        // must leave the parent watch alive on every platform.
+        fs::remove_file(&path).unwrap();
+        fs::rename(&replacement, &path).unwrap();
+        changed(&rx, &path, Some(b"val b : int"));
+        fs::write(&path, b"val c : bool").unwrap();
+        changed(&rx, &path, Some(b"val c : bool"));
+        for cycle in 0..8 {
+            fs::remove_dir_all(f.0.join("missing")).unwrap();
+            changed(&rx, &path, None);
+            fs::create_dir_all(f.0.join("missing/nested")).unwrap();
+            let recovered = format!("val recovered_{cycle} : int");
+            fs::write(&path, recovered.as_bytes()).unwrap();
+            changed(&rx, &path, Some(recovered.as_bytes()));
+            // Recovery must leave a live subscription, not just perform one
+            // successful read in response to the parent's creation event.
+            let modified = format!("val modified_{cycle} : bool");
+            fs::write(&path, modified.as_bytes()).unwrap();
+            changed(&rx, &path, Some(modified.as_bytes()));
+        }
+    }
+
+    #[test]
+    fn watch_only_directories_do_not_load_unselected_sources() {
+        let f = Fixture::new();
+        fs::write(f.path("inactive.sail"), b"val unused : int").unwrap();
+        let (tx, rx) = unbounded();
+        let mut handle = NotifyHandle::spawn(tx);
+        handle.set_config(loader::Config {
+            version: 1,
+            load: vec![loader::Entry::WatchDirectories(loader::Directories {
+                extensions: vec!["sail".into()],
+                include: vec![f.path("")],
+                exclude: vec![],
+            })],
+            watch: vec![0],
+        });
+        let until = Instant::now() + Duration::from_secs(10);
+        loop {
+            match rx.recv_timeout(until.saturating_duration_since(Instant::now())).unwrap() {
+                loader::Message::Loaded { files } => assert!(files.is_empty()),
+                loader::Message::Progress { n_done: LoadingProgress::Finished, .. } => break,
+                _ => {}
+            }
+        }
+        let path = f.path("new.sail");
+        fs::write(&path, b"val added : int").unwrap();
+        changed(&rx, &path, Some(b"val added : int"));
+    }
 }

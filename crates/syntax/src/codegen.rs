@@ -255,11 +255,10 @@ fn pluralize(s: &str) -> String {
 /// These are abstract grouping nodes or sub-structure helpers that
 /// exist only in the ungrammar for organization.
 const UNGRAM_ONLY_NODES: &[&str] = &[
-    "Expr",      // alternation — not a concrete CST node kind
-    "Pat",       // alternation
-    "Type",      // alternation
-    "FieldPat",  // sub-structure inside StructPat (no SyntaxKind)
-    "TypeParam", // sub-structure inside TypeParamList (no SyntaxKind)
+    "Expr",     // alternation — not a concrete CST node kind
+    "Pat",      // alternation
+    "Type",     // alternation
+    "FieldPat", // sub-structure inside StructPat (no SyntaxKind)
 ];
 
 pub fn generate_composite_kinds(ast: &AstSrc) -> Vec<String> {
@@ -977,12 +976,15 @@ const KEYWORD_MACRO_ARMS: &[(&str, &str)] = &[
     ("infix", "KW_INFIX"),
     ("infixl", "KW_INFIXL"),
     ("infixr", "KW_INFIXR"),
+    ("impure", "KW_IMPURE"),
     ("int", "KW_INT"),
     ("let", "KW_LET"),
     ("mapping", "KW_MAPPING"),
     ("match", "KW_MATCH"),
     ("mutual", "KW_MUTUAL"),
+    ("nat", "KW_NAT"),
     ("newtype", "KW_NEWTYPE"),
+    ("operator", "KW_OPERATOR"),
     ("order", "KW_ORDER"),
     ("outcome", "KW_OUTCOME"),
     ("overload", "KW_OVERLOAD"),
@@ -1233,6 +1235,7 @@ mod tests {
             "FIELD_INIT",
             "PARAM_LIST",
             "ARG_LIST",
+            "TYPE_PARAM",
             "TYPE_PARAM_LIST",
             "QUANTIFIER",
             "ATTRIBUTE",

@@ -41,7 +41,6 @@ impl RequestDispatcher<'_> {
     /// Handle request synchronously on the main thread with mutable state.
     /// Use for state-modifying requests (workspace reload, config change).
     /// NOT wrapped in catch_unwind — handler has full &mut GlobalState.
-    #[allow(dead_code)] // WIP: will be used for workspace reload request
     pub(crate) fn on_sync_mut<R>(
         &mut self,
         f: fn(&mut GlobalState, R::Params) -> anyhow::Result<R::Result>,
@@ -104,8 +103,16 @@ impl RequestDispatcher<'_> {
             None => return self,
         };
 
+        // The client may have cancelled while this sat in the queue; the
+        // cancellation already answered it.
+        if self.global_state.is_completed(&id) {
+            return self;
+        }
         let snap = self.global_state.snapshot();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(snap, params)));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ctx = stdx::panic_context::enter(panic_frame::<R>(&id));
+            f(snap, params)
+        }));
         let response = match thread_result_to_response::<R>(id.clone(), result) {
             Ok(response) => response,
             Err(_cancelled) => {
@@ -143,9 +150,24 @@ impl RequestDispatcher<'_> {
             None => return self,
         };
 
+        if self.global_state.is_completed(&id) {
+            return self;
+        }
         let snap = self.global_state.snapshot();
-        self.global_state.task_pool.spawn(move || {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(snap, params)));
+        // A request the user is waiting on, as rust-analyzer classifies
+        // completion and semantic tokens (`main_loop.rs:1299-1304`): the
+        // `ALLOW_RETRYING` requests are the latency-sensitive ones here,
+        // and the flag already said so in its own doc comment.
+        let intent = if ALLOW_RETRYING {
+            stdx::thread::ThreadIntent::LatencySensitive
+        } else {
+            stdx::thread::ThreadIntent::Worker
+        };
+        self.global_state.task_pool.spawn(intent, move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ctx = stdx::panic_context::enter(panic_frame::<R>(&id));
+                f(snap, params)
+            }));
             match thread_result_to_response::<R>(id.clone(), result) {
                 Ok(response) => crate::main_loop::Task::Response(response),
                 // (dispatch.rs:268): retry on cancellation if allowed.
@@ -228,6 +250,23 @@ impl NotificationDispatcher<'_> {
 }
 
 /// Parse a request into (id, params). Returns None on deserialization failure.
+/// What a crash report should say beside the backtrace.
+///
+/// `catch_unwind` turns a handler panic into an error response, which keeps
+/// the server alive and tells nobody *which* request died: the log gets a
+/// bare `panicked at ..` and the user gets an error code. rust-analyzer
+/// enters a `DbPanicContext` naming the method before calling the handler
+/// (`handlers/dispatch.rs:92`) and prints the frames from its panic hook.
+///
+/// `stdx::panic_context` is that mechanism, complete — RAII frames and the
+/// hook that prints them — and it had no caller anywhere in this workspace.
+///
+/// The method and the request id, not the parameters: a request body can
+/// carry a whole document, and this ends up in a log a user may paste.
+fn panic_frame<R: LspRequest>(id: &lsp_server::RequestId) -> String {
+    format!("request: {} (id {id})", R::METHOD)
+}
+
 fn parse<R: LspRequest>(req: Request) -> Option<(lsp_server::RequestId, R::Params)>
 where
     R::Params: for<'de> serde::Deserialize<'de>,
@@ -254,13 +293,16 @@ fn on_cancelled() -> lsp_server::ResponseError {
 /// Cancellation error wrapper for salsa::Cancelled.
 #[derive(Debug)]
 struct HandlerCancelledError {
-    #[allow(dead_code)]
-    inner: salsa::Cancelled,
+    /// The salsa unwind, when the cancellation arrived as one. An
+    /// `Analysis` method that runs inside `with_db` catches it and returns
+    /// `CancelledError` instead, and that arrives here as an ordinary
+    /// `Err` with nothing to carry.
+    inner: Option<salsa::Cancelled>,
 }
 
 impl std::error::Error for HandlerCancelledError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.inner)
+        self.inner.as_ref().map(|it| it as &(dyn std::error::Error + 'static))
     }
 }
 
@@ -298,13 +340,26 @@ where
                 message.push_str(panic_message);
             } else if let Ok(cancelled) = panic.downcast::<salsa::Cancelled>() {
                 log::error!("Cancellation propagated out of salsa! This is a bug");
-                return Err(HandlerCancelledError { inner: *cancelled });
+                return Err(HandlerCancelledError { inner: Some(*cancelled) });
             };
 
             Ok(Response::new_err(id, lsp_server::ErrorCode::InternalError as i32, message))
         }
     }
 }
+
+/// A protocol error with an intentional code, distinct from a server failure.
+#[derive(Debug)]
+pub(crate) struct RequestError {
+    pub code: lsp_server::ErrorCode,
+    pub message: &'static str,
+}
+impl std::fmt::Display for RequestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.message)
+    }
+}
+impl std::error::Error for RequestError {}
 
 /// Convert a handler result to an LSP Response.
 /// Downcasts anyhow errors to check for `salsa::Cancelled`:
@@ -329,8 +384,19 @@ where
                 format!("serialization error: {err}"),
             ),
         },
+        // A cancellation reaches here two ways: as a salsa unwind that got
+        // this far, or — now that `Analysis` catches its own — as the
+        // `CancelledError` a handler propagated with `?`. Both are
+        // ContentModified, not InternalError.
+        Err(e) if e.downcast_ref::<RequestError>().is_some() => {
+            let error = e.downcast::<RequestError>().unwrap();
+            Response::new_err(id, error.code as i32, error.message.to_owned())
+        }
+        Err(e) if e.downcast_ref::<ide_db::ide_types::CancelledError>().is_some() => {
+            return Err(HandlerCancelledError { inner: None })
+        }
         Err(e) => match e.downcast::<salsa::Cancelled>() {
-            Ok(cancelled) => return Err(HandlerCancelledError { inner: cancelled }),
+            Ok(cancelled) => return Err(HandlerCancelledError { inner: Some(cancelled) }),
             Err(e) => {
                 Response::new_err(id, lsp_server::ErrorCode::InternalError as i32, e.to_string())
             }

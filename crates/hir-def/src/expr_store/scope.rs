@@ -19,6 +19,8 @@ pub struct ExprScopes {
     scopes: Arena<ScopeData>,
     scope_entries: Arena<ScopeEntry>,
     scope_by_expr: ArenaMap<ExprId, ScopeId>,
+    eligible_implicit: std::collections::HashSet<PatId>,
+    implicit_bindings: ArenaMap<ExprId, PatId>,
 }
 
 /// One entry in a scope: a binding introduced by a pattern.
@@ -30,6 +32,8 @@ pub struct ScopeEntry {
     pat: PatId,
     /// Stable binding ID, if one was allocated during lowering.
     binding: Option<BindingId>,
+    mutable: bool,
+    implicit: bool,
 }
 
 impl ScopeEntry {
@@ -43,6 +47,14 @@ impl ScopeEntry {
 
     pub fn binding(&self) -> Option<BindingId> {
         self.binding
+    }
+
+    pub fn is_mutable(&self) -> bool {
+        self.mutable
+    }
+
+    pub fn is_implicit(&self) -> bool {
+        self.implicit
     }
 }
 
@@ -59,6 +71,8 @@ pub enum ScopeOrigin {
     ForeachLoop,
     /// Let/Var expression scope.
     LetExpr,
+    /// Mapping clause scope (the arm's pattern binds in its expressions).
+    MappingArm,
 }
 
 /// Data for a single scope node in the tree.
@@ -85,17 +99,71 @@ fn empty_entries(idx: usize) -> IdxRange<ScopeEntry> {
 impl ExprScopes {
     /// Build scopes for a function body.
     pub fn new(body: &Body) -> Self {
+        Self::new_with_globals(body, |_| false)
+    }
+
+    pub fn new_with_globals(body: &Body, is_global: impl Fn(&Name) -> bool) -> Self {
         let mut scopes = ExprScopes {
             scopes: Arena::default(),
             scope_entries: Arena::default(),
             scope_by_expr: ArenaMap::with_capacity(body.len()),
+            eligible_implicit: body
+                .assignment_bindings
+                .iter()
+                .filter_map(|(_, pat)| {
+                    let Pat::Bind(name) = body.pat(*pat)? else { return None };
+                    (!is_global(&Name::new(name))).then_some(*pat)
+                })
+                .collect(),
+            implicit_bindings: ArenaMap::default(),
         };
         let mut root = scopes.root_scope();
         // Add function parameter bindings to root scope.
         scopes.add_params_bindings(body, root, &body.params);
         // Walk the body expression tree.
         compute_expr_scopes(body.body_expr, body, &mut scopes, &mut root);
+        // A clause's guard is beside the body too — `function clause f((a @
+        // index : bits(5), ..) if unsigned(index) >= 3) = ..` — so no
+        // expression in it had a scope, and the parameters it is written
+        // against were unreachable from it.
+        if let Some(guard) = body.guard {
+            let mut guard_scope = root;
+            compute_expr_scopes(guard, body, &mut scopes, &mut guard_scope);
+        }
+        // Mapping arms sit beside the body expression, not inside it —
+        // `Body::mapping_arms` is its own list, and nothing in the walk
+        // above reaches it. So the pattern of a `mapping clause` bound its
+        // variables in no scope at all: in `forwards Regidx(r) =>
+        // zero_extend(r)`, the `r` on the right resolved through no scope,
+        // and inference fell back to matching the name against every
+        // pattern in the body.
+        for arm in &body.mapping_arms {
+            let mut arm_scope = scopes.new_scope_with_origin(root, ScopeOrigin::MappingArm);
+            for pat in [arm.lhs_pat, arm.rhs_pat].into_iter().flatten() {
+                scopes.add_pat_bindings(body, arm_scope, pat);
+            }
+            // One lowering path has no arm expressions of its own and
+            // parks `body_expr` in those fields as a placeholder. Walking
+            // it here would re-assign the whole body to this arm's scope.
+            for expr in [arm.guard, Some(arm.lhs_expr), Some(arm.rhs_expr)]
+                .into_iter()
+                .flatten()
+                .filter(|&e| e != body.body_expr)
+            {
+                compute_expr_scopes(expr, body, &mut scopes, &mut arm_scope);
+            }
+        }
         scopes
+    }
+
+    /// Only activated assignment patterns are declarations. A same-spelled
+    /// write to an existing local/register must retain that existing identity.
+    pub fn implicit_binding(&self, target: ExprId) -> Option<PatId> {
+        self.implicit_bindings.get(target).copied()
+    }
+
+    pub fn binds_pattern(&self, pat: PatId) -> bool {
+        self.scope_entries.iter().any(|(_, entry)| entry.pat == pat)
     }
 
     /// Get the entries (bindings) visible in `scope`.
@@ -153,10 +221,6 @@ impl ExprScopes {
         })
     }
 
-    fn add_binding(&mut self, scope: ScopeId, name: Name, pat: PatId) {
-        self.add_binding_with_id(scope, name, pat, None);
-    }
-
     fn add_binding_with_id(
         &mut self,
         scope: ScopeId,
@@ -164,7 +228,13 @@ impl ExprScopes {
         pat: PatId,
         binding: Option<BindingId>,
     ) {
-        let entry = self.scope_entries.alloc(ScopeEntry { name, pat, binding });
+        let entry = self.scope_entries.alloc(ScopeEntry {
+            name,
+            pat,
+            binding,
+            mutable: false,
+            implicit: false,
+        });
         self.scopes[scope].entries =
             IdxRange::new_inclusive(self.scopes[scope].entries.start()..=entry);
     }
@@ -212,12 +282,20 @@ impl ExprScopes {
                     self.add_pat_bindings(body, scope, *lhs);
                     self.add_pat_bindings(body, scope, *rhs);
                 }
-                Pat::Missing
-                | Pat::Wild
-                | Pat::Literal(_)
-                | Pat::Index { .. }
-                | Pat::RangeIndex { .. }
-                | Pat::AsType { .. } => {}
+                // `v[i]` and `v[hi .. lo]` bind `v` — the name is the
+                // pattern's, not a sub-pattern's — and an annotated pattern
+                // has one inside it. All three sat in the leaf list, so a
+                // use of the name resolved through no scope at all and
+                // inference fell back to matching names against every
+                // pattern in the body.
+                Pat::Index { name, .. } | Pat::RangeIndex { name, .. } => {
+                    let bid = Self::find_binding_id(body, pat);
+                    self.add_binding_with_id(scope, Name::new(name), pat, bid);
+                }
+                Pat::AsType { pat: inner, .. } => {
+                    self.add_pat_bindings(body, scope, *inner);
+                }
+                Pat::Missing | Pat::Wild | Pat::Literal(_) => {}
             }
         }
     }
@@ -228,8 +306,45 @@ impl ExprScopes {
         }
     }
 
+    fn add_mutable_pat_bindings(&mut self, body: &Body, scope: ScopeId, pat: PatId) {
+        let start = self.scope_entries.len();
+        self.add_pat_bindings(body, scope, pat);
+        for (_, entry) in self.scope_entries.iter_mut().skip(start) {
+            entry.mutable = true;
+        }
+    }
+
     fn set_scope(&mut self, node: ExprId, scope: ScopeId) {
         self.scope_by_expr.insert(node, scope);
+    }
+
+    fn introduce_assignment(&mut self, body: &Body, target: ExprId, scope: &mut ScopeId) {
+        match body.expr(target) {
+            Some(Expr::Ident(name)) => {
+                let Some(&pat) = body.assignment_bindings.get(target) else { return };
+                if !self.eligible_implicit.contains(&pat)
+                    || self.resolve_name_in_scope(*scope, &Name::new(name)).is_some()
+                {
+                    return;
+                }
+                *scope = self.new_scope(*scope);
+                self.add_mutable_pat_bindings(body, *scope, pat);
+                for id in self.scopes[*scope].entries.clone() {
+                    self.scope_entries[id].implicit = true;
+                }
+                self.implicit_bindings.insert(target, pat);
+                // The declaration token denotes the binding it introduces;
+                // the initializer has already been walked in the old scope.
+                self.set_scope(target, *scope);
+            }
+            Some(Expr::Cast { expr, .. }) => self.introduce_assignment(body, *expr, scope),
+            Some(Expr::Tuple(items)) => {
+                for &item in items {
+                    self.introduce_assignment(body, item, scope);
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -239,13 +354,23 @@ fn compute_expr_scopes(expr: ExprId, body: &Body, scopes: &mut ExprScopes, scope
 
     match e.clone() {
         Expr::Block(stmts) => {
-            compute_block_scopes(&stmts, body, scopes, scope);
+            // Statements extend this block's scope, not its parent's. Sharing
+            // the mutable cursor leaked bindings into sibling branches and
+            // uses following a nested block.
+            let mut block_scope = scopes.new_scope(*scope);
+            compute_block_scopes(&stmts, body, scopes, &mut block_scope);
         }
         Expr::Let { pat, value, body: let_body } => {
             compute_expr_scopes(value, body, scopes, scope);
-            *scope = scopes.new_scope_with_origin(*scope, ScopeOrigin::LetExpr);
-            scopes.add_pat_bindings(body, *scope, pat);
-            compute_expr_scopes(let_body, body, scopes, scope);
+            // A *local* scope: `let x = .. in e` binds `x` in `e` and
+            // nowhere else. Assigning to `*scope` instead left the binding
+            // in place for every statement after the expression, so in
+            // `let y = let x = 2 in x; x + y` both `x`es resolved to the
+            // inner one. The `match` arm below and the `var` arm above both
+            // use a local, which is why neither had this.
+            let mut let_scope = scopes.new_scope_with_origin(*scope, ScopeOrigin::LetExpr);
+            scopes.add_pat_bindings(body, let_scope, pat);
+            compute_expr_scopes(let_body, body, scopes, &mut let_scope);
         }
         Expr::Match { scrutinee, arms } | Expr::Try { scrutinee, arms } => {
             compute_expr_scopes(scrutinee, body, scopes, scope);
@@ -259,7 +384,7 @@ fn compute_expr_scopes(expr: ExprId, body: &Body, scopes: &mut ExprScopes, scope
             }
         }
         // Foreach now has pat: PatId instead of iterator: String.
-        Expr::Foreach { pat, start, end, step, body: loop_body } => {
+        Expr::Foreach { pat, start, end, step, body: loop_body, .. } => {
             compute_expr_scopes(start, body, scopes, scope);
             compute_expr_scopes(end, body, scopes, scope);
             if let Some(step) = step {
@@ -298,16 +423,12 @@ fn compute_expr_scopes(expr: ExprId, body: &Body, scopes: &mut ExprScopes, scope
             compute_expr_scopes(target, body, scopes, scope);
             compute_expr_scopes(value, body, scopes, scope);
         }
-        Expr::Var { target, value, body: var_body } => {
+        Expr::Var { pat, value, body: var_body } => {
             // Expr::Var creates a scope for the target binding,
             // mirroring Expr::Let scope handling.
             compute_expr_scopes(value, body, scopes, scope);
             let mut var_scope = scopes.new_scope(*scope);
-            // Extract binding name from target (Expr::Ident)
-            if let Some(Expr::Ident(name)) = body.expr(target) {
-                let sentinel_pat = PatId::from_raw(RawIdx::from_u32(u32::MAX));
-                scopes.add_binding(var_scope, Name::new(name), sentinel_pat);
-            }
+            scopes.add_mutable_pat_bindings(body, var_scope, pat);
             compute_expr_scopes(var_body, body, scopes, &mut var_scope);
         }
         Expr::Index { base, index } => {
@@ -340,7 +461,7 @@ fn compute_expr_scopes(expr: ExprId, body: &Body, scopes: &mut ExprScopes, scope
         | Expr::UnaryOp { expr: e, .. }
         | Expr::Cast { expr: e, .. }
         | Expr::Field { expr: e, .. }
-        | Expr::Attribute { expr: e } => {
+        | Expr::Attribute { expr: e, .. } => {
             compute_expr_scopes(e, body, scopes, scope);
         }
         Expr::Exit(Some(e)) => {
@@ -383,10 +504,13 @@ fn compute_block_scopes(
                 // Var bindings create scope like Let bindings.
                 compute_expr_scopes(*value, body, scopes, scope);
                 *scope = scopes.new_scope(*scope);
-                scopes.add_pat_bindings(body, *scope, *pat);
+                scopes.add_mutable_pat_bindings(body, *scope, *pat);
             }
             Statement::Expr(expr) => {
                 compute_expr_scopes(*expr, body, scopes, scope);
+                if let Some(Expr::Assign { target, .. }) = body.expr(*expr) {
+                    scopes.introduce_assignment(body, *target, scope);
+                }
             }
         }
     }
@@ -395,6 +519,7 @@ fn compute_block_scopes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ExprId as hir_def_expr_id;
 
     fn scopes_for(source: &str) -> (Body, ExprScopes) {
         use syntax::ast::{AstNode as _, CallableDef};
@@ -439,6 +564,31 @@ mod tests {
         let (_, scopes) = scopes_for("function f(x) = match x { 0 => 10, _ => 20 }\n");
         // Root + 2 arm scopes = at least 3
         assert!(scopes.scopes.len() >= 3, "expected >= 3 scopes, got {}", scopes.scopes.len());
+    }
+
+    /// A `foreach` iterator resolves at the *use*, not merely somewhere.
+    ///
+    /// `resolve_name_in_scope` is asked with the scope of the expression the
+    /// name appears in, so "some scope has it" is not the question
+    /// `hir-ty` asks.
+    #[test]
+    fn foreach_iterator_resolves_at_its_use() {
+        let (body, scopes) =
+            scopes_for("function f() = { foreach (i from 0 to 32 by 1 in inc) { g(i) } }\n");
+        let name = Name::new("i");
+        let uses: Vec<hir_def_expr_id> = body
+            .iter_exprs()
+            .filter(|(_, e)| matches!(e, Expr::Ident(n) if n == "i"))
+            .map(|(id, _)| id)
+            .collect();
+        assert!(!uses.is_empty(), "the body has no `i` to resolve");
+        for id in uses {
+            let scope = scopes.scope_for(id).expect("every expression has a scope");
+            assert!(
+                scopes.resolve_name_in_scope(scope, &name).is_some(),
+                "`i` does not resolve in the scope of its own use"
+            );
+        }
     }
 
     #[test]

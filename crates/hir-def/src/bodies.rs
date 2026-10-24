@@ -66,8 +66,10 @@ pub struct CallableBodies {
 pub struct CallableBody {
     pub name: String,
     pub def_span: Span,
-    #[allow(dead_code)]
     pub body_span: Span,
+    /// A top-level initializer's annotation belongs to the body being checked;
+    /// its binding is not yet visible in that body's environment.
+    pub initializer_type: Option<String>,
     pub body: Arc<Body>,
     pub source_map: Arc<BodySourceMap>,
     pub effects: BTreeSet<EffectTag>,
@@ -120,12 +122,70 @@ impl CallableBodies {
 
         let source = root.text().to_string();
         let mut entries = Vec::new();
+        // Bodies inside a non-taken `$ifdef` branch must be skipped, exactly
+        // as they are when building the ItemTree and the type environment.
+        // Otherwise a body is inferred against an environment that dropped
+        // the very definitions it calls.
+        let mut symbols = syntax::preprocess::default_symbols();
+        let mut cond = syntax::preprocess::CondFilter::new();
+        // `impl emulator(request) = { .. }` inside an `outcome` is a
+        // callable with parameters and a body, and it is a child of the
+        // outcome rather than of the file — so this loop never saw it, no
+        // body was lowered, and `request` was bound nowhere. Upstream
+        // checks it like any other funcl (`Impl funcl`, parser.mly:1401).
+        let mut defs: Vec<syntax::SyntaxNode> = Vec::new();
         for child in root.children() {
+            if !cond.accept(&child, &mut symbols, None) {
+                continue;
+            }
+            if child.kind() == SK::OUTCOME_DEF {
+                defs.extend(child.children().filter(|c| CallableDef::can_cast(c.kind())));
+            }
+            defs.push(child);
+        }
+        for child in defs {
             // Process CALLABLE_DEF (regular function/mapping) and
             // SCATTERED_CLAUSE_DEF (function clause/mapping clause).
             // Clauses produce separate callable bodies that share the
             // scattered definition name.
+            // A top-level `let x = expr` has a body that must be inferred
+            // too: upstream checks `DEF_let` like any other definition, so a
+            // type error in the initialiser is reported. Without this, no
+            // top-level binding's right-hand side is ever type-checked.
+            if child.kind() == SK::NAMED_DEF {
+                if !Self::is_top_level_binding(&child) {
+                    continue;
+                }
+                let Some(body_node) = Self::cst_callable_body_node(&child) else { continue };
+                let name = Self::cst_callable_name(&child);
+                let range = child.text_range();
+                let (body, source_map) = Body::lower_body(&body_node);
+                let effects = collect_effect_tags(&body, &register_names);
+                entries.push(CallableBody {
+                    name: if name.is_empty() { "_".to_string() } else { name },
+                    def_span: Span::new(usize::from(range.start()), usize::from(range.end())),
+                    body_span: Self::trimmed_span(&body_node, &source),
+                    initializer_type: child
+                        .children()
+                        .find(|node| node.kind().is_type_node())
+                        .map(|node| node.text().to_string()),
+                    body: Arc::new(body),
+                    source_map: Arc::new(source_map),
+                    effects,
+                    outcomes: BTreeSet::new(),
+                });
+                continue;
+            }
             if !CallableDef::can_cast(child.kind()) && !ScatteredClauseDef::can_cast(child.kind()) {
+                continue;
+            }
+            if ScatteredClauseDef::can_cast(child.kind())
+                && child
+                    .children_with_tokens()
+                    .any(|t| matches!(t.kind(), SK::KW_ENUM | SK::KW_UNION))
+            {
+                // A type clause declares a constructor and its payload type;
+                // it has no executable initializer to lower or infer.
                 continue;
             }
             let range = child.text_range();
@@ -153,13 +213,31 @@ impl CallableBodies {
             if let Some(body_node) = Self::cst_callable_body_node(&child) {
                 if is_mapping {
                     // Mapping: lower body and extract mapping arms from <-> infix
-                    let (mut body, source_map) = Body::lower_body(&body_node);
+                    let (mut body, mut source_map) = Body::lower_body(&body_node);
                     let bs = Self::trimmed_span(&body_node, &source);
-                    Self::extract_mapping_arms_from_body(&mut body, &source, bs);
+                    // The clauses now come from the CST — `MAPPING_CLAUSE`
+                    // carries a real pattern and a real body expression.
+                    // The text scrape below is the fallback for the shapes
+                    // the grammar still does not reach.
+                    if body.mapping_arms.is_empty() {
+                        Self::extract_mapping_arms_from_body(&mut body, &source, bs);
+                    }
+                    // A guarded clause never reaches the parser as a `<->`
+                    // expression: `I(imm) if e == 0b0 <-> ..` leaves the body
+                    // node covering `I(imm)` alone. Rebuild the arm from the
+                    // clause's text.
+                    if body.mapping_arms.is_empty() {
+                        if let Some(rebuilt) = Self::mapping_arm_from_text(&child, &source) {
+                            let (b, sm) = rebuilt;
+                            body = b;
+                            source_map = sm;
+                        }
+                    }
                     entries.push(CallableBody {
                         name: name.clone(),
                         def_span,
                         body_span: Self::trimmed_span(&body_node, &source),
+                        initializer_type: None,
                         body: Arc::new(body),
                         source_map: Arc::new(source_map),
                         effects: BTreeSet::new(),
@@ -169,8 +247,15 @@ impl CallableBodies {
                     // Lower body + params in one pass via lower_body_with_params.
                     // during body lowering, not as a post-processing step.
                     let param_list_node = child.children().find(|c| ParamList::can_cast(c.kind()));
-                    let (body, source_map) =
+                    let (mut body, mut source_map) =
                         Body::lower_body_with_params(&body_node, param_list_node.as_ref());
+                    if body.params.is_empty() && param_list_node.is_none() {
+                        if let Some((b, sm)) = Self::unparenthesised_param_body(&child, &body_node)
+                        {
+                            body = b;
+                            source_map = sm;
+                        }
+                    }
                     let mut effects = collect_effect_tags(&body, &register_names);
                     // Mark scattered clause with Scattered effect
                     if is_scattered_clause {
@@ -180,6 +265,7 @@ impl CallableBodies {
                         name: name.clone(),
                         def_span,
                         body_span: Self::trimmed_span(&body_node, &source),
+                        initializer_type: None,
                         body: Arc::new(body),
                         source_map: Arc::new(source_map),
                         effects,
@@ -210,16 +296,23 @@ impl CallableBodies {
         Span::new(start, end)
     }
 
+    /// Whether a `NAMED_DEF` binds a value with an initialiser — `let`,
+    /// `var` or `register` — as opposed to a type definition or an overload.
+    ///
+    /// A register's initialiser is a body like any other: upstream checks
+    /// `register R : bits(32) = 0xFFFF` the same way it checks a `let`, and
+    /// without an entry here nothing ever looked at the right-hand side.
+    fn is_top_level_binding(node: &syntax::SyntaxNode) -> bool {
+        use parser::SyntaxKind as SK;
+        node.children_with_tokens()
+            .filter_map(|el| el.into_token())
+            .find(|t| !t.kind().is_trivia() && t.kind() != SK::KW_PRIVATE)
+            .is_some_and(|t| matches!(t.kind(), SK::KW_LET | SK::KW_VAR | SK::KW_REGISTER))
+    }
+
     /// Extract callable name from a CST CALLABLE_DEF node.
     fn cst_callable_name(node: &syntax::SyntaxNode) -> String {
-        use parser::SyntaxKind as SK;
-        // Skip keywords, find first IDENT
-        for tok in node.descendants_with_tokens().filter_map(|el| el.into_token()) {
-            if tok.kind() == SK::IDENT {
-                return tok.text().to_string();
-            }
-        }
-        String::new()
+        syntax::definition_name(node).unwrap_or_default()
     }
 
     /// Find the body expression node after `=` in a CALLABLE_DEF.
@@ -326,6 +419,7 @@ impl CallableBodies {
                         rhs_expr: placeholder,
                         guard,
                         span: body_span,
+                        mirrored: false,
                     });
                 }
             }
@@ -349,8 +443,93 @@ impl CallableBodies {
                 rhs_expr: rhs_id,
                 guard: None,
                 span,
+                mirrored: false,
             });
         }
+    }
+
+    /// Build a mapping arm by splitting the clause's own text.
+    ///
+    /// Used when the parser did not produce a `<->` expression, which is
+    /// every clause carrying a guard. The split is on the top-level `<->`,
+    /// then each side on a trailing ` if `.
+    fn mapping_arm_from_text(
+        clause: &syntax::SyntaxNode,
+        _source: &str,
+    ) -> Option<(Body, BodySourceMap)> {
+        let text = clause.text().to_string();
+        let base = usize::from(clause.text_range().start());
+        let eq = text.find('=')?;
+        let tail = &text[eq + 1..];
+        let tail_base = base + eq + 1;
+        let arrow = tail.find("<->")?;
+        let (lhs_raw, rhs_raw) = (&tail[..arrow], &tail[arrow + 3..]);
+
+        // ` if <guard>` at the end of a side. Both sides carry the same
+        // guard in practice; the left one is enough to check it once.
+        let split_guard = |part: &str, off: usize| -> ((String, usize), Option<(String, usize)>) {
+            match part.find(" if ") {
+                Some(at) => {
+                    let expr = part[..at].trim();
+                    let guard = part[at + 4..].trim();
+                    let expr_off = off + (part.len() - part.trim_start().len());
+                    let guard_off = off + at + 4;
+                    (
+                        (expr.to_string(), expr_off),
+                        (!guard.is_empty()).then(|| (guard.to_string(), guard_off)),
+                    )
+                }
+                None => {
+                    let expr = part.trim();
+                    let expr_off = off + (part.len() - part.trim_start().len());
+                    ((expr.to_string(), expr_off), None)
+                }
+            }
+        };
+        let (lhs, guard) = split_guard(lhs_raw, tail_base);
+        let (rhs, _) = split_guard(rhs_raw, tail_base + arrow + 3);
+
+        let (mut body, source_map, lhs_expr, rhs_expr, guard_expr) =
+            crate::expr_store::lower::lower_mapping_clause_text(
+                (&lhs.0, lhs.1),
+                (&rhs.0, rhs.1),
+                guard.as_ref().map(|(t, o)| (t.as_str(), *o)),
+            )?;
+        let lhs_pat = Self::expr_to_pat(&mut body, lhs_expr);
+        let rhs_pat = Self::expr_to_pat(&mut body, rhs_expr);
+        body.mapping_arms.push(crate::expr_store::hir::MappingArm {
+            direction: crate::expr_store::hir::MappingDirection::Bidirectional,
+            lhs_pat,
+            rhs_pat,
+            lhs_expr,
+            rhs_expr,
+            guard: guard_expr,
+            span: Span::new(lhs.1, rhs.1 + rhs.0.len()),
+            mirrored: false,
+        });
+        Some((body, source_map))
+    }
+
+    /// Re-lower a clause whose parameter is written without parentheses.
+    fn unparenthesised_param_body(
+        clause: &syntax::SyntaxNode,
+        body_node: &syntax::SyntaxNode,
+    ) -> Option<(Body, BodySourceMap)> {
+        let text = clause.text().to_string();
+        let base = usize::from(clause.text_range().start());
+        let eq = text.find('=')?;
+        // `function clause <name> <pat> = ..` — the pattern starts after the
+        // third word. Only a concatenation is rebuilt; anything else the
+        // parser already models.
+        let head_end =
+            text[..eq].char_indices().filter(|(_, c)| c.is_whitespace()).map(|(i, _)| i).nth(2)?;
+        let raw = &text[head_end..eq];
+        let trimmed = raw.trim();
+        if trimmed.is_empty() || !trimmed.contains('@') {
+            return None;
+        }
+        let abs = base + head_end + (raw.len() - raw.trim_start().len());
+        crate::expr_store::lower::lower_body_with_param_text(body_node, trimmed, abs)
     }
 
     /// Best-effort conversion of an ExprId to a PatId for mapping arms.
@@ -388,10 +567,31 @@ impl CallableBodies {
                 let id = body.store.pats.alloc(Pat::Tuple(pat_items));
                 Some(id)
             }
+            // Struct: `struct { e1, e2 }` → Struct { fields: [("e1", Bind("e1")), ..] }.
+            // A field written without `= pat` is punned (`fpat: | id`,
+            // parser.mly:570), and the expression lowering already turned it
+            // into a reference to the field's own name.
+            Some(Expr::Struct { name, fields }) => {
+                let name = name.clone();
+                let fields = fields.clone();
+                let pat_fields: Vec<_> = fields
+                    .iter()
+                    .filter_map(|(f, e)| Self::expr_to_pat(body, *e).map(|p| (f.clone(), p)))
+                    .collect();
+                let id = body.store.pats.alloc(Pat::Struct { name, fields: pat_fields });
+                Some(id)
+            }
             // Cast: expr : type → Typed { inner }
-            Some(Expr::Cast { expr, .. }) => {
-                let expr = *expr;
-                Self::expr_to_pat(body, expr)
+            // `(x : bits(2))` keeps its annotation. Returning the inner
+            // pattern alone threw it away, and in a mapping clause that is
+            // the only thing that types the binding: `0b0 @ (x : bits(2))`
+            // is a vector-concat pattern, which cannot recover an operand's
+            // width on its own, so `x` was bound at `error()` and every use
+            // of it on the other side went unchecked.
+            Some(Expr::Cast { expr, ty }) => {
+                let (expr, ty) = (*expr, ty.clone());
+                let inner = Self::expr_to_pat(body, expr)?;
+                Some(body.store.pats.alloc(Pat::Typed { inner, ty }))
             }
             // Binary op (@, ::) → Infix
             Some(Expr::BinaryOp { lhs, op, rhs }) => {
@@ -412,19 +612,16 @@ impl CallableBodies {
     }
 
     /// Number of cached callable bodies.
-    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
     /// True iff no callable bodies were cached.
-    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
     /// All entries in source order.
-    #[allow(dead_code)]
     pub fn entries(&self) -> &[CallableBody] {
         &self.entries
     }
@@ -442,11 +639,13 @@ impl CallableBodies {
                 let id = builder.alloc_expr(Expr::Missing, Span::new(0, 0));
                 let (store, expr_source_map) = builder.finish();
                 let body = Body::new(store, vec![], id);
-                let source_map = BodySourceMap { file_id: None, store: expr_source_map };
+                let source_map =
+                    BodySourceMap { file_id: None, store: expr_source_map, def_base: 0 };
                 CallableBody {
                     name,
                     def_span: span,
                     body_span: span,
+                    initializer_type: None,
                     body: Arc::new(body),
                     source_map: Arc::new(source_map),
                     effects,
@@ -458,7 +657,6 @@ impl CallableBodies {
     }
 
     /// Entries matching `name` (may be multiple for function clauses).
-    #[allow(dead_code)]
     pub fn by_name<'a, 'b>(
         &'a self,
         name: &'b str,
@@ -562,6 +760,13 @@ mod tests {
     fn val_spec_alone_yields_no_body() {
         let bodies = bodies("val foo : int -> int\n");
         assert!(bodies.is_empty());
+    }
+
+    #[test]
+    fn scattered_type_payloads_are_not_executable_bodies() {
+        let bodies = bodies("scattered union U\nunion clause U = private C : (int, bool)\nscattered enum E\nenum clause E = EA\nval f : int -> int\nfunction clause f(x) = x\nval m : int <-> bool\nmapping clause m = 1 <-> true\n");
+        let names: Vec<_> = bodies.entries().iter().map(|entry| entry.name.as_str()).collect();
+        assert_eq!(names, ["f", "m"]);
     }
 
     #[test]

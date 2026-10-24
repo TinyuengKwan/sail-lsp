@@ -620,6 +620,8 @@ dependencies = [
  "hir-expand",
  "intern",
  "la-arena 0.3.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "num-bigint",
+ "num-traits",
  "parser",
  "rowan",
  "rustc-hash 2.1.2",
@@ -637,9 +639,6 @@ dependencies = [
  "base-db",
  "expect-test",
  "hir",
- "hir-def",
- "hir-expand",
- "hir-ty",
  "ide-assists",
  "ide-completion",
  "ide-db",
@@ -661,10 +660,11 @@ version = "0.1.0"
 dependencies = [
  "base-db",
  "expect-test",
- "hir-def",
+ "hir",
  "ide-db",
  "ide-diagnostics",
  "parser",
+ "salsa",
  "syntax",
  "url",
 ]
@@ -675,8 +675,6 @@ version = "0.1.0"
 dependencies = [
  "base-db",
  "hir",
- "hir-def",
- "hir-ty",
  "ide-db",
  "parser",
  "salsa",
@@ -691,9 +689,6 @@ dependencies = [
  "base-db",
  "either",
  "hir",
- "hir-def",
- "hir-expand",
- "hir-ty",
  "log",
  "parser",
  "profile",
@@ -701,6 +696,7 @@ dependencies = [
  "rustc-hash 2.1.2",
  "salsa",
  "serde_json",
+ "stdx",
  "syntax",
  "url",
  "vfs",
@@ -713,9 +709,6 @@ dependencies = [
  "base-db",
  "expect-test",
  "hir",
- "hir-def",
- "hir-expand",
- "hir-ty",
  "ide-db",
  "parser",
  "rowan",
@@ -730,8 +723,6 @@ version = "0.1.0"
 dependencies = [
  "base-db",
  "hir",
- "hir-def",
- "hir-expand",
  "ide-db",
  "parser",
  "rowan",
@@ -1112,6 +1103,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "num-bigint"
+version = "0.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c89e69e7e0f03bea5ef08013795c25018e101932225a656383bd384495ecc367"
+dependencies = [
+ "num-integer",
+ "num-traits",
+]
+
+[[package]]
+name = "num-integer"
+version = "0.1.47"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7ce2d95d4b3734dc35aa2f45e1aa22cd416814592a4f9d9205e11affd5b8e10b"
+dependencies = [
+ "num-traits",
 ]
 
 [[package]]
@@ -1555,9 +1565,6 @@ dependencies = [
  "base-db",
  "crossbeam-channel",
  "hir",
- "hir-def",
- "hir-expand",
- "hir-ty",
  "ide",
  "ide-assists",
  "ide-db",
@@ -1571,7 +1578,6 @@ dependencies = [
  "paths",
  "profile",
  "project-model",
- "rayon",
  "rustc-hash 2.1.2",
  "salsa",
  "serde",
@@ -1583,6 +1589,7 @@ dependencies = [
  "tracing-tree",
  "url",
  "vfs",
+ "vfs-notify",
  "walkdir",
  "z3",
 ]
@@ -1808,6 +1815,7 @@ name = "syntax"
 version = "0.1.0"
 dependencies = [
  "base-db",
+ "expect-test",
  "parser",
  "rowan",
  "rustc-hash 2.1.2",

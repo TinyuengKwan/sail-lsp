@@ -25,7 +25,7 @@ impl<'a> FmtVisitor<'a> {
     /// Uses `Indent::block_only` to strip alignment from the indent before
     /// applying it to gap lines (rustfmt uses block_only to avoid carrying
     /// alignment from the previous item into the gap).
-    #[allow(dead_code)] // Used when visitor recurses into function bodies.
+    #[expect(dead_code)] // Used when visitor recurses into function bodies.
     pub(crate) fn format_missing_with_indent(&mut self, end: usize) {
         if end <= self.last_pos {
             return;

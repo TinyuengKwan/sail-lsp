@@ -5,8 +5,18 @@
 
 use std::collections::HashMap;
 
-use crate::item_tree::{ItemKind, ItemTree};
+use base_db::FileId;
+
+use crate::item_tree::{DefKind, ItemTree};
 use crate::Span;
+
+/// A span together with the file it is in. A scattered group spans files, so
+/// none of its parts can be placed by an offset alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InFileSpan {
+    pub file: FileId,
+    pub span: Span,
+}
 
 /// Kind of a scattered definition group.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,14 +32,15 @@ pub enum ScatteredKind {
 pub struct ScatteredStatus {
     pub kind: Option<ScatteredKind>,
     pub heads: Vec<ScatteredHeadLocation>,
-    pub clauses: Vec<Span>,
-    pub ends: Vec<Span>,
+    pub clauses: Vec<InFileSpan>,
+    pub ends: Vec<InFileSpan>,
     /// Member names from union/enum clauses (for completeness checks).
     pub clause_member_names: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ScatteredHeadLocation {
+    pub file: FileId,
     pub name_span: Span,
     pub def_span: Span,
 }
@@ -65,63 +76,63 @@ fn scattered_kind_from_sig(sig: &str) -> Option<ScatteredKind> {
 /// Aggregate scattered groups by name from `item_trees`.
 pub fn workspace_scattered_status<'a, I>(item_trees: I) -> HashMap<String, ScatteredStatus>
 where
-    I: IntoIterator<Item = &'a ItemTree>,
+    I: IntoIterator<Item = (FileId, &'a ItemTree)>,
 {
     let mut out: HashMap<String, ScatteredStatus> = HashMap::new();
-    for tree in item_trees {
+    for (file, tree) in item_trees {
         for &id in tree.top_level_items() {
             let name_str = id.name(tree).as_str();
-            let kind = id.item_kind(tree);
+            let kind = id.def_kind(tree);
             let is_clause = id.is_clause(tree);
             let span = id.span(tree);
             match kind {
-                ItemKind::ScatteredHead => {
+                DefKind::ScatteredHead => {
                     let e = out.entry(name_str.to_string()).or_default();
                     e.kind = scattered_kind_from_sig(id.signature(tree));
-                    e.heads.push(ScatteredHeadLocation { name_span: span, def_span: span });
+                    e.heads.push(ScatteredHeadLocation { file, name_span: span, def_span: span });
                 }
-                ItemKind::EndMarker => {
+                DefKind::EndMarker => {
                     let e = out.entry(name_str.to_string()).or_default();
-                    e.ends.push(span);
+                    e.ends.push(InFileSpan { file, span });
                 }
                 // `function clause` or `mapping clause`
-                ItemKind::Function if is_clause => {
+                DefKind::Function if is_clause => {
                     let e = out.entry(name_str.to_string()).or_default();
                     if e.kind.is_none() {
                         e.kind = Some(ScatteredKind::Function);
                     }
-                    e.clauses.push(span);
+                    e.clauses.push(InFileSpan { file, span });
                 }
-                ItemKind::Mapping if is_clause => {
+                DefKind::Mapping if is_clause => {
                     let e = out.entry(name_str.to_string()).or_default();
                     if e.kind.is_none() {
                         e.kind = Some(ScatteredKind::Mapping);
                     }
-                    e.clauses.push(span);
+                    e.clauses.push(InFileSpan { file, span });
                 }
                 // `union clause X = Y` or `enum clause X = Y`
-                ItemKind::Union if is_clause => {
+                DefKind::Union if is_clause => {
                     let e = out.entry(name_str.to_string()).or_default();
                     if e.kind.is_none() {
                         e.kind = Some(ScatteredKind::Union);
                     }
-                    e.clauses.push(span);
+                    e.clauses.push(InFileSpan { file, span });
                     if let Some(member) = id.member_name(tree) {
                         e.clause_member_names.push(member.to_owned());
                     }
                 }
-                ItemKind::Enum if is_clause => {
+                DefKind::Enum if is_clause => {
                     let e = out.entry(name_str.to_string()).or_default();
                     if e.kind.is_none() {
                         e.kind = Some(ScatteredKind::Enum);
                     }
-                    e.clauses.push(span);
+                    e.clauses.push(InFileSpan { file, span });
                     if let Some(member) = id.member_name(tree) {
                         e.clause_member_names.push(member.to_owned());
                     }
                 }
                 // Also handle SCATTERED_CLAUSE_DEF entries (if CST emits them)
-                ItemKind::ScatteredClause => {
+                DefKind::ScatteredClause => {
                     let e = out.entry(name_str.to_string()).or_default();
                     // Infer kind from signature text
                     let sig = id.signature(tree);
@@ -132,7 +143,7 @@ where
                             e.kind = Some(ScatteredKind::Enum);
                         }
                     }
-                    e.clauses.push(span);
+                    e.clauses.push(InFileSpan { file, span });
                     if let Some(member) = id.member_name(tree) {
                         e.clause_member_names.push(member.to_owned());
                     }
@@ -162,8 +173,10 @@ pub struct ScatteredDiagnostic {
     pub name: String,
     /// What's wrong.
     pub kind: ScatteredDiagnosticKind,
-    /// Span for the diagnostic (head span, or end span for orphans).
-    pub span: Span,
+    /// What kind of scattered definition it is, where that is known.
+    pub scattered_kind: Option<ScatteredKind>,
+    /// Where to report it: the head, or the `end` for an orphan.
+    pub at: InFileSpan,
 }
 
 /// Check all scattered groups for completeness (missing end/clauses/orphan end).
@@ -178,7 +191,8 @@ pub fn check_scattered_completeness(
             diagnostics.push(ScatteredDiagnostic {
                 name: name.clone(),
                 kind: ScatteredDiagnosticKind::MissingEnd,
-                span: s.heads[0].name_span,
+                scattered_kind: s.kind,
+                at: InFileSpan { file: s.heads[0].file, span: s.heads[0].name_span },
             });
         }
 
@@ -192,7 +206,8 @@ pub fn check_scattered_completeness(
             diagnostics.push(ScatteredDiagnostic {
                 name: name.clone(),
                 kind: ScatteredDiagnosticKind::NoClauses,
-                span: s.heads[0].name_span,
+                scattered_kind: s.kind,
+                at: InFileSpan { file: s.heads[0].file, span: s.heads[0].name_span },
             });
         }
 
@@ -201,7 +216,8 @@ pub fn check_scattered_completeness(
             diagnostics.push(ScatteredDiagnostic {
                 name: name.clone(),
                 kind: ScatteredDiagnosticKind::OrphanEnd,
-                span: s.ends[0],
+                scattered_kind: s.kind,
+                at: s.ends[0],
             });
         }
     }
@@ -212,6 +228,10 @@ pub fn check_scattered_completeness(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn f(n: u32) -> FileId {
+        FileId::from_raw(n)
+    }
 
     fn item_tree(source: &str) -> ItemTree {
         let (root, _) = syntax::parse_text(source);
@@ -229,7 +249,7 @@ function clause foo(n) = n + 1
 end foo
 ";
         let tree = item_tree(source);
-        let status = workspace_scattered_status(std::iter::once(&tree));
+        let status = workspace_scattered_status(std::iter::once((f(0), &tree)));
         let foo = status.get("foo").expect("foo present");
         assert_eq!(foo.kind, Some(ScatteredKind::Function));
         assert_eq!(foo.heads.len(), 1);
@@ -247,7 +267,8 @@ end foo
         let tail = item_tree("end bar\n");
 
         let trees = [&head, &mid_a, &mid_b, &tail];
-        let status = workspace_scattered_status(trees.iter().copied());
+        let status =
+            workspace_scattered_status(trees.iter().enumerate().map(|(i, t)| (f(i as u32), *t)));
         let bar = status.get("bar").expect("bar present");
         assert_eq!(bar.kind, Some(ScatteredKind::Function));
         assert_eq!(bar.heads.len(), 1);
@@ -262,7 +283,8 @@ end foo
         let head = item_tree("scattered function lonely : int -> int\n");
         let body = item_tree("function clause lonely(x) = x\n");
         let trees = [&head, &body];
-        let status = workspace_scattered_status(trees.iter().copied());
+        let status =
+            workspace_scattered_status(trees.iter().enumerate().map(|(i, t)| (f(i as u32), *t)));
         let lonely = status.get("lonely").expect("present");
         assert!(lonely.has_clauses());
         assert!(!lonely.has_end());
@@ -273,7 +295,8 @@ end foo
         let head = item_tree("scattered function orphan : int -> int\n");
         let unrelated = item_tree("function clause other(x) = x\n");
         let trees = [&head, &unrelated];
-        let status = workspace_scattered_status(trees.iter().copied());
+        let status =
+            workspace_scattered_status(trees.iter().enumerate().map(|(i, t)| (f(i as u32), *t)));
         let orphan = status.get("orphan").expect("present");
         assert!(!orphan.has_clauses());
         assert!(!orphan.has_end());
@@ -290,7 +313,7 @@ union clause my_op = SUB : (int, int)
 end my_op
 ";
         let tree = item_tree(source);
-        let status = workspace_scattered_status(std::iter::once(&tree));
+        let status = workspace_scattered_status(std::iter::once((f(0), &tree)));
         let op = status.get("my_op").expect("present");
         assert_eq!(op.kind, Some(ScatteredKind::Union));
         assert_eq!(op.clauses.len(), 2);
@@ -311,7 +334,7 @@ enum clause colour = Blue
 end colour
 ";
         let tree = item_tree(source);
-        let status = workspace_scattered_status(std::iter::once(&tree));
+        let status = workspace_scattered_status(std::iter::once((f(0), &tree)));
         let colour = status.get("colour").expect("present");
         assert_eq!(colour.kind, Some(ScatteredKind::Enum));
         assert_eq!(colour.clauses.len(), 3);
@@ -328,7 +351,7 @@ mapping clause enc = 0x00000001 <-> \"add\"
 end enc
 ";
         let tree = item_tree(source);
-        let status = workspace_scattered_status(std::iter::once(&tree));
+        let status = workspace_scattered_status(std::iter::once((f(0), &tree)));
         let enc = status.get("enc").expect("present");
         assert_eq!(enc.kind, Some(ScatteredKind::Mapping));
         assert_eq!(enc.clauses.len(), 2);
@@ -339,7 +362,8 @@ end enc
         let head_a = item_tree("scattered function dup : int -> int\n");
         let head_b = item_tree("scattered function dup : int -> int\n");
         let trees = [&head_a, &head_b];
-        let status = workspace_scattered_status(trees.iter().copied());
+        let status =
+            workspace_scattered_status(trees.iter().enumerate().map(|(i, t)| (f(i as u32), *t)));
         let dup = status.get("dup").expect("present");
         assert_eq!(dup.heads.len(), 2);
     }
@@ -355,7 +379,8 @@ end enc
         let end_file = item_tree("end execute\n");
 
         let trees = [&head, &clause_rv32i, &clause_rv64i, &clause_rv32m, &end_file];
-        let status = workspace_scattered_status(trees.iter().copied());
+        let status =
+            workspace_scattered_status(trees.iter().enumerate().map(|(i, t)| (f(i as u32), *t)));
         let exec = status.get("execute").expect("execute present");
         assert_eq!(exec.kind, Some(ScatteredKind::Function));
         assert_eq!(exec.heads.len(), 1);
@@ -370,7 +395,8 @@ end enc
         let head = item_tree("scattered function foo\n");
         let clause = item_tree("function clause foo() = 0\n");
         let trees = [&head, &clause];
-        let status = workspace_scattered_status(trees.iter().copied());
+        let status =
+            workspace_scattered_status(trees.iter().enumerate().map(|(i, t)| (f(i as u32), *t)));
         let diags = check_scattered_completeness(&status);
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].kind, ScatteredDiagnosticKind::MissingEnd);
@@ -382,7 +408,8 @@ end enc
         let head = item_tree("scattered function bar\n");
         let end = item_tree("end bar\n");
         let trees = [&head, &end];
-        let status = workspace_scattered_status(trees.iter().copied());
+        let status =
+            workspace_scattered_status(trees.iter().enumerate().map(|(i, t)| (f(i as u32), *t)));
         let diags = check_scattered_completeness(&status);
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].kind, ScatteredDiagnosticKind::NoClauses);
@@ -393,7 +420,8 @@ end enc
     fn completeness_orphan_end() {
         let end = item_tree("end orphan\n");
         let trees = [&end];
-        let status = workspace_scattered_status(trees.iter().copied());
+        let status =
+            workspace_scattered_status(trees.iter().enumerate().map(|(i, t)| (f(i as u32), *t)));
         let diags = check_scattered_completeness(&status);
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].kind, ScatteredDiagnosticKind::OrphanEnd);
@@ -406,7 +434,8 @@ end enc
         let clause = item_tree("function clause baz() = 1\n");
         let end = item_tree("end baz\n");
         let trees = [&head, &clause, &end];
-        let status = workspace_scattered_status(trees.iter().copied());
+        let status =
+            workspace_scattered_status(trees.iter().enumerate().map(|(i, t)| (f(i as u32), *t)));
         let diags = check_scattered_completeness(&status);
         assert!(diags.is_empty(), "valid scattered should have no diagnostics, got: {:?}", diags);
     }
@@ -417,7 +446,8 @@ end enc
         let head = item_tree("scattered union myop\n");
         let end = item_tree("end myop\n");
         let trees = [&head, &end];
-        let status = workspace_scattered_status(trees.iter().copied());
+        let status =
+            workspace_scattered_status(trees.iter().enumerate().map(|(i, t)| (f(i as u32), *t)));
         let diags = check_scattered_completeness(&status);
         assert!(diags.is_empty(), "empty scattered union should not warn, got: {:?}", diags);
     }

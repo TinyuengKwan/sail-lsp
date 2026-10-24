@@ -1,20 +1,20 @@
 //! Handler for `AnyDiagnostic::InvalidStringPattern`.
 
 use crate::Diagnostic;
-use hir_def::diagnostics::DiagnosticCode;
-use hir_ty::display::HirDisplay;
+use hir::diagnostics::DiagnosticCode;
+use hir::display::HirDisplay;
 
 use crate::{DiagnosticsContext, InvalidStringPattern};
 
 pub(crate) fn invalid_string_pattern(
-    _ctx: &DiagnosticsContext<'_>,
+    ctx: &DiagnosticsContext<'_>,
     d: &InvalidStringPattern,
 ) -> Diagnostic {
     Diagnostic::new(
         DiagnosticCode::SailError("invalid-string-pattern"),
         format!(
             "cannot match string-append pattern against non-string type `{}`",
-            d.found.display_to_string()
+            d.found.display_to_string(ctx.db())
         ),
         crate::node_file_range(&d.node),
     )
@@ -28,7 +28,7 @@ mod tests {
     #[test]
     fn smoke() {
         let diag = AnyDiagnostic::InvalidStringPattern(InvalidStringPattern {
-            found: hir_ty::infer::Ty::scalar(hir_ty::ty::Scalar::Int),
+            found: hir::Ty::scalar(hir::Scalar::Int),
             node: test_node(0, 5),
         });
         let d = check_dispatch(&diag);

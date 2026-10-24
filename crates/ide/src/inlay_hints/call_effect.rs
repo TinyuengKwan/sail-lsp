@@ -28,12 +28,12 @@ pub(super) fn collect_call_effect_hints(
     current_file: &dyn FileDb,
     begin: usize,
     end: usize,
-    hints: &mut Vec<IdeDbInlayHint>,
+    hints: &mut Vec<InlayHint>,
     transitive_effects: Option<
-        &std::collections::HashMap<String, std::collections::BTreeSet<hir_def::EffectTag>>,
+        &std::collections::HashMap<String, std::collections::BTreeSet<hir::EffectTag>>,
     >,
 ) {
-    use hir_def::hir::Expr;
+    use hir::Expr;
 
     let Some(bodies) = current_file.bodies() else {
         return;
@@ -43,11 +43,11 @@ pub(super) fn collect_call_effect_hints(
     // transitive_effects is not available.
     let fallback_effects: std::collections::HashMap<
         String,
-        std::collections::BTreeSet<hir_def::EffectTag>,
+        std::collections::BTreeSet<hir::EffectTag>,
     >;
     let effects_map: &std::collections::HashMap<
         String,
-        std::collections::BTreeSet<hir_def::EffectTag>,
+        std::collections::BTreeSet<hir::EffectTag>,
     > = if let Some(te) = transitive_effects {
         te
     } else {
@@ -101,9 +101,9 @@ pub(super) fn collect_call_effect_hints(
                     .filter(|e| {
                         !matches!(
                             e,
-                            hir_def::EffectTag::Scattered
-                                | hir_def::EffectTag::NonExec
-                                | hir_def::EffectTag::Return
+                            hir::EffectTag::Scattered
+                                | hir::EffectTag::NonExec
+                                | hir::EffectTag::Return
                         )
                     })
                     .map(|e| e.as_str())
@@ -114,10 +114,10 @@ pub(super) fn collect_call_effect_hints(
                 }
 
                 let label = format!("/* {} */", effect_strs.join(", "));
-                hints.push(IdeDbInlayHint {
+                hints.push(InlayHint {
                     offset: call_span.end,
                     label,
-                    kind: IdeDbInlayHintKind::Other,
+                    kind: InlayHintKind::Other,
                     tooltip: Some(format!(
                         "Effects of `{callee_name}`: {}",
                         effect_strs.join(", ")

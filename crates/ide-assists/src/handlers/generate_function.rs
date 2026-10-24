@@ -1,7 +1,6 @@
 //! `generate_function` assist.
 
 use crate::assist_context::{AssistContext, AssistId, AssistKind, Assists};
-use ide_db::text_edit::TextEdit;
 
 pub(crate) fn generate_function(acc: &mut Assists, ctx: &AssistContext<'_>) -> Option<()> {
     use parser::SyntaxKind as SK;
@@ -10,7 +9,9 @@ pub(crate) fn generate_function(acc: &mut Assists, ctx: &AssistContext<'_>) -> O
     let offset = ctx.offset();
 
     // Parse CST to find a CALL_EXPR at cursor
-    let (cst_root, _) = syntax::parse_text(text);
+    // The tree the assist run already parsed. Parsing the text a second
+    // time here built one unrelated to it.
+    let cst_root = ctx.source_file()?.clone();
 
     // Find the CALL_EXPR whose callee IDENT contains the cursor
     let mut target_name = None;
@@ -50,7 +51,13 @@ pub(crate) fn generate_function(acc: &mut Assists, ctx: &AssistContext<'_>) -> O
     }
     let name = target_name?;
 
-    // Check if this function already exists in the file
+    // Whether a definition of that name already exists.
+    //
+    // This used to match *any* `IDENT` inside a definition, and the call
+    // being generated for is itself inside one — so `function f(x) =
+    // helper(x)` contains the token `helper`, and the assist declined on
+    // the case it exists for. A definition's name is its first `IDENT`,
+    // after the keyword.
     let already_defined = cst_root.children().any(|child| {
         if !matches!(child.kind(), SK::CALLABLE_DEF | SK::CALLABLE_SPEC) {
             return false;
@@ -58,7 +65,8 @@ pub(crate) fn generate_function(acc: &mut Assists, ctx: &AssistContext<'_>) -> O
         child
             .descendants_with_tokens()
             .filter_map(|el| el.into_token())
-            .any(|tok| tok.kind() == SK::IDENT && tok.text() == name)
+            .find(|tok| tok.kind() == SK::IDENT)
+            .is_some_and(|tok| tok.text() == name)
     });
     if already_defined {
         return None; // Already exists — no assist needed
@@ -85,18 +93,28 @@ pub(crate) fn generate_function(acc: &mut Assists, ctx: &AssistContext<'_>) -> O
     // Use ast::make::name to validate the generated name as a proper AST node.
     let _validated_name = syntax::ast::make::name(&name);
 
-    let stub = format!("\n\nval {name} : {param_types} -> _\nfunction {name}{params} = ()\n");
-
-    // Insert at end of file
+    // The stub's return type and body are what you have to type next, so
+    // for a client that can expand snippets they are tabstops. Nothing
+    // read `AssistConfig::snippet_cap` before — the field was passed in
+    // from the server and dropped — and `SourceChange::is_snippet` had no
+    // producer, so no assist could leave the cursor anywhere.
     let insert_offset = text.len();
-    let edit =
-        TextEdit { range: base_db::text_range(insert_offset, insert_offset), new_text: stub };
-
-    acc.add_with_edits(
+    acc.add(
         AssistId("generate_function", AssistKind::Generate),
         format!("Generate function `{name}`"),
         ctx.range,
-        vec![edit],
+        |builder| match ctx.config.snippet_cap {
+            Some(_) => builder.insert_snippet(
+                insert_offset,
+                format!(
+                    "\n\nval {name} : {param_types} -> ${{1:_}}\nfunction {name}{params} = $0\n"
+                ),
+            ),
+            None => builder.insert(
+                insert_offset,
+                format!("\n\nval {name} : {param_types} -> _\nfunction {name}{params} = ()\n"),
+            ),
+        },
     );
     Some(())
 }
@@ -108,11 +126,48 @@ pub(crate) fn generate_function(acc: &mut Assists, ctx: &AssistContext<'_>) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::check_assist;
+    use crate::tests::{check_assist, check_assist_not_applicable, check_assist_with_snippets};
+    use expect_test::expect;
 
     #[test]
-    fn smoke() {
-        let labels = check_assist(generate_function, "source code\n", 0);
-        let _ = labels; // verify no panic
+    fn applies() {
+        check_assist(
+            generate_function,
+            "val f : int -> int\nfunction f(x) = hel$0per(x)\n",
+            expect![[r#"
+                val f : int -> int
+                function f(x) = helper(x)
+
+
+                val helper : _ -> _
+                function helper(arg1) = ()
+            "#]],
+        );
+    }
+
+    /// A client that can expand snippets is left where it has to type.
+    #[test]
+    fn leaves_the_cursor_in_the_body() {
+        check_assist_with_snippets(
+            generate_function,
+            "val f : int -> int\nfunction f(x) = hel$0per(x)\n",
+            expect![[r#"
+                val f : int -> int
+                function f(x) = helper(x)
+
+
+                val helper : _ -> ${1:_}
+                function helper(arg1) = $0
+            "#]],
+        );
+    }
+
+    /// Declines where the function already exists.
+    #[test]
+    fn not_applicable_when_the_function_is_defined() {
+        check_assist_not_applicable(
+            generate_function,
+            "val helper : int -> int\nfunction helper(y) = y\nfunction f(x) = hel$0per(x)\n",
+        );
     }
 }

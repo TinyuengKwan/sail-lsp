@@ -8,6 +8,7 @@
 //! For example: `riscv::decode::execute` identifies the `execute`
 //! function in `decode.sail` within the `riscv` project.
 
+use hir::DefKind;
 use ide_db::FileDb;
 
 /// Kind of symbol in the moniker path.
@@ -88,14 +89,18 @@ pub fn moniker(
         _ => return None,
     };
 
-    // Check if this is a local binding (function parameter, let var)
-    if let Some(parsed) = file.parsed() {
-        for occ in &parsed.symbol_occurrences {
-            if occ.name == name
-                && occ.span.start <= offset
-                && offset <= occ.span.end
-                && occ.scope == Some(syntax::parser_lower::Scope::Local)
-            {
+    // A local binding has no moniker: it does not cross file boundaries, so
+    // nothing outside can refer to it. From the bodies, which know what a
+    // binding is; the scrape decided by a `Scope` it attached to each
+    // occurrence.
+    if let Some(bodies) = file.bodies() {
+        for entry in bodies.entries() {
+            let binds_it = entry
+                .body
+                .iter_pats()
+                .any(|(_, pat)| matches!(pat, hir::Pat::Bind(n) if n.as_str() == name));
+            let covers = entry.def_span.start <= offset && offset <= entry.def_span.end;
+            if binds_it && covers {
                 return Some(MonikerResult::Local);
             }
         }
@@ -115,20 +120,17 @@ pub fn moniker(
             .top_level_items()
             .iter()
             .find(|id| id.name(item_tree).as_str() == name)
-            .map(|id| match id.item_kind(item_tree) {
-                hir_def::item_tree::ItemKind::Function
-                | hir_def::item_tree::ItemKind::Mapping
-                | hir_def::item_tree::ItemKind::ValSpec
-                | hir_def::item_tree::ItemKind::MappingSpec => MonikerDescriptorKind::Method,
-                hir_def::item_tree::ItemKind::Struct
-                | hir_def::item_tree::ItemKind::Union
-                | hir_def::item_tree::ItemKind::Enum
-                | hir_def::item_tree::ItemKind::Bitfield
-                | hir_def::item_tree::ItemKind::Newtype
-                | hir_def::item_tree::ItemKind::TypeAlias => MonikerDescriptorKind::Type,
-                hir_def::item_tree::ItemKind::Register
-                | hir_def::item_tree::ItemKind::Let
-                | hir_def::item_tree::ItemKind::Var => MonikerDescriptorKind::Term,
+            .map(|id| match id.def_kind(item_tree) {
+                DefKind::Function | DefKind::Mapping | DefKind::ValSpec | DefKind::MappingSpec => {
+                    MonikerDescriptorKind::Method
+                }
+                DefKind::Struct
+                | DefKind::Union
+                | DefKind::Enum
+                | DefKind::Bitfield
+                | DefKind::Newtype
+                | DefKind::TypeAlias => MonikerDescriptorKind::Type,
+                DefKind::Register | DefKind::Let | DefKind::Var => MonikerDescriptorKind::Term,
                 _ => MonikerDescriptorKind::Term,
             })
             .unwrap_or(MonikerDescriptorKind::Term)
@@ -184,15 +186,9 @@ impl MonikerIdentifier {
 }
 
 impl MonikerDescriptorKind {
-    /// Convert to SCIP SymbolInformation kind string.
-    pub fn scip_kind(&self) -> &'static str {
-        match self {
-            MonikerDescriptorKind::Namespace => "Namespace",
-            MonikerDescriptorKind::Type => "Type",
-            MonikerDescriptorKind::Term => "Term",
-            MonikerDescriptorKind::Method => "Method",
-        }
-    }
+    // There is no `scip_kind`. It returned a display name — "Namespace",
+    // "Type" — and SCIP's symbol grammar does not use one: the kind is a
+    // suffix character, which `to_scip_symbol` writes.
 }
 
 #[cfg(test)]

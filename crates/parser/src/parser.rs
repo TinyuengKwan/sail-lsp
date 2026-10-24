@@ -31,6 +31,7 @@ pub struct Parser<'t> {
     steps: Cell<u32>,
     /// Dynamic fixity context for user-defined operators.
     pub(crate) fixities: FixityContext,
+    pub(crate) enclosing_block_end: Option<usize>,
 }
 
 impl<'t> Parser<'t> {
@@ -42,12 +43,20 @@ impl<'t> Parser<'t> {
             events: Vec::new(),
             steps: Cell::new(0),
             fixities: FixityContext::new(),
+            enclosing_block_end: None,
         }
     }
 
     /// Create a parser with a fixity context for dynamic operator precedence.
     pub fn new_with_fixities(inp: &'t Input, fixities: FixityContext) -> Parser<'t> {
-        Parser { inp, pos: 0, events: Vec::new(), steps: Cell::new(0), fixities }
+        Parser {
+            inp,
+            pos: 0,
+            events: Vec::new(),
+            steps: Cell::new(0),
+            fixities,
+            enclosing_block_end: None,
+        }
     }
 
     /// Finish parsing and return accumulated events.
@@ -76,7 +85,6 @@ impl<'t> Parser<'t> {
     }
 
     /// Check if the n-th token matches `kind`.
-    #[allow(dead_code)]
     pub fn nth_at(&self, n: usize, kind: SyntaxKind) -> bool {
         self.nth(n) == kind
     }
@@ -114,7 +122,7 @@ impl<'t> Parser<'t> {
     }
 
     /// Assert and consume the current token.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // used only by tests
     pub fn bump(&mut self, kind: SyntaxKind) {
         assert!(self.eat(kind), "expected {:?}, got {:?}", kind, self.current());
     }
@@ -129,7 +137,7 @@ impl<'t> Parser<'t> {
     }
 
     /// Advance by one token, remapping its kind.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub fn bump_remap(&mut self, kind: SyntaxKind) {
         if self.current() == SyntaxKind::EOF {
             // TODO: emit error?
@@ -171,7 +179,7 @@ impl<'t> Parser<'t> {
     }
 
     /// Error recovery: if not at a recovery token, consume one.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // used only by tests
     pub fn err_recover(&mut self, message: &str, recovery: &TokenSet) -> bool {
         if self.at_ts(recovery) || self.at_end() {
             self.error(message.to_string());
@@ -224,7 +232,7 @@ impl Marker {
 pub struct CompletedMarker {
     start_pos: u32,
     _end_pos: u32,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     kind: SyntaxKind,
 }
 
@@ -247,7 +255,7 @@ impl CompletedMarker {
     }
 
     /// Extend to the left, wrapping the given earlier marker.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub fn extend_to(self, p: &mut Parser<'_>, mut m: Marker) -> CompletedMarker {
         m.bomb.defuse();
         let end_pos = p.events.len() as u32;
@@ -259,7 +267,7 @@ impl CompletedMarker {
     }
 
     /// The `SyntaxKind` of this completed node.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub fn kind(&self) -> SyntaxKind {
         self.kind
     }

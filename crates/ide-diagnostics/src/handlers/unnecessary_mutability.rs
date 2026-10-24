@@ -11,7 +11,7 @@
 //! requires counting assignments per variable and dataflow analysis.
 
 use crate::Diagnostic;
-use hir_def::diagnostics::{DiagnosticCode, Severity};
+use hir::diagnostics::{DiagnosticCode, Severity};
 use ide_db::assists::Assist;
 
 use crate::{DiagnosticsContext, UnnecessaryMutability};

@@ -49,7 +49,7 @@ pub fn runnables(file: &dyn FileDb) -> Vec<Runnable> {
     let mut result = Vec::new();
 
     for item in tree.top_level_items() {
-        let hir_def::item_tree::ModItem::Function(id) = item else {
+        let hir::DefItem::Function(id) = item else {
             continue;
         };
         let func = tree.function(*id);

@@ -10,25 +10,11 @@ pub(crate) mod snippet;
 pub(crate) mod vertical;
 pub(crate) mod visitor;
 
-use ide_db::ide_types::{
-    DocumentLink, FormatOptions, IdeTextEdit, LinkedEditingRanges, SelectionRange,
-};
+use ide_db::ide_types::{DocumentLink, FormatOptions, IdeTextEdit, LinkedEditingRanges};
 use ide_db::line_index::TextRange;
-use ide_db::{
-    token_is_close_bracket, token_is_open_bracket, token_symbol_key, FileDb, TextDocument,
-};
+use ide_db::{token_symbol_key, FileDb};
 use std::path::Path;
 use url::Url;
-
-fn line_text_range(file: &dyn FileDb, line: u32) -> TextRange {
-    let start = file.offset_at(&ide_db::LineCol { line, col: 0 });
-    let end = file.offset_at(&ide_db::LineCol { line: line + 1, col: 0 });
-    base_db::text_range(start, end)
-}
-
-fn full_text_range(file: &dyn FileDb) -> TextRange {
-    base_db::text_range(0, file.text().len())
-}
 
 fn line_ending(text: &str) -> &'static str {
     if text.contains("\r\n") {
@@ -246,10 +232,6 @@ pub fn range_format_document_edits(
     range: TextRange,
     options: &FormatOptions,
 ) -> Option<Vec<IdeTextEdit>> {
-    let formatted_full = format_document_cst(file.text(), options);
-    if formatted_full == file.text() {
-        return None;
-    }
     let start_lc = file.position_at(base_db::range_start(range));
     let end_lc = file.position_at(base_db::range_end(range));
     let start_line = start_lc.line;
@@ -260,12 +242,32 @@ pub fn range_format_document_edits(
     };
     let original_start = file.offset_at(&ide_db::LineCol { line: start_line, col: 0 });
     let original_end = file.offset_at(&ide_db::LineCol { line: end_line_exclusive, col: 0 });
-    let formatted_doc = TextDocument::new(formatted_full.clone());
-    let formatted_start = formatted_doc.offset_at(&ide_db::LineCol { line: start_line, col: 0 });
-    let formatted_end =
-        formatted_doc.offset_at(&ide_db::LineCol { line: end_line_exclusive, col: 0 });
+
+    // Format *only* those lines. `format_document_cst_range` emits every
+    // node outside them verbatim and had no caller, while this formatted
+    // the whole document and then cut the requested lines out of the
+    // result — by line number, on both texts at once. That assumes
+    // formatted line N is original line N, and a reformat that joins or
+    // splits a line anywhere earlier breaks it: the edit then replaces
+    // the user's selection with unrelated text.
+    let file_lines = Some((start_line as usize, end_line_exclusive.saturating_sub(1) as usize));
+    let formatted_full = format_document_cst_range(file.text(), options, file_lines);
+    if formatted_full == file.text() {
+        return None;
+    }
+
+    // Outside the range the two texts are identical by construction, so
+    // the replacement is what sits between the shared prefix and suffix —
+    // no line arithmetic, and nothing to be off by one about. If they are
+    // *not* identical the formatter reached outside its range, and
+    // declining beats handing the editor an edit built on a broken
+    // assumption.
+    let (prefix, suffix) = (&file.text()[..original_start], &file.text()[original_end..]);
+    if !formatted_full.starts_with(prefix) || !formatted_full.ends_with(suffix) {
+        return None;
+    }
     let original_slice = &file.text()[original_start..original_end];
-    let formatted_slice = &formatted_full[formatted_start..formatted_end];
+    let formatted_slice = &formatted_full[prefix.len()..formatted_full.len() - suffix.len()];
     if original_slice == formatted_slice {
         return None;
     }
@@ -408,75 +410,6 @@ pub fn document_links_for_file(uri: &Url, file: &dyn FileDb) -> Vec<DocumentLink
     links
 }
 
-/// Selection range — returns internal type.
-pub fn make_selection_range(file: &dyn FileDb, position: ide_db::LineCol) -> SelectionRange {
-    let mut ranges = Vec::<TextRange>::new();
-    let offset = file.offset_at(&position);
-
-    if let Some((_, span)) = file.token_at(position) {
-        let tr = base_db::text_range(span.start, span.end);
-        if !tr.is_empty() {
-            ranges.push(tr);
-        }
-    }
-
-    if let Some(tokens) = file.tokens() {
-        let mut stack: Vec<usize> = Vec::new();
-        for (idx, (token, span)) in tokens.iter().enumerate() {
-            if token_is_open_bracket(token) {
-                stack.push(idx);
-                continue;
-            }
-            if !token_is_close_bracket(token) {
-                continue;
-            }
-            let Some(open_idx) = stack.pop() else {
-                continue;
-            };
-            let open_span = &tokens[open_idx].1;
-            if open_span.start <= offset && offset <= span.end {
-                let tr = base_db::text_range(open_span.start, span.end);
-                if !tr.is_empty() {
-                    ranges.push(tr);
-                }
-            }
-        }
-    }
-
-    // Definition-level selection ranges from ItemTree
-    if let Some(item_tree) = file.item_tree() {
-        for &id in item_tree.top_level_items() {
-            let span = id.span(item_tree);
-            if span.start <= offset && offset <= span.end {
-                let r = base_db::text_range(span.start, span.end);
-                if !r.is_empty() {
-                    ranges.push(r);
-                }
-            }
-        }
-    }
-
-    let lr = line_text_range(file, position.line);
-    if !lr.is_empty() {
-        ranges.push(lr);
-    }
-    let fr = full_text_range(file);
-    if !fr.is_empty() {
-        ranges.push(fr);
-    }
-
-    ranges.sort_by_key(|r| (r.len(), r.start()));
-    ranges.dedup_by(|a, b| a == b);
-
-    let mut parent: Option<Box<SelectionRange>> = None;
-    for r in ranges.into_iter().rev() {
-        parent = Some(Box::new(SelectionRange { range: r, parent }));
-    }
-    parent
-        .map(|node| *node)
-        .unwrap_or(SelectionRange { range: line_text_range(file, position.line), parent: None })
-}
-
 /// On-enter edits: continue doc comments (`///`) and maintain indentation
 /// after opening brackets.
 /// Returns internal IdeTextEdit.
@@ -547,147 +480,6 @@ pub fn on_enter_edits(file: &dyn FileDb, position: ide_db::LineCol) -> Option<Ve
         let indent = "  ".repeat(cst_level as usize);
         return Some(vec![make_edit(indent)]);
     }
-    None
-}
-
-/// Join lines — returns internal IdeTextEdit.
-pub fn join_lines_edits(file: &dyn FileDb, range: TextRange) -> Option<Vec<IdeTextEdit>> {
-    let text = file.text();
-    let start_lc = file.position_at(base_db::range_start(range));
-    let end_lc = file.position_at(base_db::range_end(range));
-
-    // If no selection, join current line with the next one
-    let start_line = start_lc.line;
-    let end_line = if base_db::range_start(range) == base_db::range_end(range) {
-        start_line + 1
-    } else {
-        end_lc.line
-    };
-
-    if start_line >= end_line {
-        return None;
-    }
-
-    let mut edits = Vec::new();
-
-    for line in start_line..end_line {
-        let line_end_offset = file.offset_at(&ide_db::LineCol { line: line + 1, col: 0 });
-        let next_line_end =
-            file.offset_at(&ide_db::LineCol { line: line + 2, col: 0 }).min(text.len());
-
-        if line_end_offset >= text.len() {
-            break;
-        }
-
-        // Find the end of the current line (before newline)
-        let mut current_end = line_end_offset;
-        while current_end > 0 && matches!(text.as_bytes()[current_end - 1], b'\n' | b'\r') {
-            current_end -= 1;
-        }
-
-        // Find the start of the next line's content (after leading whitespace)
-        let next_line = &text[line_end_offset..next_line_end];
-        let next_content_start = line_end_offset + next_line.len() - next_line.trim_start().len();
-
-        // Determine separator
-        let current_line_text =
-            &text[file.offset_at(&ide_db::LineCol { line, col: 0 })..current_end];
-        let next_trimmed = next_line.trim();
-
-        let separator = if current_line_text.trim_end().ends_with('{')
-            || current_line_text.trim_end().ends_with('(')
-            || current_line_text.trim_end().ends_with('[')
-            || next_trimmed.starts_with('}')
-            || next_trimmed.starts_with(')')
-            || next_trimmed.starts_with(']')
-            || next_trimmed.starts_with('.')
-        {
-            "" // No space before/after brackets or dot chains
-        } else if current_line_text.trim_end().ends_with(',') {
-            " " // Space after comma
-        } else if next_trimmed.starts_with("//") {
-            // Don't join comment lines
-            continue;
-        } else {
-            " " // Default: single space
-        };
-
-        // Remove trailing comma if joining with closing bracket
-        let mut actual_current_end = current_end;
-        if (next_trimmed.starts_with('}')
-            || next_trimmed.starts_with(')')
-            || next_trimmed.starts_with(']'))
-            && current_line_text.trim_end().ends_with(',')
-        {
-            actual_current_end -= 1;
-        }
-
-        edits.push(IdeTextEdit {
-            range: base_db::text_range(actual_current_end, next_content_start),
-            new_text: separator.to_string(),
-        });
-    }
-
-    if edits.is_empty() {
-        None
-    } else {
-        Some(edits)
-    }
-}
-
-/// Matching brace — returns byte offset of the matching bracket.
-pub fn matching_brace_offset(file: &dyn FileDb, position: ide_db::LineCol) -> Option<usize> {
-    let tokens = file.tokens()?;
-    let offset = file.offset_at(&position);
-
-    // Find the token at the cursor
-    let (idx, _) = tokens
-        .iter()
-        .enumerate()
-        .find(|(_, (_, span))| span.start <= offset && offset < span.end)?;
-
-    let (token, _span) = &tokens[idx];
-
-    // Define bracket pairs
-    let pairs: &[(parser::Token, parser::Token)] = &[
-        (parser::Token::LeftBracket, parser::Token::RightBracket),
-        (parser::Token::LeftSquareBracket, parser::Token::RightSquareBracket),
-        (parser::Token::LeftCurlyBracket, parser::Token::RightCurlyBracket),
-        (parser::Token::LeftCurlyBar, parser::Token::RightCurlyBar),
-        (parser::Token::LeftSquareBar, parser::Token::RightSquareBar),
-    ];
-
-    for (open, close) in pairs {
-        if token == open {
-            let mut depth = 1i32;
-            for (t, s) in &tokens[idx + 1..] {
-                if t == open {
-                    depth += 1;
-                } else if t == close {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some(s.start);
-                    }
-                }
-            }
-            return None;
-        }
-        if token == close {
-            let mut depth = 1i32;
-            for (t, s) in tokens[..idx].iter().rev() {
-                if t == close {
-                    depth += 1;
-                } else if t == open {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some(s.start);
-                    }
-                }
-            }
-            return None;
-        }
-    }
-
     None
 }
 
@@ -834,6 +626,45 @@ fn align_field_group(field_lines: &[(usize, &str)], _all_lines: &[&str]) -> Vec<
 
 #[cfg(test)]
 mod tests {
+
+    /// Range formatting replaces only the lines asked for, and computes
+    /// them by formatting only those lines.
+    ///
+    /// This used to format the whole document and cut the requested lines
+    /// out of the result *by line number on both texts*. That holds only
+    /// while formatting preserves the line count everywhere before the
+    /// range — and a formatter that joins or splits a line is what a
+    /// formatter is for.
+    #[test]
+    fn a_range_format_edits_only_the_range() {
+        use ide_db::test_utils::TestFile;
+
+        // Two definitions, the first written across two lines and the
+        // second badly spaced. Ask about the second only.
+        let source = "val f :
+  int -> int
+val g:int->int
+";
+        let file = TestFile::new(source);
+        let opts = ide_db::ide_types::FormatOptions::default();
+        let start = source.find("val g").expect("second definition");
+        let range = base_db::text_range(start, source.len());
+        let Some(edits) = super::range_format_document_edits(&file, range, &opts) else {
+            return; // nothing to change is a legitimate answer
+        };
+        assert_eq!(edits.len(), 1);
+        let edit = &edits[0];
+        assert!(
+            base_db::range_start(edit.range) >= start,
+            "the edit starts inside the requested range, not before it"
+        );
+        assert!(
+            !edit.new_text.contains("val f"),
+            "the replacement does not carry the other definition: {:?}",
+            edit.new_text
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -983,6 +814,113 @@ function bar(x : int) -> int = {
         let input = "function foo() = {\n  let x = 1\n";
         let cst_result = format_document_cst(input, &FormatOptions::default());
         assert_eq!(cst_result, input, "CST path should return source unchanged on parse error");
+    }
+
+    /// Formatting keeps every token, and formatting again changes nothing.
+    ///
+    /// `every_offered_assist_has_something_to_apply` re-parses what an assist
+    /// produces; the formatter had no equivalent, and it is the feature that
+    /// rewrites the user's whole file. Three idempotence tests on
+    /// hand-written snippets is not the same check: a formatter that drops a
+    /// token, or that reorders one, is silent corruption.
+    ///
+    /// The comparison is the non-trivia token stream, which is what "the same
+    /// program" means for a formatter — whitespace is exactly what it is
+    /// allowed to change.
+    #[test]
+    fn formatting_keeps_every_token_and_settles() {
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../sail-lsp/data/sail-lib");
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return; // the bundle moved; the other tests still run
+        };
+        let opts = FormatOptions::default();
+        // Breaking a list across lines adds a trailing comma, and upstream
+        // accepts one — `forall 'n 'm. (\n int('n),\n int('m),\n) -> bool`
+        // type-checks — so a comma immediately before a closing delimiter is
+        // dropped from both sides. That is not a "compare loosely"
+        // allowance: it is the one token the grammar lets a formatter add,
+        // and the first version of this test reported it as corruption.
+        let tokens = |text: &str| -> Vec<(parser::SyntaxKind, String)> {
+            let (root, _) = syntax::parse_text(text);
+            let raw: Vec<(parser::SyntaxKind, String)> = root
+                .descendants_with_tokens()
+                .filter_map(|el| el.into_token())
+                .filter(|t| !t.kind().is_trivia())
+                .map(|t| (t.kind(), t.text().to_string()))
+                .collect();
+            raw.iter()
+                .enumerate()
+                .filter(|(i, (kind, _))| {
+                    *kind != parser::SyntaxKind::COMMA
+                        || !matches!(
+                            raw.get(i + 1).map(|(k, _)| *k),
+                            Some(
+                                parser::SyntaxKind::R_PAREN
+                                    | parser::SyntaxKind::R_CURLY
+                                    | parser::SyntaxKind::R_BRACK
+                            )
+                        )
+                })
+                .map(|(_, t)| t.clone())
+                .collect()
+        };
+
+        let mut checked = 0usize;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|e| e != "sail") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            // A file the parser already rejects is returned verbatim, so it
+            // says nothing about the formatter.
+            let (_, errors) = syntax::parse_text(&text);
+            if !errors.is_empty() {
+                continue;
+            }
+            checked += 1;
+            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+
+            let once = format_document_cst(&text, &opts);
+            let (_, errors) = syntax::parse_text(&once);
+            assert!(errors.is_empty(), "formatting {name} produced text that does not parse");
+            let (before, after) = (tokens(&text), tokens(&once));
+            if before != after {
+                let at = before.iter().zip(after.iter()).position(|(a, b)| a != b);
+                let ctx = |v: &[(parser::SyntaxKind, String)], i: usize| {
+                    v[i.saturating_sub(6)..(i + 3).min(v.len())]
+                        .iter()
+                        .map(|(_, t)| t.clone())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                };
+                match at {
+                    Some(i) => panic!(
+                        "formatting {name} changed its tokens at #{i}\n  before: {}\n   after: {}",
+                        ctx(&before, i),
+                        ctx(&after, i)
+                    ),
+                    None => panic!(
+                        "formatting {name} changed its token count: {} -> {}",
+                        before.len(),
+                        after.len()
+                    ),
+                }
+            }
+
+            let twice = format_document_cst(&once, &opts);
+            if once != twice {
+                let at = once.lines().zip(twice.lines()).position(|(a, b)| a != b).unwrap_or(0);
+                panic!(
+                    "formatting {name} does not settle, first at line {}\n  once:  {:?}\n  twice: {:?}",
+                    at + 1,
+                    once.lines().nth(at).unwrap_or(""),
+                    twice.lines().nth(at).unwrap_or("")
+                );
+            }
+        }
+        assert!(checked > 20, "expected the bundled library, found {checked} files");
     }
 
     #[test]

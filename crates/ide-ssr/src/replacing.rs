@@ -89,7 +89,7 @@ fn get_placeholder_for_node<'a>(
 pub(crate) fn compute_edits_from_matches(
     rules: &[ResolvedRule],
     matches: &SsrMatches,
-) -> Vec<(hir_def::in_file::FileRange, String)> {
+) -> Vec<(hir::FileRange, String)> {
     let mut edits = Vec::new();
     for m in &matches.matches {
         if let Some(rule) = rules.get(m.rule_index) {

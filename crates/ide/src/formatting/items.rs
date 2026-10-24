@@ -906,10 +906,7 @@ pub(crate) fn rewrite_scattered_clause_def(
         return None;
     }
 
-    let body_node = find_child_node(node, SK::BLOCK_EXPR)?;
-    let (body, body_start) = extract_body_from_braced_node(&body_node, context.snippet_provider)?;
-
-    let fields = parse_colon_fields(&body, body_start);
+    let fields = extract_struct_fields(node, context.snippet_provider);
     if fields.is_empty() {
         return None;
     }

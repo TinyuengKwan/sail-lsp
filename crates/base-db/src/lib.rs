@@ -15,6 +15,9 @@ use rustc_hash::FxHasher;
 pub use salsa::Durability;
 
 mod change;
+pub mod module_graph;
+pub mod preprocess;
+
 pub mod input;
 
 pub use change::FileChange;
@@ -99,75 +102,64 @@ pub struct FileText {
 pub struct Files {
     /// FileId → FileText salsa input. `Arc<DashMap>` for cheap clone + concurrent read.
     map: Arc<DashMap<FileId, FileText>>,
+    /// Semantic views share source text but are not VFS members.
+    instances: Arc<DashMap<FileId, FileText>>,
     /// Content-hash per file for dedup.
     content_hashes: HashMap<FileId, u64>,
-    /// Pending changes buffered by set_file_contents().
-    /// Flushed to salsa by apply_pending().
-    pending: Vec<(FileId, Arc<str>, Durability)>,
+    /// SourceRootId → the salsa input holding that root.
+    source_roots: HashMap<SourceRootId, SourceRootInput>,
+    /// FileId → the salsa input naming the root it belongs to.
+    file_source_roots: HashMap<FileId, FileSourceRootInput>,
 }
 
 impl Default for Files {
     fn default() -> Self {
         Self {
             map: Arc::new(DashMap::new()),
+            instances: Arc::new(DashMap::new()),
             content_hashes: HashMap::default(),
-            pending: Vec::new(),
+            source_roots: HashMap::default(),
+            file_source_roots: HashMap::default(),
         }
     }
 }
 
 impl Files {
-    /// Buffer a file change without writing to salsa.
-    /// Analogous to `Vfs::set_file_contents()` — stores in pending queue.
-    /// Call `apply_pending(db)` to flush all buffered changes to salsa.
+    /// Whether this text differs from what was last written for the file.
     ///
-    /// The caller is responsible for obtaining the FileId from `vfs::Vfs`
-    /// (URL ↔ FileId mapping now lives in the VFS layer).
-    pub fn set_file_contents(&mut self, file_id: FileId, text: &str, durability: Durability) {
-        // Content-hash dedup before buffering
+    /// The dedup that used to live in a `set_file_contents` buffer, moved to
+    /// the store that owns the hashes. A no-op write must not reach salsa:
+    /// it bumps a revision and every dependent query re-verifies.
+    pub fn content_changed(&mut self, file_id: FileId, text: &str) -> bool {
         let hash = {
             let mut h = FxHasher::default();
             text.hash(&mut h);
             h.finish()
         };
         if self.content_hashes.get(&file_id) == Some(&hash) {
-            return; // Content unchanged — don't buffer
-        }
-        self.content_hashes.insert(file_id, hash);
-        self.pending.push((file_id, Arc::from(text), durability));
-    }
-
-    /// Flush pending changes to salsa in a single batch.
-    /// Analogous to `process_changes()` → `analysis_host.apply_change()`.
-    /// Returns true if any changes were applied.
-    pub fn apply_pending(&mut self, db: &mut dyn salsa::Database) -> bool {
-        if self.pending.is_empty() {
             return false;
         }
-        let changes: Vec<_> = self.pending.drain(..).collect();
-        for (file_id, text, durability) in changes {
-            use salsa::Setter;
-            if let Some(existing) = self.map.get(&file_id) {
-                existing.set_text(db).with_durability(durability).to(text);
-            } else {
-                let ft = FileText::builder(text, file_id).durability(durability).new(db);
-                self.map.insert(file_id, ft);
-            }
-        }
+        self.content_hashes.insert(file_id, hash);
         true
     }
 
-    /// Check if there are pending changes.
-    pub fn has_pending(&self) -> bool {
-        !self.pending.is_empty()
+    /// The salsa input for a source root, if one has been registered.
+    pub fn source_root(&self, id: SourceRootId) -> Option<SourceRootInput> {
+        self.source_roots.get(&id).copied()
     }
 
-    /// Drain all pending changes into a Vec, leaving the pending queue empty.
-    ///
-    /// Used by `RootDatabase::apply_pending_file_changes` to solve the
-    /// borrow-conflict (Files + db are the same object).
-    pub fn take_pending(&mut self) -> Vec<(FileId, Arc<str>, Durability)> {
-        std::mem::take(&mut self.pending)
+    pub fn register_source_root(&mut self, id: SourceRootId, input: SourceRootInput) {
+        self.source_roots.insert(id, input);
+    }
+
+    /// The salsa input naming a file's source root, if the file has been
+    /// classified.
+    pub fn file_source_root(&self, id: FileId) -> Option<FileSourceRootInput> {
+        self.file_source_roots.get(&id).copied()
+    }
+
+    pub fn register_file_source_root(&mut self, id: FileId, input: FileSourceRootInput) {
+        self.file_source_roots.insert(id, input);
     }
 
     /// Set file text with explicit durability. Open (edited) files get
@@ -213,14 +205,29 @@ impl Files {
         self.map.insert(file_id, ft);
     }
 
+    pub fn register_instance(&mut self, id: FileId, text: FileText) {
+        assert!(id.is_instance());
+        self.instances.insert(id, text);
+    }
+
     /// Look up the `FileText` salsa input for a given `FileId`.
     pub fn file_text(&self, file_id: FileId) -> Option<FileText> {
-        self.map.get(&file_id).map(|r| *r.value())
+        if file_id.is_instance() {
+            self.instances.get(&file_id).map(|r| *r.value())
+        } else {
+            self.map.get(&file_id).map(|r| *r.value())
+        }
     }
 
     /// Iterate all known file IDs.
     pub fn all_file_ids(&self) -> Vec<FileId> {
-        self.map.iter().map(|r| *r.key()).collect()
+        // DashMap iteration order follows shard/hash layout, not insertion
+        // order. WorkspaceFiles is semantically ordered (default Order,
+        // duplicate aliases and overload candidates all observe it), so
+        // never let a hash-table walk decide the program's type environment.
+        let mut ids: Vec<_> = self.map.iter().map(|r| *r.key()).collect();
+        ids.sort_by_key(|id| id.index());
+        ids
     }
 
     pub fn len(&self) -> usize {
@@ -293,6 +300,23 @@ pub trait SourceDatabase: salsa::Database {
         source_root_id: SourceRootId,
         durability: Durability,
     );
+
+    /// The source root a file belongs to, or `None` if nothing has claimed
+    /// it yet.
+    ///
+    /// rust-analyzer reads this through `file_source_root`, which panics for
+    /// an unknown file — it can, because a crate graph classifies every file
+    /// before any text is set. A change here can name a file no root has
+    /// seen, so this answers rather than panics, and the caller treats "no
+    /// root" as local.
+    fn source_root_id_of(&self, _file_id: FileId) -> Option<SourceRootId> {
+        None
+    }
+
+    /// The stored content of a source root, if it has been set.
+    fn source_root_data(&self, _id: SourceRootId) -> Option<Arc<SourceRoot>> {
+        None
+    }
 
     /// Set a source root's content, with explicit durability.
     fn set_source_root_with_durability(

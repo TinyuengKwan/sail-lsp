@@ -1,0 +1,48 @@
+SOURCE_FILE@0..372
+  LINE_COMMENT@0..73 "// Upstream requires  ..."
+  WHITESPACE@73..74 "\n"
+  LINE_COMMENT@74..147 "// `sail --just-check ..."
+  WHITESPACE@147..148 "\n"
+  LINE_COMMENT@148..226 "// have been `then`.  ..."
+  WHITESPACE@226..227 "\n"
+  LINE_COMMENT@227..299 "// give the IDE a tre ..."
+  WHITESPACE@299..300 "\n"
+  LINE_COMMENT@300..338 "// rust-analyzer's di ..."
+  WHITESPACE@338..339 "\n"
+  CALLABLE_DEF@339..371
+    KW_FUNCTION@339..347 "function"
+    WHITESPACE@347..348 " "
+    IDENT@348..349 "t"
+    UNIT@349..351 "()"
+    WHITESPACE@351..352 " "
+    EQ@352..353 "="
+    WHITESPACE@353..354 " "
+    BLOCK_EXPR@354..371
+      L_CURLY@354..355 "{"
+      WHITESPACE@355..356 " "
+      BLOCK_ITEM@356..360
+        IF_EXPR@356..360
+          KW_IF@356..358 "if"
+          WHITESPACE@358..359 " "
+          IDENT_EXPR@359..360
+            IDENT@359..360 "c"
+      WHITESPACE@360..361 " "
+      BLOCK_ITEM@361..369
+        BLOCK_EXPR@361..369
+          L_CURLY@361..362 "{"
+          WHITESPACE@362..363 " "
+          BLOCK_ITEM@363..367
+            CALL_EXPR@363..367
+              IDENT_EXPR@363..364
+                IDENT@363..364 "g"
+              ARG_LIST@364..367
+                L_PAREN@364..365 "("
+                LITERAL_EXPR@365..366
+                  NUM_LIT@365..366 "1"
+                R_PAREN@366..367 ")"
+          WHITESPACE@367..368 " "
+          R_CURLY@368..369 "}"
+      WHITESPACE@369..370 " "
+      R_CURLY@370..371 "}"
+  WHITESPACE@371..372 "\n"
+error 356..360: expected `then`

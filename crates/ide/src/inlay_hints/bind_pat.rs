@@ -11,8 +11,8 @@ pub(super) fn collect_type_hints(
     current_file: &dyn FileDb,
     begin: usize,
     end: usize,
-    hints: &mut Vec<IdeDbInlayHint>,
-    type_check: Option<&hir_ty::infer::TypeCheckResult>,
+    hints: &mut Vec<InlayHint>,
+    type_check: Option<&hir::TypeCheckResult>,
 ) {
     let Some(bodies) = current_file.bodies() else {
         return;
@@ -21,7 +21,7 @@ pub(super) fn collect_type_hints(
     for entry in bodies.entries() {
         let body = &entry.body;
         for (pat_id, pat) in body.iter_pats() {
-            let hir_def::Pat::Bind(name) = pat else {
+            let hir::Pat::Bind(name) = pat else {
                 continue;
             };
             let pat_span = match entry.source_map.pat_syntax(pat_id) {
@@ -44,10 +44,10 @@ pub(super) fn collect_type_hints(
                 if ty_text == "unit" || ty_text == "unknown" {
                     continue;
                 }
-                hints.push(IdeDbInlayHint {
+                hints.push(InlayHint {
                     offset: pat_span.end,
                     label: format!(": {ty_text}"),
-                    kind: IdeDbInlayHintKind::Type,
+                    kind: InlayHintKind::Type,
                     tooltip: Some(format!("Inferred type of `{name}`")),
                     padding_left: Some(false),
                     padding_right: Some(true),

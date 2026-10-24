@@ -1,0 +1,38 @@
+SOURCE_FILE@0..39
+  NAMED_DEF@0..38
+    KW_BITFIELD@0..8 "bitfield"
+    WHITESPACE@8..9 " "
+    NAME@9..10
+      IDENT@9..10 "b"
+    WHITESPACE@10..11 " "
+    COLON@11..12 ":"
+    WHITESPACE@12..13 " "
+    TYPE_APP@13..20
+      TYPE_NAMED@13..17
+        IDENT@13..17 "bits"
+      L_PAREN@17..18 "("
+      TYPE_NAMED@18..19
+        NUM_LIT@18..19 "8"
+      R_PAREN@19..20 ")"
+    WHITESPACE@20..21 " "
+    EQ@21..22 "="
+    WHITESPACE@22..23 " "
+    STRUCT_EXPR@23..38
+      L_CURLY@23..24 "{"
+      WHITESPACE@24..25 " "
+      FIELD_INIT@25..36
+        IDENT@25..27 "hi"
+        WHITESPACE@27..28 " "
+        COLON@28..29 ":"
+        WHITESPACE@29..30 " "
+        TYPE_NAMED@30..31
+          NUM_LIT@30..31 "7"
+        WHITESPACE@31..32 " "
+        DOT@32..33 "."
+        DOT@33..34 "."
+        WHITESPACE@34..35 " "
+        TYPE_NAMED@35..36
+          NUM_LIT@35..36 "4"
+      WHITESPACE@36..37 " "
+      R_CURLY@37..38 "}"
+  WHITESPACE@38..39 "\n"

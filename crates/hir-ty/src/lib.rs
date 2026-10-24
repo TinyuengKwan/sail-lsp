@@ -21,12 +21,12 @@ pub use ty::{
 };
 
 pub mod cancel;
-pub mod db;
 pub mod diagnostics;
 pub mod infer;
 /// Type lowering (CST → Ty).
 pub mod lower;
 pub mod query;
+pub mod solver_budget;
 
 pub mod display;
 pub mod flow;
@@ -37,11 +37,9 @@ pub mod representability;
 pub mod utils;
 
 pub use cancel::CancellationToken;
-pub use db::HirDatabase;
 pub use display::{HirDisplay, HirDisplayWrapper, HirFormatter};
 pub use infer::{
-    check_file, check_file_with_records, check_file_with_workspace, diff_symbol_sig_hashes,
-    infer_expr_type_text_in_files, CrossFileRecords, Diverges, InferenceDiagnostic,
-    InferenceResult, Subst, TypeCheckResult, TypeMismatch, WorkspaceContext,
+    diff_symbol_sig_hashes, Diverges, InferenceDiagnostic, InferenceResult, Subst, TypeCheckResult,
+    TypeMismatch, WorkspaceContext,
 };
 pub use nexp::{NConstraint, Nexp};

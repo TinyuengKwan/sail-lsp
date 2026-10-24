@@ -4,8 +4,7 @@
 //!
 //! Also handles struct pattern completion: `match x { Foo { | } => ... }`
 
-use ide_db::defs::CompletionItemKind;
-use ide_db::ide_types::{CompletionItem, CompletionRelevance};
+use crate::item::CompletionItem;
 use ide_db::FileDb;
 
 /// Complete record fields inside a struct literal or struct pattern.
@@ -16,7 +15,7 @@ use ide_db::FileDb;
 /// - `prefix`: text typed so far
 /// - `all_files`: workspace files for looking up struct definitions
 pub fn complete_record(
-    _file: &dyn FileDb,
+    file: &dyn FileDb,
     text: &str,
     offset: usize,
     prefix: &str,
@@ -36,17 +35,17 @@ pub fn complete_record(
 
     // 3. Look up struct fields across workspace
     for (_, ws_file) in all_files {
-        if let Some(parsed) = ws_file.parsed() {
-            for decl in &parsed.decls {
-                if decl.name == *struct_name
-                    && matches!(
-                        decl.kind,
-                        syntax::parser_lower::DeclKind::Struct
-                            | syntax::parser_lower::DeclKind::Bitfield
-                    )
+        if let Some(tree) = ws_file.item_tree() {
+            for &id in tree.top_level_items() {
+                if !ide_db::symbol_visible_from(file, *ws_file, id.name(tree).as_str()) {
+                    continue;
+                }
+                if id.name(tree).as_str() == *struct_name
+                    && matches!(id.def_kind(tree), hir::DefKind::Struct | hir::DefKind::Bitfield)
                 {
-                    let def_text = ws_file.text().get(decl.span.start..decl.span.end).unwrap_or("");
-                    for field in extract_record_fields(def_text) {
+                    // The fields the item tree recorded, not the ones a regex
+                    // found in the definition's text.
+                    for field in id.fields(tree).iter().map(|f| f.name.to_string()) {
                         // Skip already-filled fields
                         if already_filled.contains(&field) {
                             continue;
@@ -57,18 +56,7 @@ pub fn complete_record(
                         {
                             continue;
                         }
-                        items.push(CompletionItem {
-                            label: field.clone(),
-                            kind: CompletionItemKind::Field,
-                            detail: Some(format!("field of {struct_name}")),
-                            insert_text: Some(format!("{field} = ")),
-                            text_edit: None,
-                            sort_text: Some(format!("0{field}")),
-                            filter_text: None,
-                            documentation: None,
-                            deprecated: false,
-                            relevance: CompletionRelevance::default(),
-                        });
+                        items.push(crate::render::render_record_field(&field, struct_name));
                     }
                 }
             }
@@ -128,53 +116,9 @@ fn find_record_context(text: &str, offset: usize) -> Option<RecordContext> {
     Some(RecordContext { struct_name, filled_fields })
 }
 
-/// Extract field names from a struct definition text.
-///
-/// Parses `struct Foo = { field1 : type1, field2 : type2 }` and
-/// returns `["field1", "field2"]`.
-fn extract_record_fields(def_text: &str) -> Vec<String> {
-    let mut fields = Vec::new();
-    // Find the part between { and }
-    let brace_start = match def_text.find('{') {
-        Some(pos) => pos + 1,
-        None => return fields,
-    };
-    let brace_end = def_text.rfind('}').unwrap_or(def_text.len());
-    let inner = &def_text[brace_start..brace_end];
-
-    for segment in inner.split(',') {
-        let trimmed = segment.trim();
-        // Field format: `name : type`
-        if let Some(colon_pos) = trimmed.find(':') {
-            let field_name = trimmed[..colon_pos].trim();
-            if !field_name.is_empty()
-                && field_name.chars().next().is_some_and(|c| c.is_alphabetic())
-            {
-                fields.push(field_name.to_string());
-            }
-        }
-    }
-
-    fields
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn extract_fields_from_struct() {
-        let def = "struct Point = { x : int, y : int }";
-        let fields = extract_record_fields(def);
-        assert_eq!(fields, vec!["x", "y"]);
-    }
-
-    #[test]
-    fn extract_fields_multiline() {
-        let def = "struct Config = {\n  width : int,\n  height : int,\n  name : string\n}";
-        let fields = extract_record_fields(def);
-        assert_eq!(fields, vec!["width", "height", "name"]);
-    }
 
     #[test]
     fn find_record_context_basic() {

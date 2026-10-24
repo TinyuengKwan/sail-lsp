@@ -5,7 +5,7 @@
 //! Fix: add effect annotation to the enclosing function signature.
 
 use crate::Diagnostic;
-use hir_def::diagnostics::DiagnosticCode;
+use hir::diagnostics::DiagnosticCode;
 use ide_db::assists::Assist;
 
 use crate::{DiagnosticsContext, EffectViolation};
@@ -14,7 +14,7 @@ use crate::{DiagnosticsContext, EffectViolation};
 pub(crate) fn effect_violation(_ctx: &DiagnosticsContext<'_>, d: &EffectViolation) -> Diagnostic {
     // Check if the violating effect has associated outcomes (FunctionEffects::outcomes).
     // Outcomes are string-typed side effects tracked separately from EffectTag.
-    let effects = hir_def::effects::FunctionEffects::default();
+    let effects = hir::effects::FunctionEffects::default();
     let outcome_note = if effects.has_outcome(&format!("{:?}", d.effect)) {
         format!(" (has outcome `{:?}`)", d.effect)
     } else {
@@ -46,7 +46,7 @@ mod tests {
     #[test]
     fn smoke() {
         let diag = AnyDiagnostic::EffectViolation(EffectViolation {
-            effect: hir_def::bodies::EffectTag::Throw,
+            effect: hir::EffectTag::Throw,
             context: "pure function",
             node: test_node(0, 5),
         });

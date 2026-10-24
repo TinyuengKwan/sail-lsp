@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use base_db::{Durability, FileId, FileText, Files};
+use base_db::{FileId, FileText, Files};
 use ide::analysis::{AnalysisHost, UrlMap};
 use ide_db::test_utils::TestFile;
 use ide_diagnostics::DiagnosticsConfig;
@@ -95,14 +95,15 @@ fn patch(what: &mut String, from: &str, to: &str) -> usize {
 fn load_workspace(root: &Path) -> (AnalysisHost, Files, Vec<(Url, FileId)>) {
     let sail_files = discover_sail_files(root);
     let mut host = AnalysisHost::new(None);
-    let mut files = Files::default();
+    let mut change = ide_db::apply_change::Change::new();
     let mut vfs = vfs::Vfs::default();
 
     for (url, _path, text) in &sail_files {
         let fid = vfs.file_id_for_url(url);
-        files.set_file_contents(fid, text, Durability::HIGH);
+        change.change_file(fid, text.clone());
     }
-    files.apply_pending(host.raw_database_mut());
+    host.apply_change(std::mem::take(&mut change));
+    let files = host.raw_database().files().clone();
 
     let mut url_fids = Vec::new();
     for (url, _path, _text) in &sail_files {
@@ -118,14 +119,15 @@ fn load_workspace(root: &Path) -> (AnalysisHost, Files, Vec<(Url, FileId)>) {
 fn load_workspace_with_url_map(root: &Path) -> (AnalysisHost, Files, Vec<(Url, FileId)>, UrlMap) {
     let sail_files = discover_sail_files(root);
     let mut host = AnalysisHost::new(None);
-    let mut files = Files::default();
+    let mut change = ide_db::apply_change::Change::new();
     let mut vfs = vfs::Vfs::default();
 
     for (url, _path, text) in &sail_files {
         let fid = vfs.file_id_for_url(url);
-        files.set_file_contents(fid, text, Durability::HIGH);
+        change.change_file(fid, text.clone());
     }
-    files.apply_pending(host.raw_database_mut());
+    host.apply_change(std::mem::take(&mut change));
+    let files = host.raw_database().files().clone();
 
     let mut url_fids = Vec::new();
     for (url, _path, _text) in &sail_files {
@@ -319,7 +321,8 @@ fn benchmark_workspace_diagnostics() {
     let t_load = Instant::now();
     let (host, files, url_fids) = load_workspace(&dir);
     let analysis = host.analysis(&files);
-    let ws_names = analysis.build_workspace_names();
+    let ws_names =
+        analysis.build_workspace_names().expect("the benchmark has no other thread to cancel it");
 
     // Build WorkspaceContext for cross-file inference
     let all_test_files: Vec<TestFile> = url_fids
@@ -526,7 +529,7 @@ fn pick_small_target_file(
             let text: &str = text_arc;
             let lines = text.lines().count();
             if (30..=120).contains(&lines) {
-                let ids = hir_def::def_query::file_def_with_body_ids(db, ft);
+                let ids = hir::def_query::file_def_with_body_ids(db, ft);
                 if ids.len() >= 2 && ids.len() <= 8 {
                     return Some((url.clone(), *fid, text.to_string(), lines, ids.len()));
                 }
@@ -538,7 +541,7 @@ fn pick_small_target_file(
             let text_arc = ft.text(db);
             let text: &str = text_arc;
             let lines = text.lines().count();
-            let ids = hir_def::def_query::file_def_with_body_ids(db, ft);
+            let ids = hir::def_query::file_def_with_body_ids(db, ft);
             if ids.len() >= 2 && lines <= 200 {
                 return Some((url.clone(), *fid, text.to_string(), lines, ids.len()));
             }
@@ -572,16 +575,23 @@ fn benchmark_incremental_diagnostics() {
     eprintln!("[bench] Warming caches...");
     let t0 = Instant::now();
     let config = DiagnosticsConfig::new();
-    let analysis = host.analysis(&files);
-    let ws_names = analysis.build_workspace_names();
+    // Dropped before anything writes. A snapshot is a second handle on the
+    // database and salsa's next write waits for every other handle to go —
+    // scenario 3's `set_file_text` blocked here indefinitely. Scenario 1's
+    // did not, which is what hid it: a no-op edit is deduped by content hash
+    // and never reaches salsa at all.
+    let ws_names = {
+        let analysis = host.analysis(&files);
+        analysis.build_workspace_names().expect("the benchmark has no other thread to cancel it")
+    };
 
     {
         let _t = stdx::timeit("cache_warm");
         for (_url, fid) in &url_fids {
             if let Some(ft) = files.file_text(*fid) {
-                let ids = hir_def::def_query::file_def_with_body_ids(host.raw_database(), ft);
+                let ids = hir::def_query::file_def_with_body_ids(host.raw_database(), ft);
                 for &id in ids {
-                    let _ = hir_ty::query::infer(host.raw_database(), id);
+                    let _ = hir::ty_query::infer(host.raw_database(), id);
                 }
             }
         }
@@ -627,7 +637,7 @@ fn benchmark_incremental_diagnostics() {
 
         let t1 = Instant::now();
         let (root, _) = syntax::parse_text(&modified);
-        let tree = hir_def::ItemTree::build_from_cst(&root);
+        let tree = hir::ItemTree::build_from_cst(&root);
         let tree_ms = t1.elapsed().as_secs_f64() * 1000.0;
         eprintln!(
             "  Parse+ItemTree: {:>7.2} ms ({} items)\n",
@@ -636,9 +646,100 @@ fn benchmark_incremental_diagnostics() {
         );
     }
 
-    // Scenario 3: salsa set_file_text cost (known slow, skipped)
-    eprintln!("-- Scenario 3: salsa set_file_text cost (skipped -- known slow) --");
-    eprintln!("  salsa revision bump after full cache warm triggers eager re-verification.\n");
+    // Scenario 3: what one body edit invalidates.
+    //
+    // This is what salsa is for — edit one function, re-infer that function
+    // — and it was skipped, with a note saying a revision bump "triggers
+    // eager re-verification". That is a claim about the thing being
+    // measured, standing in for the measurement.
+    //
+    // Bounded on purpose, and it still may not finish: the budget is checked
+    // between callables, and on sail-riscv a *single* `infer` after
+    // `set_file_text` did not return in fifteen minutes — against two
+    // seconds to warm every callable in all 158 files cold. Editing one
+    // body invalidates the cross-file environment, and rebuilding it is
+    // not merely the cold cost again.
+    //
+    // `inference_after_an_edit_finishes` in tests.rs holds the same shape at
+    // a size the test suite can run, so the small case cannot regress
+    // unnoticed while this one is too slow to run in CI.
+    eprintln!("-- Scenario 3: what one body edit invalidates --");
+    {
+        // Bounded: after an edit this does not finish in any useful time,
+        // so it stops at the budget and says so. Reporting "> 30 s to
+        // re-infer six callables" is the finding; hanging is not.
+        const BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+        let warm_file = |host: &AnalysisHost, files: &Files, fid: FileId| {
+            let t = Instant::now();
+            let (mut n, mut gave_up) = (0usize, false);
+            if let Some(ft) = files.file_text(fid) {
+                for &id in hir::def_query::file_def_with_body_ids(host.raw_database(), ft) {
+                    if t.elapsed() > BUDGET {
+                        gave_up = true;
+                        break;
+                    }
+                    let _ = hir::ty_query::infer(host.raw_database(), id);
+                    n += 1;
+                }
+            }
+            (t.elapsed().as_secs_f64() * 1000.0, n, gave_up)
+        };
+        let fmt = |ms: f64, gave_up: bool| {
+            if gave_up {
+                format!(">{ms:.0} ms (gave up)")
+            } else {
+                format!("{ms:.1} ms")
+            }
+        };
+
+        // A file with callables of its own. "Nothing was re-inferred" is
+        // not a finding about a file that had nothing to re-infer, and the
+        // first file that is not the target had none.
+        let other_fid = url_fids
+            .iter()
+            .map(|(_, fid)| *fid)
+            .find(|fid| {
+                *fid != target_fid
+                    && files.file_text(*fid).is_some_and(|ft| {
+                        !hir::def_query::file_def_with_body_ids(host.raw_database(), ft).is_empty()
+                    })
+            })
+            .expect("some other file has a callable");
+
+        let (edited_cached, n_edited, _) = warm_file(&host, &files, target_fid);
+        let (other_cached, n_other, _) = warm_file(&host, &files, other_fid);
+
+        let modified = make_body_edit(&target_text);
+        let t0 = Instant::now();
+        files.set_file_text(host.raw_database_mut(), target_fid, &modified);
+        let set_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+        let (edited_after, n_edited_after, edited_gave_up) = warm_file(&host, &files, target_fid);
+        let (other_after, n_other_after, other_gave_up) = warm_file(&host, &files, other_fid);
+
+        eprintln!("  cold warm, all {} files:  {warm_ms:>9.0} ms", url_fids.len());
+        eprintln!("  set_file_text:            {set_ms:>9.2} ms");
+        eprintln!(
+            "  edited file ({n_edited} callables): cached {} -> after {} ({n_edited_after} done)",
+            fmt(edited_cached, false),
+            fmt(edited_after, edited_gave_up)
+        );
+        eprintln!(
+            "  other file  ({n_other} callables): cached {} -> after {} ({n_other_after} done)",
+            fmt(other_cached, false),
+            fmt(other_after, other_gave_up)
+        );
+        // The question salsa exists to answer: does editing one body cost
+        // anything in a file that does not mention it?
+        eprintln!(
+            "  unrelated file re-inferred: {}\n",
+            if other_gave_up || other_after > other_cached.max(0.05) * 10.0 {
+                "YES - invalidation is global"
+            } else {
+                "no"
+            }
+        );
+    }
 
     // Scenario 4: Body-only edit consistency
     //

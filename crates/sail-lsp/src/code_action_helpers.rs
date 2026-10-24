@@ -1,7 +1,7 @@
 //! LSP code action protocol helpers.
 //! Moved from ide-assists to isolate lsp_types to the binary crate.
 
-use lsp_types::{CodeActionKind, TextEdit, Url};
+use lsp_types::CodeActionKind;
 
 pub fn code_action_kind_allowed(
     requested: &Option<Vec<CodeActionKind>>,
@@ -16,20 +16,19 @@ pub fn code_action_kind_allowed(
         .any(|kind| action.starts_with(kind.as_str()) || kind.as_str().starts_with(action))
 }
 
-pub fn lazy_code_action_data(uri: &Url, edits: &[TextEdit]) -> serde_json::Value {
-    serde_json::json!({
-        "uri": uri.as_str(),
-        "edits": edits,
-    })
+/// The edit an unresolved code action carries until the client asks for it.
+///
+/// It used to be `{uri, edits}` — one file — because a `CodeAction` carried
+/// one file's edits. It is the whole `WorkspaceEdit` now, so an assist that
+/// touches two files survives the round trip.
+pub fn lazy_code_action_data(edit: &crate::lsp::ext::SnippetWorkspaceEdit) -> serde_json::Value {
+    serde_json::json!({ "workspaceEdit": edit })
 }
 
 pub fn resolve_code_action_edit_from_data(
     data: &serde_json::Value,
-) -> Option<(Url, Vec<TextEdit>)> {
-    let uri = data.get("uri")?.as_str().and_then(|s| Url::parse(s).ok())?;
-    let edits_value = data.get("edits")?.clone();
-    let edits = serde_json::from_value::<Vec<TextEdit>>(edits_value).ok()?;
-    Some((uri, edits))
+) -> Option<crate::lsp::ext::SnippetWorkspaceEdit> {
+    serde_json::from_value(data.get("workspaceEdit")?.clone()).ok()
 }
 
 pub fn sail_source_fix_all_kind() -> CodeActionKind {

@@ -2,55 +2,25 @@
 //!
 //! All LSP-specific type conversions live here so the IDE crates
 //! (ide, ide-db, etc.) can be framework-independent.
+//!
+//! Five position converters used to sit here with no caller, each the
+//! same conversion as one in `from_proto` or `to_proto`
+//! (`offset_from_position` / `from_proto::offset`,
+//! `range_from_text_range` / `to_proto::range`, and so on). Two doors is
+//! how one of them stops being maintained.
 
-use ide_db::line_index::{LineCol, LineIndex, TextRange};
-use lsp_types::{Position, Range};
-
-/// Convert an LSP Position to an internal LineCol.
-pub fn line_col_from_position(pos: Position) -> LineCol {
-    LineCol { line: pos.line, col: pos.character }
-}
-
-/// Convert an LSP Position to a byte offset using a LineIndex.
-#[allow(dead_code)]
-pub fn offset_from_position(line_index: &LineIndex, pos: Position) -> usize {
-    line_index.offset(line_col_from_position(pos))
-}
-
-/// Convert an LSP Range to an internal TextRange using a LineIndex.
-#[allow(dead_code)]
-pub fn text_range_from_range(line_index: &LineIndex, range: Range) -> TextRange {
-    base_db::text_range(
-        offset_from_position(line_index, range.start),
-        offset_from_position(line_index, range.end),
-    )
-}
-
-/// Convert an internal LineCol to an LSP Position.
-pub fn position_from_line_col(lc: LineCol) -> Position {
-    Position::new(lc.line, lc.col)
-}
-
-/// Convert a byte offset to an LSP Position using a LineIndex.
-#[allow(dead_code)]
-pub fn position_from_offset(line_index: &LineIndex, offset: usize) -> Position {
-    position_from_line_col(line_index.line_col(offset))
-}
-
-/// Convert an internal TextRange to an LSP Range using a LineIndex.
-#[allow(dead_code)]
-pub fn range_from_text_range(line_index: &LineIndex, range: TextRange) -> Range {
-    Range::new(
-        position_from_offset(line_index, base_db::range_start(range)),
-        position_from_offset(line_index, base_db::range_end(range)),
-    )
-}
-
-/// Convert a parser::Span to an LSP Range using a LineIndex.
-#[allow(dead_code)]
-pub fn range_from_span(line_index: &LineIndex, span: parser::Span) -> Range {
-    range_from_text_range(line_index, base_db::span_to_text_range(&span))
-}
+// The two conversions that used to be here assigned
+// `Position::character` to a byte column and back:
+//
+//     LineCol { line: pos.line, col: pos.character }
+//     Position::new(lc.line, lc.col)
+//
+// `character` is a UTF-16 column. Twenty-seven handlers called this pair,
+// so the conversion fixed in `from_proto`/`to_proto` reached almost
+// nothing — and `protocol_check`, which exercises those two modules,
+// reported zero the whole time. They are `from_proto::line_col` and
+// `to_proto::position_from_line_col` now, both of which need a
+// `LineIndex`, which is what makes the wrong version unwritable.
 
 /// Convert an internal SymbolKind to an LSP SymbolKind.
 pub fn lsp_symbol_kind(kind: ide_db::ide_types::SymbolKind) -> lsp_types::SymbolKind {
@@ -71,49 +41,6 @@ pub fn lsp_symbol_kind(kind: ide_db::ide_types::SymbolKind) -> lsp_types::Symbol
         Ide::Operator => Lsp::OPERATOR,
         Ide::TypeAlias => Lsp::TYPE_PARAMETER,
         Ide::Other => Lsp::NULL,
-    }
-}
-
-/// Convert ItemKind to LSP SymbolKind for workspace index entries.
-pub fn item_kind_to_symbol_kind(kind: hir_def::item_tree::ItemKind) -> lsp_types::SymbolKind {
-    use hir_def::item_tree::ItemKind;
-    use lsp_types::SymbolKind as Lsp;
-    match kind {
-        ItemKind::Function | ItemKind::Mapping => Lsp::FUNCTION,
-        ItemKind::ValSpec | ItemKind::MappingSpec => Lsp::FUNCTION,
-        ItemKind::TypeAlias => Lsp::TYPE_PARAMETER,
-        ItemKind::Struct | ItemKind::Bitfield | ItemKind::Newtype => Lsp::STRUCT,
-        ItemKind::Union => Lsp::ENUM,
-        ItemKind::Enum => Lsp::ENUM,
-        ItemKind::Register => Lsp::VARIABLE,
-        ItemKind::Let | ItemKind::Var => Lsp::VARIABLE,
-        ItemKind::Overload => Lsp::FUNCTION,
-        ItemKind::ScatteredHead | ItemKind::ScatteredClause => Lsp::FUNCTION,
-        ItemKind::Constraint => Lsp::TYPE_PARAMETER,
-        ItemKind::TerminationMeasure | ItemKind::EndMarker | ItemKind::Instantiation => Lsp::NULL,
-    }
-}
-
-/// Convert a NavigationTarget to an LSP DocumentSymbol.
-#[allow(deprecated, dead_code)]
-pub fn document_symbol_from_nav(
-    line_index: &LineIndex,
-    nav: &ide_db::ide_types::NavigationTarget,
-) -> lsp_types::DocumentSymbol {
-    let range = range_from_text_range(line_index, nav.full_range);
-    let selection_range = range_from_text_range(line_index, nav.focus_range);
-    let children: Vec<lsp_types::DocumentSymbol> =
-        nav.children.iter().map(|child| document_symbol_from_nav(line_index, child)).collect();
-
-    lsp_types::DocumentSymbol {
-        name: nav.name.clone(),
-        detail: nav.detail.clone(),
-        kind: lsp_symbol_kind(nav.kind),
-        tags: None,
-        deprecated: None,
-        range,
-        selection_range,
-        children: if children.is_empty() { Some(Vec::new()) } else { Some(children) },
     }
 }
 
@@ -142,7 +69,8 @@ pub fn semantic_tokens_options() -> lsp_types::SemanticTokensOptions {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use ide_db::line_index::LineIndex;
+    use lsp_types::{Position, Range};
 
     #[test]
     fn position_roundtrip() {
@@ -151,10 +79,10 @@ mod tests {
 
         // line 0, col 4 = byte offset 4
         let pos = Position::new(0, 4);
-        let offset = offset_from_position(&idx, pos);
+        let offset = crate::lsp::from_proto::offset(&idx, pos);
         assert_eq!(offset, 4);
 
-        let back = position_from_offset(&idx, offset);
+        let back = crate::to_proto::position_in(&idx, offset);
         assert_eq!(back, pos);
     }
 
@@ -164,12 +92,22 @@ mod tests {
         let idx = LineIndex::new(text);
 
         let range = Range::new(Position::new(0, 0), Position::new(0, 11));
-        let tr = text_range_from_range(&idx, range);
+        let tr = crate::lsp::from_proto::text_range(&idx, range);
         assert_eq!(base_db::range_start(tr), 0);
         assert_eq!(base_db::range_end(tr), 11);
 
-        let back = range_from_text_range(&idx, tr);
+        let back = crate::to_proto::range(&idx, tr);
         assert_eq!(back, range);
+    }
+
+    #[test]
+    fn position_roundtrip_between_wide_characters() {
+        let text = "étarget🦀\n";
+        let idx = LineIndex::new(text);
+        let client = Position::new(0, 4);
+        let internal = crate::lsp::from_proto::line_col(&idx, client);
+        assert_eq!(internal, ide_db::LineCol { line: 0, col: 5 });
+        assert_eq!(crate::to_proto::position_from_line_col(&idx, internal), client);
     }
 }
 
@@ -383,10 +321,150 @@ impl lsp_types::request::Request for Ssr {
     const METHOD: &'static str = "experimental/ssr";
 }
 
+/// Parameters for `experimental/matchingBrace`.
+///
+/// rust-analyzer's shape: several positions in one round trip, because the
+/// editor asks for every cursor it has.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchingBraceParams {
+    pub text_document: lsp_types::TextDocumentIdentifier,
+    pub positions: Vec<lsp_types::Position>,
+}
+
+/// Custom request: `experimental/matchingBrace`.
+///
+/// The position of the bracket matching the one at each given position.
+/// A position that is not on a bracket comes back unchanged, so the reply
+/// lines up with the request one for one.
+pub enum MatchingBrace {}
+
+impl lsp_types::request::Request for MatchingBrace {
+    type Params = MatchingBraceParams;
+    type Result = Vec<lsp_types::Position>;
+    const METHOD: &'static str = "experimental/matchingBrace";
+}
+
+/// Parameters for `experimental/joinLines`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JoinLinesParams {
+    pub text_document: lsp_types::TextDocumentIdentifier,
+    pub ranges: Vec<lsp_types::Range>,
+}
+
+/// Custom request: `experimental/joinLines`.
+pub enum JoinLines {}
+
+impl lsp_types::request::Request for JoinLines {
+    type Params = JoinLinesParams;
+    type Result = Vec<lsp_types::TextEdit>;
+    const METHOD: &'static str = "experimental/joinLines";
+}
+
+/// Custom request: `experimental/onEnter`.
+///
+/// What to insert when Enter is pressed: continue a doc comment, keep the
+/// indentation of the block just opened.
+pub enum OnEnter {}
+
+impl lsp_types::request::Request for OnEnter {
+    type Params = lsp_types::TextDocumentPositionParams;
+    type Result = Option<Vec<SnippetTextEdit>>;
+    const METHOD: &'static str = "experimental/onEnter";
+}
+
+/// Which way `experimental/moveItem` moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum MoveItemDirection {
+    Up,
+    Down,
+}
+
+/// Parameters for `experimental/moveItem`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoveItemParams {
+    pub direction: MoveItemDirection,
+    pub text_document: lsp_types::TextDocumentIdentifier,
+    pub range: lsp_types::Range,
+}
+
+/// Custom request: `experimental/moveItem`.
+///
+/// Swap the definition, match arm or block item under the cursor with the
+/// sibling above or below it.
+pub enum MoveItem {}
+
+impl lsp_types::request::Request for MoveItem {
+    type Params = MoveItemParams;
+    type Result = Vec<SnippetTextEdit>;
+    const METHOD: &'static str = "experimental/moveItem";
+}
+
 /// `$/cancelRequest` notification — handles request cancellation.
 pub enum CancelRequest {}
 
 impl lsp_types::notification::Notification for CancelRequest {
     type Params = lsp_types::CancelParams;
     const METHOD: &'static str = "$/cancelRequest";
+}
+
+/// A text edit that may carry snippet syntax — `$0` for where the cursor
+/// lands, `${1:name}` for something to type over.
+///
+/// rust-analyzer's extension, verbatim: the protocol has no snippet in a
+/// workspace edit, so a client opts in with `experimental.snippetTextEdit`
+/// and a client that does not gets the placeholders stripped.
+#[derive(Debug, Eq, PartialEq, Clone, Default, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnippetTextEdit {
+    pub range: lsp_types::Range,
+    pub new_text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub insert_text_format: Option<lsp_types::InsertTextFormat>,
+}
+
+/// A workspace edit whose text edits may be snippets.
+#[derive(Debug, Eq, PartialEq, Clone, Default, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SnippetWorkspaceEdit {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub changes: Option<std::collections::HashMap<lsp_types::Url, Vec<SnippetTextEdit>>>,
+}
+
+/// `textDocument/codeAction`'s result, with the edit widened to carry
+/// snippets. rust-analyzer's, for the same reason: `lsp_types::CodeAction`
+/// has a `WorkspaceEdit`, and a `WorkspaceEdit` has nowhere to say that an
+/// edit's text is a snippet.
+#[derive(Debug, PartialEq, Clone, Default, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeAction {
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<lsp_types::CodeActionKind>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<Vec<lsp_types::Diagnostic>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edit: Option<SnippetWorkspaceEdit>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_preferred: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
+}
+
+pub enum CodeActionRequest {}
+
+impl lsp_types::request::Request for CodeActionRequest {
+    type Params = lsp_types::CodeActionParams;
+    type Result = Option<Vec<CodeAction>>;
+    const METHOD: &'static str = "textDocument/codeAction";
+}
+
+pub enum CodeActionResolveRequest {}
+
+impl lsp_types::request::Request for CodeActionResolveRequest {
+    type Params = CodeAction;
+    type Result = CodeAction;
+    const METHOD: &'static str = "codeAction/resolve";
 }

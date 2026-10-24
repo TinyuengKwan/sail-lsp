@@ -17,7 +17,15 @@
 //! is queried via salsa and dependents only invalidate when the
 //! tree's identity actually changes.
 
+pub mod generated;
 mod lower;
+
+/// The declared fields of a `struct` or `bitfield` node, read once.
+///
+/// Exported because `hir-ty` builds its `RecordInfo` from the same
+/// declaration and used to read it a second way — see
+/// `extract_struct_fields_from_cst`.
+pub use lower::extract_field_decls;
 pub mod pretty;
 
 use std::collections::hash_map::DefaultHasher;
@@ -29,12 +37,14 @@ use crate::name::Name;
 use crate::type_ref::TypeRef;
 
 /// A function or function clause definition.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Eq)]
 pub struct Function {
     pub name: Name,
     pub signature: String,
     pub type_ref: Option<TypeRef>,
     pub span: crate::Span,
+    /// Span of just the declared name, for cursor placement.
+    pub name_span: crate::Span,
     pub is_clause: bool,
     pub member_name: Option<String>,
     pub doc: Option<String>,
@@ -43,14 +53,37 @@ pub struct Function {
     pub signature_hash: u64,
 }
 
+/// One field of a struct or bitfield, as declared.
+#[derive(Debug, Clone, Eq)]
+pub struct FieldDecl {
+    pub name: Name,
+    /// Visibility on this member, independent of the containing declaration.
+    pub visibility: crate::visibility::RawVisibility,
+    /// Span of the field's name, which is where navigation should land.
+    pub name_span: crate::Span,
+    /// The declared type as written (`Access_variety`, `0 .. 3`), for the
+    /// detail line. Empty when it could not be read off the source.
+    pub type_text: String,
+}
+
 /// A type definition (struct, union, enum, bitfield, newtype, type alias).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Eq)]
 pub struct TypeDef {
     pub name: Name,
     pub kind: TypeDefKind,
     pub signature: String,
     pub type_ref: Option<TypeRef>,
     pub span: crate::Span,
+    /// Span of just the declared name, for cursor placement.
+    pub name_span: crate::Span,
+    /// The names this type declares members under: a struct's or bitfield's
+    /// fields. Empty for the kinds that have none.
+    ///
+    /// A field is not a top-level item and never appears in
+    /// `top_level_items()`, but it is a declaration with a name and a place
+    /// in the source, which is all navigation needs. rust-analyzer carries
+    /// fields in its symbol index for the same reason.
+    pub fields: Vec<FieldDecl>,
     pub is_clause: bool,
     pub member_name: Option<String>,
     pub doc: Option<String>,
@@ -70,35 +103,41 @@ pub enum TypeDefKind {
 }
 
 /// A register definition.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Eq)]
 pub struct Register {
     pub name: Name,
     pub signature: String,
     pub type_ref: Option<TypeRef>,
     pub span: crate::Span,
+    /// Span of just the declared name, for cursor placement.
+    pub name_span: crate::Span,
     pub doc: Option<String>,
     pub visibility: crate::visibility::RawVisibility,
 }
 
 /// A `val` specification (type signature).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Eq)]
 pub struct ValSpec {
     pub name: Name,
     pub signature: String,
     pub type_ref: Option<TypeRef>,
     pub span: crate::Span,
+    /// Span of just the declared name, for cursor placement.
+    pub name_span: crate::Span,
     pub doc: Option<String>,
     pub visibility: crate::visibility::RawVisibility,
     pub signature_hash: u64,
 }
 
 /// A mapping or mapping clause.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Eq)]
 pub struct Mapping {
     pub name: Name,
     pub signature: String,
     pub type_ref: Option<TypeRef>,
     pub span: crate::Span,
+    /// Span of just the declared name, for cursor placement.
+    pub name_span: crate::Span,
     pub is_clause: bool,
     pub doc: Option<String>,
     pub visibility: crate::visibility::RawVisibility,
@@ -106,57 +145,73 @@ pub struct Mapping {
 }
 
 /// A top-level `let` or `var` binding.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Eq)]
 pub struct LetDef {
     pub name: Name,
     pub signature: String,
     pub type_ref: Option<TypeRef>,
     pub span: crate::Span,
+    /// Span of just the declared name, for cursor placement.
+    pub name_span: crate::Span,
     pub is_var: bool,
     pub doc: Option<String>,
     pub visibility: crate::visibility::RawVisibility,
 }
 
 /// An `overload` declaration.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Eq)]
 pub struct Overload {
     pub name: Name,
     pub signature: String,
     pub type_ref: Option<TypeRef>,
     pub span: crate::Span,
+    /// Span of just the declared name, for cursor placement.
+    pub name_span: crate::Span,
     pub visibility: crate::visibility::RawVisibility,
 }
 
 /// A scattered definition head or clause.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Eq)]
 pub struct ScatteredDef {
     pub name: Name,
     pub signature: String,
     pub type_ref: Option<TypeRef>,
     pub span: crate::Span,
+    /// Span of just the declared name, for cursor placement.
+    pub name_span: crate::Span,
     pub is_head: bool,
     /// For union/enum clauses: the member name (e.g. "ADD" in `union clause op = ADD`).
     pub member_name: Option<String>,
+    /// Where that member's name is written. The clause is indexed under the
+    /// scattered type's name (`op`), so without this the member itself —
+    /// which is what the source refers to everywhere else — has no location.
+    pub member_span: Option<crate::Span>,
+    pub fields: Vec<FieldDecl>,
+    pub type_kind: Option<TypeDefKind>,
     pub doc: Option<String>,
     pub visibility: crate::visibility::RawVisibility,
 }
 
 /// A constraint definition.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Eq)]
 pub struct Constraint {
     pub name: Name,
     pub signature: String,
     pub type_ref: Option<TypeRef>,
     pub span: crate::Span,
+    /// Span of just the declared name, for cursor placement.
+    pub name_span: crate::Span,
     pub visibility: crate::visibility::RawVisibility,
 }
 
 /// A termination measure or end marker.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Eq)]
 pub struct Pragma {
     pub name: Name,
     pub text: String,
     pub span: crate::Span,
+    /// Span of just the declared name, for cursor placement.
+    pub name_span: crate::Span,
     pub pragma_kind: PragmaKind,
     pub visibility: crate::visibility::RawVisibility,
 }
@@ -174,7 +229,7 @@ pub enum PragmaKind {
 /// An item in the item tree, identified by which arena it lives in
 /// and its index within that arena.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ModItem {
+pub enum DefItem {
     Function(Idx<Function>),
     TypeDef(Idx<TypeDef>),
     Register(Idx<Register>),
@@ -187,7 +242,7 @@ pub enum ModItem {
     Pragma(Idx<Pragma>),
 }
 
-impl ModItem {
+impl DefItem {
     /// Get the name of the item, if it has one (all items have names).
     pub fn name<'a>(&self, tree: &'a ItemTree) -> &'a Name {
         match self {
@@ -205,6 +260,25 @@ impl ModItem {
     }
 
     /// Get the span of the item.
+    /// Span of just the declared name.
+    ///
+    /// Where a cursor should land when navigating to this item;
+    /// [`DefItemId::span`] covers the whole definition.
+    pub fn name_span(&self, tree: &ItemTree) -> crate::Span {
+        match self {
+            Self::Function(id) => tree.functions[*id].name_span,
+            Self::TypeDef(id) => tree.type_defs[*id].name_span,
+            Self::Register(id) => tree.registers[*id].name_span,
+            Self::ValSpec(id) => tree.val_specs[*id].name_span,
+            Self::Mapping(id) => tree.mappings[*id].name_span,
+            Self::Let(id) => tree.lets[*id].name_span,
+            Self::Overload(id) => tree.overloads[*id].name_span,
+            Self::Scattered(id) => tree.scattered[*id].name_span,
+            Self::Constraint(id) => tree.constraints[*id].name_span,
+            Self::Pragma(id) => tree.pragmas[*id].name_span,
+        }
+    }
+
     pub fn span(&self, tree: &ItemTree) -> crate::Span {
         match self {
             Self::Function(id) => tree.functions[*id].span,
@@ -246,47 +320,79 @@ impl ModItem {
             Self::Mapping(id) => tree.mappings[*id].doc.as_deref(),
             Self::Let(id) => tree.lets[*id].doc.as_deref(),
             Self::Scattered(id) => tree.scattered[*id].doc.as_deref(),
-            Self::Overload(_) | Self::Constraint(_) | Self::Pragma(_) => None,
+            Self::Overload(_) => tree.generated.get(self).and_then(|origin| origin.owner.doc(tree)),
+            Self::Constraint(_) | Self::Pragma(_) => None,
         }
     }
 
-    /// Map to the legacy `ItemKind` for backward compatibility.
-    pub fn item_kind(&self, tree: &ItemTree) -> ItemKind {
+    /// The members this item declares under their own names — a struct's or
+    /// bitfield's fields. Empty for everything else.
+    pub fn fields<'a>(&self, tree: &'a ItemTree) -> &'a [FieldDecl] {
         match self {
-            // is_clause does not affect the legacy ItemKind mapping.
-            Self::Function(_) => ItemKind::Function,
+            Self::TypeDef(id) => &tree.type_defs[*id].fields,
+            Self::Scattered(id) => &tree.scattered[*id].fields,
+            _ => &[],
+        }
+    }
+
+    pub fn scattered_type_kind(&self, tree: &ItemTree) -> Option<TypeDefKind> {
+        match self {
+            Self::Scattered(id) => tree.scattered[*id].type_kind,
+            _ => None,
+        }
+    }
+
+    /// The member a scattered `union clause`/`enum clause` declares, with the
+    /// span of its name. `enum clause extension = Ext_S` is indexed under
+    /// `extension`, so `Ext_S` — the name every use site writes — needs its
+    /// own entry.
+    pub fn scattered_member<'a>(&self, tree: &'a ItemTree) -> Option<(&'a str, crate::Span)> {
+        match self {
+            Self::Scattered(id) => {
+                let d = &tree.scattered[*id];
+                Some((d.member_name.as_deref()?, d.member_span?))
+            }
+            _ => None,
+        }
+    }
+
+    /// Map to the legacy `DefKind` for backward compatibility.
+    pub fn def_kind(&self, tree: &ItemTree) -> DefKind {
+        match self {
+            // is_clause does not affect the legacy DefKind mapping.
+            Self::Function(_) => DefKind::Function,
             Self::TypeDef(id) => match tree.type_defs[*id].kind {
-                TypeDefKind::Struct => ItemKind::Struct,
-                TypeDefKind::Union => ItemKind::Union,
-                TypeDefKind::Enum => ItemKind::Enum,
-                TypeDefKind::Bitfield => ItemKind::Bitfield,
-                TypeDefKind::Newtype => ItemKind::Newtype,
-                TypeDefKind::TypeAlias => ItemKind::TypeAlias,
+                TypeDefKind::Struct => DefKind::Struct,
+                TypeDefKind::Union => DefKind::Union,
+                TypeDefKind::Enum => DefKind::Enum,
+                TypeDefKind::Bitfield => DefKind::Bitfield,
+                TypeDefKind::Newtype => DefKind::Newtype,
+                TypeDefKind::TypeAlias => DefKind::TypeAlias,
             },
-            Self::Register(_) => ItemKind::Register,
-            Self::ValSpec(_) => ItemKind::ValSpec,
-            Self::Mapping(_) => ItemKind::Mapping,
+            Self::Register(_) => DefKind::Register,
+            Self::ValSpec(_) => DefKind::ValSpec,
+            Self::Mapping(_) => DefKind::Mapping,
             Self::Let(id) => {
                 if tree.lets[*id].is_var {
-                    ItemKind::Var
+                    DefKind::Var
                 } else {
-                    ItemKind::Let
+                    DefKind::Let
                 }
             }
-            Self::Overload(_) => ItemKind::Overload,
+            Self::Overload(_) => DefKind::Overload,
             Self::Scattered(id) => {
                 if tree.scattered[*id].is_head {
-                    ItemKind::ScatteredHead
+                    DefKind::ScatteredHead
                 } else {
-                    ItemKind::ScatteredClause
+                    DefKind::ScatteredClause
                 }
             }
-            Self::Constraint(_) => ItemKind::Constraint,
+            Self::Constraint(_) => DefKind::Constraint,
             Self::Pragma(id) => match tree.pragmas[*id].pragma_kind {
-                PragmaKind::TerminationMeasure => ItemKind::TerminationMeasure,
-                PragmaKind::EndMarker => ItemKind::EndMarker,
-                PragmaKind::MappingSpec => ItemKind::MappingSpec,
-                PragmaKind::Instantiation => ItemKind::Instantiation,
+                PragmaKind::TerminationMeasure => DefKind::TerminationMeasure,
+                PragmaKind::EndMarker => DefKind::EndMarker,
+                PragmaKind::MappingSpec => DefKind::MappingSpec,
+                PragmaKind::Instantiation => DefKind::Instantiation,
             },
         }
     }
@@ -343,52 +449,377 @@ impl ModItem {
     }
 }
 
-/// Stable summary of every top-level item in a file. Constructed via
-/// [`ItemTree::build`]. Cheap to clone (just two fields), cheap to
-/// equality-compare (by hash), and stable across edits to function
-/// bodies / initialiser values.
-///
-/// # Typed Arena Architecture
-///
-/// One item in an [`ItemTree`]. Lossy by design: holds only the
-/// public surface needed to compare across revisions, not the full
-/// AST node.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ItemTreeEntry {
-    pub name: Name,
-    pub kind: ItemKind,
-    /// Canonical span-free rendering of this item's signature.
-    pub signature_text: String,
-    /// Per-entry hash over `(kind, name, signature_text)`.
-    pub signature_hash: u64,
-    /// Byte span of the definition in source.
-    pub span: crate::Span,
-    /// True when this entry is a `<kind> clause`.
-    pub is_clause: bool,
-    /// For scattered union/enum clauses: the member name.
-    pub member_name: Option<String>,
-    /// `///` doc comment text.
-    pub doc: Option<String>,
-    /// Visibility of this item.
-    pub visibility: crate::visibility::RawVisibility,
+// Identity, and not position.
+//
+// rust-analyzer's `ItemTree` header calls this layer "an invalidation
+// barrier for incremental computations: when typing inside an item body,
+// the `ItemTree` of the modified file is typically unaffected, so we don't
+// have to recompute name resolution results". Its items carry an `AstId`
+// and no offsets, so that holds by construction. Ours carry spans —
+// navigation reads them straight off the tree rather than through a second
+// query — so it has to hold by definition instead: two items that say the
+// same thing are the same item, wherever they sit.
+//
+// `file_def_map`'s only input is `file_item_tree`, so this is precisely
+// what decides whether editing a body redoes name resolution for the file.
+// `the_same_items_at_a_different_offset_are_the_same_tree` pins it.
+//
+// Each impl destructures exhaustively: a field added later fails to
+// compile here rather than silently dropping out of the comparison, which
+// would leave name resolution stale for whatever it holds.
+
+impl PartialEq for Function {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            name,
+            signature,
+            type_ref,
+            span: _,
+            name_span: _,
+            is_clause,
+            member_name,
+            doc,
+            visibility,
+            signature_hash,
+        } = self;
+        let Self {
+            name: o_name,
+            signature: o_signature,
+            type_ref: o_type_ref,
+            span: _,
+            name_span: _,
+            is_clause: o_is_clause,
+            member_name: o_member_name,
+            doc: o_doc,
+            visibility: o_visibility,
+            signature_hash: o_signature_hash,
+        } = other;
+        name == o_name
+            && signature == o_signature
+            && type_ref == o_type_ref
+            && is_clause == o_is_clause
+            && member_name == o_member_name
+            && doc == o_doc
+            && visibility == o_visibility
+            && signature_hash == o_signature_hash
+    }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+impl PartialEq for FieldDecl {
+    fn eq(&self, other: &Self) -> bool {
+        let Self { name, visibility, name_span: _, type_text } = self;
+        let Self { name: o_name, visibility: o_visibility, name_span: _, type_text: o_type_text } =
+            other;
+        name == o_name && visibility == o_visibility && type_text == o_type_text
+    }
+}
+
+impl PartialEq for TypeDef {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            name,
+            kind,
+            signature,
+            type_ref,
+            span: _,
+            name_span: _,
+            fields,
+            is_clause,
+            member_name,
+            doc,
+            visibility,
+            signature_hash,
+        } = self;
+        let Self {
+            name: o_name,
+            kind: o_kind,
+            signature: o_signature,
+            type_ref: o_type_ref,
+            span: _,
+            name_span: _,
+            fields: o_fields,
+            is_clause: o_is_clause,
+            member_name: o_member_name,
+            doc: o_doc,
+            visibility: o_visibility,
+            signature_hash: o_signature_hash,
+        } = other;
+        name == o_name
+            && kind == o_kind
+            && signature == o_signature
+            && type_ref == o_type_ref
+            && fields == o_fields
+            && is_clause == o_is_clause
+            && member_name == o_member_name
+            && doc == o_doc
+            && visibility == o_visibility
+            && signature_hash == o_signature_hash
+    }
+}
+
+impl PartialEq for Register {
+    fn eq(&self, other: &Self) -> bool {
+        let Self { name, signature, type_ref, span: _, name_span: _, doc, visibility } = self;
+        let Self {
+            name: o_name,
+            signature: o_signature,
+            type_ref: o_type_ref,
+            span: _,
+            name_span: _,
+            doc: o_doc,
+            visibility: o_visibility,
+        } = other;
+        name == o_name
+            && signature == o_signature
+            && type_ref == o_type_ref
+            && doc == o_doc
+            && visibility == o_visibility
+    }
+}
+
+impl PartialEq for ValSpec {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            name,
+            signature,
+            type_ref,
+            span: _,
+            name_span: _,
+            doc,
+            visibility,
+            signature_hash,
+        } = self;
+        let Self {
+            name: o_name,
+            signature: o_signature,
+            type_ref: o_type_ref,
+            span: _,
+            name_span: _,
+            doc: o_doc,
+            visibility: o_visibility,
+            signature_hash: o_signature_hash,
+        } = other;
+        name == o_name
+            && signature == o_signature
+            && type_ref == o_type_ref
+            && doc == o_doc
+            && visibility == o_visibility
+            && signature_hash == o_signature_hash
+    }
+}
+
+impl PartialEq for Mapping {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            name,
+            signature,
+            type_ref,
+            span: _,
+            name_span: _,
+            is_clause,
+            doc,
+            visibility,
+            signature_hash,
+        } = self;
+        let Self {
+            name: o_name,
+            signature: o_signature,
+            type_ref: o_type_ref,
+            span: _,
+            name_span: _,
+            is_clause: o_is_clause,
+            doc: o_doc,
+            visibility: o_visibility,
+            signature_hash: o_signature_hash,
+        } = other;
+        name == o_name
+            && signature == o_signature
+            && type_ref == o_type_ref
+            && is_clause == o_is_clause
+            && doc == o_doc
+            && visibility == o_visibility
+            && signature_hash == o_signature_hash
+    }
+}
+
+impl PartialEq for LetDef {
+    fn eq(&self, other: &Self) -> bool {
+        let Self { name, signature, type_ref, span: _, name_span: _, is_var, doc, visibility } =
+            self;
+        let Self {
+            name: o_name,
+            signature: o_signature,
+            type_ref: o_type_ref,
+            span: _,
+            name_span: _,
+            is_var: o_is_var,
+            doc: o_doc,
+            visibility: o_visibility,
+        } = other;
+        name == o_name
+            && signature == o_signature
+            && type_ref == o_type_ref
+            && is_var == o_is_var
+            && doc == o_doc
+            && visibility == o_visibility
+    }
+}
+
+impl PartialEq for Overload {
+    fn eq(&self, other: &Self) -> bool {
+        let Self { name, signature, type_ref, span: _, name_span: _, visibility } = self;
+        let Self {
+            name: o_name,
+            signature: o_signature,
+            type_ref: o_type_ref,
+            span: _,
+            name_span: _,
+            visibility: o_visibility,
+        } = other;
+        name == o_name
+            && signature == o_signature
+            && type_ref == o_type_ref
+            && visibility == o_visibility
+    }
+}
+
+impl PartialEq for ScatteredDef {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            name,
+            signature,
+            type_ref,
+            span: _,
+            name_span: _,
+            is_head,
+            member_name,
+            member_span: _,
+            fields,
+            type_kind,
+            doc,
+            visibility,
+        } = self;
+        let Self {
+            name: o_name,
+            signature: o_signature,
+            type_ref: o_type_ref,
+            span: _,
+            name_span: _,
+            is_head: o_is_head,
+            member_name: o_member_name,
+            member_span: _,
+            fields: o_fields,
+            type_kind: o_type_kind,
+            doc: o_doc,
+            visibility: o_visibility,
+        } = other;
+        name == o_name
+            && fields == o_fields
+            && type_kind == o_type_kind
+            && signature == o_signature
+            && type_ref == o_type_ref
+            && is_head == o_is_head
+            && member_name == o_member_name
+            && doc == o_doc
+            && visibility == o_visibility
+    }
+}
+
+impl PartialEq for Constraint {
+    fn eq(&self, other: &Self) -> bool {
+        let Self { name, signature, type_ref, span: _, name_span: _, visibility } = self;
+        let Self {
+            name: o_name,
+            signature: o_signature,
+            type_ref: o_type_ref,
+            span: _,
+            name_span: _,
+            visibility: o_visibility,
+        } = other;
+        name == o_name
+            && signature == o_signature
+            && type_ref == o_type_ref
+            && visibility == o_visibility
+    }
+}
+
+impl PartialEq for Pragma {
+    fn eq(&self, other: &Self) -> bool {
+        let Self { name, text, span: _, name_span: _, pragma_kind, visibility } = self;
+        let Self {
+            name: o_name,
+            text: o_text,
+            span: _,
+            name_span: _,
+            pragma_kind: o_pragma_kind,
+            visibility: o_visibility,
+        } = other;
+        name == o_name
+            && text == o_text
+            && pragma_kind == o_pragma_kind
+            && visibility == o_visibility
+    }
+}
+
+impl PartialEq for ItemTree {
+    fn eq(&self, other: &Self) -> bool {
+        // `include_spans` is where the file's `$include`s are, which moves
+        // with everything else; the paths themselves are the identity.
+        let Self {
+            signature_hash,
+            fixities,
+            include_spans,
+            top_level,
+            functions,
+            type_defs,
+            registers,
+            val_specs,
+            mappings,
+            lets,
+            overloads,
+            scattered,
+            constraints,
+            pragmas,
+            generated,
+        } = self;
+        let includes = |v: &Vec<(String, crate::Span)>| {
+            v.iter().map(|(path, _)| path.clone()).collect::<Vec<_>>()
+        };
+        *signature_hash == other.signature_hash
+            && *fixities == other.fixities
+            && includes(include_spans) == includes(&other.include_spans)
+            && *top_level == other.top_level
+            && *functions == other.functions
+            && *type_defs == other.type_defs
+            && *registers == other.registers
+            && *val_specs == other.val_specs
+            && *mappings == other.mappings
+            && *lets == other.lets
+            && *overloads == other.overloads
+            && *scattered == other.scattered
+            && *constraints == other.constraints
+            && *pragmas == other.pragmas
+            && *generated == other.generated
+    }
+}
+
+#[derive(Clone, Debug, Eq)]
 pub struct ItemTree {
     /// Legacy: one entry per public top-level item, in source order.
-    #[deprecated(note = "use top_level_items() with ModItem accessors")]
-    pub entries: Vec<ItemTreeEntry>,
     /// Combined hash over all entries' rendered signature text.
     pub signature_hash: u64,
     /// Fixity declarations (`infixl N op`, `infixr N op`, `infix N op`).
     pub fixities: Vec<FixityDecl>,
     /// Spans of `$include` directives in this file.
     /// Each entry is (include_path_text, span_of_directive).
-    /// Used by DefCollector to emit diagnostics with real source spans.
+    /// So an unresolved `$include` can be reported at the directive.
     pub include_spans: Vec<(String, crate::Span)>,
 
     /// Top-level items in source order, indexing into typed arenas.
-    pub top_level: Vec<ModItem>,
+    pub top_level: Vec<DefItem>,
+    /// Synthetic names retain their generating item instead of pretending
+    /// that its name token spells the synthetic name.
+    pub generated: std::collections::HashMap<DefItem, generated::Origin>,
     /// Per-kind arenas.
     pub(crate) functions: Arena<Function>,
     pub(crate) type_defs: Arena<TypeDef>,
@@ -432,7 +863,7 @@ pub enum Associativity {
 /// `ItemTree` since they don't form part of the file's public
 /// surface in the sense that downstream typechecking depends on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum ItemKind {
+pub enum DefKind {
     /// `function foo(...) = ...` or `function clause foo(...) = ...`
     Function,
     /// `mapping foo : ... = { ... }` or `mapping clause foo = ...`
@@ -473,11 +904,57 @@ pub enum ItemKind {
     EndMarker,
     /// `instantiation foo with 'a = bar_kind` — outcome instantiation.
     Instantiation,
+    /// `outcome foo : 'a -> unit` — Sail's `DEF_outcome`. Declares a
+    /// callable whose implementation an `instantiation` supplies.
+    Outcome,
+    /// One field of a `struct` or `bitfield`.
+    ///
+    /// Not a top-level item — nothing in `top_level_items()` ever carries
+    /// this — but a named declaration with a source location, which is what
+    /// the symbol index and navigation work in terms of.
+    Field,
+    /// One member of a `union` or `enum`, declared inline in its braces.
+    /// A member declared as `enum clause E = A` is a `ScatteredClause`
+    /// instead, and carries the member's own name in `member_name`.
+    Variant,
+}
+
+impl DefKind {
+    /// The keyword a definition of this kind is written with.
+    ///
+    /// `None` for the two kinds that are not written as a keyword-led
+    /// definition: a struct or bitfield field, and an inline union or
+    /// enum member.
+    pub fn keyword(self) -> Option<&'static str> {
+        Some(match self {
+            Self::Function => "function",
+            Self::Mapping | Self::MappingSpec => "mapping",
+            Self::ValSpec => "val",
+            Self::TypeAlias => "type",
+            Self::Struct => "struct",
+            Self::Union => "union",
+            Self::Enum => "enum",
+            Self::Bitfield => "bitfield",
+            Self::Newtype => "newtype",
+            Self::Register => "register",
+            Self::Let => "let",
+            Self::Var => "var",
+            Self::Overload => "overload",
+            Self::ScatteredHead => "scattered",
+            Self::ScatteredClause => "clause",
+            Self::Constraint => "constraint",
+            Self::TerminationMeasure => "termination_measure",
+            Self::EndMarker => "end",
+            Self::Instantiation => "instantiation",
+            Self::Outcome => "outcome",
+            Self::Field | Self::Variant => return None,
+        })
+    }
 }
 
 impl ItemTree {
     /// Top-level items in source order (typed arena version).
-    pub fn top_level_items(&self) -> &[ModItem] {
+    pub fn top_level_items(&self) -> &[DefItem] {
         &self.top_level
     }
 
@@ -526,11 +1003,11 @@ impl ItemTree {
     #[allow(deprecated)]
     fn empty() -> Self {
         Self {
-            entries: Vec::new(),
             signature_hash: 0,
             fixities: Vec::new(),
             include_spans: Vec::new(),
             top_level: Vec::new(),
+            generated: Default::default(),
             functions: Arena::new(),
             type_defs: Arena::new(),
             registers: Arena::new(),
@@ -544,17 +1021,7 @@ impl ItemTree {
         }
     }
 
-    /// Find a top-level item by name. O(n) — the typical use case is a
-    /// single lookup per query, so a HashMap index isn't worth the cost.
-    /// Returns the `ModItem` for the first match.
-    /// Legacy lookup by name in `entries`.
-    #[deprecated(note = "use find_by_name()")]
-    #[allow(deprecated)]
-    pub fn entry(&self, name: &str) -> Option<&ItemTreeEntry> {
-        self.entries.iter().find(|e| e.name == name)
-    }
-
-    pub fn find_by_name(&self, name: &str) -> Option<ModItem> {
+    pub fn find_by_name(&self, name: &str) -> Option<DefItem> {
         self.top_level.iter().copied().find(|id| id.name(self).as_str() == name)
     }
 
@@ -620,19 +1087,19 @@ impl ItemTree {
     }
 
     /// Iterator over every top-level item of a given kind.
-    pub fn items_of_kind(&self, kind: ItemKind) -> impl Iterator<Item = ModItem> + '_ {
-        self.top_level.iter().copied().filter(move |id| id.item_kind(self) == kind)
+    pub fn items_of_kind(&self, kind: DefKind) -> impl Iterator<Item = DefItem> + '_ {
+        self.top_level.iter().copied().filter(move |id| id.def_kind(self) == kind)
     }
 }
 
 /// Legacy: compute signature hash directly from typed arenas.
 /// Superseded by `ItemTree::compute_per_item_hashes` .
-#[allow(dead_code)]
+#[expect(dead_code)]
 fn compute_signature_hash(tree: &ItemTree) -> u64 {
     let mut hasher = DefaultHasher::new();
     tree.top_level.len().hash(&mut hasher);
     for id in &tree.top_level {
-        id.item_kind(tree).hash(&mut hasher);
+        id.def_kind(tree).hash(&mut hasher);
         id.name(tree).hash(&mut hasher);
         id.signature(tree).hash(&mut hasher);
     }
@@ -717,5 +1184,41 @@ mod test_visibility_detection {
             crate::visibility::RawVisibility::Public,
             "$[deprecated, experimental] should be Public"
         );
+    }
+}
+
+#[cfg(test)]
+mod position_independence {
+    use super::*;
+
+    /// The same items, written at two different offsets, are the same tree.
+    ///
+    /// This is the invariant rust-analyzer's `ItemTree` states in its own
+    /// header: the layer exists "to provide an invalidation barrier for
+    /// incremental computations", so that typing inside a body does not
+    /// recompute name resolution. It holds only if the tree's *identity*
+    /// carries no position — RA's items hold an `AstId`, not a span.
+    ///
+    /// Written as a comparison rather than a field audit because it catches
+    /// the next position field too, wherever someone adds it.
+    #[test]
+    fn the_same_items_at_a_different_offset_are_the_same_tree() {
+        let body = "\
+type xlenbits = bits(64)
+val f : int -> int
+function f(x) = x + 1
+struct S = { a : int, b : bool }
+$include \"other.sail\"
+scattered function g
+end g
+";
+        let build = |src: &str| {
+            let (root, _) = syntax::parse_text(src);
+            ItemTree::build_from_cst(&root)
+        };
+        let here = build(body);
+        // Everything moved down two lines and right by a comment.
+        let moved = build(&format!("// a comment nobody asked about\n\n{body}"));
+        assert_eq!(here, moved, "the tree changed because the items moved");
     }
 }

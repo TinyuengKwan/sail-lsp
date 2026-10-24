@@ -4,7 +4,6 @@
 
 use super::Completions;
 use crate::context::{CompletionContext, CompletionPosition};
-use ide_db::ide_types::CompletionItem;
 
 /// Complete keywords based on position context.
 /// `complete_for_and_where(acc, ctx, item)`.
@@ -71,18 +70,7 @@ pub(crate) fn complete_keywords(
 
         let snippet = keyword_snippet(keyword, ctx.is_top_level);
 
-        acc.add(CompletionItem {
-            label: keyword.to_string(),
-            kind: ide_db::ide_types::CompletionItemKind::Keyword,
-            detail: Some("keyword".to_string()),
-            documentation: None,
-            insert_text: Some(snippet.unwrap_or_else(|| keyword.to_string())),
-            text_edit: None,
-            sort_text: None,
-            filter_text: Some(keyword.to_string()),
-            deprecated: false,
-            relevance: Default::default(),
-        });
+        acc.add(crate::render::render_keyword_snippet(keyword, snippet));
     }
 }
 

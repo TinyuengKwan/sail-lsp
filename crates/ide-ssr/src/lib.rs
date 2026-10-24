@@ -127,7 +127,7 @@ pub struct MatchFinder<'db> {
     /// Resolved rules (AST-level).
     rules: Vec<ResolvedRule>,
     /// Resolution scope (cached).
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     resolution_scope: ResolutionScope<'db>,
 }
 
@@ -244,7 +244,7 @@ impl<'db> MatchFinder<'db> {
                 );
                 let matched = match matcher.try_match(pattern, &node) {
                     Ok(captures) => Ok(matching::Match {
-                        range: hir_def::in_file::FileRange { file_id, range: node.text_range() },
+                        range: hir::FileRange { file_id, range: node.text_range() },
                         matched_node: node.clone(),
                         placeholder_values: captures,
                         ignored_comments: Vec::new(),

@@ -1,129 +1,119 @@
 //! `merge_nested_if` assist — merge nested `if` into a single `if` with `&` condition.
 
 use crate::assist_context::{AssistContext, AssistId, AssistKind, Assists};
-use ide_db::text_edit::TextEdit;
 
 pub(crate) fn merge_nested_if(acc: &mut Assists, ctx: &AssistContext<'_>) -> Option<()> {
-    let text = ctx.source_text();
+    use parser::SyntaxKind as SK;
+
+    let root = ctx.source_file()?;
     let offset = ctx.offset();
 
-    // Find outer "if" near cursor
-    let outer_if = find_keyword_at(text, offset, "if")?;
+    // The `if` under the cursor.
+    //
+    // This used to search a ±100-byte window of raw text for the word
+    // `if`, then for `then`, then count braces — so it matched those words
+    // inside a string or a comment, and it took the *last* `if` in the
+    // window rather than the one the cursor is on.
+    let kw = root.descendants_with_tokens().filter_map(|el| el.into_token()).find(|t| {
+        t.kind() == SK::KW_IF
+            && usize::from(t.text_range().start()) <= offset
+            && offset < usize::from(t.text_range().end())
+    })?;
+    let outer = kw.parent().filter(|n| n.kind() == SK::IF_EXPR)?;
 
-    // Parse: if <cond1> then { if <cond2> then <body> }
-    let after_outer_if = outer_if + 2;
-    let rest = &text[after_outer_if..];
-
-    // Find "then" for outer if
-    let then_rel = find_word(rest, "then")?;
-    let outer_cond = rest[..then_rel].trim();
-    let after_then = after_outer_if + then_rel + 4; // "then" is 4 chars
-
-    // Skip whitespace and expect '{'
-    let body_start =
-        after_then + (text[after_then..].len() - text[after_then..].trim_start().len());
-    if text.as_bytes().get(body_start)? != &b'{' {
+    let (outer_cond, outer_then, outer_else) = parts(&outer)?;
+    // `if a then { if b then x } else y` is not `if (a & b) then x else y`:
+    // the original runs `y` when `a` is false, the merged one also runs it
+    // when `a` holds and `b` does not. The byte version replaced up to the
+    // closing brace and left the `else` attached to the merged `if`.
+    if outer_else.is_some() {
         return None;
     }
 
-    // Find matching '}'
-    let close_brace = find_matching_brace(text, body_start)?;
-
-    // Inner content between braces
-    let inner = text[body_start + 1..close_brace].trim();
-
-    // Inner must start with "if"
-    if !inner.starts_with("if ") {
+    let inner = unwrap_single(&outer_then)?;
+    if inner.kind() != SK::IF_EXPR {
+        return None;
+    }
+    let (inner_cond, inner_then, inner_else) = parts(&inner)?;
+    if inner_else.is_some() {
         return None;
     }
 
-    // Parse inner if
-    let inner_rest = &inner[3..]; // skip "if "
-    let inner_then = find_word(inner_rest, "then")?;
-    let inner_cond = inner_rest[..inner_then].trim();
-    let inner_body = inner_rest[inner_then + 4..].trim();
-
-    // Build merged expression
-    let merged_cond = format!("({} & {})", outer_cond, inner_cond);
-    let merged = format!("if {} then {}", merged_cond, inner_body);
-
-    // The full range to replace: from outer_if to close_brace + 1
-    let end = close_brace + 1;
-
-    acc.add_with_edits(
+    let merged = format!("if ({outer_cond} & {inner_cond}) then {inner_then}");
+    acc.add(
         AssistId("merge_nested_if", AssistKind::RefactorRewrite),
         "Merge nested if",
         ctx.range,
-        vec![TextEdit { range: base_db::text_range(outer_if, end), new_text: merged }],
+        |builder| {
+            let mut editor = builder.make_editor(&outer);
+            editor.replace(outer.clone(), syntax::ast::make::expr_from_text(&merged));
+            builder.add_file_edits(editor);
+        },
     );
     Some(())
 }
 
-fn find_keyword_at(text: &str, offset: usize, kw: &str) -> Option<usize> {
-    let start = offset.saturating_sub(100);
-    let end = text.len().min(offset + 50);
-    let window = &text[start..end];
-    let mut search_from = 0;
-    let mut best = None;
-    let kw_len = kw.len();
-    while let Some(pos) = window[search_from..].find(kw) {
-        let abs = start + search_from + pos;
-        let before_ok = abs == 0 || !text.as_bytes()[abs - 1].is_ascii_alphanumeric();
-        let after_ok =
-            abs + kw_len >= text.len() || !text.as_bytes()[abs + kw_len].is_ascii_alphanumeric();
-        if before_ok && after_ok {
-            best = Some(abs);
-        }
-        search_from += pos + 1;
-    }
-    best
+/// An `IF_EXPR`'s condition, then-branch and else-branch, in that order —
+/// which is the order they are its children in.
+fn parts(
+    if_expr: &syntax::SyntaxNode,
+) -> Option<(syntax::SyntaxNode, syntax::SyntaxNode, Option<syntax::SyntaxNode>)> {
+    let mut children = if_expr.children();
+    let cond = children.next()?;
+    let then = children.next()?;
+    Some((cond, then, children.next()))
 }
 
-fn find_word(text: &str, word: &str) -> Option<usize> {
-    let mut search_from = 0;
+/// The one expression a branch holds, looking through a block that wraps
+/// exactly one item.
+fn unwrap_single(node: &syntax::SyntaxNode) -> Option<syntax::SyntaxNode> {
+    use parser::SyntaxKind as SK;
+    let mut node = node.clone();
     loop {
-        match text[search_from..].find(word) {
-            Some(pos) => {
-                let abs = search_from + pos;
-                let before_ok = abs == 0 || !text.as_bytes()[abs - 1].is_ascii_alphanumeric();
-                let after_ok = abs + word.len() >= text.len()
-                    || !text.as_bytes()[abs + word.len()].is_ascii_alphanumeric();
-                if before_ok && after_ok {
-                    return Some(abs);
-                }
-                search_from = abs + 1;
-            }
-            None => return None,
+        if !matches!(node.kind(), SK::BLOCK_EXPR | SK::BLOCK_ITEM) {
+            return Some(node);
         }
+        let mut children = node.children();
+        let only = children.next()?;
+        if children.next().is_some() {
+            return None;
+        }
+        node = only;
     }
-}
-
-fn find_matching_brace(text: &str, open: usize) -> Option<usize> {
-    let mut depth = 1i32;
-    let mut i = open + 1;
-    let bytes = text.as_bytes();
-    while i < text.len() && depth > 0 {
-        match bytes[i] {
-            b'{' => depth += 1,
-            b'}' => depth -= 1,
-            _ => {}
-        }
-        if depth == 0 {
-            return Some(i);
-        }
-        i += 1;
-    }
-    None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::check_assist;
+    use crate::tests::{check_assist, check_assist_not_applicable};
+    use expect_test::expect;
 
     #[test]
-    fn smoke() {
-        let labels = check_assist(merge_nested_if, "if x then { if y then z }\n", 0);
-        let _ = labels;
+    fn applies() {
+        check_assist(
+            merge_nested_if,
+            "function f(x, y, z) = $0if x then { if y then z }\n",
+            expect![[r#"
+            function f(x, y, z) = if (x & y) then z
+        "#]],
+        );
+    }
+
+    /// Merging past an `else` changes when the `else` runs.
+    #[test]
+    fn declines_when_the_outer_if_has_an_else() {
+        check_assist_not_applicable(
+            merge_nested_if,
+            "function f(x, y, z, w) = $0if x then { if y then z } else w\n",
+        );
+    }
+
+    /// The window search read the word `if` out of a string literal.
+    #[test]
+    fn a_string_holding_the_word_if_is_not_an_if() {
+        check_assist_not_applicable(
+            merge_nested_if,
+            "function f(x, y, z) = { print(\"if y then\"); i$0f x then z }\n",
+        );
     }
 }

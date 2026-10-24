@@ -4,7 +4,7 @@
 //! then dispatched to individual handler modules. Each handler converts its
 //! variant into an IDE `Diagnostic` with optional quick-fixes.
 //!
-//! Two pipelines: `syntax_diagnostics` (parse errors, bracket checks) and
+//! Two pipelines: `syntax_diagnostics` (parse + tree validation errors) and
 //! `semantic_diagnostics` (type inference, name resolution, lints).
 //! Combined via `full_diagnostics`.
 
@@ -26,11 +26,14 @@ mod handlers {
     pub(crate) mod invalid_vector_concat;
     pub(crate) mod mapping_binding_mismatch;
     pub(crate) mod mismatched_arg_count;
+    pub(crate) mod mismatched_param_count;
     pub(crate) mod missing_effect_annotation;
     pub(crate) mod missing_fields;
     pub(crate) mod missing_match_arms;
     pub(crate) mod no_overloading;
     pub(crate) mod non_contiguous_subrange;
+    pub(crate) mod not_a_function;
+    pub(crate) mod redundant_match_arm;
     pub(crate) mod redundant_type_annotation;
     pub(crate) mod remove_trailing_return;
     pub(crate) mod remove_unnecessary_else;
@@ -38,6 +41,7 @@ mod handlers {
     pub(crate) mod shadowed_binding;
     pub(crate) mod type_mismatch;
     pub(crate) mod undeclared_effect;
+    pub(crate) mod undeclared_fixity;
     pub(crate) mod undeclared_mapping_type;
     pub(crate) mod unnecessary_mutability;
     pub(crate) mod unreachable_code;
@@ -64,12 +68,12 @@ use hir::diagnostics::{
     DuplicateDefinition, EffectMismatchInOverride, EffectViolation, ExpectedFunction,
     ImpossibleConstraint, IncompleteMatch, IncompleteScattered, InconsistentHexCasing,
     InvalidListPattern, InvalidSliceAssign, InvalidStringPattern, InvalidVectorConcat,
-    MappingBindingMismatch, MismatchedArgCount, MissingEffectAnnotation, MissingFields,
-    NoOverloading, NonContiguousSubrange, RedundantTypeAnnotation, RemoveTrailingReturn,
-    RemoveUnnecessaryElse, ReturnOutsideFunction, ShadowedBinding, TypeMismatch, UndeclaredEffect,
-    UndeclaredMappingType, UnnecessaryMutability, UnreachableCode, UnresolvedField,
-    UnresolvedIdent, UnresolvedInclude, UnresolvedQuants, UnsolvedConstraint, UnusedImport,
-    UnusedVariable, VectorSubrangeOrder,
+    MappingBindingMismatch, MismatchedArgCount, MismatchedParamCount, MissingEffectAnnotation,
+    MissingFields, NoOverloading, NonContiguousSubrange, NotAFunction, RedundantMatchArm,
+    RedundantTypeAnnotation, RemoveTrailingReturn, RemoveUnnecessaryElse, ReturnOutsideFunction,
+    ShadowedBinding, TypeMismatch, UndeclaredEffect, UndeclaredMappingType, UnnecessaryMutability,
+    UnreachableCode, UnresolvedField, UnresolvedIdent, UnresolvedInclude, UnresolvedQuants,
+    UnsolvedConstraint, UnusedImport, UnusedVariable, VectorSubrangeOrder,
 };
 use ide_db::assists::{Assist, AssistId, AssistKind, AssistResolveStrategy, Label, SnippetCap};
 use ide_db::line_index::TextRange;
@@ -79,14 +83,12 @@ use ide_db::source_change::SourceChange;
 ///
 /// Convenience helper so handlers can write `node_file_range(&d.node)` instead
 /// of constructing `FileRange { file_id: d.node.file_id, range: d.node.value.text_range() }`.
-pub(crate) fn node_file_range(
-    node: &hir_def::in_file::InFile<syntax::SyntaxNodePtr>,
-) -> hir_def::in_file::FileRange {
-    hir_def::in_file::FileRange { file_id: node.file_id, range: node.value.text_range() }
+pub(crate) fn node_file_range(node: &hir::InFile<syntax::SyntaxNodePtr>) -> hir::FileRange {
+    hir::FileRange { file_id: node.file_id, range: node.value.text_range() }
 }
 
 // Re-export Severity from hir-def (single source of truth).
-pub use hir_def::diagnostics::Severity;
+pub use hir::diagnostics::Severity;
 
 /// Configuration for diagnostics computation.
 #[derive(Clone, Debug, Default)]
@@ -140,9 +142,9 @@ impl DiagnosticsConfig {
     pub fn effective_severity(
         &self,
         code: &str,
-        default: hir_def::diagnostics::Severity,
-    ) -> hir_def::diagnostics::Severity {
-        use hir_def::diagnostics::Severity;
+        default: hir::diagnostics::Severity,
+    ) -> hir::diagnostics::Severity {
+        use hir::diagnostics::Severity;
         if self.warnings_as_hint.contains(code) {
             Severity::WeakWarning
         } else if self.warnings_as_info.contains(code) {
@@ -158,9 +160,9 @@ impl DiagnosticsConfig {
 /// Replaces `lsp_types::Diagnostic` in IDE crates.
 #[derive(Clone, Debug)]
 pub struct Diagnostic {
-    pub code: hir_def::diagnostics::DiagnosticCode,
+    pub code: hir::diagnostics::DiagnosticCode,
     pub message: String,
-    pub range: hir_def::in_file::FileRange,
+    pub range: hir::FileRange,
     pub severity: Severity,
     pub unused: bool,
     pub experimental: bool,
@@ -170,15 +172,23 @@ pub struct Diagnostic {
     ///
     /// Used for `#[allow]` attribute resolution in RA; in Sail, used
     /// for precise range adjustment in handlers.
-    pub main_node: Option<hir_def::in_file::InFile<syntax::SyntaxNodePtr>>,
+    pub main_node: Option<hir::InFile<syntax::SyntaxNodePtr>>,
+    /// Secondary places, each with what it contributes.
+    ///
+    /// Upstream draws a caret at every one of them — "derived from here",
+    /// "bound here" — and a constraint error is mostly the question of
+    /// *which argument* is at fault. This used to be appended to the
+    /// message as `constraint from 110..111`, which shows the reader two
+    /// integers.
+    pub related: Vec<(hir::FileRange, String)>,
 }
 
 impl Diagnostic {
     /// Create a new diagnostic.
     pub fn new(
-        code: hir_def::diagnostics::DiagnosticCode,
+        code: hir::diagnostics::DiagnosticCode,
         message: impl Into<String>,
-        range: impl Into<hir_def::in_file::FileRange>,
+        range: impl Into<hir::FileRange>,
     ) -> Self {
         let severity = code.default_severity();
         Self {
@@ -190,21 +200,28 @@ impl Diagnostic {
             experimental: false,
             fixes: None,
             main_node: None,
+            related: Vec::new(),
         }
+    }
+
+    /// Attach the places this finding was derived from.
+    pub fn with_related(mut self, related: Vec<(hir::FileRange, String)>) -> Self {
+        self.related = related;
+        self
     }
 
     /// Create a diagnostic from a syntax node pointer, computing the display range.
     pub(crate) fn new_with_syntax_node_ptr(
         ctx: &DiagnosticsContext<'_>,
-        code: hir_def::diagnostics::DiagnosticCode,
+        code: hir::diagnostics::DiagnosticCode,
         message: impl Into<String>,
-        node: hir_def::in_file::InFile<syntax::SyntaxNodePtr>,
+        node: hir::InFile<syntax::SyntaxNodePtr>,
     ) -> Self {
         let file_range = ctx.sema.diagnostics_display_range(node);
         Diagnostic::new(
             code,
             message,
-            hir_def::in_file::FileRange { file_id: node.file_id, range: file_range.range },
+            hir::FileRange { file_id: node.file_id, range: file_range.range },
         )
         .with_main_node(node)
     }
@@ -240,10 +257,7 @@ impl Diagnostic {
     }
 
     /// Builder: set main syntax node for attribute resolution.
-    pub fn with_main_node(
-        mut self,
-        main_node: hir_def::in_file::InFile<syntax::SyntaxNodePtr>,
-    ) -> Self {
+    pub fn with_main_node(mut self, main_node: hir::InFile<syntax::SyntaxNodePtr>) -> Self {
         self.main_node = Some(main_node);
         self
     }
@@ -255,13 +269,12 @@ impl Diagnostic {
 struct DiagnosticsContext<'a> {
     config: &'a DiagnosticsConfig,
     sema: hir::Semantics<'a>,
-    /// Controls lazy resolution of fix actions.
-    #[allow(dead_code)]
+    /// Whether a fix's edit is built now or left for
+    /// `codeAction/resolve`. Read once, by `drop_unresolved_fixes`.
     resolve: &'a AssistResolveStrategy,
 }
 
 impl<'a> DiagnosticsContext<'a> {
-    #[allow(dead_code)]
     fn db(&self) -> &'a dyn salsa::Database {
         self.sema.db
     }
@@ -277,12 +290,41 @@ impl<'a> DiagnosticsContext<'a> {
 pub struct WorkspaceNames {
     /// Function names defined across all workspace files.
     pub function_names: std::collections::HashSet<String>,
+    /// Explicit signatures, distinct from definitions with inferred types.
+    pub value_spec_names: std::collections::HashSet<String>,
+    pub mapping_spec_names: std::collections::HashSet<String>,
     /// Constructor names (enum/union members) across all workspace files.
     pub constructor_names: std::collections::HashSet<String>,
     /// Value names (let bindings, registers) across all workspace files.
     pub value_names: std::collections::HashSet<String>,
     /// Record/struct names that have known field definitions elsewhere.
     pub record_names: std::collections::HashSet<String>,
+    /// Names declared as `scattered function|mapping|union|enum` anywhere in
+    /// the workspace. A matching `end` may live in a different file.
+    pub scattered_heads: std::collections::HashSet<String>,
+    /// Every type name in the workspace: synonyms, structs, unions, enums,
+    /// bitfields, newtypes. Used to tell a type-level constant apart from a
+    /// value where a numeric type expression is required.
+    pub type_names: std::collections::HashSet<String>,
+    /// An `$include_error` a workspace file reaches under the current
+    /// preprocessor symbols, together with the include-path file names that
+    /// transitively lead to it. A source file is responsible for the error
+    /// only when one of its own `$include`s names one of those files — this
+    /// is how `lib/vector.sail` enforces that a `default Order` has been set.
+    pub include_error: Option<(String, std::collections::HashSet<String>)>,
+    /// Values from the model configuration named by `$option --config`,
+    /// flattened to dotted keys. The value is rendered as JSON so a check can
+    /// tell a string from a number without re-parsing.
+    pub config_values: std::collections::HashMap<String, String>,
+    /// The files on an `$include` cycle, with the cycle rendered for the
+    /// message. A cycle is a property of the graph, not of any one file, so
+    /// only a caller holding the whole workspace can find it — and a file
+    /// reports it only when it is one of the files on the cycle.
+    pub include_cycle: Option<(std::collections::HashSet<base_db::FileId>, String)>,
+    /// Scattered groups that are incomplete across the whole workspace. A
+    /// head in one file and its `end` in another is legal, so a per-file
+    /// view can only guess; this is computed once over every item tree.
+    pub scattered_problems: Vec<hir::scattered::ScatteredDiagnostic>,
 }
 
 // Two-pipeline entry points.
@@ -321,16 +363,22 @@ pub fn syntax_diagnostics(
     if let Some(errors) = errors {
         for err in errors.iter().take(128) {
             res.push(Diagnostic::new(
-                hir_def::diagnostics::DiagnosticCode::SyntaxError,
+                hir::diagnostics::DiagnosticCode::SyntaxError,
                 format!("Syntax Error: {err}"),
                 err.range(),
             ));
         }
     }
 
-    // Phase 2: Bracket matching + ItemTree checks (Sail-specific).
-    let parse_diags = compute_parse_diagnostics(file, &[]);
-    res.extend(parse_diags.into_iter().take(128).map(|d| hir_diag_to_ide(&d)));
+    // Phase 2: an operator with no fixity. Upstream refuses the program
+    // (`initial_check.ml:308`); the parser here recovers, so the report
+    // has to come from somewhere that knows the workspace's own table.
+    res.extend(handlers::undeclared_fixity::undeclared_fixity(db, file));
+
+    // Phase 3: ItemTree checks (Sail-specific). Bracket matching moved to
+    // `syntax::validation`, so it arrives through phase 1.
+    let parse_diags = compute_parse_diagnostics(file);
+    res.extend(parse_diags.into_iter().take(128).map(|d| hir_diag_to_ide(&d, ft.file_id(db))));
 
     // Config-based filtering for syntax pipeline.
     res.retain(|d| {
@@ -359,19 +407,176 @@ pub fn semantic_diagnostics(
     let sema = hir::Semantics::new(db);
     let ctx = DiagnosticsContext { config, sema, resolve };
     let mut res = Vec::new();
+    // `ctx.resolve` is read at the end of this function, once, over every
+    // fix — see `drop_unresolved_fixes`.
 
-    // AST visitor checks: duplicate_definitions, unreachable_code.
-    let semantic_diags = compute_semantic_diagnostics(file);
+    // What name resolution found while building the file's `DefMap`. These
+    // were collected and never read — `ide-diagnostics` re-checked the same
+    // things by walking the CST instead.
+    let mut any_from_defs: Vec<AnyDiagnostic> = Vec::new();
+    if let (Some(dm), Some(tree)) = (
+        hir::def_query::file_def_map(db, ft).as_ref(),
+        hir::def_query::file_item_tree(db, ft).as_deref(),
+    ) {
+        any_from_defs = AnyDiagnostic::from_def_map(&dm.0, tree, ft.file_id(db));
+    }
+
+    // Repeated unguarded includes are distinct declarations, not one
+    // deduplicated physical file. Sail rejects repeated bodies and type definitions.
+    if let Some(workspace) = base_db::WorkspaceFiles::try_get(db) {
+        let source = base_db::preprocess::physical_file(db, ft.file_id(db));
+        if base_db::preprocess::file_instances(db, source).len() > 1 {
+            let mut previous = std::collections::HashMap::new();
+            for &view in workspace.file_texts(db) {
+                if base_db::preprocess::physical_file(db, view.file_id(db)) != source {
+                    continue;
+                }
+                let Some(tree) = hir::def_query::file_item_tree(db, view).as_ref() else {
+                    continue;
+                };
+                let Some(root) = syntax::parse_query::semantic_parse_file(db, view).syntax_node()
+                else {
+                    continue;
+                };
+                for item in tree.top_level_items() {
+                    let creating = match item {
+                        hir::DefItem::Function(id) if !tree.function(*id).is_clause => "function",
+                        hir::DefItem::TypeDef(id) if !tree.type_def(*id).is_clause => {
+                            if item.def_kind(tree) == hir::DefKind::TypeAlias {
+                                "type synonym"
+                            } else {
+                                "type"
+                            }
+                        }
+                        hir::DefItem::Register(_) => "register",
+                        _ => continue,
+                    };
+                    let span = item.span(tree);
+                    let Some(node) =
+                        root.children().find(|n| usize::from(n.text_range().start()) == span.start)
+                    else {
+                        continue;
+                    };
+                    let location = hir::InFile {
+                        file_id: view.file_id(db),
+                        value: syntax::SyntaxNodePtr::new(&node),
+                    };
+                    let name = item.name(tree).to_string();
+                    if let Some(first) = previous.get(&name) {
+                        if view == ft {
+                            any_from_defs.push(AnyDiagnostic::DuplicateDefinition(
+                                DuplicateDefinition {
+                                    name: name.clone(),
+                                    node: location,
+                                    creating,
+                                    first: Some(*first),
+                                },
+                            ));
+                        }
+                    } else {
+                        previous.insert(name, location);
+                    }
+                }
+                if view == ft {
+                    break;
+                }
+            }
+        }
+    }
+
+    if let Some(project) = base_db::preprocess::WorkspaceSourceProject::try_get(db) {
+        let plan = hir::preprocess::workspace_plan(db, project);
+        for (file, event, path) in &plan.missing {
+            if *file != ft.file_id(db) {
+                continue;
+            }
+            if let Some(node) =
+                syntax::parse_query::parse_file(db, ft).syntax_node().and_then(|root| {
+                    root.children()
+                        .filter(|n| syntax::preprocess::Event::from_node(n).is_some())
+                        .nth(*event)
+                })
+            {
+                any_from_defs.push(AnyDiagnostic::UnresolvedInclude(UnresolvedInclude {
+                    path: path.display().to_string(),
+                    node: hir::InFile { file_id: *file, value: syntax::SyntaxNodePtr::new(&node) },
+                }));
+            }
+        }
+    }
+
+    // An `$include` cycle, found by whoever holds the whole graph.
+    if let Some((files, desc)) = workspace_names.and_then(|ws| ws.include_cycle.as_ref()) {
+        if files.contains(&ft.file_id(db)) {
+            any_from_defs.push(AnyDiagnostic::CircularInclude(hir::diagnostics::CircularInclude {
+                cycle_description: desc.clone(),
+                node: hir::InFile {
+                    file_id: ft.file_id(db),
+                    value: syntax::SyntaxNodePtr::from_range(
+                        parser::SyntaxKind::ERROR,
+                        base_db::text_range(0, 0),
+                    ),
+                },
+            }));
+        }
+    }
+
+    // Scattered groups the workspace view found incomplete.
+    //
+    // Only an orphan `end` is reported. Upstream accepts a scattered
+    // definition that is never ended — the group simply stays open, and a
+    // `match` on it reports `<future instruction clause>` unmatched instead
+    // — so `MissingEnd` and `NoClauses` would fire on files `sail
+    // --just-check` takes. `end x` with no `scattered x` anywhere is a type
+    // error there: "x is not a scattered definition, so it cannot be ended".
+    // The other two kinds still reach `add_scattered_end`, which offers to
+    // write the `end` rather than demanding it.
+    let ordered_scattered = semantic::ordered_scattered::diagnostics(db, ft);
+    for d in workspace_names.map(|ws| ws.scattered_problems.as_slice()).unwrap_or(&[]) {
+        if ordered_scattered.is_some() {
+            break;
+        }
+        if d.at.file != ft.file_id(db)
+            || d.kind != hir::scattered::ScatteredDiagnosticKind::OrphanEnd
+        {
+            continue;
+        }
+        any_from_defs.push(AnyDiagnostic::IncompleteScattered(
+            hir::diagnostics::IncompleteScattered {
+                name: d.name.clone(),
+                kind: match d.scattered_kind {
+                    Some(hir::scattered::ScatteredKind::Function) => "function",
+                    Some(hir::scattered::ScatteredKind::Mapping) => "mapping",
+                    Some(hir::scattered::ScatteredKind::Union) => "union",
+                    Some(hir::scattered::ScatteredKind::Enum) => "enum",
+                    None => "definition",
+                }
+                .to_owned(),
+                problem: d.kind.clone(),
+                node: hir::InFile {
+                    file_id: d.at.file,
+                    value: syntax::SyntaxNodePtr::from_range(
+                        parser::SyntaxKind::ERROR,
+                        base_db::text_range(d.at.span.start, d.at.span.end),
+                    ),
+                },
+            },
+        ));
+    }
+
+    // AST visitor checks.
+    res.extend(ordered_scattered.into_iter().flatten());
+    let semantic_diags = semantic::compute_semantic_diagnostics_with_names(file, workspace_names);
     for d in &semantic_diags {
-        res.push(hir_diag_to_ide(d));
+        res.push(hir_diag_to_ide(d, ft.file_id(db)));
     }
 
     // Per-callable inference diagnostics.
-    let callable_ids = hir_def::def_query::file_def_with_body_ids(db, ft);
-    let mut any_diags: Vec<AnyDiagnostic> = Vec::new();
+    let callable_ids = hir::def_query::file_def_with_body_ids(db, ft);
+    let mut any_diags: Vec<AnyDiagnostic> = any_from_defs;
 
     for &id in callable_ids {
-        let tcr = hir_ty::query::infer(db, id);
+        let tcr = hir::ty_query::infer(db, id);
 
         // InferenceDiagnostic -> AnyDiagnostic
         let typed_diags = tcr.0.inference_diagnostics();
@@ -379,11 +584,13 @@ pub fn semantic_diagnostics(
         let has_type_mismatches = !tcr.0.type_mismatches.is_empty();
 
         if has_typed_diags || has_type_mismatches {
-            let bsm = hir_def::def_query::body_with_source_map(db, id);
+            let bsm = hir::def_query::body_with_source_map(db, id);
             let source_map = &bsm.0 .1;
 
             for diag in typed_diags {
-                if let Some(d) = AnyDiagnostic::inference_diagnostic(diag, source_map) {
+                if let Some(d) =
+                    AnyDiagnostic::inference_diagnostic(diag, source_map, tcr.0.def_base)
+                {
                     any_diags.push(d);
                 }
             }
@@ -396,7 +603,9 @@ pub fn semantic_diagnostics(
 
     // Cross-file false-positive suppression: when `workspace_names` is
     // provided, suppress diagnostics for identifiers defined in other files.
-    if let Some(ws) = workspace_names {
+    if let Some(ws) =
+        workspace_names.filter(|_| hir::source_order::declarations_for(db, ft).is_none())
+    {
         any_diags.retain(|d| !is_cross_file_false_positive(d, ws));
     }
 
@@ -410,12 +619,16 @@ pub fn semantic_diagnostics(
                 handlers::unresolved_field::unresolved_field(&ctx, d),
             AnyDiagnostic::MismatchedArgCount(d) =>
                 handlers::mismatched_arg_count::mismatched_arg_count(&ctx, d),
+            AnyDiagnostic::MismatchedParamCount(d) =>
+                handlers::mismatched_param_count::mismatched_param_count(&ctx, d),
             AnyDiagnostic::ExpectedFunction(d) =>
                 handlers::expected_function::expected_function(&ctx, d),
             AnyDiagnostic::EffectViolation(d) =>
                 handlers::effect_violation::effect_violation(&ctx, d),
             AnyDiagnostic::IncompleteMatch(d) =>
                 handlers::missing_match_arms::missing_match_arms(&ctx, d),
+            AnyDiagnostic::RedundantMatchArm(d) =>
+                handlers::redundant_match_arm::redundant_match_arm(&ctx, d),
             AnyDiagnostic::MissingFields(d) =>
                 handlers::missing_fields::missing_fields(&ctx, d),
             AnyDiagnostic::UnsolvedConstraint(d) =>
@@ -432,8 +645,12 @@ pub fn semantic_diagnostics(
                 handlers::remove_unnecessary_else::remove_unnecessary_else(&ctx, d),
             AnyDiagnostic::ConcatTypeMismatch(d) =>
                 handlers::concat_type_mismatch::concat_type_mismatch(&ctx, d),
+            AnyDiagnostic::InvalidTypeUse(d) => invalid_type_use(d),
+            AnyDiagnostic::UnrecoverableImplicit(d) => unrecoverable_implicit(d),
             AnyDiagnostic::NoOverloading(d) =>
                 handlers::no_overloading::no_overloading(&ctx, d),
+            AnyDiagnostic::NotAFunction(d) =>
+                handlers::not_a_function::not_a_function(&ctx, d),
             AnyDiagnostic::DuplicateBinding(d) =>
                 handlers::duplicate_binding::duplicate_binding(&ctx, d),
             AnyDiagnostic::NonContiguousSubrange(d) =>
@@ -499,7 +716,32 @@ pub fn semantic_diagnostics(
     // Apply config-level severity overrides.
     handle_lints(ctx.config, &mut res);
 
+    drop_unresolved_fixes(ctx.resolve, &mut res);
     res
+}
+
+/// Drop the edit from every fix the caller did not ask to resolve.
+///
+/// rust-analyzer's `AssistResolveStrategy`: a client that advertises
+/// `codeAction/resolve` gets the *label* now and the edit when it asks, so
+/// a request that only needs to know a fix exists does not pay for
+/// building it. `should_resolve` had no caller here, and the strategy was
+/// hard-coded to `All` at the one place that chose one — while the
+/// publish path, which reads no fix at all, was the caller paying for it.
+///
+/// The fix survives as a label; only the `SourceChange` goes.
+fn drop_unresolved_fixes(resolve: &AssistResolveStrategy, res: &mut [Diagnostic]) {
+    if matches!(resolve, AssistResolveStrategy::All) {
+        return;
+    }
+    for d in res.iter_mut() {
+        let Some(fixes) = &mut d.fixes else { continue };
+        for fix in fixes.iter_mut() {
+            if !resolve.should_resolve(&fix.id) {
+                fix.source_change = None;
+            }
+        }
+    }
 }
 
 /// Check if an `AnyDiagnostic` is a false positive caused by
@@ -515,10 +757,16 @@ fn is_cross_file_false_positive(d: &AnyDiagnostic, ws: &WorkspaceNames) -> bool 
                 || ws.value_names.contains(&d.name)
         }
         AnyDiagnostic::UnresolvedField(d) => {
-            // If the receiver type is a record defined in another file,
-            // field resolution may fail per-file but succeed workspace-wide.
-            // Query type name directly from Ty instead of parsing strings.
-            d.receiver.as_name().map(|n| ws.record_names.contains(n)).unwrap_or(false)
+            // A record whose declaration this handle could not see: field
+            // resolution fails per-file and would succeed workspace-wide.
+            //
+            // This used to suppress *every* miss whose receiver was a known
+            // record name — which is the case where the fields are known and
+            // the miss is real, so `r.zzz` on a struct declared right beside
+            // it was never reported. `record_names` is workspace-wide, so it
+            // could not tell "declared elsewhere" from "declared here".
+            !d.receiver_fields_known
+                && d.receiver.as_name().map(|n| ws.record_names.contains(n)).unwrap_or(false)
         }
         AnyDiagnostic::MismatchedArgCount(d) => {
             // Cross-file function calls may have arity mismatch due to
@@ -534,16 +782,40 @@ fn is_cross_file_false_positive(d: &AnyDiagnostic, ws: &WorkspaceNames) -> bool 
     }
 }
 
-/// Convert `hir_def::diagnostics::Diagnostic` to `ide_diagnostics::Diagnostic`.
-fn hir_diag_to_ide(d: &hir_def::diagnostics::Diagnostic) -> Diagnostic {
-    let unused =
-        d.tags.iter().any(|t| matches!(t, hir_def::diagnostics::DiagnosticTag::Unnecessary));
+/// Convert `hir::diagnostics::Diagnostic` to `ide_diagnostics::Diagnostic`.
+fn hir_diag_to_ide(d: &hir::diagnostics::Diagnostic, file: base_db::FileId) -> Diagnostic {
+    let unused = d.tags.iter().any(|t| matches!(t, hir::diagnostics::DiagnosticTag::Unnecessary));
+    let related = d
+        .related
+        .iter()
+        .map(|(r, msg)| (hir::FileRange { file_id: file, range: *r }, msg.clone()))
+        .chain(d.related_in_files.iter().map(|(file, range, message)| {
+            (hir::FileRange { file_id: *file, range: *range }, message.clone())
+        }))
+        .collect();
     Diagnostic::new(d.code.clone(), d.message.clone(), d.range)
         .with_severity(d.severity)
         .with_unused(unused)
+        .with_related(related)
 }
 
 // Kept for unit tests that need to dispatch a single AnyDiagnostic.
+
+fn invalid_type_use(d: &hir::diagnostics::InvalidTypeUse) -> Diagnostic {
+    Diagnostic::new(
+        hir::diagnostics::DiagnosticCode::SailError("type-error"),
+        d.message.clone(),
+        node_file_range(&d.node),
+    )
+}
+
+fn unrecoverable_implicit(d: &hir::diagnostics::InvalidTypeUse) -> Diagnostic {
+    Diagnostic::new(
+        hir::diagnostics::DiagnosticCode::SailError("unrecoverable-implicit"),
+        d.message.clone(),
+        node_file_range(&d.node),
+    )
+}
 
 #[cfg(test)]
 pub(crate) fn dispatch_one(ctx: &DiagnosticsContext<'_>, d: &AnyDiagnostic) -> Option<Diagnostic> {
@@ -552,6 +824,9 @@ pub(crate) fn dispatch_one(ctx: &DiagnosticsContext<'_>, d: &AnyDiagnostic) -> O
         AnyDiagnostic::UnresolvedField(d) => handlers::unresolved_field::unresolved_field(ctx, d),
         AnyDiagnostic::MismatchedArgCount(d) => {
             handlers::mismatched_arg_count::mismatched_arg_count(ctx, d)
+        }
+        AnyDiagnostic::MismatchedParamCount(d) => {
+            handlers::mismatched_param_count::mismatched_param_count(ctx, d)
         }
         AnyDiagnostic::ExpectedFunction(d) => {
             handlers::expected_function::expected_function(ctx, d)
@@ -575,7 +850,10 @@ pub(crate) fn dispatch_one(ctx: &DiagnosticsContext<'_>, d: &AnyDiagnostic) -> O
         AnyDiagnostic::ConcatTypeMismatch(d) => {
             handlers::concat_type_mismatch::concat_type_mismatch(ctx, d)
         }
+        AnyDiagnostic::InvalidTypeUse(d) => invalid_type_use(d),
+        AnyDiagnostic::UnrecoverableImplicit(d) => unrecoverable_implicit(d),
         AnyDiagnostic::NoOverloading(d) => handlers::no_overloading::no_overloading(ctx, d),
+        AnyDiagnostic::NotAFunction(d) => handlers::not_a_function::not_a_function(ctx, d),
         AnyDiagnostic::DuplicateBinding(d) => {
             handlers::duplicate_binding::duplicate_binding(ctx, d)
         }
@@ -633,6 +911,9 @@ pub(crate) fn dispatch_one(ctx: &DiagnosticsContext<'_>, d: &AnyDiagnostic) -> O
         AnyDiagnostic::InconsistentHexCasing(d) => {
             handlers::inconsistent_hex_casing::inconsistent_hex_casing(ctx, d)
         }
+        AnyDiagnostic::RedundantMatchArm(d) => {
+            handlers::redundant_match_arm::redundant_match_arm(ctx, d)
+        }
         AnyDiagnostic::UnreachableCode(d) => handlers::unreachable_code::unreachable_code(ctx, d),
         AnyDiagnostic::RedundantTypeAnnotation(d) => {
             handlers::redundant_type_annotation::redundant_type_annotation(ctx, d)
@@ -661,15 +942,15 @@ fn handle_lints(config: &DiagnosticsConfig, diagnostics: &mut Vec<Diagnostic>) {
         //   warnings_as_hint → WeakWarning
         //   warnings_as_info → Information
         if config.warnings_as_hint.contains(code) {
-            diag.severity = hir_def::diagnostics::Severity::WeakWarning;
+            diag.severity = hir::diagnostics::Severity::WeakWarning;
         } else if config.warnings_as_info.contains(code) {
-            diag.severity = hir_def::diagnostics::Severity::Information;
+            diag.severity = hir::diagnostics::Severity::Information;
         }
     }
 
     // Filter out Allow-severity diagnostics.
     diagnostics.retain(|d| {
-        d.severity != hir_def::diagnostics::Severity::Hint || {
+        d.severity != hir::diagnostics::Severity::Hint || {
             // Keep hints that are explicitly enabled.
             true
         }
@@ -685,15 +966,14 @@ fn handle_lints(config: &DiagnosticsConfig, diagnostics: &mut Vec<Diagnostic>) {
 /// When `Semantics::parse(file_id)` is available, this function will
 /// resolve the `AstPtr` to a concrete node and call `adj` on it.
 /// For now, falls back to the full pointer range.
-#[allow(dead_code)]
 fn adjusted_display_range<N: syntax::ast::AstNode>(
     _ctx: &DiagnosticsContext<'_>,
-    diag_ptr: hir_def::in_file::InFile<syntax::AstPtr<N>>,
+    diag_ptr: hir::InFile<syntax::AstPtr<N>>,
     _adj: &dyn Fn(N) -> Option<base_db::TextRange>,
-) -> hir_def::in_file::FileRange {
+) -> hir::FileRange {
     // TODO: resolve AstPtr via ctx.sema.parse(file_id) when available.
     // For now, use the full pointer range as fallback.
-    hir_def::in_file::FileRange { file_id: diag_ptr.file_id, range: diag_ptr.value.text_range() }
+    hir::FileRange { file_id: diag_ptr.file_id, range: diag_ptr.value.text_range() }
 }
 
 // Minimal re-exports for public API.
@@ -717,13 +997,13 @@ pub fn fix(
 pub fn unresolved_fix(id: &'static str, label: &str, target: TextRange) -> Assist {
     assert!(!id.contains(' '));
     Assist {
+        import: None,
         id: AssistId(id, AssistKind::QuickFix),
         label: Label::new(label.to_owned()),
         group: None,
         target,
         source_change: None,
         command: None,
-        edits: Vec::new(),
     }
 }
 

@@ -1,7 +1,7 @@
 //! Handler for `AnyDiagnostic::InconsistentHexCasing`.
 
 use crate::Diagnostic;
-use hir_def::diagnostics::{DiagnosticCode, Severity};
+use hir::diagnostics::{DiagnosticCode, Severity};
 
 use crate::{DiagnosticsContext, InconsistentHexCasing};
 

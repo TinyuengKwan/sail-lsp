@@ -25,7 +25,7 @@ pub(super) fn children<N: AstNode>(parent: &SyntaxNode) -> Vec<N> {
 
 /// Find the first token of a given kind among direct children.
 #[inline]
-#[allow(dead_code)] // Infrastructure for future generated token accessors.
+#[expect(dead_code)] // Infrastructure for future generated token accessors.
 pub(super) fn token(parent: &SyntaxNode, kind: SyntaxKind) -> Option<SyntaxToken> {
     parent.children_with_tokens().filter_map(|it| it.into_token()).find(|it| it.kind() == kind)
 }

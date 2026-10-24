@@ -1,9 +1,27 @@
 //! Completion context — semantic position analysis.
+//!
+//! `analyze` used to answer `CompletionAnalysis::NameRef` at every
+//! position, so `Name` and `String` — the other two arms, RA's model
+//! carried over whole — were unreachable, and thirteen
+//! `#[expect(dead_code)]` kept the build quiet about the model underneath
+//! them. It distinguishes all three now: inside a string literal nothing
+//! completes, and where a name is being *defined* the only candidates are
+//! declarations still waiting for it (`completions/name.rs`).
+//!
+//! Five `#[expect(dead_code)]` are left, on `PathKind::Type`, `ExprCtx`,
+//! `TypeLocation`, `ItemListKind` and `PatternContext`: the analyzer fills them in and no
+//! provider asks. Each names a distinction Sail's completion could draw —
+//! `then`/`else` belong in a condition, `end` in a block — and drawing it
+//! is provider work, not analyzer work. What is deleted rather than left
+//! is what carried no information at all: `record_expr` and
+//! `has_call_parens` were assigned `false` at every construction,
+//! `DotAccessKind` was `Field` at the only one, and `NameKind` had three
+//! variants nothing produced.
 //! Architecture: `CompletionContext::new()` analyzes the cursor position
 //! and produces a `(CompletionContext, CompletionAnalysis)` pair.
 //! The analysis enum drives dispatch to specific completion providers.
 
-use ide_db::ide_types::CompletionRelevanceTypeMatch;
+use crate::item::CompletionRelevanceTypeMatch;
 use ide_db::FileDb;
 
 //
@@ -13,7 +31,6 @@ use ide_db::FileDb;
 /// Classification of the completion position.
 ///
 /// Determines which providers are dispatched.
-#[allow(dead_code)]
 pub(crate) enum CompletionAnalysis {
     /// Cursor is at a name definition site (e.g., `function |`).
     Name(NameContext),
@@ -21,44 +38,37 @@ pub(crate) enum CompletionAnalysis {
     NameRef(NameRefContext),
     /// Cursor is inside a string literal.
     String,
+    /// Cursor is inside a comment. Nothing in the workspace is a
+    /// candidate there, and this had no arm at all: typing in `// fo|`
+    /// offered every symbol.
+    Comment,
 }
 
 /// Context for name definition completions.
-#[allow(dead_code)]
 pub(crate) struct NameContext {
     pub(crate) kind: NameKind,
 }
 
 /// What kind of name is being defined.
-#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum NameKind {
     /// Function name definition.
     Function,
     /// Type name definition.
     TypeDef,
-    /// Let/var binding name.
+    /// Let/var/register binding name.
     Let,
-    /// Function parameter name.
-    Param,
-    /// Match arm binding.
-    MatchArm,
-    /// Other name context.
-    Other,
 }
 
 /// Context for name reference completions (the common case).
-#[allow(dead_code)]
 pub(crate) struct NameRefContext {
     /// Dot-access: `expr.|`
     pub(crate) dot_access: Option<DotAccess>,
     /// Path context (if inside a path expression).
     pub(crate) path_ctx: Option<PathCompletionCtx>,
-    /// Record expression context: `Struct { field: |, ... }`.
-    pub(crate) record_expr: bool,
 }
 
 /// Dot-access context.
-#[allow(dead_code)]
 pub(crate) struct DotAccess {
     /// Text of the receiver expression before the dot.
     pub(crate) receiver_text: String,
@@ -66,24 +76,11 @@ pub(crate) struct DotAccess {
     ///
     /// Sail uses `hir_ty::Ty` directly (no TypeInfo wrapper).
     /// Populated during CompletionContext construction when sema is available.
-    pub(crate) receiver_ty: Option<hir_ty::infer::Ty>,
-    /// Whether this is field access or method call.
-    pub(crate) kind: DotAccessKind,
-}
-
-/// Discriminates field vs method access.
-#[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
-pub(crate) enum DotAccessKind {
-    Field,
-    Method,
+    pub(crate) receiver_ty: Option<hir::Ty>,
 }
 
 /// Path completion context.
-#[allow(dead_code)]
 pub(crate) struct PathCompletionCtx {
-    /// Whether the call site already has parentheses.
-    pub(crate) has_call_parens: bool,
     /// How the path is qualified.
     pub(crate) qualified: Qualified,
     /// What kind of path this is.
@@ -92,7 +89,6 @@ pub(crate) struct PathCompletionCtx {
 
 /// How the completion trigger is qualified.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) enum Qualified {
     /// Bare identifier: `foo|`.
     No,
@@ -106,11 +102,11 @@ pub(crate) enum Qualified {
 /// What kind of path the completion is in.
 ///
 /// Sail-specific: no `Attr`, `Derive`, `Vis`, `Use` variants.
-#[allow(dead_code)]
 pub(crate) enum PathKind {
     /// Expression position: value expected.
     Expr { expr_ctx: ExprCtx },
     /// Type annotation position: type expected.
+    #[expect(dead_code)]
     Type { location: TypeLocation },
     /// Item list position: top-level or block-level item.
     Item { kind: ItemListKind },
@@ -119,48 +115,54 @@ pub(crate) enum PathKind {
 }
 
 /// Expression completion context.
-#[allow(dead_code)]
 pub(crate) struct ExprCtx {
     /// Inside a block expression.
+    #[expect(dead_code)]
     pub(crate) in_block_expr: bool,
     /// Inside a condition (if/while condition).
+    #[expect(dead_code)]
     pub(crate) in_condition: bool,
     /// Inside a match guard (`if` after pattern).
+    #[expect(dead_code)]
     pub(crate) in_match_guard: bool,
     /// After an `if` expression (for `else` suggestion).
+    #[expect(dead_code)]
     pub(crate) after_if_expr: bool,
 }
 
 /// Where in a type annotation the completion is.
-#[allow(dead_code)]
 pub(crate) enum TypeLocation {
     /// After `:` in a let/var binding.
     TypeAscription,
     /// After `->` in a function return type.
     FunctionReturn,
     /// In a function parameter type position.
+    #[expect(dead_code)]
     FunctionParam,
     /// In a type alias RHS.
+    #[expect(dead_code)]
     TypeAlias,
     /// Other type position.
+    #[expect(dead_code)]
     Other,
 }
 
 /// Item list context.
-#[allow(dead_code)]
 pub(crate) enum ItemListKind {
     /// File top-level.
     SourceFile,
     /// Inside a block `{ }`.
+    #[expect(dead_code)]
     Block,
 }
 
 /// Pattern completion context.
-#[allow(dead_code)]
 pub(crate) struct PatternContext {
     /// Whether this is a refutable pattern (match arm) or irrefutable (let binding).
+    #[expect(dead_code)]
     pub(crate) refutability: PatternRefutability,
     /// Whether the pattern is inside a record/struct destructuring.
+    #[expect(dead_code)]
     pub(crate) in_record_pat: bool,
     /// Whether this is a function parameter position (`function foo(|`).
     pub(crate) is_param: bool,
@@ -168,7 +170,6 @@ pub(crate) struct PatternContext {
 
 /// Whether a pattern context is refutable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) enum PatternRefutability {
     /// Refutable: match arm, if-let.
     Refutable,
@@ -199,7 +200,7 @@ pub enum CompletionPosition {
 fn position_from_analysis(analysis: &CompletionAnalysis) -> CompletionPosition {
     match analysis {
         CompletionAnalysis::Name(_) => CompletionPosition::TopLevel,
-        CompletionAnalysis::String => CompletionPosition::Expression,
+        CompletionAnalysis::String | CompletionAnalysis::Comment => CompletionPosition::Expression,
         CompletionAnalysis::NameRef(nr) => {
             if let Some(path) = &nr.path_ctx {
                 match &path.kind {
@@ -236,26 +237,21 @@ fn qualified_from_analysis(analysis: &CompletionAnalysis) -> Qualified {
 /// Completion context — everything a provider needs to generate items.
 pub(crate) struct CompletionContext<'a> {
     /// Semantic analysis access.
-    #[allow(dead_code)]
     pub(crate) sema: hir::Semantics<'a>,
     /// Database reference for salsa queries.
-    #[allow(dead_code)]
     pub(crate) db: &'a dyn salsa::Database,
 
     /// Salsa file input (for type queries via sema.type_of_expr).
     /// None when db doesn't have this file registered.
-    #[allow(dead_code)]
     pub(crate) file_text: Option<base_db::FileText>,
 
     /// The expected type of what we are completing.
     ///
     /// E.g., inside `if |` → expected bool, inside `let x: int = |` → expected int.
-    #[allow(dead_code)]
-    pub(crate) expected_type: Option<hir_ty::infer::Ty>,
+    pub(crate) expected_type: Option<hir::Ty>,
     /// The expected name of what we are completing.
     ///
     /// Usually the parameter name of the function argument we are completing.
-    #[allow(dead_code)]
     pub(crate) expected_name: Option<String>,
 
     /// Current file.
@@ -294,7 +290,21 @@ impl<'a> CompletionContext<'a> {
         prefix: &'a str,
     ) -> (Self, CompletionAnalysis) {
         let sema = hir::Semantics::new(db);
-        let mut analysis = analyze(text, offset, prefix);
+        // Ask the tree what the cursor is inside before reading the text.
+        // `is_in_comment` / `is_in_string` (`ide_db::syntax_helpers`) are
+        // one `matches!` on the token kind and had no caller, while this
+        // module scanned the raw characters for an unterminated quote —
+        // beside a lossless CST that has a `STRING_LIT` token covering
+        // exactly that text. And nothing asked about comments at all.
+        let mut analysis = match token_before(file, offset) {
+            Some(t) if ide_db::syntax_helpers::node_ext::is_in_comment(&t) => {
+                CompletionAnalysis::Comment
+            }
+            Some(t) if ide_db::syntax_helpers::node_ext::is_in_string(&t) => {
+                CompletionAnalysis::String
+            }
+            token => analyze(token.as_ref(), text, offset, prefix),
+        };
 
         // Resolve receiver type for dot access using sema.
         //   `receiver_ty = receiver.as_ref().and_then(|it| sema.type_of_expr(it))`
@@ -341,17 +351,108 @@ impl<'a> CompletionContext<'a> {
 // into a CompletionAnalysis variant.
 
 /// Classify the completion position into a `CompletionAnalysis`.
-fn analyze(text: &str, offset: usize, prefix: &str) -> CompletionAnalysis {
+/// The token the cursor sits in, taken from the tree.
+///
+/// Left-biased at the offset, because a cursor at the end of `// foo` is
+/// between that token and whatever follows, and what the user is typing
+/// into is the one on the left.
+fn token_before(file: &dyn FileDb, offset: usize) -> Option<syntax::SyntaxToken> {
+    let root = file.syntax()?;
+    let at =
+        syntax::TextSize::new(u32::try_from(offset).ok()?.min(u32::from(root.text_range().end())));
+    root.token_at_offset(at).left_biased()
+}
+
+/// Whether `before` ends inside an unterminated string literal.
+fn in_string_literal(before: &str) -> bool {
+    let mut in_string = false;
+    let mut escaped = false;
+    for ch in before.chars() {
+        match ch {
+            _ if escaped => escaped = false,
+            '\\' if in_string => escaped = true,
+            '"' => in_string = !in_string,
+            '\n' => in_string = false,
+            _ => {}
+        }
+    }
+    in_string
+}
+
+/// The kind of definition whose name is being typed, if that is what this
+/// position is.
+fn name_being_defined(trimmed: &str) -> Option<NameKind> {
+    let last = trimmed.rsplit(|c: char| c.is_whitespace()).find(|w| !w.is_empty())?;
+    Some(match last {
+        "function" | "mapping" | "val" | "outcome" => NameKind::Function,
+        "struct" | "union" | "enum" | "type" | "newtype" | "bitfield" => NameKind::TypeDef,
+        "let" | "var" | "register" => NameKind::Let,
+        _ => return None,
+    })
+}
+
+fn analyze(
+    token: Option<&syntax::SyntaxToken>,
+    text: &str,
+    offset: usize,
+    prefix: &str,
+) -> CompletionAnalysis {
     let before = &text[..offset];
     let trimmed = before.trim_end();
     let trimmed = trimmed.strip_suffix(prefix).unwrap_or(trimmed).trim_end();
+
+    // Inside a string literal, where nothing in the workspace is a
+    // candidate. This arm and the one below were never constructed —
+    // `analyze` always answered `NameRef` — so typing inside a string, or
+    // typing the *name* of a definition, offered every symbol the
+    // workspace has.
+    if in_string_literal(before) {
+        return CompletionAnalysis::String;
+    }
+
+    // The name being given to a definition: `function fo|`, `struct S|`.
+    // A new name is not a reference to an existing one.
+    if let Some(kind) = name_being_defined(trimmed) {
+        return CompletionAnalysis::Name(NameContext { kind });
+    }
+
+    if let Some(node) = token.and_then(|t| {
+        t.parent_ancestors().find(|n| n.kind() == syntax::SyntaxKind::INSTANTIATION_DEF)
+    }) {
+        let role = syntax::instantiation_reference(&node, offset.saturating_sub(1));
+        let kind = match role {
+            Some(syntax::InstantiationReference::Type) => {
+                PathKind::Type { location: TypeLocation::TypeAscription }
+            }
+            Some(syntax::InstantiationReference::Callable) => PathKind::Expr {
+                expr_ctx: ExprCtx {
+                    in_block_expr: false,
+                    in_condition: false,
+                    in_match_guard: false,
+                    after_if_expr: false,
+                },
+            },
+            Some(syntax::InstantiationReference::Outcome) => PathKind::Expr {
+                expr_ctx: ExprCtx {
+                    in_block_expr: false,
+                    in_condition: false,
+                    in_match_guard: false,
+                    after_if_expr: false,
+                },
+            },
+            None => return CompletionAnalysis::Name(NameContext { kind: NameKind::Let }),
+        };
+        return CompletionAnalysis::NameRef(NameRefContext {
+            dot_access: None,
+            path_ctx: Some(PathCompletionCtx { qualified: Qualified::No, kind }),
+        });
+    }
 
     // Dot access: `expr.|`
     if let Some(dot_access) = detect_dot_access(text, offset, prefix) {
         return CompletionAnalysis::NameRef(NameRefContext {
             dot_access: Some(dot_access),
             path_ctx: None,
-            record_expr: false,
         });
     }
 
@@ -365,21 +466,23 @@ fn analyze(text: &str, offset: usize, prefix: &str) -> CompletionAnalysis {
         return CompletionAnalysis::NameRef(NameRefContext {
             dot_access: None,
             path_ctx: Some(PathCompletionCtx {
-                has_call_parens: false,
                 qualified: Qualified::No,
                 kind: PathKind::Type { location },
             }),
-            record_expr: false,
         });
     }
 
     // Function parameter position: inside `function name(` or `val name : ... (`
     // before any `)`. Detect by scanning backwards for unmatched `(`.
-    if is_in_param_list(text, offset) {
+    // An unmatched call parenthesis on a `function` line is still an
+    // expression. Prefer the CST before the incomplete-parameter fallback.
+    let in_expression = token.is_some_and(|t| {
+        t.parent_ancestors().any(|n| ide_db::syntax_helpers::node_ext::is_expr_kind(n.kind()))
+    });
+    if !in_expression && is_in_param_list(text, offset) {
         return CompletionAnalysis::NameRef(NameRefContext {
             dot_access: None,
             path_ctx: Some(PathCompletionCtx {
-                has_call_parens: false,
                 qualified: Qualified::No,
                 kind: PathKind::Pat {
                     pat_ctx: PatternContext {
@@ -389,7 +492,34 @@ fn analyze(text: &str, offset: usize, prefix: &str) -> CompletionAnalysis {
                     },
                 },
             }),
-            record_expr: false,
+        });
+    }
+
+    // In an expression, which the tree knows and brace counting does not.
+    //
+    // `function f() -> bits(8) = a_dec|` is at brace depth 0, so the check
+    // below read it as the top level of the file and offered item keywords
+    // — none of which start with what was typed, so completion answered
+    // *nothing* at the one position where a name is most obviously wanted.
+    // The same text inside a block answered, which is how it stayed hidden.
+    // The token's ancestors say it plainly: `IDENT@115..120` under
+    // `IDENT_EXPR@115..120`.
+    if in_expression {
+        return CompletionAnalysis::NameRef(NameRefContext {
+            dot_access: None,
+            path_ctx: Some(PathCompletionCtx {
+                qualified: detect_qualification(text, offset, prefix),
+                kind: PathKind::Expr {
+                    expr_ctx: ExprCtx {
+                        in_block_expr: token.is_some_and(|t| {
+                            t.parent_ancestors().any(|n| n.kind() == syntax::SyntaxKind::BLOCK_EXPR)
+                        }),
+                        in_condition: false,
+                        in_match_guard: false,
+                        after_if_expr: trimmed.ends_with("else"),
+                    },
+                },
+            }),
         });
     }
 
@@ -409,11 +539,9 @@ fn analyze(text: &str, offset: usize, prefix: &str) -> CompletionAnalysis {
         return CompletionAnalysis::NameRef(NameRefContext {
             dot_access: None,
             path_ctx: Some(PathCompletionCtx {
-                has_call_parens: false,
                 qualified: Qualified::No,
                 kind: PathKind::Item { kind: ItemListKind::SourceFile },
             }),
-            record_expr: false,
         });
     }
 
@@ -426,7 +554,6 @@ fn analyze(text: &str, offset: usize, prefix: &str) -> CompletionAnalysis {
                 return CompletionAnalysis::NameRef(NameRefContext {
                     dot_access: None,
                     path_ctx: Some(PathCompletionCtx {
-                        has_call_parens: false,
                         qualified: Qualified::No,
                         kind: PathKind::Pat {
                             pat_ctx: PatternContext {
@@ -436,7 +563,6 @@ fn analyze(text: &str, offset: usize, prefix: &str) -> CompletionAnalysis {
                             },
                         },
                     }),
-                    record_expr: false,
                 });
             }
         }
@@ -448,7 +574,6 @@ fn analyze(text: &str, offset: usize, prefix: &str) -> CompletionAnalysis {
     CompletionAnalysis::NameRef(NameRefContext {
         dot_access: None,
         path_ctx: Some(PathCompletionCtx {
-            has_call_parens: false,
             qualified,
             kind: PathKind::Expr {
                 expr_ctx: ExprCtx {
@@ -459,7 +584,6 @@ fn analyze(text: &str, offset: usize, prefix: &str) -> CompletionAnalysis {
                 },
             },
         }),
-        record_expr: false,
     })
 }
 
@@ -483,7 +607,7 @@ fn detect_dot_access(text: &str, offset: usize, prefix: &str) -> Option<DotAcces
         return None;
     }
     let receiver_text = text[start..dot_pos].to_string();
-    Some(DotAccess { receiver_text, receiver_ty: None, kind: DotAccessKind::Field })
+    Some(DotAccess { receiver_text, receiver_ty: None })
 }
 
 /// Detect qualified path: `TypeName.|`
@@ -520,7 +644,7 @@ fn expected_type_and_name(
     text: &str,
     offset: usize,
     analysis: &CompletionAnalysis,
-) -> (Option<hir_ty::infer::Ty>, Option<String>) {
+) -> (Option<hir::Ty>, Option<String>) {
     let before = text[..offset].trim_end();
 
     // If in a type annotation position, no expected *value* type.
@@ -534,17 +658,17 @@ fn expected_type_and_name(
 
     // `if | then` → expected bool (condition position)
     if before.ends_with("if") || before.ends_with("else if") {
-        return (Some(hir_ty::infer::Ty::scalar(hir_ty::ty::Scalar::Bool)), None);
+        return (Some(hir::Ty::scalar(hir::Scalar::Bool)), None);
     }
 
     // `while | do` → expected bool
     if before.ends_with("while") {
-        return (Some(hir_ty::infer::Ty::scalar(hir_ty::ty::Scalar::Bool)), None);
+        return (Some(hir::Ty::scalar(hir::Scalar::Bool)), None);
     }
 
     // `assert(|)` or `constraint(|)` → expected bool
     if before.ends_with("assert(") || before.ends_with("constraint(") {
-        return (Some(hir_ty::infer::Ty::scalar(hir_ty::ty::Scalar::Bool)), None);
+        return (Some(hir::Ty::scalar(hir::Scalar::Bool)), None);
     }
 
     // `let x : T = |` or `var x : T = |` → expected T
@@ -555,7 +679,7 @@ fn expected_type_and_name(
             let type_str = pre_eq[colon_pos + 1..].trim();
             if !type_str.is_empty() {
                 let name = extract_binding_name(pre_eq, colon_pos);
-                return (Some(hir_ty::infer::Ty::named(type_str)), name);
+                return (Some(hir::Ty::named(type_str)), name);
             }
         }
     }
@@ -572,7 +696,7 @@ fn expected_type_and_name(
                     c.is_alphanumeric() || c == '_' || c == '\'' || c == '(' || c == ')' || c == ','
                 })
             {
-                return (Some(hir_ty::infer::Ty::named(ret_ty)), None);
+                return (Some(hir::Ty::named(ret_ty)), None);
             }
         }
     }
@@ -632,8 +756,8 @@ fn find_enclosing_call(before: &str) -> Option<(String, usize)> {
 /// base types (e.g., same ADT name with different args), or `None`
 /// if the types are unrelated.
 pub(crate) fn compute_type_match(
-    expected: &hir_ty::infer::Ty,
-    candidate: &hir_ty::infer::Ty,
+    expected: &hir::Ty,
+    candidate: &hir::Ty,
 ) -> Option<CompletionRelevanceTypeMatch> {
     if expected.is_error() || candidate.is_error() {
         return None;
@@ -653,21 +777,21 @@ pub(crate) fn compute_type_match(
 ///
 /// Returns true if the types share the same base name (e.g., `bits(32)`
 /// and `bits(64)` both have base `bits`) or if either is a type parameter.
-fn could_types_unify(a: &hir_ty::infer::Ty, b: &hir_ty::infer::Ty) -> bool {
-    use hir_ty::ty::TyKind;
+fn could_types_unify(a: &hir::Ty, b: &hir::Ty) -> bool {
+    use hir::TyKind;
     match (a.kind(), b.kind()) {
         // Type parameters can unify with anything.
         (TyKind::Param(_), _) | (_, TyKind::Param(_)) => true,
         // Same scalar types always unify (handled by exact match above,
         // but different scalars do not).
         (TyKind::Scalar(sa), TyKind::Scalar(sb)) => sa == sb,
-        // Same ADT base name → could unify (args may differ).
-        (TyKind::Adt(na, _), TyKind::Adt(nb, _)) => na == nb,
+        // Same base name → could unify (args may differ).
+        (TyKind::Named(na, _), TyKind::Named(nb, _)) => na == nb,
         // Same App base name → could unify.
         (TyKind::App { name: na, .. }, TyKind::App { name: nb, .. }) => na == nb,
-        // ADT vs App with same name (e.g., `bits` as Adt vs App).
-        (TyKind::Adt(n, _), TyKind::App { name, .. })
-        | (TyKind::App { name, .. }, TyKind::Adt(n, _)) => n == name,
+        // Named vs App with the same name: the same type written two ways.
+        (TyKind::Named(n, _), TyKind::App { name, .. })
+        | (TyKind::App { name, .. }, TyKind::Named(n, _)) => n == name,
         // Tuples: same arity.
         (TyKind::Tuple(a_items), TyKind::Tuple(b_items)) => a_items.len() == b_items.len(),
         // Function types: same param count.
@@ -703,4 +827,185 @@ fn is_in_param_list(text: &str, offset: usize) -> bool {
         }
     }
     false
+}
+
+/// The identifier characters a completion prefix is made of. Sail's
+/// include `?`, `'` and `~`, which Rust's do not.
+fn is_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'?' | b'\'' | b'~')
+}
+
+/// The word being typed at `offset`, which is what the completion list is
+/// filtered by. It lived in the crate root beside `completions`;
+/// rust-analyzer keeps the equivalent on `CompletionContext`, which is
+/// where everything else that reads the cursor's surroundings lives.
+pub fn completion_prefix(text: &str, offset: usize) -> &str {
+    let offset = offset.min(text.len());
+    let bytes = text.as_bytes();
+    let mut start = offset;
+
+    while start > 0 && is_identifier_byte(bytes[start - 1]) {
+        start -= 1;
+    }
+
+    &text[start..offset]
+}
+
+impl CompletionContext<'_> {
+    pub(crate) fn instantiation_role(&self) -> Option<syntax::InstantiationReference> {
+        let token = token_before(self.file, self.offset)?;
+        let node =
+            token.parent_ancestors().find(|n| n.kind() == syntax::SyntaxKind::INSTANTIATION_DEF)?;
+        syntax::instantiation_reference(&node, self.offset.saturating_sub(1))
+    }
+
+    pub(crate) fn can_see_member(&self, target: &dyn FileDb, member: &hir::FieldDecl) -> bool {
+        if self.instantiation_role().is_some() {
+            return false;
+        }
+        let (Some(from), Some((_, target))) = (self.file_text, target.file_text()) else {
+            return true;
+        };
+        use hir::source_order::{
+            self,
+            bindings::{self, Namespace},
+        };
+        if source_order::declarations_for(self.db, from).is_some() {
+            let Some(at) = source_order::at_offset(self.db, from, self.offset)
+                .or_else(|| source_order::at_offset(self.db, from, self.offset.saturating_sub(1)))
+            else {
+                return false;
+            };
+            if !matches!(
+                source_order::program(self.db, from),
+                Some(source_order::Program::Inline(_))
+            ) || bindings::contains_name(self.db, at, &member.name)
+            {
+                let selected =
+                    bindings::resolve(self.db, at, member.name.clone(), Namespace::Value);
+                return selected.is_some()
+                    && selected
+                        == source_order::at_offset(self.db, target, member.name_span.start);
+            }
+        }
+        hir::visibility::symbol_visible_from(
+            self.db,
+            from.file_id(self.db),
+            target,
+            member.name.as_str(),
+        )
+    }
+
+    pub(crate) fn can_see(&self, target: &dyn FileDb, name: &str) -> bool {
+        match (self.file_text, target.file_text()) {
+            (Some(from), Some((_, target))) => {
+                if hir::source_order::declarations_for(self.db, from).is_some() {
+                    use hir::source_order::{
+                        self,
+                        bindings::{self, Namespace},
+                    };
+                    let Some(at) =
+                        source_order::at_offset(self.db, from, self.offset).or_else(|| {
+                            source_order::at_offset(self.db, from, self.offset.saturating_sub(1))
+                        })
+                    else {
+                        return false;
+                    };
+                    if matches!(
+                        source_order::program(self.db, from),
+                        Some(source_order::Program::Inline(_))
+                    ) && !bindings::contains_name(self.db, at, &hir::Name::new(name))
+                    {
+                        return hir::visibility::symbol_visible_from(
+                            self.db,
+                            from.file_id(self.db),
+                            target,
+                            name,
+                        );
+                    }
+                    let namespaces = match self.instantiation_role() {
+                        Some(syntax::InstantiationReference::Outcome) => vec![Namespace::Outcome],
+                        Some(syntax::InstantiationReference::Type) => vec![Namespace::Type],
+                        Some(syntax::InstantiationReference::Callable) => vec![Namespace::Callable],
+                        None => vec![Namespace::Value, Namespace::Type],
+                    };
+                    return namespaces.into_iter().any(|ns| {
+                        bindings::resolve(self.db, at, hir::Name::new(name), ns)
+                            .is_some_and(|d| d.file == target)
+                    });
+                }
+                hir::visibility::symbol_visible_from(self.db, from.file_id(self.db), target, name)
+            }
+            _ => true,
+        }
+    }
+
+    pub(crate) fn can_see_item(
+        &self,
+        target: &dyn FileDb,
+        tree: &hir::ItemTree,
+        item: hir::DefItem,
+    ) -> bool {
+        if matches!(
+            self.instantiation_role(),
+            Some(
+                syntax::InstantiationReference::Callable | syntax::InstantiationReference::Outcome
+            )
+        ) && !matches!(
+            item.def_kind(tree),
+            hir::DefKind::Function
+                | hir::DefKind::ValSpec
+                | hir::DefKind::Mapping
+                | hir::DefKind::MappingSpec
+        ) {
+            return false;
+        }
+        if !self.can_see(target, item.name(tree).as_str()) {
+            return false;
+        }
+        let (Some(from), Some((_, target))) = (self.file_text, target.file_text()) else {
+            return true;
+        };
+        if hir::source_order::declarations_for(self.db, from).is_none() {
+            return true;
+        }
+        use hir::source_order::{
+            self,
+            bindings::{self, Namespace},
+        };
+        let Some(at) = source_order::at_offset(self.db, from, self.offset)
+            .or_else(|| source_order::at_offset(self.db, from, self.offset.saturating_sub(1)))
+        else {
+            return false;
+        };
+        if matches!(source_order::program(self.db, from), Some(source_order::Program::Inline(_)))
+            && !bindings::contains_name(self.db, at, item.name(tree))
+        {
+            return true;
+        }
+
+        let Some(candidate) = source_order::at_offset(self.db, target, item.name_span(tree).start)
+        else {
+            return false;
+        };
+        let ns = match item.def_kind(tree) {
+            hir::DefKind::ScatteredHead if item.scattered_type_kind(tree).is_some() => {
+                Namespace::Type
+            }
+            hir::DefKind::Struct
+            | hir::DefKind::Union
+            | hir::DefKind::Enum
+            | hir::DefKind::Bitfield
+            | hir::DefKind::Newtype
+            | hir::DefKind::TypeAlias => Namespace::Type,
+            _ => Namespace::Value,
+        };
+        let ns = match self.instantiation_role() {
+            Some(syntax::InstantiationReference::Outcome) => Namespace::Outcome,
+            Some(syntax::InstantiationReference::Callable) => Namespace::Callable,
+            Some(syntax::InstantiationReference::Type) => Namespace::Type,
+            None => ns,
+        };
+        bindings::resolve(self.db, at, item.name(tree).clone(), ns) == Some(candidate)
+    }
 }

@@ -33,17 +33,19 @@ pub fn include_paths(db: &dyn salsa::Database, input: FileText) -> Vec<String> {
 /// distinction for proper path resolution.
 #[salsa::tracked(returns(ref))]
 pub fn typed_include_paths(db: &dyn salsa::Database, input: FileText) -> Vec<IncludePath> {
-    let text = input.text(db);
     let mut includes = Vec::new();
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("$include") {
-            let rest = rest.trim();
-            if let Some(path) = rest.strip_prefix('"').and_then(|r| r.strip_suffix('"')) {
-                includes.push(IncludePath::Relative(path.to_string()));
-            } else if let Some(path) = rest.strip_prefix('<').and_then(|r| r.strip_suffix('>')) {
-                includes.push(IncludePath::Library(path.to_string()));
-            }
+    let Some(root) = syntax::parse_query::semantic_parse_file(db, input).syntax_node() else {
+        return includes;
+    };
+    for node in root.children() {
+        if let Some(syntax::preprocess::Event::Include { path, library }) =
+            syntax::preprocess::Event::from_node(&node)
+        {
+            includes.push(if library {
+                IncludePath::Library(path)
+            } else {
+                IncludePath::Relative(path)
+            });
         }
     }
     includes
@@ -63,11 +65,4 @@ impl std::hash::Hash for ArcIncludeGraph {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         std::ptr::hash(Arc::as_ptr(&self.0), state);
     }
-}
-
-/// Salsa input: the workspace include graph, set once after workspace scan.
-#[salsa::input(singleton)]
-pub struct WorkspaceIncludeGraph {
-    #[returns(ref)]
-    pub graph: ArcIncludeGraph,
 }

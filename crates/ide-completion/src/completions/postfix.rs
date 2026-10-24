@@ -3,18 +3,21 @@
 //! type category when type information is available.
 
 use super::Completions;
+use crate::completions::dot::extract_receiver_expr;
 use crate::context::CompletionContext;
+use crate::item::CompletionItem;
+use ide_db::defs::CompletionItemKind;
 
 /// Complete postfix templates after `.`, with type-aware filtering.
 pub(crate) fn complete_postfix(acc: &mut Completions, ctx: &CompletionContext<'_>) {
-    let mut items = crate::postfix_completions(ctx.text, ctx.offset, ctx.prefix);
+    let mut items = postfix_completions(ctx.text, ctx.offset, ctx.prefix);
 
     // B5-2: Try to determine receiver type for filtering.
     // Extract receiver span and look up its type via FileDb.
     let prefix_start = ctx.offset.saturating_sub(ctx.prefix.len());
     if prefix_start > 0 && ctx.text.as_bytes().get(prefix_start - 1) == Some(&b'.') {
         let dot_pos = prefix_start - 1;
-        let receiver_text = crate::extract_receiver_expr(ctx.text, dot_pos);
+        let receiver_text = crate::completions::dot::extract_receiver_expr(ctx.text, dot_pos);
         if !receiver_text.is_empty() {
             // Look up receiver type from binding type cache
             let receiver_span =
@@ -55,4 +58,63 @@ pub(crate) fn complete_postfix(acc: &mut Completions, ctx: &CompletionContext<'_
     }
 
     acc.add_many(items);
+}
+
+/// Generate postfix completions (e.g. `expr.if` -> `if expr then { }`)
+pub(crate) fn postfix_completions(text: &str, offset: usize, prefix: &str) -> Vec<CompletionItem> {
+    // Find the dot before the prefix
+    let prefix_start = offset - prefix.len();
+    if prefix_start == 0 {
+        return Vec::new();
+    }
+    let before = &text[..prefix_start];
+    if !before.ends_with('.') {
+        return Vec::new();
+    }
+
+    // Extract the receiver expression (text before the dot)
+    let dot_pos = prefix_start - 1;
+    let receiver = extract_receiver_expr(text, dot_pos);
+    if receiver.is_empty() {
+        return Vec::new();
+    }
+
+    let prefix_lower = prefix.to_ascii_lowercase();
+
+    let postfix_templates: &[(&str, &str, &str)] = &[
+        ("if", "if {} then {{\n\t$0\n}}", "Wrap in if-then"),
+        ("match", "match {} {{\n\t${{1:_}} => $0\n}}", "Wrap in match"),
+        ("let", "let ${{1:x}} = {}", "Bind to let"),
+        ("not", "~({})", "Negate expression"),
+        ("return", "return {}", "Return expression"),
+        ("dbg", "/* DBG */ {}", "Debug wrapper"),
+        ("foreach", "foreach (${{1:i}} from ${{2:0}} to {}) {{\n\t$0\n}}", "Wrap in foreach"),
+        ("assert", "assert({}, ${{1:\"assertion failed\"}})", "Wrap in assert"),
+        ("while", "while {} do {{\n\t$0\n}}", "Wrap in while-do"),
+        ("var", "var ${{1:x}} = {}", "Bind to var (mutable)"),
+        ("throw", "throw {}", "Throw expression"),
+        ("exit", "exit({})", "Exit with expression"),
+        ("some", "Some({})", "Wrap in Some"),
+        ("unsigned", "unsigned({})", "Convert to unsigned"),
+        ("signed", "signed({})", "Convert to signed"),
+    ];
+
+    let mut items = Vec::new();
+    for (trigger, template, detail) in postfix_templates {
+        if !trigger.starts_with(&prefix_lower) && !prefix_lower.is_empty() {
+            continue;
+        }
+
+        let snippet = template.replace("{}", receiver);
+
+        items.push(
+            CompletionItem::new(CompletionItemKind::Snippet, format!(".{trigger}"))
+                .detail(*detail)
+                .filter_text(*trigger)
+                .insert_text(snippet)
+                // A postfix template is asked for by name, so it sorts first.
+                .sort_text(format!("0000_{trigger}")),
+        );
+    }
+    items
 }

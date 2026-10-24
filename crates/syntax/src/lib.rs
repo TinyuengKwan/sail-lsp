@@ -14,12 +14,16 @@
 // validation are all private modules with precise re-exports.
 #[cfg(test)]
 mod grammar_tests;
+#[cfg(test)]
+mod parser_corpus_tests;
 mod parsing;
 mod ptr;
 mod syntax_error;
 mod syntax_node;
 mod token_text;
-mod validation;
+#[cfg(test)]
+mod upstream_lexing_suite;
+pub(crate) mod validation;
 
 pub mod algo;
 pub mod ast;
@@ -151,6 +155,63 @@ impl Parse<ast::SourceFile> {
         }
         buf
     }
+}
+
+/// The name a definition declares.
+///
+/// One place, because six near-copies of this walk had drifted apart and
+/// each divergence was a bug: only one of them knew that
+/// `val "shift_bits_right" : ..` names a function with a string literal
+/// (parser.mly `val_spec`), so the others registered it under no name at all.
+///
+/// Prefers the `NAME` node when the grammar produced one, and falls back to
+/// the first identifier-like token otherwise. `operator <sym>` needs no
+/// special case: the lexer emits the symbol as an ordinary `IDENT`.
+pub fn definition_name(node: &SyntaxNode) -> Option<String> {
+    fn from_tokens(node: &SyntaxNode) -> Option<String> {
+        node.children_with_tokens()
+            .filter_map(|el| el.into_token())
+            .find(|t| matches!(t.kind(), SyntaxKind::IDENT | SyntaxKind::STRING_LIT))
+            .map(|t| t.text().trim_matches('"').to_string())
+    }
+    for child in node.children() {
+        if child.kind() == SyntaxKind::NAME {
+            return from_tokens(&child);
+        }
+    }
+    node.descendants_with_tokens()
+        .filter_map(|el| el.into_token())
+        .find(|t| matches!(t.kind(), SyntaxKind::IDENT | SyntaxKind::STRING_LIT))
+        .map(|t| t.text().trim_matches('"').to_string())
+}
+
+/// Byte span of the name [`definition_name`] returns.
+///
+/// Where a cursor should land when navigating to this definition. `None` when
+/// the definition declares no ordinary name — an anonymous pragma, or a
+/// recovered node.
+pub fn definition_name_span(node: &SyntaxNode) -> Option<parser::Span> {
+    fn token_span(node: &SyntaxNode) -> Option<parser::Span> {
+        node.children_with_tokens()
+            .filter_map(|el| el.into_token())
+            .find(|t| matches!(t.kind(), SyntaxKind::IDENT | SyntaxKind::STRING_LIT))
+            .map(|t| {
+                let r = t.text_range();
+                parser::Span::new(usize::from(r.start()), usize::from(r.end()))
+            })
+    }
+    for child in node.children() {
+        if child.kind() == SyntaxKind::NAME {
+            return token_span(&child);
+        }
+    }
+    node.descendants_with_tokens()
+        .filter_map(|el| el.into_token())
+        .find(|t| matches!(t.kind(), SyntaxKind::IDENT | SyntaxKind::STRING_LIT))
+        .map(|t| {
+            let r = t.text_range();
+            parser::Span::new(usize::from(r.start()), usize::from(r.end()))
+        })
 }
 
 impl ast::SourceFile {
@@ -371,3 +432,102 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod quantifier_grammar {
+    use parser::SyntaxKind as SK;
+
+    /// One `TYPE_PARAM` per `kopt`, with its names and its kind.
+    fn kopts(src: &str) -> Vec<(String, Option<String>)> {
+        let (root, _) = crate::parse_text(src);
+        root.descendants()
+            .filter(|n| n.kind() == SK::TYPE_PARAM)
+            .map(|p| {
+                let names = p
+                    .children_with_tokens()
+                    .filter_map(|el| el.into_token())
+                    .filter(|t| t.kind() == SK::TY_VAR)
+                    .map(|t| t.text().to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let mut toks = p.children_with_tokens().filter_map(|el| el.into_token());
+                let kind = toks
+                    .find(|t| t.kind() == SK::COLON)
+                    .and(toks.find(|t| !t.kind().is_trivia()))
+                    .map(|t| t.text().to_string());
+                (names, kind)
+            })
+            .collect()
+    }
+
+    /// Upstream's `kopt := '(' kid_list ':' kind ')' | kid`
+    /// (`parser.mly:430`). `forall` used to be parsed by bumping tokens
+    /// until the `.`, so `TypeParamList` and `TypeParam` were declared in
+    /// `sail.ungram`, generated into the AST, and built by nobody — while
+    /// three consumers re-derived the list from the token stream, each with
+    /// its own heuristic.
+    #[test]
+    fn a_quantifier_list_is_a_tree() {
+        assert_eq!(kopts("val f : forall 'n. int('n) -> unit"), vec![("'n".to_string(), None)]);
+        assert_eq!(
+            kopts("val f : forall ('n : Int). int('n) -> unit"),
+            vec![("'n".to_string(), Some("Int".to_string()))]
+        );
+        // One `kopt` binding two names at one kind is one node, as upstream
+        // has it — not two nodes, and not a name list with the kind lost.
+        assert_eq!(
+            kopts("val f : forall ('n 'm : Int). int('n) -> unit"),
+            vec![("'n 'm".to_string(), Some("Int".to_string()))]
+        );
+        assert_eq!(
+            kopts("val f : forall ('m : Int) ('o : Order). vector('m, 'o, bit) -> unit"),
+            vec![
+                ("'m".to_string(), Some("Int".to_string())),
+                ("'o".to_string(), Some("Order".to_string())),
+            ]
+        );
+    }
+
+    /// The constraint after the comma is a type node of its own, so the
+    /// quantifier list ends where the grammar says rather than where a
+    /// scan for the last comma before the first comparison operator guesses.
+    #[test]
+    fn a_constraint_is_a_node_not_a_token_run() {
+        let (root, _) = crate::parse_text("val f : forall 'n, 'n > 0 & 'n <= 64. bits('n) -> unit");
+        let forall = root
+            .descendants()
+            .find(|n| n.kind() == SK::TYPE_FORALL)
+            .expect("the signature has a forall");
+        let children: Vec<SK> = forall.children().map(|c| c.kind()).collect();
+        assert_eq!(children.len(), 3, "param list, constraint, body — got {children:?}");
+        assert_eq!(children[0], SK::TYPE_PARAM_LIST);
+        assert_eq!(kopts("val f : forall 'n, 'n > 0. bits('n) -> unit").len(), 1);
+    }
+    /// An existential binds a `kopt` list too — `{'d 'n, C. T}` — and the
+    /// same braces spell a numeric set, `{1, 2, 4, 8}`, which binds nothing.
+    /// A `kopt` starts with a type variable or a `(`, and that is the only
+    /// difference the parser needs.
+    #[test]
+    fn an_existential_binds_a_kopt_list() {
+        assert_eq!(kopts("val f : unit -> {'n, 'n >= 0. int('n)}"), vec![("'n".to_string(), None)]);
+        assert_eq!(
+            kopts("val f : unit -> {('d : Int) ('n : Int), 0 <= 'n. int('d)}"),
+            vec![
+                ("'d".to_string(), Some("Int".to_string())),
+                ("'n".to_string(), Some("Int".to_string())),
+            ]
+        );
+        // A numeric set binds nothing and must not grow a parameter list.
+        assert!(kopts("val f : {8, 16, 32, 64} -> unit").is_empty());
+        let (root, _) = crate::parse_text("val f : {8, 16, 32, 64} -> unit");
+        assert!(
+            root.descendants().any(|n| n.kind() == SK::TYPE_EXISTENTIAL),
+            "the numeric-set form still parses"
+        );
+    }
+}
+
+mod instantiation;
+pub use instantiation::{
+    instantiation_reference, instantiation_substitutions, InstantiationReference,
+};

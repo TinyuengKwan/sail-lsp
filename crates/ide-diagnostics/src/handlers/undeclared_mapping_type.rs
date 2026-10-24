@@ -1,7 +1,7 @@
 //! Handler for `AnyDiagnostic::UndeclaredMappingType`.
 
 use crate::Diagnostic;
-use hir_def::diagnostics::DiagnosticCode;
+use hir::diagnostics::DiagnosticCode;
 
 use crate::{DiagnosticsContext, UndeclaredMappingType};
 

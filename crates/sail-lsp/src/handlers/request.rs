@@ -17,7 +17,7 @@ use lsp_types::request::{
 };
 use lsp_types::*;
 
-use hir_def::callgraph::SourceFileInfo;
+use hir::callgraph::SourceFileInfo;
 use ide_db::FileDb;
 
 use crate::global_state::GlobalStateSnapshot;
@@ -47,7 +47,7 @@ fn file_locations_to_lsp(
 
 /// Convert `NavigationTarget`s to LSP `Location`s.
 fn nav_targets_to_lsp(
-    targets: &[ide_db::ide_types::NavigationTarget],
+    targets: &[ide::NavigationTarget],
     analysis: &ide::analysis::Analysis,
 ) -> Vec<Location> {
     targets
@@ -58,6 +58,20 @@ fn nav_targets_to_lsp(
             Some(Location::new(t.url.clone(), crate::to_proto::range(&line_index, t.focus_range)))
         })
         .collect()
+}
+
+/// The line index of the file a request is about.
+///
+/// Every position conversion needs one, which is the point: the pair this
+/// replaced took only a `Position` and assigned `character` to a byte
+/// column. Rebuilt per call rather than cached — a request handles one
+/// position or a few, and the index is linear in the file it is about.
+fn line_index_for(
+    snap: &GlobalStateSnapshot,
+    uri: &lsp_types::Url,
+) -> ide_db::line_index::LineIndex {
+    let text = snap.analysis.file(uri).map(|sf| sf.text().to_string()).unwrap_or_default();
+    ide_db::line_index::LineIndex::new(&text)
 }
 
 pub(crate) fn handle_document_symbol(
@@ -78,11 +92,149 @@ pub(crate) fn handle_document_symbol(
     let line_index = ide_db::line_index::LineIndex::new(sf.text());
     let tree: Vec<DocumentSymbol> = targets
         .iter()
-        .map(|t: &ide_db::ide_types::NavigationTarget| {
-            crate::to_proto::document_symbol(&line_index, t)
-        })
+        .map(|t: &ide::NavigationTarget| crate::to_proto::document_symbol(&line_index, t))
         .collect();
-    Ok(Some(DocumentSymbolResponse::Nested(tree)))
+    // A client that did not say it understands the nested form gets the
+    // flat one. This always sent `Nested`, and
+    // `hierarchical_symbols_support` — which says whether that is allowed —
+    // had no caller: an editor without the capability sees an empty
+    // outline, and nothing here would have said why.
+    if snap.client_caps.hierarchical_symbols_support() {
+        return Ok(Some(DocumentSymbolResponse::Nested(tree)));
+    }
+    Ok(Some(DocumentSymbolResponse::Flat(flatten_symbols(&tree, uri))))
+}
+
+/// The nested outline as the flat list the older protocol form wants.
+#[allow(deprecated)]
+fn flatten_symbols(
+    tree: &[lsp_types::DocumentSymbol],
+    uri: &Url,
+) -> Vec<lsp_types::SymbolInformation> {
+    fn walk(
+        out: &mut Vec<lsp_types::SymbolInformation>,
+        nodes: &[lsp_types::DocumentSymbol],
+        uri: &Url,
+        container: Option<&str>,
+    ) {
+        for node in nodes {
+            out.push(lsp_types::SymbolInformation {
+                name: node.name.clone(),
+                kind: node.kind,
+                tags: node.tags.clone(),
+                deprecated: None,
+                location: lsp_types::Location::new(uri.clone(), node.range),
+                container_name: container.map(str::to_owned),
+            });
+            if let Some(children) = &node.children {
+                walk(out, children, uri, Some(&node.name));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&mut out, tree, uri, None);
+    out
+}
+
+/// `experimental/matchingBrace` — where the other bracket is.
+///
+/// A position that is not on a bracket comes back unchanged, so the reply
+/// lines up with the request one for one; that is rust-analyzer's contract
+/// and what makes the client able to move each cursor independently.
+pub(crate) fn handle_matching_brace(
+    snap: GlobalStateSnapshot,
+    params: crate::lsp_ext::MatchingBraceParams,
+) -> anyhow::Result<Vec<lsp_types::Position>> {
+    let uri = &params.text_document.uri;
+    let Some(sf) = snap.analysis.file(uri) else {
+        return Ok(params.positions);
+    };
+    let line_index = ide_db::line_index::LineIndex::new(sf.text());
+    params
+        .positions
+        .into_iter()
+        .map(|pos| {
+            let offset = crate::from_proto::offset(&line_index, pos);
+            match snap.analysis.matching_brace(uri, offset)? {
+                Some(target) => Ok(crate::to_proto::position_in(&line_index, target)),
+                None => Ok(pos),
+            }
+        })
+        .collect()
+}
+
+/// `experimental/joinLines` — collapse the selected lines into one.
+pub(crate) fn handle_join_lines(
+    snap: GlobalStateSnapshot,
+    params: crate::lsp_ext::JoinLinesParams,
+) -> anyhow::Result<Vec<TextEdit>> {
+    let uri = &params.text_document.uri;
+    let Some(sf) = snap.analysis.file(uri) else {
+        return Ok(Vec::new());
+    };
+    let line_index = ide_db::line_index::LineIndex::new(sf.text());
+    let mut edits = Vec::new();
+    for range in params.ranges {
+        let range = crate::from_proto::text_range(&line_index, range);
+        edits.extend(snap.analysis.join_lines(uri, range)?);
+    }
+    Ok(ide_edits_to_lsp(edits, &sf))
+}
+
+/// `experimental/onEnter` — what to insert when Enter is pressed.
+pub(crate) fn handle_on_enter(
+    snap: GlobalStateSnapshot,
+    params: lsp_types::TextDocumentPositionParams,
+) -> anyhow::Result<Option<Vec<crate::lsp_ext::SnippetTextEdit>>> {
+    let uri = &params.text_document.uri;
+    let Some(sf) = snap.analysis.file(uri) else {
+        return Ok(None);
+    };
+    let lc = crate::from_proto::line_col(&line_index_for(&snap, uri), params.position);
+    let Some(edits) = snap.analysis.on_enter(uri, lc)? else {
+        return Ok(None);
+    };
+    Ok(Some(snippet_edits(edits, &sf, snap.client_caps.snippet_text_edit_support())))
+}
+
+/// `experimental/moveItem` — swap a definition with its sibling.
+pub(crate) fn handle_move_item(
+    snap: GlobalStateSnapshot,
+    params: crate::lsp_ext::MoveItemParams,
+) -> anyhow::Result<Vec<crate::lsp_ext::SnippetTextEdit>> {
+    let uri = &params.text_document.uri;
+    let Some(sf) = snap.analysis.file(uri) else {
+        return Ok(Vec::new());
+    };
+    let line_index = ide_db::line_index::LineIndex::new(sf.text());
+    let offset = crate::from_proto::offset(&line_index, params.range.start);
+    let direction = match params.direction {
+        crate::lsp_ext::MoveItemDirection::Up => ide::MoveDirection::Up,
+        crate::lsp_ext::MoveItemDirection::Down => ide::MoveDirection::Down,
+    };
+    let edits = snap.analysis.move_item(uri, offset, direction)?;
+    Ok(snippet_edits(edits, &sf, snap.client_caps.snippet_text_edit_support()))
+}
+
+/// Convert ide edits to the snippet form, stripping placeholders for a
+/// client that did not advertise `experimental.snippetTextEdit`.
+fn snippet_edits(
+    edits: Vec<ide_db::ide_types::IdeTextEdit>,
+    file: &dyn FileDb,
+    snippets: bool,
+) -> Vec<crate::lsp_ext::SnippetTextEdit> {
+    let line_index = ide_db::line_index::LineIndex::new(file.text());
+    edits
+        .into_iter()
+        .map(|e| {
+            let edit = crate::to_proto::text_edit(&line_index, &e);
+            crate::lsp_ext::SnippetTextEdit {
+                range: edit.range,
+                new_text: edit.new_text,
+                insert_text_format: snippets.then_some(lsp_types::InsertTextFormat::SNIPPET),
+            }
+        })
+        .collect()
 }
 
 pub(crate) fn handle_selection_range(
@@ -90,19 +242,20 @@ pub(crate) fn handle_selection_range(
     params: SelectionRangeParams,
 ) -> anyhow::Result<Option<Vec<SelectionRange>>> {
     let uri = &params.text_document.uri;
-    let result = snap.analysis.with_file(uri, |sf, _| {
-        let line_index = ide_db::line_index::LineIndex::new(sf.text());
-        params
-            .positions
-            .iter()
-            .map(|pos| {
-                let lc = crate::lsp_ext::line_col_from_position(*pos);
-                let ide_sr = ide::formatting::make_selection_range(sf, lc);
-                crate::to_proto::selection_range(&line_index, &ide_sr)
-            })
-            .collect::<Vec<_>>()
-    });
-    Ok(result)
+    let Some(sf) = snap.analysis.file(uri) else {
+        return Ok(None);
+    };
+    let line_index = ide_db::line_index::LineIndex::new(sf.text());
+    let ranges = params
+        .positions
+        .iter()
+        .filter_map(|pos| {
+            let lc = crate::from_proto::line_col(&line_index_for(&snap, uri), *pos);
+            let sr = snap.analysis.selection_range(uri, lc).ok().flatten()?;
+            Some(crate::to_proto::selection_range(&line_index, &sr))
+        })
+        .collect::<Vec<_>>();
+    Ok(Some(ranges))
 }
 
 pub(crate) fn handle_formatting(
@@ -113,18 +266,12 @@ pub(crate) fn handle_formatting(
     let Some(file_id) = snap.analysis.file_id(uri) else {
         return Ok(None);
     };
+    let opts = crate::from_proto::format_options(&params.options);
     // Cache the client's format options so code actions can reuse them.
-    {
-        let opts = crate::from_proto::format_options(&params.options);
-        if let Ok(mut cached) = snap.last_format_options.lock() {
-            *cached = opts;
-        }
+    if let Ok(mut cached) = snap.last_format_options.lock() {
+        *cached = opts.clone();
     }
-    let edits = snap
-        .analysis
-        .format_document(file_id, params.options.tab_size, params.options.insert_spaces)
-        .ok()
-        .flatten();
+    let edits = snap.analysis.format_document(file_id, &opts).ok().flatten();
     let Some(edits) = edits else { return Ok(None) };
     let Some(sf) = snap.analysis.file(uri) else {
         return Ok(None);
@@ -137,13 +284,15 @@ pub(crate) fn handle_semantic_tokens_range(
     params: SemanticTokensRangeParams,
 ) -> anyhow::Result<Option<SemanticTokensRangeResult>> {
     let uri = &params.text_document.uri;
-    let result = snap.analysis.with_file(uri, |sf, _| {
-        let line_index = ide_db::line_index::LineIndex::new(sf.text());
-        let text_range = crate::from_proto::text_range(&line_index, params.range);
-        let ide_tokens = ide::syntax_highlighting::compute_semantic_tokens_range(sf, &text_range);
-        SemanticTokensRangeResult::Tokens(crate::to_proto::semantic_tokens(&ide_tokens))
-    });
-    Ok(result)
+    let Some(sf) = snap.analysis.file(uri) else {
+        return Ok(None);
+    };
+    let line_index = ide_db::line_index::LineIndex::new(sf.text());
+    let range = crate::from_proto::text_range(&line_index, params.range);
+    let Some(tokens) = snap.analysis.semantic_tokens_range(uri, range)? else {
+        return Ok(None);
+    };
+    Ok(Some(SemanticTokensRangeResult::Tokens(crate::to_proto::semantic_tokens(&tokens))))
 }
 
 /// Document highlight — highlight related symbols and keywords.
@@ -161,15 +310,9 @@ pub(crate) fn handle_document_highlight(
     let Some(sf) = snap.analysis.file(uri) else {
         return Ok(None);
     };
-    let lc = crate::lsp_ext::line_col_from_position(position);
+    let lc = crate::from_proto::line_col(&line_index_for(&snap, uri), position);
 
-    let config = ide::highlight_related::HighlightRelatedConfig {
-        references: true,
-        exit_points: true,
-        break_points: true,
-        branch_exit_points: true,
-    };
-    let ranges = ide::highlight_related::highlight_related(&sf, &config, lc);
+    let ranges = snap.analysis.highlight_related(uri, lc)?;
     if ranges.is_empty() {
         return Ok(None);
     }
@@ -184,10 +327,12 @@ pub(crate) fn handle_document_highlight(
             };
             DocumentHighlight {
                 range: Range::new(
-                    crate::lsp_ext::position_from_line_col(
+                    crate::to_proto::position_from_line_col(
+                        &line_index_for(&snap, uri),
                         sf.position_at(base_db::range_start(hr.range)),
                     ),
-                    crate::lsp_ext::position_from_line_col(
+                    crate::to_proto::position_from_line_col(
+                        &line_index_for(&snap, uri),
                         sf.position_at(base_db::range_end(hr.range)),
                     ),
                 ),
@@ -206,6 +351,9 @@ pub(crate) fn handle_semantic_tokens_full(
     let Some(file_id) = snap.analysis.file_id(uri) else {
         return Ok(None);
     };
+    if !snap.config.semantic_tokens.enable {
+        return Ok(None);
+    }
     let Some(ide_tokens) = snap.analysis.semantic_tokens(file_id).ok() else {
         return Ok(None);
     };
@@ -241,16 +389,23 @@ pub(crate) fn handle_document_diagnostic(
     let Some(file_id) = snap.analysis.file_id(uri) else {
         return Ok(empty_report());
     };
+    // Not for the bundled library: the user cannot fix those files, and a
+    // false positive there would sit in the problems panel forever.
+    if snap.is_library(file_id) {
+        return Ok(empty_report());
+    }
     let diag_config = snap.config.diagnostics.to_ide_config();
 
     // Main file diagnostics
-    let ide_diags = snap.analysis.file_diagnostics(file_id, &diag_config);
+    let ide_diags = snap.analysis.file_diagnostics(file_id, &diag_config)?;
     let Some(sf) = snap.analysis.file(uri) else {
         return Ok(empty_report());
     };
     let line_index = ide_db::line_index::LineIndex::new(sf.text());
-    let items: Vec<Diagnostic> =
-        ide_diags.iter().map(|d| crate::to_proto::diagnostic(&line_index, d)).collect();
+    let items: Vec<Diagnostic> = ide_diags
+        .iter()
+        .map(|d| crate::to_proto::diagnostic_with_analysis(&snap.analysis, &line_index, uri, d))
+        .collect();
 
     // Related documents — files that $include this file.
     // When this file's types change, dependent files may get new errors.
@@ -261,11 +416,20 @@ pub(crate) fn handle_document_diagnostic(
     if supports_related {
         for &dep_fid in snap.include_graph.included_by(file_id) {
             if let Some(dep_url) = snap.analysis.url_for_file_id(dep_fid) {
-                let dep_diags = snap.analysis.file_diagnostics(dep_fid, &diag_config);
+                let dep_diags = snap.analysis.file_diagnostics(dep_fid, &diag_config)?;
                 if let Some(dep_sf) = snap.analysis.file(dep_url) {
                     let dep_li = ide_db::line_index::LineIndex::new(dep_sf.text());
-                    let dep_items: Vec<Diagnostic> =
-                        dep_diags.iter().map(|d| crate::to_proto::diagnostic(&dep_li, d)).collect();
+                    let dep_items: Vec<Diagnostic> = dep_diags
+                        .iter()
+                        .map(|d| {
+                            crate::to_proto::diagnostic_with_analysis(
+                                &snap.analysis,
+                                &dep_li,
+                                dep_url,
+                                d,
+                            )
+                        })
+                        .collect();
                     related_documents.insert(
                         dep_url.clone(),
                         DocumentDiagnosticReportKind::Full(FullDocumentDiagnosticReport {
@@ -315,12 +479,8 @@ pub(crate) fn handle_range_formatting(
     };
     let range =
         crate::from_proto::text_range(&ide_db::line_index::LineIndex::new(sf.text()), params.range);
-    let edits = ide::formatting::range_format_document_edits(
-        &sf,
-        range,
-        &crate::from_proto::format_options(&params.options),
-    );
-    match edits {
+    let opts = crate::from_proto::format_options(&params.options);
+    match snap.analysis.range_format(uri, range, &opts)? {
         Some(edits) => Ok(Some(ide_edits_to_lsp(edits, &sf))),
         None => Ok(None),
     }
@@ -331,16 +491,18 @@ pub(crate) fn handle_linked_editing_range(
     params: LinkedEditingRangeParams,
 ) -> anyhow::Result<Option<LinkedEditingRanges>> {
     let uri = &params.text_document_position_params.text_document.uri;
-    let position = params.text_document_position_params.position;
+    let lc = crate::from_proto::line_col(
+        &line_index_for(&snap, uri),
+        params.text_document_position_params.position,
+    );
+    let Some(result) = snap.analysis.linked_editing_ranges(uri, lc)? else {
+        return Ok(None);
+    };
     let Some(sf) = snap.analysis.file(uri) else {
         return Ok(None);
     };
-    let lc = crate::lsp_ext::line_col_from_position(position);
-    let Some(ide_result) = ide::formatting::linked_editing_ranges_for_position(&sf, lc) else {
-        return Ok(None);
-    };
     let line_index = ide_db::line_index::LineIndex::new(sf.text());
-    Ok(Some(crate::to_proto::linked_editing_ranges(&line_index, &ide_result)))
+    Ok(Some(crate::to_proto::linked_editing_ranges(&line_index, &result)))
 }
 
 pub(crate) fn handle_document_link(
@@ -348,17 +510,15 @@ pub(crate) fn handle_document_link(
     params: DocumentLinkParams,
 ) -> anyhow::Result<Option<Vec<DocumentLink>>> {
     let uri = params.text_document.uri;
+    let links = snap.analysis.document_links(&uri)?;
+    if links.is_empty() {
+        return Ok(None);
+    }
     let Some(sf) = snap.analysis.file(&uri) else {
         return Ok(None);
     };
-    let ide_links = ide::formatting::document_links_for_file(&uri, &sf);
-    if ide_links.is_empty() {
-        return Ok(None);
-    }
     let line_index = ide_db::line_index::LineIndex::new(sf.text());
-    let lsp_links: Vec<DocumentLink> =
-        ide_links.iter().map(|l| crate::to_proto::document_link(&line_index, l)).collect();
-    Ok(Some(lsp_links))
+    Ok(Some(links.iter().map(|l| crate::to_proto::document_link(&line_index, l)).collect()))
 }
 
 pub(crate) fn handle_document_link_resolve(
@@ -380,30 +540,18 @@ pub(crate) fn handle_prepare_rename(
     params: TextDocumentPositionParams,
 ) -> anyhow::Result<Option<PrepareRenameResponse>> {
     let uri = &params.text_document.uri;
-    let Some(sf) = snap.analysis.file(uri) else {
+    let index = line_index_for(&snap, uri);
+    let lc = crate::from_proto::line_col(&index, params.position);
+    let Some((placeholder, start, end)) = snap.analysis.prepare_rename(uri, lc)? else {
         return Ok(None);
     };
-    let lc = crate::lsp_ext::line_col_from_position(params.position);
-    let Some((token, span)) = sf.token_at(lc) else {
-        return Ok(None);
-    };
-    match token {
-        parser::Token::Id(name) => Ok(Some(PrepareRenameResponse::RangeWithPlaceholder {
-            range: Range::new(
-                crate::lsp_ext::position_from_line_col(sf.position_at(span.start)),
-                crate::lsp_ext::position_from_line_col(sf.position_at(span.end)),
-            ),
-            placeholder: name.clone(),
-        })),
-        parser::Token::TyVal(name) => Ok(Some(PrepareRenameResponse::RangeWithPlaceholder {
-            range: Range::new(
-                crate::lsp_ext::position_from_line_col(sf.position_at(span.start)),
-                crate::lsp_ext::position_from_line_col(sf.position_at(span.end)),
-            ),
-            placeholder: format!("'{}", name),
-        })),
-        _ => Ok(None),
-    }
+    Ok(Some(PrepareRenameResponse::RangeWithPlaceholder {
+        range: Range::new(
+            crate::to_proto::position_from_line_col(&index, start),
+            crate::to_proto::position_from_line_col(&index, end),
+        ),
+        placeholder,
+    }))
 }
 
 pub(crate) fn handle_semantic_tokens_full_delta(
@@ -416,6 +564,9 @@ pub(crate) fn handle_semantic_tokens_full_delta(
     let Some(file_id) = snap.analysis.file_id(uri) else {
         return Ok(None);
     };
+    if !snap.config.semantic_tokens.enable {
+        return Ok(None);
+    }
     let Some(ide_tokens) = snap.analysis.semantic_tokens(file_id).ok() else {
         return Ok(None);
     };
@@ -441,32 +592,11 @@ pub(crate) fn handle_folding_range(
     params: FoldingRangeParams,
 ) -> anyhow::Result<Option<Vec<FoldingRange>>> {
     let uri = &params.text_document.uri;
-    let Some(sf) = snap.analysis.file(uri) else {
-        return Ok(None);
-    };
-    let ide_folds = ide::folding_ranges::folding_ranges(&sf);
+    let ide_folds = snap.analysis.folding_ranges(uri)?;
     if ide_folds.is_empty() {
         return Ok(None);
     }
-    let ranges: Vec<FoldingRange> = ide_folds
-        .into_iter()
-        .map(|f| {
-            let kind = match f.kind {
-                ide::folding_ranges::FoldKind::Comment => Some(FoldingRangeKind::Comment),
-                ide::folding_ranges::FoldKind::Imports => Some(FoldingRangeKind::Imports),
-                ide::folding_ranges::FoldKind::Region => Some(FoldingRangeKind::Region),
-                _ => Some(FoldingRangeKind::Region),
-            };
-            FoldingRange {
-                start_line: f.start_line,
-                start_character: None,
-                end_line: f.end_line,
-                end_character: None,
-                kind,
-                collapsed_text: None,
-            }
-        })
-        .collect();
+    let ranges: Vec<FoldingRange> = ide_folds.iter().map(crate::to_proto::folding_range).collect();
     Ok(Some(ranges))
 }
 
@@ -479,7 +609,7 @@ pub(crate) fn handle_code_lens_resolve(
     mut params: CodeLens,
 ) -> anyhow::Result<CodeLens> {
     if let Some(data) = params.data.as_ref() {
-        if let Some(title) = ide::annotations::code_lens_title(data) {
+        if let Some(title) = _snap.analysis.code_lens_title(data)? {
             let kind = data.get("kind").and_then(|v| v.as_str()).unwrap_or("");
             let name = data.get("name").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -528,332 +658,121 @@ pub(crate) fn handle_on_type_formatting(
     params: DocumentOnTypeFormattingParams,
 ) -> anyhow::Result<Option<Vec<TextEdit>>> {
     let uri = &params.text_document_position.text_document.uri;
-    let position = params.text_document_position.position;
     let Some(sf) = snap.analysis.file(uri) else {
         return Ok(None);
     };
-    let lc = crate::lsp_ext::line_col_from_position(position);
-    let result: Option<Vec<ide_db::ide_types::IdeTextEdit>> = match params.ch.as_str() {
-        "}" | ";" => ide::formatting::format_document_edits(
-            &sf,
-            &crate::from_proto::format_options(&params.options),
-        ),
-        "\n" => ide::formatting::on_enter_edits(&sf, lc),
-        "=" | ">" => {
-            let offset = sf.offset_at(&lc);
-            let text = sf.text();
-            if offset >= 2 {
-                let prev = text.as_bytes().get(offset - 2);
-                if matches!(prev, Some(b'-') | Some(b'=')) {
-                    ide::formatting::format_document_edits(
-                        &sf,
-                        &crate::from_proto::format_options(&params.options),
-                    )
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        }
-        _ => None,
-    };
-    match result {
+    let lc = crate::from_proto::line_col(
+        &line_index_for(&snap, uri),
+        params.text_document_position.position,
+    );
+    let opts = crate::from_proto::format_options(&params.options);
+    match snap.analysis.on_type_formatting(uri, lc, &params.ch, &opts)? {
         Some(edits) => Ok(Some(ide_edits_to_lsp(edits, &sf))),
         None => Ok(None),
     }
 }
 
 pub(crate) fn handle_inlay_hint_resolve(
-    _snap: GlobalStateSnapshot,
+    snap: GlobalStateSnapshot,
     params: InlayHint,
 ) -> anyhow::Result<InlayHint> {
     let line_index = ide_db::line_index::LineIndex::new("");
-    let mut ide_hint = crate::from_proto::inlay_hint(&line_index, &params);
-    ide::inlay_hints::resolve_inlay_hint(&mut ide_hint);
+    let mut hint = crate::from_proto::inlay_hint(&line_index, &params);
+    snap.analysis.resolve_inlay_hint(&mut hint)?;
     let mut result = params;
-    result.tooltip = ide_hint.tooltip.map(InlayHintTooltip::String);
+    result.tooltip = hint.tooltip.map(InlayHintTooltip::String);
     Ok(result)
 }
 
 pub(crate) fn handle_code_action(
     snap: GlobalStateSnapshot,
     params: CodeActionParams,
-) -> anyhow::Result<Option<Vec<CodeActionOrCommand>>> {
+) -> anyhow::Result<Option<Vec<crate::lsp::ext::CodeAction>>> {
     let uri = &params.text_document.uri;
     let Some(sf) = snap.analysis.file(uri) else {
         return Ok(None);
     };
-    let requested_kinds = params.context.only.clone();
-    let mut actions: Vec<CodeActionOrCommand> = Vec::new();
     let line_index = ide_db::line_index::LineIndex::new(sf.text());
-
-    // --- Quick fixes for diagnostics ---
-    for diagnostic in &params.context.diagnostics {
-        let ide_diag = crate::from_proto::diagnostic(&line_index, diagnostic);
-        if let Some((title, ide_edit, is_preferred)) =
-            ide_assists::quick_fix_for_diagnostic(&sf, &ide_diag)
-        {
-            let kind = CodeActionKind::QUICKFIX;
-            if crate::code_action_helpers::code_action_kind_allowed(&requested_kinds, &kind) {
-                let lsp_edit = crate::to_proto::text_edit(&line_index, &ide_edit);
-                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-                    title,
-                    kind: Some(kind),
-                    diagnostics: Some(vec![diagnostic.clone()]),
-                    edit: None,
-                    command: None,
-                    is_preferred: Some(is_preferred),
-                    disabled: None,
-                    data: Some(crate::code_action_helpers::lazy_code_action_data(uri, &[lsp_edit])),
-                }));
-            }
-        }
-    }
-
-    // --- Auto-include quick fix ---
-    // Offer `$include "file.sail"` when the cursor is on an unresolved
-    // identifier that is defined in another workspace file.
-    if crate::code_action_helpers::code_action_kind_allowed(
-        &requested_kinds,
-        &CodeActionKind::QUICKFIX,
-    ) {
-        let offset = {
-            let pos = params.range.start;
-            line_index.offset(ide_db::LineCol { line: pos.line, col: pos.character })
-        };
-        let owned = snap.analysis.all_salsa_files();
-        let all_files: Vec<(&Url, &dyn FileDb)> =
-            owned.iter().map(|(u, s)| (u, s as &dyn FileDb)).collect();
-        if let Some((title, ide_edit)) =
-            ide_assists::auto_include_edits(&sf, offset, all_files.iter().copied(), Some(uri))
-        {
-            let lsp_edit = crate::to_proto::text_edit(&line_index, &ide_edit);
-            actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-                title,
-                kind: Some(CodeActionKind::QUICKFIX),
-                diagnostics: None,
-                edit: None,
-                command: None,
-                is_preferred: Some(true),
-                disabled: None,
-                data: Some(crate::code_action_helpers::lazy_code_action_data(uri, &[lsp_edit])),
-            }));
-        }
-    }
-
-    // --- Refactoring assists ---
     let ide_range = crate::from_proto::text_range(&line_index, params.range);
+    let diagnostics: Vec<_> = params
+        .context
+        .diagnostics
+        .iter()
+        .map(|d| crate::from_proto::diagnostic(&line_index, d))
+        .collect();
+    let format = snap
+        .last_format_options
+        .lock()
+        .map(|o| o.clone())
+        .unwrap_or_else(|_| crate::code_action_helpers::default_code_action_format_options());
 
-    type RangeAssistFn = fn(
-        &dyn ide_db::FileDb,
-        ide_db::line_index::TextRange,
-    ) -> Option<Vec<ide_db::ide_types::IdeTextEdit>>;
-    let range_assists: &[(&str, CodeActionKind, RangeAssistFn)] = &[
-        ("Invert if", CodeActionKind::REFACTOR_REWRITE, ide_assists::invert_if_edits),
-        (
-            "Flip binary expression",
-            CodeActionKind::REFACTOR_REWRITE,
-            ide_assists::flip_binexpr_edits,
-        ),
-        (
-            "Apply De Morgan's law",
-            CodeActionKind::REFACTOR_REWRITE,
-            ide_assists::apply_demorgan_edits,
-        ),
-        (
-            "Extract to variable",
-            CodeActionKind::REFACTOR_EXTRACT,
-            ide_assists::extract_local_let_edits,
-        ),
-        ("Extract function", CodeActionKind::REFACTOR_EXTRACT, ide_assists::extract_function_edits),
-        ("Inline variable", CodeActionKind::REFACTOR_INLINE, ide_assists::inline_variable_edits),
-        (
-            "Generate doc template",
-            CodeActionKind::REFACTOR_REWRITE,
-            ide_assists::generate_doc_template_edits,
-        ),
-        ("Unwrap block", CodeActionKind::REFACTOR_REWRITE, ide_assists::unwrap_block_edits),
-        (
-            "Pull assignment up",
-            CodeActionKind::REFACTOR_REWRITE,
-            ide_assists::pull_assignment_up_edits,
-        ),
-        (
-            "Convert to guarded return",
-            CodeActionKind::REFACTOR_REWRITE,
-            ide_assists::guarded_return_edits,
-        ),
-        ("Sort items", CodeActionKind::REFACTOR_REWRITE, ide_assists::sort_items_edits),
-        (
-            "Line to block comment",
-            CodeActionKind::REFACTOR_REWRITE,
-            ide_assists::line_to_block_comment_edits,
-        ),
-        (
-            "Block to line comment",
-            CodeActionKind::REFACTOR_REWRITE,
-            ide_assists::block_to_line_comment_edits,
-        ),
-        (
-            "Toggle doc comment",
-            CodeActionKind::REFACTOR_REWRITE,
-            ide_assists::toggle_doc_comment_edits,
-        ),
-        (
-            "Generate bitfield accessors",
-            CodeActionKind::REFACTOR_REWRITE,
-            ide_assists::bitfield_accessor_edits,
-        ),
-        (
-            "Evaluate constant",
-            CodeActionKind::REFACTOR_REWRITE,
-            ide_assists::evaluate_constant_edits,
-        ),
-        ("Simplify boolean", CodeActionKind::REFACTOR_REWRITE, ide_assists::simplify_boolean_edits),
-    ];
-
-    for (title, kind, assist_fn) in range_assists {
-        if crate::code_action_helpers::code_action_kind_allowed(&requested_kinds, kind) {
-            if let Some(edits) = assist_fn(&sf, ide_range) {
-                if !edits.is_empty() {
-                    let lsp_edits = ide_edits_to_lsp(edits, &sf);
-                    actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-                        title: title.to_string(),
-                        kind: Some(kind.clone()),
-                        diagnostics: None,
-                        edit: None,
-                        command: None,
-                        is_preferred: None,
-                        disabled: None,
-                        data: Some(crate::code_action_helpers::lazy_code_action_data(
-                            uri, &lsp_edits,
-                        )),
-                    }));
+    // What the client supports and asked for, passed in rather than
+    // defaulted: `AssistConfig` had six fields and no readers.
+    // `snippet_cap` says whether an assist may leave a tabstop, so it is
+    // the *client's* `experimental.snippetTextEdit` that decides it —
+    // whether a workspace edit may carry snippet syntax. It used to be
+    // read off `completion.snippets`, this server's own setting for
+    // whether completion items expand, which answers a different question
+    // and is not the client's answer to any.
+    let assists = ide_assists::AssistConfig {
+        snippet_cap: ide_assists::SnippetCap::new(snap.client_caps.snippet_text_edit_support()),
+        ..Default::default()
+    };
+    let fix_all_kind = crate::code_action_helpers::sail_source_fix_all_kind();
+    let actions: Vec<crate::lsp::ext::CodeAction> = snap
+        .analysis
+        .code_actions(uri, ide_range, &diagnostics, &format, &assists)?
+        .into_iter()
+        .filter_map(|action| {
+            let kind = if action.is_fix_all {
+                fix_all_kind.clone()
+            } else {
+                assist_kind_to_lsp(action.kind)
+            };
+            if !crate::code_action_helpers::code_action_kind_allowed(&params.context.only, &kind) {
+                return None;
+            }
+            // The edit an assist produces may be a snippet — `$0` where
+            // the cursor should land. A client that opted into
+            // `experimental.snippetTextEdit` gets it; one that did not
+            // gets the placeholders stripped, inside a plain edit.
+            let url = |fid| snap.analysis.url_for_file_id(fid).cloned();
+            let line_index =
+                |fid| snap.analysis.url_for_file_id(fid).map(|uri| line_index_for(&snap, uri));
+            let edit = if snap.client_caps.snippet_text_edit_support() {
+                crate::lsp::ext::SnippetWorkspaceEdit {
+                    changes: Some(crate::to_proto::snippet_workspace_edit(
+                        &action.source_change,
+                        &url,
+                        &line_index,
+                    )),
                 }
-            }
-        }
-    }
-
-    // Offset-based assists
-    let offset = base_db::range_start(ide_range);
-    if crate::code_action_helpers::code_action_kind_allowed(
-        &requested_kinds,
-        &CodeActionKind::REFACTOR,
-    ) {
-        if let Some(edits) = ide_assists::generate_function_edits(&sf, offset) {
-            if !edits.is_empty() {
-                let lsp_edits = ide_edits_to_lsp(edits, &sf);
-                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-                    title: "Generate function".to_string(),
-                    kind: Some(CodeActionKind::REFACTOR),
-                    diagnostics: None,
-                    edit: None,
-                    command: None,
-                    is_preferred: None,
-                    disabled: None,
-                    data: Some(crate::code_action_helpers::lazy_code_action_data(uri, &lsp_edits)),
-                }));
-            }
-        }
-        if let Some(edits) = ide_assists::inline_call_edits(&sf, offset) {
-            if !edits.is_empty() {
-                let lsp_edits = ide_edits_to_lsp(edits, &sf);
-                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-                    title: "Inline call".to_string(),
-                    kind: Some(CodeActionKind::REFACTOR_INLINE),
-                    diagnostics: None,
-                    edit: None,
-                    command: None,
-                    is_preferred: None,
-                    disabled: None,
-                    data: Some(crate::code_action_helpers::lazy_code_action_data(uri, &lsp_edits)),
-                }));
-            }
-        }
-    }
-
-    // Literal format conversions
-    if crate::code_action_helpers::code_action_kind_allowed(
-        &requested_kinds,
-        &CodeActionKind::REFACTOR_REWRITE,
-    ) {
-        for (title, edits) in ide_assists::convert_literal_format_edits(&sf, ide_range) {
-            if !edits.is_empty() {
-                let lsp_edits = ide_edits_to_lsp(edits, &sf);
-                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-                    title,
-                    kind: Some(CodeActionKind::REFACTOR_REWRITE),
-                    diagnostics: None,
-                    edit: None,
-                    command: None,
-                    is_preferred: None,
-                    disabled: None,
-                    data: Some(crate::code_action_helpers::lazy_code_action_data(uri, &lsp_edits)),
-                }));
-            }
-        }
-    }
-
-    // --- Source actions ---
-    let source_kind = CodeActionKind::SOURCE;
-    if crate::code_action_helpers::code_action_kind_allowed(&requested_kinds, &source_kind) {
-        if let Some(edits) = ide_assists::organize_imports_edits(&sf) {
-            if !edits.is_empty() {
-                let lsp_edits = ide_edits_to_lsp(edits, &sf);
-                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-                    title: "Organize imports".to_string(),
-                    kind: Some(source_kind.clone()),
-                    diagnostics: None,
-                    edit: None,
-                    command: None,
-                    is_preferred: None,
-                    disabled: None,
-                    data: Some(crate::code_action_helpers::lazy_code_action_data(uri, &lsp_edits)),
-                }));
-            }
-        }
-        if let Some(edits) = ide_assists::remove_unused_imports_edits(&sf) {
-            if !edits.is_empty() {
-                let lsp_edits = ide_edits_to_lsp(edits, &sf);
-                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-                    title: "Remove unused imports".to_string(),
-                    kind: Some(source_kind.clone()),
-                    diagnostics: None,
-                    edit: None,
-                    command: None,
-                    is_preferred: None,
-                    disabled: None,
-                    data: Some(crate::code_action_helpers::lazy_code_action_data(uri, &lsp_edits)),
-                }));
-            }
-        }
-    }
-
-    // Format fix-all
-    let source_fix_all_kind = crate::code_action_helpers::sail_source_fix_all_kind();
-    if crate::code_action_helpers::code_action_kind_allowed(&requested_kinds, &source_fix_all_kind)
-    {
-        let fmt_opts =
-            snap.last_format_options.lock().map(|o| o.clone()).unwrap_or_else(|_| {
-                crate::code_action_helpers::default_code_action_format_options()
-            });
-        if let Some(ide_edits) = ide::formatting::format_document_edits(&sf, &fmt_opts) {
-            if !ide_edits.is_empty() {
-                let lsp_edits = ide_edits_to_lsp(ide_edits, &sf);
-                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-                    title: "Format document".to_string(),
-                    kind: Some(source_fix_all_kind),
-                    diagnostics: None,
-                    edit: None,
-                    command: None,
-                    is_preferred: None,
-                    disabled: None,
-                    data: Some(crate::code_action_helpers::lazy_code_action_data(uri, &lsp_edits)),
-                }));
-            }
-        }
-    }
+            } else {
+                let plain = crate::to_proto::workspace_edit(
+                    &action.source_change,
+                    &url,
+                    &line_index,
+                    false,
+                );
+                crate::to_proto::snippet_workspace_edit_from_plain(&plain)
+            };
+            Some(crate::lsp::ext::CodeAction {
+                title: action.title,
+                kind: Some(kind),
+                diagnostics: action
+                    .for_diagnostic
+                    .and_then(|i| params.context.diagnostics.get(i))
+                    .map(|d| vec![d.clone()]),
+                edit: None,
+                is_preferred: action.is_preferred,
+                data: Some(if let Some(request) = action.import {
+                    serde_json::json!({"autoInclude": crate::to_proto::import_request(&request)})
+                } else {
+                    crate::code_action_helpers::lazy_code_action_data(&edit)
+                }),
+            })
+        })
+        .collect();
 
     if actions.is_empty() {
         Ok(None)
@@ -861,20 +780,48 @@ pub(crate) fn handle_code_action(
         Ok(Some(actions))
     }
 }
-
+/// An assist's kind, as the protocol names it.
+fn assist_kind_to_lsp(kind: ide_db::assists::AssistKind) -> CodeActionKind {
+    use ide_db::assists::AssistKind as K;
+    match kind {
+        K::QuickFix => CodeActionKind::QUICKFIX,
+        K::Refactor | K::Generate => CodeActionKind::REFACTOR,
+        K::RefactorExtract => CodeActionKind::REFACTOR_EXTRACT,
+        K::RefactorInline => CodeActionKind::REFACTOR_INLINE,
+        K::RefactorRewrite => CodeActionKind::REFACTOR_REWRITE,
+        K::Source => CodeActionKind::SOURCE,
+        K::None => CodeActionKind::EMPTY,
+    }
+}
 pub(crate) fn handle_code_action_resolve(
-    _snap: GlobalStateSnapshot,
-    mut params: CodeAction,
-) -> anyhow::Result<CodeAction> {
+    snap: GlobalStateSnapshot,
+    mut params: crate::lsp::ext::CodeAction,
+) -> anyhow::Result<crate::lsp::ext::CodeAction> {
+    if let Some(request) = params
+        .data
+        .as_ref()
+        .and_then(|data| data.get("autoInclude"))
+        .and_then(crate::from_proto::import_request)
+    {
+        let Some(change) = snap.analysis.resolve_auto_include(&request)? else {
+            return Err(super::dispatch::RequestError {
+                code: lsp_server::ErrorCode::ContentModified,
+                message: "The include candidate is no longer applicable in this source context",
+            }
+            .into());
+        };
+        let edit = crate::to_proto::workspace_edit(
+            &change,
+            &|id| snap.analysis.url_for_file_id(id).cloned(),
+            &|id| snap.analysis.url_for_file_id(id).map(|uri| line_index_for(&snap, uri)),
+            false,
+        );
+        params.edit = Some(crate::to_proto::snippet_workspace_edit_from_plain(&edit));
+        return Ok(params);
+    }
     if params.edit.is_none() {
         if let Some(data) = params.data.as_ref() {
-            if let Some((uri, edits)) =
-                crate::code_action_helpers::resolve_code_action_edit_from_data(data)
-            {
-                let mut changes = HashMap::new();
-                changes.insert(uri, edits);
-                params.edit = Some(WorkspaceEdit { changes: Some(changes), ..Default::default() });
-            }
+            params.edit = crate::code_action_helpers::resolve_code_action_edit_from_data(data);
         }
     }
     Ok(params)
@@ -889,13 +836,25 @@ pub(crate) fn handle_completion(
     let Some(file_id) = snap.analysis.file_id(uri) else {
         return Ok(None);
     };
-    let line_col = crate::lsp_ext::line_col_from_position(position);
+    let line_col = crate::from_proto::line_col(&line_index_for(&snap, uri), position);
+    if !snap.config.completion.enable {
+        return Ok(None);
+    }
     let ide_items = snap.analysis.completions(file_id, line_col)?;
     if ide_items.is_empty() {
         return Ok(None);
     }
-    let lsp_items: Vec<CompletionItem> =
-        ide_items.iter().map(crate::to_proto::completion_item).collect();
+    let lsp_items: Vec<CompletionItem> = {
+        let markdown = snap.client_caps.completion_markdown_support();
+        let snippets = snap.client_caps.completion_snippet_support();
+        ide_items
+            .iter()
+            .filter(|it| {
+                it.import.is_none() || snap.client_caps.completion_import_resolve_support()
+            })
+            .map(|it| crate::to_proto::completion_item(it, snippets, markdown, None))
+            .collect()
+    };
     Ok(Some(CompletionResponse::Array(lsp_items)))
 }
 
@@ -903,12 +862,25 @@ pub(crate) fn handle_resolve_completion_item(
     snap: GlobalStateSnapshot,
     item: CompletionItem,
 ) -> anyhow::Result<CompletionItem> {
-    let owned = snap.analysis.all_salsa_files();
-    let all_files: Vec<(&Url, &dyn FileDb)> =
-        owned.iter().map(|(u, s)| (u, s as &dyn FileDb)).collect();
     let mut ide_item = crate::from_proto::completion_item(&item);
-    ide::completion::resolve_completion_item_ide(&mut ide_item, &all_files);
-    Ok(crate::to_proto::completion_item(&ide_item))
+    snap.analysis.resolve_completion_item(&mut ide_item)?;
+    if ide_item.import.is_some() && ide_item.additional_text_edits.is_empty() {
+        return Err(super::dispatch::RequestError {
+            code: lsp_server::ErrorCode::ContentModified,
+            message: "The include candidate is no longer applicable in this source context",
+        }
+        .into());
+    }
+    let index = ide_item
+        .scope_file
+        .and_then(|id| snap.analysis.url_for_file_id(id))
+        .map(|uri| line_index_for(&snap, uri));
+    Ok(crate::to_proto::completion_item(
+        &ide_item,
+        snap.client_caps.completion_snippet_support(),
+        snap.client_caps.completion_markdown_support(),
+        index.as_ref(),
+    ))
 }
 
 pub(crate) fn handle_inlay_hint(
@@ -919,30 +891,22 @@ pub(crate) fn handle_inlay_hint(
     let Some(sf) = snap.analysis.file(uri) else {
         return Ok(None);
     };
-    let owned = snap.analysis.all_salsa_files();
-    let all_files: Vec<(&Url, &dyn FileDb)> =
-        owned.iter().map(|(u, s)| (u, s as &dyn FileDb)).collect();
-    let range =
-        crate::from_proto::text_range(&ide_db::line_index::LineIndex::new(sf.text()), params.range);
-    let ft = snap.analysis.file_id(uri).and_then(|fid| snap.analysis.files_ref().file_text(fid));
-    let type_check = ft.map(|ft| hir_ty::query::infer_body(snap.analysis.db(), ft));
-    // Use salsa-cached transitive effects for effect hints.
-    let transitive_effects = ft.map(|ft| hir_ty::query::transitive_effects(snap.analysis.db(), ft));
-    let ide_hints = ide::inlay_hints::inlay_hints_ide_with_types(
-        &all_files,
-        uri,
-        &sf,
-        range,
-        type_check.map(|tc| &*tc.0),
-        transitive_effects.map(|te| &*te.0),
-    );
-    if ide_hints.is_empty() {
+    let Some(file_id) = snap.analysis.file_id(uri) else {
+        return Ok(None);
+    };
+    let line_index = ide_db::line_index::LineIndex::new(sf.text());
+    let range = crate::from_proto::text_range(&line_index, params.range);
+    // The client's settings reach the feature. They used to be parsed into
+    // `SailLspConfig`, converted by `to_ide_config`, and then dropped.
+    if !snap.config.inlay_hints.enable {
         return Ok(None);
     }
-    let line_index = ide_db::line_index::LineIndex::new(sf.text());
-    let lsp_hints: Vec<InlayHint> =
-        ide_hints.iter().map(|h| crate::to_proto::inlay_hint(&line_index, h)).collect();
-    Ok(Some(lsp_hints))
+    let hints =
+        snap.analysis.inlay_hints(file_id, range, &snap.config.inlay_hints.to_ide_config())?;
+    if hints.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(hints.iter().map(|h| crate::to_proto::inlay_hint(&line_index, h)).collect()))
 }
 
 pub(crate) fn handle_signature_help(
@@ -951,14 +915,11 @@ pub(crate) fn handle_signature_help(
 ) -> anyhow::Result<Option<SignatureHelp>> {
     let uri = &params.text_document_position_params.text_document.uri;
     let position = params.text_document_position_params.position;
-    let Some(sf) = snap.analysis.file(uri) else {
+    let lc = crate::from_proto::line_col(&line_index_for(&snap, uri), position);
+    let Some(file_id) = snap.analysis.file_id(uri) else {
         return Ok(None);
     };
-    let owned = snap.analysis.all_salsa_files();
-    let all_files: Vec<(&Url, &dyn FileDb)> =
-        owned.iter().map(|(u, s)| (u, s as &dyn FileDb)).collect();
-    let lc = crate::lsp_ext::line_col_from_position(position);
-    let Some(ide_help) = ide::calls::signature_help_ide(&all_files, uri, &sf, lc) else {
+    let Some(ide_help) = snap.analysis.signature_help(file_id, lc)? else {
         return Ok(None);
     };
     let lsp_help = SignatureHelp {
@@ -998,58 +959,18 @@ pub(crate) fn handle_goto_definition(
 ) -> anyhow::Result<Option<GotoDefinitionResponse>> {
     let uri = &params.text_document_position_params.text_document.uri;
     let position = params.text_document_position_params.position;
-    let Some(sf) = snap.analysis.file(uri) else {
-        return Ok(None);
-    };
-    let lc = crate::lsp_ext::line_col_from_position(position);
+    let lc = crate::from_proto::line_col(&line_index_for(&snap, uri), position);
 
-    // 1. Semantic path: scope-aware local resolution.
-    // (`ide/src/goto_definition.rs:139-150`).
-    if let Some(nav_targets) = ide::goto_definition::goto_definition_semantic(&sf, lc, uri) {
-        if !nav_targets.is_empty() {
-            let lsp_locs = nav_targets_to_lsp(&nav_targets, &snap.analysis);
-            if !lsp_locs.is_empty() {
-                return Ok(Some(GotoDefinitionResponse::Array(lsp_locs)));
-            }
-        }
+    // The resolution chain lives in `ide` — this converts the answer.
+    let navs = snap.analysis.clone().goto_definition(uri, lc)?;
+    if navs.is_empty() {
+        return Ok(None);
     }
-
-    // 1b. 投産-4: Field/method resolution via SourceAnalyzer.
-    // Uses resolve_field() and resolve_method_call() for struct field
-    // access and function call expressions. Requires salsa FileText.
-    if let Some(file_id) = snap.analysis.file_id(uri) {
-        if let Some(file_text) = snap.analysis.files_ref().file_text(file_id) {
-            let offset = sf.offset_at(&lc);
-            if let Some(nav_targets) = ide::goto_definition::goto_definition_field_or_method(
-                snap.analysis.db(),
-                file_text,
-                offset,
-                uri,
-                &snap.workspace_index,
-            ) {
-                if !nav_targets.is_empty() {
-                    let lsp_locs = nav_targets_to_lsp(&nav_targets, &snap.analysis);
-                    if !lsp_locs.is_empty() {
-                        return Ok(Some(GotoDefinitionResponse::Array(lsp_locs)));
-                    }
-                }
-            }
-        }
-    }
-
-    // 2. Index fallback: cross-file O(1) lookup.
-    // Sail-specific: no CrateDefMap, so we use SymbolIndex.
-    let Some((token, _)) = sf.token_at(lc) else {
-        return Ok(None);
-    };
-    let Some(key) = ide_db::token_symbol_key(token) else {
-        return Ok(None);
-    };
-    let locs = ide::navigation::definition_locations_indexed(&snap.workspace_index, &key, uri);
-    if locs.is_empty() {
+    let lsp_locs = nav_targets_to_lsp(&navs, &snap.analysis);
+    if lsp_locs.is_empty() {
         Ok(None)
     } else {
-        Ok(Some(GotoDefinitionResponse::Array(file_locations_to_lsp(&locs, &snap.analysis))))
+        Ok(Some(GotoDefinitionResponse::Array(lsp_locs)))
     }
 }
 
@@ -1058,22 +979,15 @@ pub(crate) fn handle_goto_declaration(
     params: GotoDeclarationParams,
 ) -> anyhow::Result<Option<GotoDeclarationResponse>> {
     let uri = &params.text_document_position_params.text_document.uri;
-    let position = params.text_document_position_params.position;
-    let Some(sf) = snap.analysis.file(uri) else {
-        return Ok(None);
-    };
-    let lc = crate::lsp_ext::line_col_from_position(position);
-    let Some((token, _)) = sf.token_at(lc) else {
-        return Ok(None);
-    };
-    let Some(key) = ide_db::token_symbol_key(token) else {
-        return Ok(None);
-    };
-    let locs = ide::navigation::declaration_locations_indexed(&snap.workspace_index, &key, uri);
+    let lc = crate::from_proto::line_col(
+        &line_index_for(&snap, uri),
+        params.text_document_position_params.position,
+    );
+    let locs = snap.analysis.clone().goto_declaration(uri, lc)?;
     if locs.is_empty() {
         Ok(None)
     } else {
-        Ok(Some(GotoDefinitionResponse::Array(file_locations_to_lsp(&locs, &snap.analysis))))
+        Ok(Some(GotoDeclarationResponse::Array(file_locations_to_lsp(&locs, &snap.analysis))))
     }
 }
 
@@ -1085,28 +999,9 @@ pub(crate) fn handle_references(
 ) -> anyhow::Result<Option<Vec<Location>>> {
     let uri = &params.text_document_position.text_document.uri;
     let position = params.text_document_position.position;
-    let Some(sf) = snap.analysis.file(uri) else {
-        return Ok(None);
-    };
-    let lc = crate::lsp_ext::line_col_from_position(position);
+    let lc = crate::from_proto::line_col(&line_index_for(&snap, uri), position);
 
-    // Get FileId for the target file
-    let Some(target_file_id) = snap.analysis.file_id(uri) else {
-        return Ok(None);
-    };
-
-    // Build (FileId, &dyn FileDb) pairs for all workspace files
-    let all = snap.analysis.all_salsa_files();
-    let file_pairs: Vec<(base_db::FileId, &dyn ide_db::FileDb)> = all
-        .iter()
-        .filter_map(|(url, salsa_file)| {
-            let fid = snap.analysis.file_id(url)?;
-            Some((fid, salsa_file as &dyn ide_db::FileDb))
-        })
-        .collect();
-
-    // Use find_all_refs
-    let results = ide::references::find_all_refs(&file_pairs, target_file_id, &sf, lc, None);
+    let results = snap.analysis.find_all_refs(uri, lc, None)?;
 
     let Some(results) = results else {
         return Ok(None);
@@ -1117,16 +1012,18 @@ pub(crate) fn handle_references(
     for result in &results {
         // Include declaration if requested
         if params.context.include_declaration {
-            if let Some(decl) = &result.declaration {
+            for decl in &result.declarations {
                 if let Some(decl_url) = snap.analysis.url_for_file_id(decl.file_id) {
                     if let Some(decl_file) = snap.analysis.file(decl_url) {
                         locations.push(Location {
                             uri: decl_url.clone(),
                             range: Range::new(
-                                crate::lsp_ext::position_from_line_col(
+                                crate::to_proto::position_from_line_col(
+                                    &line_index_for(&snap, uri),
                                     decl_file.position_at(base_db::range_start(decl.range)),
                                 ),
-                                crate::lsp_ext::position_from_line_col(
+                                crate::to_proto::position_from_line_col(
+                                    &line_index_for(&snap, uri),
                                     decl_file.position_at(base_db::range_end(decl.range)),
                                 ),
                             ),
@@ -1144,10 +1041,12 @@ pub(crate) fn handle_references(
                         locations.push(Location {
                             uri: ref_url.clone(),
                             range: Range::new(
-                                crate::lsp_ext::position_from_line_col(
+                                crate::to_proto::position_from_line_col(
+                                    &line_index_for(&snap, uri),
                                     ref_file.position_at(base_db::range_start(*range)),
                                 ),
-                                crate::lsp_ext::position_from_line_col(
+                                crate::to_proto::position_from_line_col(
+                                    &line_index_for(&snap, uri),
                                     ref_file.position_at(base_db::range_end(*range)),
                                 ),
                             ),
@@ -1175,85 +1074,14 @@ pub(crate) fn handle_rename(
 ) -> anyhow::Result<Option<WorkspaceEdit>> {
     let uri = &params.text_document_position.text_document.uri;
     let position = params.text_document_position.position;
-    let new_name = &params.new_name;
-    let Some(sf) = snap.analysis.file(uri) else {
+    let lc = crate::from_proto::line_col(&line_index_for(&snap, uri), position);
+
+    let source_change =
+        snap.analysis.rename(uri, lc, &params.new_name)?.map_err(|e| anyhow::anyhow!("{e}"))?;
+    let Some(source_change) = source_change else {
         return Ok(None);
     };
-    let lc = crate::lsp_ext::line_col_from_position(position);
-
-    // 1. Validate new name via IdentifierKind::classify
-    let (_validated_name, _kind) = match ide_db::rename::IdentifierKind::classify(new_name) {
-        Ok(v) => v,
-        Err(e) => return Err(anyhow::anyhow!("{}", e)),
-    };
-
-    // 2. Verify symbol exists at cursor (early exit if not renameable)
-    let Some(_symbol) = ide::references::resolve_symbol_at(&sf, lc) else {
-        return Ok(None);
-    };
-
-    // 3. Handle type variable rename (prefix with ')
-    let Some((token, _)) = sf.token_at(lc) else {
-        return Ok(None);
-    };
-    let effective_name =
-        match ide::references::normalize_validated_rename(token, new_name, ide_db::SAIL_KEYWORDS) {
-            Ok(Some(v)) => v,
-            Ok(None) => new_name.to_string(),
-            Err(e) => return Err(anyhow::anyhow!("{}", e)),
-        };
-
-    // 4. Collect edits via find_all_refs path (FileId-keyed)
-    let all = snap.analysis.all_salsa_files();
-    let file_pairs: Vec<(base_db::FileId, &dyn ide_db::FileDb)> = all
-        .iter()
-        .filter_map(|(url, salsa_file)| {
-            let fid = snap.analysis.file_id(url)?;
-            Some((fid, salsa_file as &dyn ide_db::FileDb))
-        })
-        .collect();
-    let target_file_id = snap.analysis.file_id(uri).unwrap_or(base_db::FileId::from_raw(0));
-
-    let results = ide::references::find_all_refs(&file_pairs, target_file_id, &sf, lc, None);
-
-    let Some(results) = results else {
-        return Ok(None);
-    };
-
-    // 5. Build SourceChange from results
-    let mut source_change = ide_db::source_change::SourceChange::new();
-    for result in &results {
-        // Include declaration edit
-        if let Some(decl) = &result.declaration {
-            source_change.insert_source_edit(
-                decl.file_id,
-                vec![ide_db::text_edit::TextEdit {
-                    range: decl.range,
-                    new_text: effective_name.clone(),
-                }],
-            );
-        }
-        // Reference edits
-        for (&file_id, refs) in &result.references {
-            let edits: Vec<ide_db::text_edit::TextEdit> = refs
-                .iter()
-                .map(|(range, _)| ide_db::text_edit::TextEdit {
-                    range: *range,
-                    new_text: effective_name.clone(),
-                })
-                .collect();
-            if !edits.is_empty() {
-                source_change.insert_source_edit(file_id, edits);
-            }
-        }
-    }
-
-    if source_change.is_empty() {
-        return Ok(None);
-    }
-
-    // 6. Convert SourceChange to LSP WorkspaceEdit via to_proto
-    let ws_edit = crate::to_proto::workspace_edit(
+    Ok(Some(crate::to_proto::workspace_edit(
         &source_change,
         &|fid| snap.analysis.url_for_file_id(fid).cloned(),
         &|fid| {
@@ -1262,9 +1090,8 @@ pub(crate) fn handle_rename(
                 .and_then(|url| snap.analysis.file(url))
                 .map(|f| ide_db::line_index::LineIndex::new(f.text()))
         },
-    );
-
-    Ok(Some(ws_edit))
+        snap.client_caps.snippet_text_edit_support(),
+    )))
 }
 
 pub(crate) fn handle_code_lens(
@@ -1275,6 +1102,9 @@ pub(crate) fn handle_code_lens(
     let Some(file_id) = snap.analysis.file_id(uri) else {
         return Ok(None);
     };
+    if !snap.config.code_lens.enable {
+        return Ok(None);
+    }
     let Some(ide_lenses) = snap.analysis.code_lenses(file_id).ok() else {
         return Ok(None);
     };
@@ -1311,23 +1141,15 @@ pub(crate) fn handle_call_hierarchy_prepare(
 ) -> anyhow::Result<Option<Vec<CallHierarchyItem>>> {
     let uri = &params.text_document_position_params.text_document.uri;
     let position = params.text_document_position_params.position;
-    let Some(sf) = snap.analysis.file(uri) else {
+    if snap.analysis.file(uri).is_none() {
+        return Ok(None);
+    }
+    let lc = crate::from_proto::line_col(&line_index_for(&snap, uri), position);
+    let Some(ide_item) = snap.analysis.prepare_call_hierarchy(uri, lc)? else {
         return Ok(None);
     };
-    let all = snap.analysis.all_salsa_files();
-    let lc = crate::lsp_ext::line_col_from_position(position);
-    let Some((token, _)) = sf.token_at(lc) else {
-        return Ok(None);
-    };
-    let Some(name) = ide_db::token_symbol_key(token) else {
-        return Ok(None);
-    };
-    let Some(ide_item) =
-        ide::navigation::call_hierarchy_item(all.iter().map(|(u, s)| (u, s)), uri, &name)
-    else {
-        return Ok(None);
-    };
-    let li = ide_db::line_index::LineIndex::new(sf.text());
+    let Some(target) = snap.analysis.file(&ide_item.url) else { return Ok(None) };
+    let li = ide_db::line_index::LineIndex::new(target.text());
     Ok(Some(vec![crate::to_proto::call_hierarchy_item(&li, &ide_item)]))
 }
 
@@ -1335,30 +1157,19 @@ pub(crate) fn handle_call_hierarchy_incoming(
     snap: GlobalStateSnapshot,
     params: CallHierarchyIncomingCallsParams,
 ) -> anyhow::Result<Option<Vec<CallHierarchyIncomingCall>>> {
-    let target_name = params.item.name.clone();
-    let all = snap.analysis.all_salsa_files();
-    let items = ide::call_hierarchy::incoming_calls(all.iter().map(|(u, s)| (u, s)), &target_name);
-    let mut calls = Vec::new();
-    for item in &items {
-        if let Some(from_item) = ide::call_hierarchy::call_hierarchy_item(
-            all.iter().map(|(u, s)| (u, s)),
-            &item.caller_uri,
-            &item.caller,
-        ) {
-            let caller_sf = snap.analysis.file(&item.caller_uri);
-            let li = caller_sf.map(|s| ide_db::line_index::LineIndex::new(s.text()));
-            if let Some(li) = &li {
-                calls.push(CallHierarchyIncomingCall {
-                    from: crate::to_proto::call_hierarchy_item(li, &from_item),
-                    from_ranges: item
-                        .ranges
-                        .iter()
-                        .map(|r| crate::to_proto::range(li, *r))
-                        .collect(),
-                });
-            }
-        }
-    }
+    let calls: Vec<_> = snap
+        .analysis
+        .incoming_calls(params.item.data.as_ref().unwrap_or(&serde_json::Value::Null))?
+        .into_iter()
+        .filter_map(|(item, ranges)| {
+            let sf = snap.analysis.file(&item.url)?;
+            let li = ide_db::line_index::LineIndex::new(sf.text());
+            Some(CallHierarchyIncomingCall {
+                from: crate::to_proto::call_hierarchy_item(&li, &item),
+                from_ranges: ranges.iter().map(|r| crate::to_proto::range(&li, *r)).collect(),
+            })
+        })
+        .collect();
     if calls.is_empty() {
         Ok(None)
     } else {
@@ -1370,31 +1181,22 @@ pub(crate) fn handle_call_hierarchy_outgoing(
     snap: GlobalStateSnapshot,
     params: CallHierarchyOutgoingCallsParams,
 ) -> anyhow::Result<Option<Vec<CallHierarchyOutgoingCall>>> {
-    let caller_name = params.item.name.clone();
-    let caller_uri = params.item.uri.clone();
-    let all = snap.analysis.all_salsa_files();
-    let items = ide::call_hierarchy::outgoing_calls(all.iter().map(|(u, s)| (u, s)), &caller_name);
-    let mut calls = Vec::new();
-    for item in &items {
-        if let Some(to_item) = ide::call_hierarchy::call_hierarchy_item(
-            all.iter().map(|(u, s)| (u, s)),
-            &caller_uri,
-            &item.callee,
-        ) {
-            let callee_sf = snap.analysis.file(&caller_uri);
-            let li = callee_sf.map(|s| ide_db::line_index::LineIndex::new(s.text()));
-            if let Some(li) = &li {
-                calls.push(CallHierarchyOutgoingCall {
-                    to: crate::to_proto::call_hierarchy_item(li, &to_item),
-                    from_ranges: item
-                        .ranges
-                        .iter()
-                        .map(|r| crate::to_proto::range(li, *r))
-                        .collect(),
-                });
-            }
-        }
-    }
+    let calls: Vec<_> = snap
+        .analysis
+        .outgoing_calls(params.item.data.as_ref().unwrap_or(&serde_json::Value::Null))?
+        .into_iter()
+        .filter_map(|(item, ranges)| {
+            let sf = snap.analysis.file(&params.item.uri)?;
+            let li = ide_db::line_index::LineIndex::new(sf.text());
+            Some(CallHierarchyOutgoingCall {
+                to: crate::to_proto::call_hierarchy_item(
+                    &ide_db::line_index::LineIndex::new(snap.analysis.file(&item.url)?.text()),
+                    &item,
+                ),
+                from_ranges: ranges.iter().map(|r| crate::to_proto::range(&li, *r)).collect(),
+            })
+        })
+        .collect();
     if calls.is_empty() {
         Ok(None)
     } else {
@@ -1406,21 +1208,26 @@ pub(crate) fn handle_workspace_symbol(
     snap: GlobalStateSnapshot,
     params: WorkspaceSymbolParams,
 ) -> anyhow::Result<Option<WorkspaceSymbolResponse>> {
-    let query = params.query.to_ascii_lowercase();
     let results: Vec<SymbolInformation> = snap
-        .workspace_index
-        .search(&query)
+        .analysis
+        .workspace_symbols(&params.query)?
         .into_iter()
-        .filter_map(|entry| {
-            let sf = snap.analysis.file(&entry.url)?;
-            let p = crate::lsp_ext::position_from_line_col(sf.position_at(entry.span.start));
+        .filter_map(|nav| {
+            let sf = snap.analysis.file(&nav.url)?;
+            // The symbol's own file, not the request's — a workspace
+            // search answers about files the client never named.
+            let index = line_index_for(&snap, &nav.url);
+            let p = crate::to_proto::position_from_line_col(
+                &index,
+                sf.position_at(base_db::range_start(nav.full_range)),
+            );
             #[allow(deprecated)]
             Some(SymbolInformation {
-                name: entry.name.clone(),
-                kind: crate::lsp_ext::item_kind_to_symbol_kind(entry.kind),
+                name: nav.name,
+                kind: crate::lsp_ext::lsp_symbol_kind(nav.kind),
                 tags: None,
                 deprecated: None,
-                location: Location::new(entry.url.clone(), Range::new(p, p)),
+                location: Location::new(nav.url, Range::new(p, p)),
                 container_name: None,
             })
         })
@@ -1438,50 +1245,22 @@ pub(crate) fn handle_hover(
 ) -> anyhow::Result<Option<Hover>> {
     let uri = &params.text_document_position_params.text_document.uri;
     let position = params.text_document_position_params.position;
+    let Some(file_id) = snap.analysis.file_id(uri) else {
+        return Ok(None);
+    };
+    let lc = crate::from_proto::line_col(&line_index_for(&snap, uri), position);
+    let Some(result) = snap.analysis.hover(file_id, lc, &snap.config.hover.to_ide_config())? else {
+        return Ok(None);
+    };
     let Some(sf) = snap.analysis.file(uri) else {
         return Ok(None);
     };
-    let all = snap.analysis.all_salsa_files();
-    let lc = crate::lsp_ext::line_col_from_position(position);
-    let Some((token, span)) = sf.token_at(lc) else {
-        return Ok(None);
-    };
-    let Some(key) = ide_db::token_symbol_key(token) else {
-        return Ok(None);
-    };
-    let hover_range = base_db::text_range(span.start, span.end);
-    let Some(ide_hover) = ide::hover::hover_for_symbol(
-        all.iter().map(|(u, s)| (u, s)),
-        uri,
-        &sf,
-        lc,
-        hover_range,
-        &key,
-    ) else {
-        return Ok(None);
-    };
-    // 投産-4: Enrich hover with field/method resolution from SourceAnalyzer.
-    // This supplements the structural hover with semantic information
-    // when the cursor is on a field access or method call expression.
-    if let Some(file_id) = snap.analysis.file_id(uri) {
-        if let Some(file_text) = snap.analysis.files_ref().file_text(file_id) {
-            let offset = sf.offset_at(&lc);
-            if let Some(extra) =
-                ide::hover::hover_resolve_field_or_method(snap.analysis.db(), file_text, offset)
-            {
-                let enriched = ide_db::ide_types::HoverResult {
-                    markup: format!("{}\n\n{}", ide_hover.markup, extra),
-                    range: ide_hover.range,
-                    actions: ide_hover.actions,
-                };
-                let line_index = ide_db::line_index::LineIndex::new(sf.text());
-                return Ok(Some(crate::to_proto::hover(&line_index, &enriched)));
-            }
-        }
-    }
-
     let line_index = ide_db::line_index::LineIndex::new(sf.text());
-    Ok(Some(crate::to_proto::hover(&line_index, &ide_hover)))
+    Ok(Some(crate::to_proto::hover(
+        &line_index,
+        &result,
+        snap.client_caps.hover_markdown_support(),
+    )))
 }
 
 pub(crate) fn handle_goto_implementation(
@@ -1489,18 +1268,11 @@ pub(crate) fn handle_goto_implementation(
     params: GotoImplementationParams,
 ) -> anyhow::Result<Option<GotoImplementationResponse>> {
     let uri = &params.text_document_position_params.text_document.uri;
-    let position = params.text_document_position_params.position;
-    let Some(sf) = snap.analysis.file(uri) else {
-        return Ok(None);
-    };
-    let lc = crate::lsp_ext::line_col_from_position(position);
-    let Some((token, _)) = sf.token_at(lc) else {
-        return Ok(None);
-    };
-    let Some(key) = ide_db::token_symbol_key(token) else {
-        return Ok(None);
-    };
-    let locs = ide::navigation::implementation_locations_indexed(&snap.workspace_index, &key, uri);
+    let lc = crate::from_proto::line_col(
+        &line_index_for(&snap, uri),
+        params.text_document_position_params.position,
+    );
+    let locs = snap.analysis.clone().goto_implementation(uri, lc)?;
     if locs.is_empty() {
         Ok(None)
     } else {
@@ -1514,9 +1286,7 @@ pub(crate) fn handle_will_rename_files(
 ) -> anyhow::Result<Option<WorkspaceEdit>> {
     let rename_pairs: Vec<(String, String)> =
         params.files.iter().map(|r| (r.old_uri.clone(), r.new_uri.clone())).collect();
-    let all = snap.analysis.all_salsa_files();
-    let edits =
-        ide::navigation::will_rename_file_edits(all.iter().map(|(u, s)| (u, s)), &rename_pairs);
+    let edits = snap.analysis.will_rename_file_edits(&rename_pairs)?;
     Ok(edits.map(|changes| {
         let lsp_changes: HashMap<Url, Vec<TextEdit>> = changes
             .into_iter()
@@ -1537,46 +1307,16 @@ pub(crate) fn handle_goto_type_definition(
     params: GotoTypeDefinitionParams,
 ) -> anyhow::Result<Option<GotoTypeDefinitionResponse>> {
     let uri = &params.text_document_position_params.text_document.uri;
-    let position = params.text_document_position_params.position;
-    let Some(sf) = snap.analysis.file(uri) else {
-        return Ok(None);
-    };
-    let all = snap.analysis.all_salsa_files();
-    let lc = crate::lsp_ext::line_col_from_position(position);
-    let Some((token, _)) = sf.token_at(lc) else {
-        return Ok(None);
-    };
-    let Some(key) = ide_db::token_symbol_key(token) else {
-        return Ok(None);
-    };
-    let bindings = ide::navigation::typed_bindings(&sf);
-    if let Some(ty_name) = bindings.get(&key) {
-        if let Some(parsed_ty) = ide::navigation::parse_named_type(ty_name) {
-            let locs = ide::navigation::type_definition_locations(
-                all.iter().map(|(u, s)| (u, s)),
-                uri,
-                &parsed_ty,
-            );
-            if !locs.is_empty() {
-                return Ok(Some(GotoTypeDefinitionResponse::Array(file_locations_to_lsp(
-                    &locs,
-                    &snap.analysis,
-                ))));
-            }
-        }
-        let locs = ide::navigation::type_definition_locations(
-            all.iter().map(|(u, s)| (u, s)),
-            uri,
-            ty_name,
-        );
-        if !locs.is_empty() {
-            return Ok(Some(GotoTypeDefinitionResponse::Array(file_locations_to_lsp(
-                &locs,
-                &snap.analysis,
-            ))));
-        }
+    let lc = crate::from_proto::line_col(
+        &line_index_for(&snap, uri),
+        params.text_document_position_params.position,
+    );
+    let locs = snap.analysis.goto_type_definition(uri, lc)?;
+    if locs.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(GotoTypeDefinitionResponse::Array(file_locations_to_lsp(&locs, &snap.analysis))))
     }
-    Ok(None)
 }
 
 pub(crate) fn handle_type_hierarchy_prepare(
@@ -1585,23 +1325,15 @@ pub(crate) fn handle_type_hierarchy_prepare(
 ) -> anyhow::Result<Option<Vec<TypeHierarchyItem>>> {
     let uri = &params.text_document_position_params.text_document.uri;
     let position = params.text_document_position_params.position;
-    let Some(sf) = snap.analysis.file(uri) else {
+    if snap.analysis.file(uri).is_none() {
+        return Ok(None);
+    }
+    let lc = crate::from_proto::line_col(&line_index_for(&snap, uri), position);
+    let Some(ide_item) = snap.analysis.prepare_type_hierarchy(uri, lc)? else {
         return Ok(None);
     };
-    let all = snap.analysis.all_salsa_files();
-    let lc = crate::lsp_ext::line_col_from_position(position);
-    let Some((token, _)) = sf.token_at(lc) else {
-        return Ok(None);
-    };
-    let Some(name) = ide_db::token_symbol_key(token) else {
-        return Ok(None);
-    };
-    let Some(ide_item) =
-        ide::navigation::type_hierarchy_item(all.iter().map(|(u, s)| (u, s)), uri, &name)
-    else {
-        return Ok(None);
-    };
-    let li = ide_db::line_index::LineIndex::new(sf.text());
+    let Some(target) = snap.analysis.file(&ide_item.url) else { return Ok(None) };
+    let li = ide_db::line_index::LineIndex::new(target.text());
     Ok(Some(vec![crate::to_proto::type_hierarchy_item(&li, &ide_item)]))
 }
 
@@ -1609,10 +1341,9 @@ pub(crate) fn handle_type_hierarchy_supertypes(
     snap: GlobalStateSnapshot,
     params: TypeHierarchySupertypesParams,
 ) -> anyhow::Result<Option<Vec<TypeHierarchyItem>>> {
-    let name = &params.item.name;
-    let uri = &params.item.uri;
-    let all = snap.analysis.all_salsa_files();
-    let ide_items = ide::navigation::type_supertypes(all.iter().map(|(u, s)| (u, s)), uri, name);
+    let ide_items = snap
+        .analysis
+        .type_supertypes(params.item.data.as_ref().unwrap_or(&serde_json::Value::Null))?;
     if ide_items.is_empty() {
         return Ok(None);
     }
@@ -1631,10 +1362,9 @@ pub(crate) fn handle_type_hierarchy_subtypes(
     snap: GlobalStateSnapshot,
     params: TypeHierarchySubtypesParams,
 ) -> anyhow::Result<Option<Vec<TypeHierarchyItem>>> {
-    let name = &params.item.name;
-    let uri = &params.item.uri;
-    let all = snap.analysis.all_salsa_files();
-    let ide_items = ide::navigation::type_subtypes(all.iter().map(|(u, s)| (u, s)), uri, name);
+    let ide_items = snap
+        .analysis
+        .type_subtypes(params.item.data.as_ref().unwrap_or(&serde_json::Value::Null))?;
     if ide_items.is_empty() {
         return Ok(None);
     }
@@ -1665,11 +1395,10 @@ pub(crate) fn handle_view_syntax_tree(
     snap: GlobalStateSnapshot,
     params: crate::lsp_ext::ViewSyntaxTreeParams,
 ) -> anyhow::Result<String> {
-    let uri = &params.text_document.uri;
-    let Some(sf) = snap.analysis.file(uri) else {
-        return Ok("(file not found)".to_string());
-    };
-    Ok(ide::view_syntax_tree::view_syntax_tree(&sf))
+    Ok(snap
+        .analysis
+        .view_syntax_tree(&params.text_document.uri)
+        .unwrap_or_else(|| "(file not found)".to_string()))
 }
 
 /// View HIR at cursor position.
@@ -1678,12 +1407,14 @@ pub(crate) fn handle_view_hir(
     snap: GlobalStateSnapshot,
     params: crate::lsp_ext::ViewHirParams,
 ) -> anyhow::Result<String> {
-    let uri = &params.text_document.uri;
-    let Some(sf) = snap.analysis.file(uri) else {
-        return Ok("(file not found)".to_string());
-    };
-    let lc = crate::lsp_ext::line_col_from_position(params.position);
-    Ok(ide::view_hir::view_hir_at(&sf, lc))
+    let lc = crate::from_proto::line_col(
+        &line_index_for(&snap, &params.text_document.uri),
+        params.position,
+    );
+    Ok(snap
+        .analysis
+        .view_hir(&params.text_document.uri, lc)?
+        .unwrap_or_else(|| "(file not found)".to_string()))
 }
 
 /// View the ItemTree for a file.
@@ -1692,11 +1423,10 @@ pub(crate) fn handle_view_item_tree(
     snap: GlobalStateSnapshot,
     params: crate::lsp_ext::ViewItemTreeParams,
 ) -> anyhow::Result<String> {
-    let uri = &params.text_document.uri;
-    let Some(sf) = snap.analysis.file(uri) else {
-        return Ok("(file not found)".to_string());
-    };
-    Ok(ide::view_item_tree::view_item_tree(&sf))
+    Ok(snap
+        .analysis
+        .view_item_tree(&params.text_document.uri)?
+        .unwrap_or_else(|| "(file not found)".to_string()))
 }
 
 /// Expand $include directives for a file.
@@ -1705,26 +1435,14 @@ pub(crate) fn handle_expand_include(
     snap: GlobalStateSnapshot,
     params: crate::lsp_ext::ExpandIncludeParams,
 ) -> anyhow::Result<Option<crate::lsp_ext::ExpandIncludeResult>> {
-    let uri = &params.text_document.uri;
-    let Some(file_id) = snap.analysis.file_id(uri) else {
+    let Some(result) = snap
+        .analysis
+        .clone()
+        .with_include_graph_arc(snap.include_graph.clone())
+        .expand_includes(&params.text_document.uri)?
+    else {
         return Ok(None);
     };
-    let result = ide::expand_include::expand_includes(
-        &snap.include_graph,
-        file_id,
-        &|fid| {
-            snap.analysis
-                .url_for_file_id(fid)
-                .and_then(|url| snap.analysis.file(url))
-                .map(|sf| sf.text().to_string())
-        },
-        &|fid| {
-            snap.analysis
-                .url_for_file_id(fid)
-                .map(|u| u.path().rsplit('/').next().unwrap_or("?").to_string())
-                .unwrap_or_else(|| format!("file:{}", fid.index()))
-        },
-    );
     Ok(Some(crate::lsp_ext::ExpandIncludeResult { root: result.root, expansion: result.expansion }))
 }
 
@@ -1739,7 +1457,7 @@ pub(crate) fn handle_effect_annotations(
     let Some(sf) = snap.analysis.file(uri) else {
         return Ok(Vec::new());
     };
-    let annotations = ide::effect_annotations::effect_annotations(&sf);
+    let annotations = snap.analysis.effect_annotations(uri)?;
     let line_index = ide_db::line_index::LineIndex::new(sf.text());
     let items: Vec<_> = annotations
         .into_iter()
@@ -1762,16 +1480,13 @@ pub(crate) fn handle_sail_lsp_status(
     snap: GlobalStateSnapshot,
     _params: (),
 ) -> anyhow::Result<String> {
-    let all = snap.analysis.all_salsa_files();
-    let file_count = all.len();
-    let index_count = snap.workspace_index.all_entries().count();
-    let include_files = snap.include_graph.all_files().len();
+    let counts = snap.analysis.status()?;
 
     let mut status = String::new();
     stdx::format_to!(status, "sail-lsp status\n");
-    stdx::format_to!(status, "  files loaded:     {file_count}\n");
-    stdx::format_to!(status, "  index symbols:    {index_count}\n");
-    stdx::format_to!(status, "  include graph:    {include_files} nodes\n");
+    stdx::format_to!(status, "  files loaded:     {}\n", counts.files);
+    stdx::format_to!(status, "  index symbols:    {}\n", counts.symbols);
+    stdx::format_to!(status, "  include graph:    {} nodes\n", counts.include_nodes);
     Ok(status)
 }
 
@@ -1782,16 +1497,12 @@ pub(crate) fn handle_view_include_graph(
     snap: GlobalStateSnapshot,
     params: crate::lsp_ext::ViewIncludeGraphParams,
 ) -> anyhow::Result<String> {
-    let uri = &params.text_document.uri;
-    let Some(file_id) = snap.analysis.file_id(uri) else {
+    if snap.analysis.file_id(&params.text_document.uri).is_none() {
         return Ok("(file not found)".to_string());
-    };
-    let graph = ide::include_graph_view::render_include_graph(&snap.include_graph, &|fid| {
-        snap.analysis
-            .url_for_file_id(fid)
-            .map(|u| u.path().rsplit('/').next().unwrap_or("?").to_string())
-            .unwrap_or_else(|| format!("file:{}", fid.index()))
-    });
-    let _ = file_id; // Used for context; graph renders all nodes
-    Ok(graph)
+    }
+    Ok(snap
+        .analysis
+        .clone()
+        .with_include_graph_arc(snap.include_graph.clone())
+        .render_include_graph()?)
 }

@@ -1,7 +1,14 @@
 //! Corpus check: validate sail-lsp diagnostics against a directory of .sail files.
 //!
 //! Runs the **same `Analysis::file_diagnostics` pipeline** that the LSP server uses,
-//! ensuring corpus validation results match what users see in their editor.
+//! but does not drive the LSP workspace loader or incremental document path.
+//! Loader equivalence is covered separately by
+//! `reload::tests::server_workspace_order_matches_the_probe`.
+//!
+//! This distinction matters: the probe has an explicit, stable
+//! standard-library-first vector. Reconstructing `WorkspaceFiles` from a
+//! hash map in the real server once made editor diagnostics disagree while
+//! this probe remained green.
 //!
 //! ## Architecture alignment (RA)
 //!
@@ -66,8 +73,15 @@ fn find_sail_lib() -> Option<PathBuf> {
             return Some(p);
         }
     }
-    let candidates =
-        [PathBuf::from("crates/sail-lsp/data/sail-lib"), PathBuf::from("data/sail-lib")];
+    // Anchored on this crate's source directory, not the cwd: a relative
+    // lookup silently finds nothing when the binary is run from anywhere
+    // else, and a run without the prelude reports zero errors no matter
+    // what is broken.
+    let candidates = [
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data/sail-lib"),
+        PathBuf::from("crates/sail-lsp/data/sail-lib"),
+        PathBuf::from("data/sail-lib"),
+    ];
     candidates.into_iter().find(|c| c.is_dir()).and_then(|p| p.canonicalize().ok())
 }
 
@@ -76,33 +90,28 @@ fn find_sail_lib() -> Option<PathBuf> {
 /// Returns `Analysis` with a populated `UrlMap` so that
 /// `build_workspace_names()` can produce cross-file name sets for
 /// false-positive suppression (mirrors RA's `CrateDefMap`).
-fn load_workspace(root: &Path) -> (Analysis, Files, Vec<(Url, FileId)>) {
-    let mut all_sail_files = Vec::new();
+/// A loaded database plus the project files registered in it.
+type LoadedWorkspace = (Analysis, Files, Vec<(Url, FileId)>);
 
-    // Load sail-lib first (prelude types: bits, int, range, etc.)
-    if let Some(lib_dir) = find_sail_lib() {
-        let lib_files = discover_sail_files(&lib_dir);
-        eprintln!("Loaded {} sail-lib files from {}", lib_files.len(), lib_dir.display());
-        all_sail_files.extend(lib_files);
-    } else {
-        eprintln!("Warning: sail-lib not found. Set SAIL_LIB or ensure crates/sail-lsp/data/sail-lib exists.");
-    }
-
-    // Then project files
-    let project_files = discover_sail_files(root);
+fn load_workspace(
+    lib_files: &[(Url, PathBuf, String)],
+    project_files: Vec<(Url, PathBuf, String)>,
+) -> LoadedWorkspace {
+    let mut all_sail_files: Vec<(Url, PathBuf, String)> = lib_files.to_vec();
     let project_start = all_sail_files.len();
     all_sail_files.extend(project_files);
 
     let mut host = AnalysisHost::new(None);
-    let mut files = Files::default();
+    let mut change = ide_db::apply_change::Change::new();
     let mut vfs = vfs::Vfs::default();
 
     // Register all files into VFS + salsa
     for (url, _path, text) in &all_sail_files {
         let fid = vfs.file_id_for_url(url);
-        files.set_file_contents(fid, text, base_db::Durability::HIGH);
+        change.change_file(fid, text.clone());
     }
-    files.apply_pending(host.raw_database_mut());
+    host.apply_change(std::mem::take(&mut change));
+    let files = host.raw_database().files().clone();
 
     // Create WorkspaceFiles salsa singleton for cross-file type inference.
     {
@@ -114,7 +123,7 @@ fn load_workspace(root: &Path) -> (Analysis, Files, Vec<(Url, FileId)>) {
                 files.file_text(fid)
             })
             .collect();
-        base_db::WorkspaceFiles::new(db, file_texts);
+        hir::def_query::set_workspace_files(db, file_texts);
     }
 
     // Build UrlMap (needed for cross-file workspace names)
@@ -128,8 +137,25 @@ fn load_workspace(root: &Path) -> (Analysis, Files, Vec<(Url, FileId)>) {
             url_fids.push((url.clone(), fid));
         }
     }
-    let url_map = UrlMap::new(url_to_fid, fid_to_url);
-    let analysis = Analysis::with_url_map(host.raw_database().clone(), files.clone(), url_map);
+    let url_map = UrlMap::new(url_to_fid.clone(), fid_to_url);
+    // With the include graph the server builds, by the same function. A
+    // probe that has none is a different program: an `$include` cycle is
+    // reported only by a holder of the whole graph, so that diagnostic was
+    // one no corpus run could ever produce.
+    let paths: Vec<(Url, PathBuf)> =
+        all_sail_files.iter().map(|(url, path, _)| (url.clone(), path.clone())).collect();
+    let graph = ide::analysis::build_include_graph(
+        host.raw_database(),
+        &paths,
+        &url_to_fid,
+        find_sail_lib().as_deref(),
+    );
+    let analysis = Analysis::with_include_graph(
+        host.raw_database().clone(),
+        files.clone(),
+        url_map,
+        std::sync::Arc::new(graph),
+    );
 
     // Only return project file ids (skip sail-lib) for diagnostics iteration
     let project_url_fids = url_fids.split_off(project_start);
@@ -141,32 +167,92 @@ fn load_workspace(root: &Path) -> (Analysis, Files, Vec<(Url, FileId)>) {
 // Main
 // ---------------------------------------------------------------------------
 
+/// The file at `idx` plus every sibling it pulls in with `$include "..."`.
+///
+/// A quoted include is a path relative to the including file, so a program
+/// that splits itself across files is still one program. Only angle-bracket
+/// includes name the bundled library.
+fn with_local_includes(
+    files: &[(Url, PathBuf, String)],
+    idx: usize,
+) -> Vec<(Url, PathBuf, String)> {
+    let mut out = vec![files[idx].clone()];
+    let mut queue = vec![idx];
+    let mut seen = vec![idx];
+    while let Some(i) = queue.pop() {
+        for line in files[i].2.lines() {
+            let Some(rest) = line.trim_start().strip_prefix("$include") else { continue };
+            let Some(path) = rest.trim().strip_prefix('"').and_then(|r| r.split('"').next()) else {
+                continue;
+            };
+            let target = match files[i].1.parent() {
+                Some(dir) => dir.join(path),
+                None => PathBuf::from(path),
+            };
+            let Some(j) = files.iter().position(|(_, p, _)| *p == target) else { continue };
+            if seen.contains(&j) {
+                continue;
+            }
+            seen.push(j);
+            queue.push(j);
+            out.push(files[j].clone());
+        }
+    }
+    out
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let verbose = args.iter().any(|a| a == "--verbose" || a == "-v");
     let json = args.iter().any(|a| a == "--json");
+    // Upstream's test directories hold unrelated standalone programs, several
+    // of which reuse the same names. Loading a directory as one workspace
+    // lets them resolve against each other, which is neither what upstream
+    // checks nor what an editor would see.
+    let isolated = args.iter().any(|a| a == "--isolated");
     let root = args.iter().filter(|a| !a.starts_with('-')).nth(1).unwrap_or_else(|| {
         eprintln!("Usage: corpus_check [--verbose|-v] [--json] /path/to/sail-project");
         std::process::exit(1);
     });
-    let root = PathBuf::from(root);
+    let root = PathBuf::from(root).canonicalize().unwrap_or_else(|err| {
+        eprintln!("Cannot open project directory {root}: {err}");
+        std::process::exit(1);
+    });
 
     // Use large stack for deep type inference
     let handle = std::thread::Builder::new()
         .name("corpus-check".into())
         .stack_size(256 * 1024 * 1024)
-        .spawn(move || run_check(&root, verbose, json))
+        .spawn(move || run_check(&root, verbose, json, isolated))
         .expect("failed to spawn check thread");
     let exit_code = handle.join().unwrap();
     std::process::exit(exit_code);
 }
 
-fn run_check(root: &Path, verbose: bool, json: bool) -> i32 {
+fn run_check(root: &Path, verbose: bool, json: bool, isolated: bool) -> i32 {
     let t0 = std::time::Instant::now();
 
+    let lib_files = match find_sail_lib() {
+        Some(lib_dir) => {
+            let lib_files = discover_sail_files(&lib_dir);
+            eprintln!("Loaded {} sail-lib files from {}", lib_files.len(), lib_dir.display());
+            lib_files
+        }
+        None => {
+            eprintln!(
+                "Warning: sail-lib not found. Set SAIL_LIB or ensure crates/sail-lsp/data/sail-lib exists."
+            );
+            Vec::new()
+        }
+    };
+
     eprintln!("Loading workspace from {}...", root.display());
-    let (analysis, _files, url_fids) = load_workspace(root);
-    let n_files = url_fids.len();
+    let project_files = discover_sail_files(root);
+    let n_files = project_files.len();
+    // In isolated mode each file gets its own database, so the analysis is
+    // rebuilt per file inside the loop below.
+    let whole: Option<LoadedWorkspace> =
+        (!isolated).then(|| load_workspace(&lib_files, project_files.clone()));
     eprintln!("Loaded {} project files in {} ms", n_files, t0.elapsed().as_millis());
 
     // Run diagnostics through the same pipeline as the LSP server:
@@ -186,14 +272,30 @@ fn run_check(root: &Path, verbose: bool, json: bool) -> i32 {
     let mut by_code: HashMap<String, usize> = HashMap::new();
     let mut per_file: Vec<(String, Vec<ide_diagnostics::Diagnostic>)> = Vec::new();
 
-    for (idx, (url, fid)) in url_fids.iter().enumerate() {
+    for idx in 0..n_files {
+        // Isolated: prelude + this one file. Whole-workspace: everything.
+        let owned = whole
+            .is_none()
+            .then(|| load_workspace(&lib_files, with_local_includes(&project_files, idx)));
+        let (analysis, url, fid) = match (&whole, &owned) {
+            (Some((analysis, _, ids)), _) => {
+                let (url, fid) = &ids[idx];
+                (analysis, url.clone(), *fid)
+            }
+            (None, Some((analysis, _, ids))) => {
+                let (url, fid) = &ids[0];
+                (analysis, url.clone(), *fid)
+            }
+            (None, None) => unreachable!(),
+        };
+        let url = &url;
         if idx % 20 == 0 {
             let rel = url_relative(url, root);
             eprintln!("  [{}/{}] {}", idx, n_files, rel);
         }
 
         let diags = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            analysis.file_diagnostics(*fid, &config)
+            analysis.file_diagnostics(fid, &config).expect("no other thread is here to cancel it")
         }));
 
         match diags {

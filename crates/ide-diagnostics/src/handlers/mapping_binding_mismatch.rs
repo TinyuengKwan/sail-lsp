@@ -6,7 +6,7 @@
 //! bindings that don't appear on both sides.
 
 use crate::Diagnostic;
-use hir_def::diagnostics::DiagnosticCode;
+use hir::diagnostics::DiagnosticCode;
 
 use crate::{DiagnosticsContext, MappingBindingMismatch};
 

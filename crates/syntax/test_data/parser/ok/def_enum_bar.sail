@@ -1,0 +1,1 @@
+enum e = A | B

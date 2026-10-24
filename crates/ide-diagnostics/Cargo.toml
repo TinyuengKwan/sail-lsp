@@ -13,10 +13,9 @@ parser.workspace = true
 syntax.workspace = true
 base-db.workspace = true
 salsa.workspace = true
-hir.workspace = true
-hir-expand.workspace = true
-hir-def.workspace = true
-hir-ty.workspace = true
+# Depends only on the top-level `hir` package, as in rust-analyzer.
+# Anything from a `hir-xxx` subpackage is re-exported there.
+hir = { workspace = true, default-features = false }
 ide-db.workspace = true
 rowan.workspace = true
 rustc-hash.workspace = true

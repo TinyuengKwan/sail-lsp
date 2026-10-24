@@ -80,19 +80,25 @@ pub fn highlight_related(
     }
 }
 
-/// Backward-compat entry point (no config, all features enabled).
-pub fn highlight_related_default(file: &dyn FileDb, position: LineCol) -> Vec<HighlightedRange> {
-    let config = HighlightRelatedConfig {
-        references: true,
-        exit_points: true,
-        break_points: true,
-        branch_exit_points: true,
-    };
-    highlight_related(file, &config, position)
-}
+// There is no `highlight_related_default`. It was a "backward-compat
+// entry point (no config, all features enabled)" for a caller that never
+// existed — every request carries the client's config, which is what
+// `highlight_related` takes.
 
 /// Highlight all references to the symbol at cursor position.
 fn highlight_references(file: &dyn FileDb, position: LineCol) -> Vec<HighlightedRange> {
+    // A local resolves through the bodies, which know its scope; the flat
+    // scrape below cannot tell one `x` from a shadowing one and found
+    // neither, so highlighting a variable lit nothing at all.
+    if let Some(spans) = crate::references::local_spans_through_hir(file, position) {
+        return spans
+            .into_iter()
+            .map(|(span, is_decl)| HighlightedRange {
+                range: base_db::text_range(span.start, span.end),
+                category: if is_decl { ReferenceCategory::Write } else { ReferenceCategory::Read },
+            })
+            .collect();
+    }
     let symbol = match crate::references::resolve_symbol_at(file, position) {
         Some(s) => s,
         None => return Vec::new(),
@@ -284,4 +290,33 @@ fn highlight_try_catch(file: &dyn FileDb, trigger: Span) -> Vec<HighlightedRange
         }
     }
     result
+}
+
+#[cfg(test)]
+mod through_analysis {
+    use ide_db::FileDb;
+    /// Highlighting a local lights its binding and its uses.
+    ///
+    /// It lit nothing: the flat scrape resolves a local by a `target_span`
+    /// it never fills in, so every variable, parameter and pattern binding
+    /// in the language highlighted empty.
+    #[test]
+    fn a_local_highlights_its_binding_and_uses() {
+        let (analysis, files) = crate::fixture::analysis(
+            "//- /main.sail\ndefault Order dec\nfunction f(xy : int) -> int = xy + xy\n",
+        );
+        let (file_id, _) = files[0];
+        let url = analysis.url_for_file_id(file_id).expect("fixture file has a URL").clone();
+        let sf = analysis.file(&url).expect("fixture file");
+        let text = {
+            use ide_db::SourceFileInfo;
+            sf.text().to_string()
+        };
+        let at = text.rfind("xy").expect("fixture mentions xy") + 1;
+        let pos = sf.position_at(at);
+
+        let ranges =
+            analysis.highlight_related(&url, pos).expect("the test database is never cancelled");
+        assert_eq!(ranges.len(), 3, "expected the parameter and its two uses, got {ranges:?}");
+    }
 }

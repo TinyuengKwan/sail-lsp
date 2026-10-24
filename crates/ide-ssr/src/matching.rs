@@ -8,7 +8,7 @@ use rowan::NodeOrToken;
 use rustc_hash::FxHashMap;
 use syntax::{SyntaxNode, SyntaxToken};
 
-use hir_def::in_file::FileRange;
+use hir::FileRange;
 
 use crate::parsing::{Constraint, NodeKind, Placeholder, Var, PLACEHOLDER_PREFIX};
 use crate::resolving::SyntaxNodeKey;
@@ -20,7 +20,6 @@ pub(crate) type Comment = syntax::SyntaxToken;
 
 /// A single match found by AST-level SSR.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Match {
     /// Location of the matched node.
     pub(crate) range: FileRange,
@@ -29,20 +28,23 @@ pub struct Match {
     /// Captured placeholder values.
     pub(crate) placeholder_values: FxHashMap<Var, PlaceholderMatch>,
     /// Comments inside the matched node that should be preserved in replacement.
+    #[expect(dead_code)]
     pub(crate) ignored_comments: Vec<Comment>,
     /// Paths in the replacement template pre-rendered for the match context.
+    #[expect(dead_code)]
     pub(crate) rendered_template_paths: FxHashMap<SyntaxNodeKey, String>,
     /// Which rule (by index) produced this match.
     pub(crate) rule_index: usize,
     /// Nesting depth (for overlap resolution).
+    #[expect(dead_code)]
     pub(crate) depth: usize,
 }
 
 /// A single placeholder's captured value.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub(crate) struct PlaceholderMatch {
     /// Location of the captured code.
+    #[expect(dead_code)]
     pub(crate) range: FileRange,
     /// The captured syntax node (or token wrapped in a node).
     pub(crate) node: SyntaxNode,
@@ -79,7 +81,6 @@ impl Match {
 
 /// Result of a failed match attempt.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub(crate) struct MatchFailed {
     pub(crate) reason: Option<String>,
 }
@@ -91,11 +92,11 @@ impl MatchFailed {
 }
 
 /// CST-level matcher.
-#[allow(dead_code)]
 pub(crate) struct Matcher {
     /// Placeholders keyed by stand-in name.
     pub(crate) placeholders: FxHashMap<String, Placeholder>,
     /// Rule index for tagging matches.
+    #[expect(dead_code)]
     pub(crate) rule_index: usize,
 }
 

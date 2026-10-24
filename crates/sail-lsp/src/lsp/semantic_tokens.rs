@@ -85,15 +85,13 @@ impl SemanticTokensCache {
         Some(lsp_types::SemanticTokensDelta { result_id: Some(new_result_id), edits })
     }
 
-    /// Invalidate cache for a file (called when file changes).
-    #[allow(dead_code)] // WIP: will be called on didChange notifications
+    /// Forget a file's baseline — it is closed.
     pub(crate) fn invalidate(&self, uri: &lsp_types::Url) {
         let mut map = self.inner.lock().unwrap();
         map.remove(uri);
     }
 
-    /// Invalidate all cached tokens (called on workspace reload).
-    #[allow(dead_code)]
+    /// Forget every baseline, because the client has been asked to re-pull.
     pub(crate) fn clear(&self) {
         let mut map = self.inner.lock().unwrap();
         map.clear();

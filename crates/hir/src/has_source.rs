@@ -8,7 +8,7 @@
 use hir_def::in_file::InFile;
 use syntax::SyntaxNodePtr;
 
-use crate::{Adt, AdtId, DefLocation, Function, Mapping, ModuleDef, Register};
+use crate::{Def, DefLocation, Function, Mapping, Register, TypeDef};
 
 /// Trait for HIR objects that have a source location in a file.
 ///
@@ -30,7 +30,7 @@ use crate::{Adt, AdtId, DefLocation, Function, Mapping, ModuleDef, Register};
 ///
 /// Once salsa integration deepens (e.g., a `DefDatabase` trait
 /// with `item_tree(file_id)` and `def_map(file_id)` queries), this
-/// trait can be upgraded to take `&dyn DefDatabase` like RA.
+/// trait can be upgraded to take `&dyn salsa::Database` like RA.
 /// Takes `db` instead of `&DefMap + &ItemTree`.
 pub trait HasSource: Sized {
     /// The AST type returned by `source()`.
@@ -40,24 +40,24 @@ pub trait HasSource: Sized {
     /// AST nodes (e.g., `ast::CallableDef` for Function).
     type Ast;
 
-    fn source(&self, db: &dyn hir_def::db::DefDatabase) -> Option<InFile<Self::Ast>>;
+    fn source(&self, db: &dyn salsa::Database) -> Option<InFile<Self::Ast>>;
 }
 
 fn loc_source(
-    db: &dyn hir_def::db::DefDatabase,
+    db: &dyn salsa::Database,
     loc: &DefLocation,
     def_map: &hir_def::nameres::DefMap,
     item_tree: &hir_def::item_tree::ItemTree,
 ) -> Option<InFile<SyntaxNodePtr>> {
-    hir_def::def_id_source(loc.file_id(db), loc.raw_def_id(), def_map, item_tree)
+    hir_def::def_id_source(loc.file_id(db), loc.raw_def_idx(), def_map, item_tree)
 }
 
 /// Helper: query DefMap + ItemTree from db for a DefLocation.
 fn loc_source_from_db(
-    db: &dyn hir_def::db::DefDatabase,
+    db: &dyn salsa::Database,
     loc: &DefLocation,
 ) -> Option<InFile<SyntaxNodePtr>> {
-    let dm = hir_def::def_query::crate_def_map(db, loc.file_text).as_ref()?;
+    let dm = hir_def::def_query::file_def_map(db, loc.file_text).as_ref()?;
     let it = hir_def::def_query::file_item_tree(db, loc.file_text).as_ref()?;
     loc_source(db, loc, &dm.0, it)
 }
@@ -65,15 +65,15 @@ fn loc_source_from_db(
 impl HasSource for Function {
     type Ast = SyntaxNodePtr;
 
-    fn source(&self, db: &dyn hir_def::db::DefDatabase) -> Option<InFile<SyntaxNodePtr>> {
+    fn source(&self, db: &dyn salsa::Database) -> Option<InFile<SyntaxNodePtr>> {
         loc_source_from_db(db, &self.id)
     }
 }
 
-impl HasSource for Adt {
+impl HasSource for TypeDef {
     type Ast = SyntaxNodePtr;
 
-    fn source(&self, db: &dyn hir_def::db::DefDatabase) -> Option<InFile<SyntaxNodePtr>> {
+    fn source(&self, db: &dyn salsa::Database) -> Option<InFile<SyntaxNodePtr>> {
         loc_source_from_db(db, &self.id)
     }
 }
@@ -81,7 +81,7 @@ impl HasSource for Adt {
 impl HasSource for Register {
     type Ast = SyntaxNodePtr;
 
-    fn source(&self, db: &dyn hir_def::db::DefDatabase) -> Option<InFile<SyntaxNodePtr>> {
+    fn source(&self, db: &dyn salsa::Database) -> Option<InFile<SyntaxNodePtr>> {
         loc_source_from_db(db, &self.id)
     }
 }
@@ -89,29 +89,21 @@ impl HasSource for Register {
 impl HasSource for Mapping {
     type Ast = SyntaxNodePtr;
 
-    fn source(&self, db: &dyn hir_def::db::DefDatabase) -> Option<InFile<SyntaxNodePtr>> {
+    fn source(&self, db: &dyn salsa::Database) -> Option<InFile<SyntaxNodePtr>> {
         loc_source_from_db(db, &self.id)
     }
 }
 
-impl HasSource for AdtId {
+impl HasSource for Def {
     type Ast = SyntaxNodePtr;
 
-    fn source(&self, db: &dyn hir_def::db::DefDatabase) -> Option<InFile<SyntaxNodePtr>> {
-        self.type_def().source(db)
-    }
-}
-
-impl HasSource for ModuleDef {
-    type Ast = SyntaxNodePtr;
-
-    fn source(&self, db: &dyn hir_def::db::DefDatabase) -> Option<InFile<SyntaxNodePtr>> {
+    fn source(&self, db: &dyn salsa::Database) -> Option<InFile<SyntaxNodePtr>> {
         match self {
-            ModuleDef::Function(f) => f.source(db),
-            ModuleDef::TypeDef(t) => t.source(db),
-            ModuleDef::Register(r) => r.source(db),
-            ModuleDef::Mapping(m) => m.source(db),
-            ModuleDef::Let(loc) | ModuleDef::Overload(loc) => loc_source_from_db(db, loc),
+            Def::Function(f) => f.source(db),
+            Def::TypeDef(t) => t.source(db),
+            Def::Register(r) => r.source(db),
+            Def::Mapping(m) => m.source(db),
+            other => loc_source_from_db(db, &other.location()),
         }
     }
 }
@@ -119,7 +111,7 @@ impl HasSource for ModuleDef {
 impl HasSource for DefLocation {
     type Ast = SyntaxNodePtr;
 
-    fn source(&self, db: &dyn hir_def::db::DefDatabase) -> Option<InFile<SyntaxNodePtr>> {
+    fn source(&self, db: &dyn salsa::Database) -> Option<InFile<SyntaxNodePtr>> {
         loc_source_from_db(db, self)
     }
 }

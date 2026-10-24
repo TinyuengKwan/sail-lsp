@@ -9,10 +9,6 @@ mod imp {
 
     use base_db::{Durability, FileId, FileText, SourceRootId};
 
-    use crate::db::DefDatabase;
-    use crate::item_tree::ItemTree;
-    use crate::nameres::DefMap;
-
     #[salsa::db]
     #[derive(Default, Clone)]
     pub(crate) struct TestDb {
@@ -56,39 +52,6 @@ mod imp {
             _: Durability,
         ) {
             unimplemented!()
-        }
-    }
-
-    impl hir_expand::db::ExpandDatabase for TestDb {
-        fn include_paths(&self, input: FileText) -> &[String] {
-            crate::def_query::include_paths(self, input)
-        }
-    }
-
-    impl DefDatabase for TestDb {
-        fn file_item_tree(&self, input: FileText) -> Option<&Arc<ItemTree>> {
-            crate::def_query::file_item_tree(self, input).as_ref()
-        }
-        fn callable_bodies(&self, input: FileText) -> Option<&crate::bodies::CallableBodies> {
-            crate::def_query::callable_bodies(self, input).as_ref().map(|b| b.0.as_ref())
-        }
-        fn def_map(&self, input: FileText) -> Option<&DefMap> {
-            crate::def_query::crate_def_map(self, input).as_ref().map(|d| d.0.as_ref())
-        }
-        fn callgraph(&self, input: FileText) -> Option<&crate::callgraph::CallGraph> {
-            crate::def_query::callgraph(self, input).as_ref().map(|cg| cg.0.as_ref())
-        }
-        fn file_def_with_body_ids<'db>(
-            &'db self,
-            input: FileText,
-        ) -> &'db [crate::def_query::DefWithBodyId<'db>] {
-            crate::def_query::file_def_with_body_ids(self, input)
-        }
-        fn body_with_source_map<'db>(
-            &'db self,
-            id: crate::def_query::DefWithBodyId<'db>,
-        ) -> &'db crate::def_query::ArcBodyWithSourceMap {
-            crate::def_query::body_with_source_map(self, id)
         }
     }
 }

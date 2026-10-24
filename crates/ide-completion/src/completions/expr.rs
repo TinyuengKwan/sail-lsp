@@ -6,10 +6,11 @@
 //! matching RA's single-module pattern.
 
 use super::Completions;
-use ide_db::ide_types::{
-    CompletionItem, CompletionItemKind, CompletionRelevance, CompletionRelevanceFn,
-    CompletionRelevanceReturnType, CompletionRelevanceTypeMatch,
+use crate::item::{
+    CompletionItem, CompletionRelevance, CompletionRelevanceFn, CompletionRelevanceReturnType,
+    CompletionRelevanceTypeMatch,
 };
+use ide_db::defs::CompletionItemKind;
 use ide_db::FileDb;
 use url::Url;
 
@@ -60,229 +61,113 @@ fn complete_qualified(
     let mut seen = std::collections::HashSet::new();
 
     for (_uri, file) in all_files {
-        let Some(parsed) = file.parsed() else {
+        let Some(tree) = file.item_tree() else {
             continue;
         };
-
-        for decl in &parsed.decls {
-            if decl.scope != syntax::parser_lower::Scope::TopLevel {
+        for &id in tree.top_level_items() {
+            let name = id.name(tree).to_string();
+            let scattered_clause = id.def_kind(tree) == hir::DefKind::ScatteredClause
+                && id.scattered_type_kind(tree).is_some();
+            if !scattered_clause && !ctx.can_see_item(*file, tree, id) {
                 continue;
             }
-
-            // Match enum type → emit its members
-            if matches!(decl.kind, syntax::parser_lower::DeclKind::Enum)
-                && decl.name.to_ascii_lowercase() == path_lower
-            {
-                // Found the enum — now emit its members
-                emit_enum_members(&decl.name, parsed, &prefix_lower, &mut seen, acc);
+            let member_kind = match id.scattered_type_kind(tree) {
+                Some(hir::TypeDefShape::Enum) => hir::DefKind::Enum,
+                Some(hir::TypeDefShape::Union) => hir::DefKind::Union,
+                _ => id.def_kind(tree),
+            };
+            if name.to_ascii_lowercase() != path_lower {
+                continue;
             }
-
-            // Match union type → emit its constructors
-            if matches!(decl.kind, syntax::parser_lower::DeclKind::Union)
-                && decl.name.to_ascii_lowercase() == path_lower
-            {
-                emit_union_constructors(
-                    &decl.name,
-                    parsed,
-                    file.text(),
-                    decl.span,
-                    &prefix_lower,
-                    &mut seen,
-                    acc,
-                );
-            }
-
-            // Match struct type → emit fields (supplements field.rs
-            // for the uppercase-name case)
-            if matches!(
-                decl.kind,
-                syntax::parser_lower::DeclKind::Struct | syntax::parser_lower::DeclKind::Bitfield
-            ) && decl.name.to_ascii_lowercase() == path_lower
-            {
-                emit_struct_fields(
-                    &decl.name,
-                    file.text(),
-                    decl.span,
-                    &prefix_lower,
-                    &mut seen,
-                    acc,
-                );
+            // The members are the definition's own fields — no heuristic
+            // about which declarations follow which. `emit_enum_members`
+            // used to decide that "members declared between this enum and
+            // the next non-member declaration belong to it", and
+            // `emit_union_constructors` sliced the braces out of the
+            // definition's source text and split on commas.
+            let members = || {
+                id.fields(tree)
+                    .iter()
+                    .filter(|f| {
+                        !matches!(member_kind, hir::DefKind::Enum | hir::DefKind::Union)
+                            || ctx.can_see_member(*file, f)
+                    })
+                    .map(|f| f.name.to_string())
+            };
+            match member_kind {
+                hir::DefKind::Enum => {
+                    for member in members() {
+                        emit(
+                            acc,
+                            &mut seen,
+                            &prefix_lower,
+                            &member,
+                            CompletionItemKind::EnumMember,
+                            format!("member of {name}"),
+                            member.clone(),
+                        );
+                    }
+                }
+                hir::DefKind::Union => {
+                    for ctor in members() {
+                        let insert = format!("{ctor}($0)");
+                        emit(
+                            acc,
+                            &mut seen,
+                            &prefix_lower,
+                            &ctor,
+                            CompletionItemKind::EnumMember,
+                            format!("constructor of {name}"),
+                            insert,
+                        );
+                    }
+                }
+                hir::DefKind::Struct | hir::DefKind::Bitfield => {
+                    for field in members() {
+                        emit(
+                            acc,
+                            &mut seen,
+                            &prefix_lower,
+                            &field,
+                            CompletionItemKind::Field,
+                            format!("field of {name}"),
+                            field.clone(),
+                        );
+                    }
+                }
+                _ => {}
             }
         }
     }
 }
 
-/// Emit enum members that belong to a given enum type.
-fn emit_enum_members(
-    enum_name: &str,
-    parsed: &syntax::parser_lower::ParsedFile,
-    prefix_lower: &str,
-    seen: &mut std::collections::HashSet<String>,
+/// Add one member completion, unless it is filtered out or already offered.
+#[allow(clippy::too_many_arguments)]
+fn emit(
     acc: &mut Completions,
-) {
-    // Enum members are emitted as top-level DeclKind::EnumMember
-    // declarations immediately after the enum definition.
-    // We collect all EnumMember decls whose parent enum matches.
-    //
-    // Heuristic: members declared between this enum and the next
-    // non-member decl belong to this enum.
-    let mut in_enum = false;
-    for decl in &parsed.decls {
-        if decl.scope != syntax::parser_lower::Scope::TopLevel {
-            continue;
-        }
-        if decl.name == enum_name && matches!(decl.kind, syntax::parser_lower::DeclKind::Enum) {
-            in_enum = true;
-            continue;
-        }
-        if in_enum {
-            if !matches!(decl.kind, syntax::parser_lower::DeclKind::EnumMember) {
-                break; // past the enum's members
-            }
-            if !prefix_lower.is_empty() && !decl.name.to_ascii_lowercase().starts_with(prefix_lower)
-            {
-                continue;
-            }
-            if !seen.insert(decl.name.clone()) {
-                continue;
-            }
-            acc.add(CompletionItem {
-                label: decl.name.clone(),
-                kind: CompletionItemKind::EnumMember,
-                detail: Some(format!("member of {enum_name}")),
-                documentation: None,
-                insert_text: Some(decl.name.clone()),
-                text_edit: None,
-                sort_text: None,
-                filter_text: Some(decl.name.clone()),
-                deprecated: false,
-                relevance: CompletionRelevance {
-                    exact_name_match: false,
-                    is_local: false,
-                    type_match: Some(ide_db::ide_types::CompletionRelevanceTypeMatch::Exact),
-                    ..Default::default()
-                },
-            });
-        }
-    }
-}
-
-/// Emit union constructors for a given union type.
-fn emit_union_constructors(
-    union_name: &str,
-    parsed: &syntax::parser_lower::ParsedFile,
-    text: &str,
-    span: parser::Span,
-    prefix_lower: &str,
     seen: &mut std::collections::HashSet<String>,
-    acc: &mut Completions,
+    prefix_lower: &str,
+    label: &str,
+    kind: CompletionItemKind,
+    detail: String,
+    insert_text: String,
 ) {
-    // Extract constructors from the union definition body
-    let def_text = text.get(span.start..span.end).unwrap_or("");
-    let Some(brace_start) = def_text.find('{') else {
-        return;
-    };
-    let Some(brace_end) = def_text.rfind('}') else {
-        return;
-    };
-    if brace_start >= brace_end {
+    if !prefix_lower.is_empty() && !label.to_ascii_lowercase().starts_with(prefix_lower) {
         return;
     }
-    let inner = &def_text[brace_start + 1..brace_end];
-    for part in inner.split(',') {
-        let part = part.trim();
-        // Union variants look like `CtorName : type`
-        let ctor_name = if let Some(colon_pos) = part.find(':') {
-            part[..colon_pos].trim()
-        } else {
-            part.trim()
-        };
-        if ctor_name.is_empty() {
-            continue;
-        }
-        if !prefix_lower.is_empty() && !ctor_name.to_ascii_lowercase().starts_with(prefix_lower) {
-            continue;
-        }
-        if !seen.insert(ctor_name.to_string()) {
-            continue;
-        }
-        acc.add(CompletionItem {
-            label: ctor_name.to_string(),
-            kind: CompletionItemKind::EnumMember,
-            detail: Some(format!("constructor of {union_name}")),
-            documentation: None,
-            insert_text: Some(format!("{ctor_name}($0)")),
-            text_edit: None,
-            sort_text: None,
-            filter_text: Some(ctor_name.to_string()),
-            deprecated: false,
-            relevance: CompletionRelevance {
-                type_match: Some(ide_db::ide_types::CompletionRelevanceTypeMatch::Exact),
-                ..Default::default()
-            },
-        });
+    if !seen.insert(label.to_string()) {
+        return;
     }
-
-    // Also check union_constructor_names for cross-file constructors
-    for ctor in &parsed.union_constructor_names {
-        if !prefix_lower.is_empty() && !ctor.to_ascii_lowercase().starts_with(prefix_lower) {
-            continue;
-        }
-        if !seen.insert(ctor.clone()) {
-            continue;
-        }
-        acc.add(CompletionItem {
-            label: ctor.clone(),
-            kind: CompletionItemKind::EnumMember,
-            detail: Some(format!("constructor of {union_name}")),
-            documentation: None,
-            insert_text: Some(format!("{ctor}($0)")),
-            text_edit: None,
-            sort_text: None,
-            filter_text: Some(ctor.clone()),
-            deprecated: false,
-            relevance: CompletionRelevance {
-                type_match: Some(ide_db::ide_types::CompletionRelevanceTypeMatch::Exact),
+    acc.add(
+        CompletionItem::new(kind, label)
+            .detail(detail)
+            .insert_text(insert_text)
+            .filter_text(label)
+            .relevance(CompletionRelevance {
+                type_match: Some(crate::item::CompletionRelevanceTypeMatch::Exact),
                 ..Default::default()
-            },
-        });
-    }
-}
-
-/// Emit struct/bitfield fields for a given struct type.
-fn emit_struct_fields(
-    struct_name: &str,
-    text: &str,
-    span: parser::Span,
-    prefix_lower: &str,
-    seen: &mut std::collections::HashSet<String>,
-    acc: &mut Completions,
-) {
-    let def_text = text.get(span.start..span.end).unwrap_or("");
-    let fields = crate::extract_struct_fields(def_text);
-    for field in fields {
-        if !prefix_lower.is_empty() && !field.to_ascii_lowercase().starts_with(prefix_lower) {
-            continue;
-        }
-        if !seen.insert(field.clone()) {
-            continue;
-        }
-        acc.add(CompletionItem {
-            label: field.clone(),
-            kind: CompletionItemKind::Field,
-            detail: Some(format!("field of {struct_name}")),
-            documentation: None,
-            insert_text: Some(field),
-            text_edit: None,
-            sort_text: None,
-            filter_text: None,
-            deprecated: false,
-            relevance: CompletionRelevance {
-                type_match: Some(ide_db::ide_types::CompletionRelevanceTypeMatch::Exact),
-                ..Default::default()
-            },
-        });
-    }
+            }),
+    );
 }
 
 /// Complete unqualified names (top-level definitions, builtins, local bindings).
@@ -299,7 +184,11 @@ fn complete_unqualified(
     // from the DefMap scope chain (local bindings, block scope, workspace).
     if let Some(file_text) = ctx.file_text {
         {
-            let scope_names = ctx.sema.names_in_scope(file_text, ctx.offset);
+            let scope_names = if hir::source_order::declarations_for(ctx.db, file_text).is_some() {
+                ctx.sema.local_names_in_scope(file_text, ctx.offset)
+            } else {
+                ctx.sema.names_in_scope(file_text, ctx.offset)
+            };
             for name in &scope_names {
                 let name_str: &str = name.as_str();
                 if !prefix_lower.is_empty()
@@ -308,18 +197,16 @@ fn complete_unqualified(
                     continue;
                 }
                 // Scope-aware names get high relevance (is_local = true)
-                acc.add(ide_db::ide_types::CompletionItem {
-                    label: name_str.to_string(),
-                    kind: ide_db::ide_types::CompletionItemKind::Variable,
-                    detail: Some("scope".to_string()),
-                    documentation: None,
-                    insert_text: Some(name_str.to_string()),
-                    text_edit: None,
-                    sort_text: None,
-                    filter_text: Some(name_str.to_string()),
-                    deprecated: false,
-                    relevance: CompletionRelevance { is_local: true, ..Default::default() },
-                });
+                acc.add(
+                    crate::item::CompletionItem::new(
+                        ide_db::defs::CompletionItemKind::Variable,
+                        name_str,
+                    )
+                    .detail("scope")
+                    .insert_text(name_str)
+                    .filter_text(name_str)
+                    .relevance(CompletionRelevance { is_local: true, ..Default::default() }),
+                );
             }
         }
     }
@@ -334,26 +221,63 @@ fn complete_unqualified(
         } else {
             CompletionItemKind::Constant
         };
-        acc.add(CompletionItem {
-            label: builtin.to_string(),
-            kind,
-            detail: Some("builtin".to_string()),
-            documentation: None,
-            insert_text: None,
-            text_edit: None,
-            sort_text: None,
-            filter_text: Some(builtin.to_string()),
-            deprecated: false,
-            relevance: Default::default(),
-        });
+        acc.add(CompletionItem::new(kind, *builtin).detail("builtin").filter_text(*builtin));
     }
 
     // Workspace symbols from all files
     let mut seen = std::collections::HashSet::new();
     for (_candidate_uri, candidate_file) in all_files {
-        if let Some(parsed) = candidate_file.parsed() {
-            for decl in &parsed.decls {
-                if decl.scope != syntax::parser_lower::Scope::TopLevel {
+        if let Some(tree) = candidate_file.item_tree() {
+            // An enum's members and a union's constructors are written
+            // unqualified in Sail — `Red`, not `Color::Red` — so they belong
+            // in this list beside the top-level names. They were only
+            // offered after typing the enum's own name, which is a Rust
+            // shape: the older engine this file replaced did offer them, and
+            // the only test that noticed was calling that engine.
+            if ctx.position != CompletionPosition::TypeAnnotation {
+                for &id in tree.top_level_items() {
+                    let owner = id.name(tree).to_string();
+                    let (kind, what) = match id.def_kind(tree) {
+                        hir::DefKind::Enum => (CompletionItemKind::EnumMember, "member"),
+                        hir::DefKind::Union | hir::DefKind::Newtype => {
+                            (CompletionItemKind::EnumMember, "constructor")
+                        }
+                        hir::DefKind::ScatteredClause if id.scattered_type_kind(tree).is_some() => {
+                            (
+                                CompletionItemKind::EnumMember,
+                                if id.scattered_type_kind(tree) == Some(hir::TypeDefShape::Enum) {
+                                    "member"
+                                } else {
+                                    "constructor"
+                                },
+                            )
+                        }
+                        _ => continue,
+                    };
+                    for field in id.fields(tree) {
+                        if !ctx.can_see_member(*candidate_file, field) {
+                            continue;
+                        }
+                        let member = field.name.to_string();
+                        if !prefix_lower.is_empty()
+                            && !member.to_ascii_lowercase().starts_with(&prefix_lower)
+                        {
+                            continue;
+                        }
+                        if !seen.insert((member.clone(), false)) {
+                            continue;
+                        }
+                        acc.add(
+                            CompletionItem::new(kind, member.clone())
+                                .detail(format!("{what} of {owner}"))
+                                .filter_text(member),
+                        );
+                    }
+                }
+            }
+            for &id in tree.top_level_items() {
+                let decl = DeclLike { name: id.name(tree).to_string() };
+                if !ctx.can_see_item(*candidate_file, tree, id) {
                     continue;
                 }
                 if !prefix_lower.is_empty()
@@ -362,7 +286,16 @@ fn complete_unqualified(
                     continue;
                 }
                 // Filter by context: type position → only types
-                let (kind, detail) = decl_kind_to_completion(decl.kind);
+                let selected_kind = if id.def_kind(tree) == hir::DefKind::ScatteredHead
+                    && id.scattered_type_kind(tree).is_some()
+                {
+                    hir::DefKind::Enum
+                } else {
+                    id.def_kind(tree)
+                };
+                let Some((kind, detail)) = def_kind_to_completion(selected_kind) else {
+                    continue;
+                };
                 if ctx.position == CompletionPosition::TypeAnnotation
                     && !matches!(
                         kind,
@@ -373,12 +306,28 @@ fn complete_unqualified(
                 {
                     continue;
                 }
-                if !seen.insert(decl.name.clone()) {
+                if !seen.insert((
+                    decl.name.clone(),
+                    matches!(
+                        kind,
+                        CompletionItemKind::Struct
+                            | CompletionItemKind::Enum
+                            | CompletionItemKind::TypeParameter
+                    ),
+                )) {
                     continue;
                 }
                 // Function snippet + relevance from signature index
+                let selected_sigs = ctx.file_text.and_then(|ft| {
+                    ide_db::signatures::callable_signatures_at(ctx.db, ft, ctx.offset, &decl.name)
+                });
                 let sig_info = if matches!(kind, CompletionItemKind::Function) {
-                    candidate_file.signature_index().and_then(|idx| idx.get(&decl.name))
+                    match &selected_sigs {
+                        Some(sigs) => sigs.first(),
+                        None => {
+                            candidate_file.signature_index().and_then(|idx| idx.get(&decl.name))
+                        }
+                    }
                 } else {
                     None
                 };
@@ -402,18 +351,17 @@ fn complete_unqualified(
                         ..Default::default()
                     }
                 };
-                acc.add(CompletionItem {
-                    label: decl.name.clone(),
-                    kind,
-                    detail: Some(detail),
-                    documentation: None,
-                    insert_text: Some(snippet.unwrap_or(decl.name.clone())),
-                    text_edit: None,
-                    sort_text: None,
-                    filter_text: Some(decl.name.clone()),
-                    deprecated: false,
-                    relevance,
-                });
+                acc.add(
+                    CompletionItem::new(kind, decl.name.clone())
+                        .detail(if selected_sigs.is_some() {
+                            sig_info.map(|s| s.label.clone()).unwrap_or(detail)
+                        } else {
+                            detail
+                        })
+                        .insert_text(snippet.unwrap_or_else(|| decl.name.clone()))
+                        .filter_text(decl.name.clone())
+                        .relevance(relevance),
+                );
             }
 
             // Local bindings from current file handled via symbol_occurrences
@@ -422,25 +370,36 @@ fn complete_unqualified(
     }
 }
 
-fn decl_kind_to_completion(kind: syntax::parser_lower::DeclKind) -> (CompletionItemKind, String) {
-    use syntax::parser_lower::DeclKind;
-    match kind {
-        DeclKind::Function => (CompletionItemKind::Function, "function".into()),
-        DeclKind::Value => (CompletionItemKind::Function, "value specification".into()),
-        DeclKind::Mapping => (CompletionItemKind::Function, "mapping".into()),
-        DeclKind::Overload => (CompletionItemKind::Function, "overload".into()),
-        DeclKind::Type
-        | DeclKind::Struct
-        | DeclKind::Union
-        | DeclKind::Bitfield
-        | DeclKind::Newtype => (CompletionItemKind::Struct, "type".into()),
-        DeclKind::Enum => (CompletionItemKind::Enum, "enum".into()),
-        DeclKind::Register => (CompletionItemKind::Variable, "register".into()),
-        DeclKind::EnumMember => (CompletionItemKind::EnumMember, "enum member".into()),
-        DeclKind::Let => (CompletionItemKind::Variable, "let binding".into()),
-        DeclKind::Var => (CompletionItemKind::Variable, "var binding".into()),
-        DeclKind::Parameter => (CompletionItemKind::Variable, "parameter".into()),
-    }
+/// A name from the item tree, in the shape the loop below already used.
+struct DeclLike {
+    name: String,
+}
+
+/// How a definition of this kind is offered, or `None` if it is not offered.
+fn def_kind_to_completion(kind: hir::DefKind) -> Option<(CompletionItemKind, String)> {
+    use hir::DefKind as D;
+    Some(match kind {
+        D::Function => (CompletionItemKind::Function, "function".into()),
+        D::ValSpec => (CompletionItemKind::Function, "value specification".into()),
+        D::Mapping | D::MappingSpec => (CompletionItemKind::Function, "mapping".into()),
+        D::Outcome => (CompletionItemKind::Function, "outcome".into()),
+        D::Overload => (CompletionItemKind::Function, "overload".into()),
+        D::TypeAlias | D::Struct | D::Union | D::Bitfield | D::Newtype => {
+            (CompletionItemKind::Struct, "type".into())
+        }
+        D::Enum => (CompletionItemKind::Enum, "enum".into()),
+        D::Register => (CompletionItemKind::Variable, "register".into()),
+        D::Let => (CompletionItemKind::Variable, "let binding".into()),
+        D::Var => (CompletionItemKind::Variable, "var binding".into()),
+        D::ScatteredHead => (CompletionItemKind::Function, "scattered definition".into()),
+        D::ScatteredClause
+        | D::EndMarker
+        | D::Constraint
+        | D::TerminationMeasure
+        | D::Instantiation
+        | D::Field
+        | D::Variant => return None,
+    })
 }
 
 /// Compute type_match for a function candidate by comparing its return type
@@ -455,6 +414,6 @@ fn compute_fn_type_match(
     if ret_str.is_empty() {
         return None;
     }
-    let candidate_ty = hir_ty::infer::Ty::named(ret_str);
+    let candidate_ty = hir::Ty::named(ret_str);
     context::compute_type_match(expected, &candidate_ty)
 }

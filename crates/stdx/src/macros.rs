@@ -35,7 +35,7 @@ macro_rules! format_to_acc {
 /// # Example
 ///
 /// ```ignore
-/// impl_from!(Struct, Union, Enum for Adt);
+/// impl_from!(Struct, Union, Enum for TypeDef);
 /// ```
 #[macro_export]
 macro_rules! impl_from {

@@ -4,58 +4,107 @@
 
 use crate::assist_context::{AssistContext, AssistId, AssistKind, Assists};
 use ide_db::text_edit::TextEdit;
+use parser::SyntaxKind as SK;
 
 pub(crate) fn change_visibility(acc: &mut Assists, ctx: &AssistContext<'_>) -> Option<()> {
-    let text = ctx.file.text();
     let offset = ctx.offset();
+    let root = ctx.source_file()?;
 
-    // Check if we're on or near a "private" keyword
-    let line_start = text[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
-    let line = &text
-        [line_start..text[line_start..].find('\n').map(|i| line_start + i).unwrap_or(text.len())];
-    let trimmed = line.trim_start();
-
-    if trimmed.starts_with("private ") {
-        // Remove "private "
-        let priv_start = line_start + line.find("private ").unwrap();
-        let range = base_db::text_range(priv_start, priv_start + 8); // "private "
-        acc.add_with_edits(
-            AssistId("change_visibility", AssistKind::RefactorRewrite),
-            "Make public (remove `private`)",
-            ctx.range,
-            vec![TextEdit { range, new_text: String::new() }],
-        );
-        Some(())
-    } else if trimmed.starts_with("function ")
-        || trimmed.starts_with("val ")
-        || trimmed.starts_with("type ")
-        || trimmed.starts_with("struct ")
-        || trimmed.starts_with("enum ")
-        || trimmed.starts_with("union ")
-    {
-        // Add "private " before the keyword
-        let kw_start = line_start + (line.len() - trimmed.len());
-        let range = base_db::text_range(kw_start, kw_start);
-        acc.add_with_edits(
-            AssistId("change_visibility", AssistKind::RefactorRewrite),
-            "Make private",
-            ctx.range,
-            vec![TextEdit { range, new_text: "private ".to_string() }],
-        );
-        Some(())
-    } else {
-        None
+    // The definition the cursor is on.
+    //
+    // This used to read the cursor's *line* and ask whether its first
+    // word was `private`, `function`, `val`, `type`, `struct`, `enum` or
+    // `union` — so it fired on a comment or a string that began that way,
+    // it missed every definition written across two lines, and on a
+    // `mapping`, `register`, `newtype` or `bitfield` it did nothing.
+    let def = root.children().find(|n| {
+        usize::from(n.text_range().start()) <= offset && offset <= usize::from(n.text_range().end())
+    })?;
+    let is_definition = def
+        .children_with_tokens()
+        .filter_map(|el| el.into_token())
+        .any(|t| format!("{:?}", t.kind()).starts_with("KW_"));
+    if !is_definition {
+        return None;
     }
+
+    // `private` is its own node when it is there.
+    match def.children().find(|n| n.kind() == SK::VISIBILITY) {
+        Some(vis) => {
+            // The keyword and the space after it.
+            let start = usize::from(vis.text_range().start());
+            let end = vis
+                .next_sibling_or_token()
+                .filter(|el| el.kind() == SK::WHITESPACE)
+                .map_or(usize::from(vis.text_range().end()), |ws| {
+                    usize::from(ws.text_range().end())
+                });
+            acc.add_with_edits(
+                AssistId("change_visibility", AssistKind::RefactorRewrite),
+                "Make public (remove `private`)",
+                ctx.range,
+                vec![TextEdit { range: base_db::text_range(start, end), new_text: String::new() }],
+            );
+        }
+        None => {
+            let start = usize::from(def.text_range().start());
+            acc.add_with_edits(
+                AssistId("change_visibility", AssistKind::RefactorRewrite),
+                "Make private",
+                ctx.range,
+                vec![TextEdit {
+                    range: base_db::text_range(start, start),
+                    new_text: "private ".to_owned(),
+                }],
+            );
+        }
+    }
+    Some(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::check_assist;
+    use crate::tests::{check_assist, check_assist_not_applicable};
+    use expect_test::expect;
 
     #[test]
-    fn smoke() {
-        let labels = check_assist(change_visibility, "function foo() -> unit = ()\n", 0);
-        let _ = labels;
+    fn adds_private() {
+        check_assist(
+            change_visibility,
+            "function f$0oo() -> unit = ()\n",
+            expect![[r#"
+            private function foo() -> unit = ()
+        "#]],
+        );
+    }
+
+    #[test]
+    fn removes_private() {
+        check_assist(
+            change_visibility,
+            "private function f$0oo() -> unit = ()\n",
+            expect![[r#"
+            function foo() -> unit = ()
+        "#]],
+        );
+    }
+
+    /// The line-first-word test only knew seven forms of definition.
+    #[test]
+    fn a_register_can_be_made_private_too() {
+        check_assist(
+            change_visibility,
+            "register r$0 : bits(32)\n",
+            expect![[r#"
+            private register r : bits(32)
+        "#]],
+        );
+    }
+
+    /// It fired on any line beginning with one of its keywords.
+    #[test]
+    fn a_comment_that_begins_with_a_keyword_is_not_a_definition() {
+        check_assist_not_applicable(change_visibility, "// funct$0ion foo() = ()\n");
     }
 }

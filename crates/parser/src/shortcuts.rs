@@ -3,7 +3,7 @@
 //! reconstructing a rowan `GreenNode` from parser `Output`, and
 //! `LexedStr::intersperse_trivia` for weaving trivia tokens back in.
 
-use crate::lex_full::{lex_full_fidelity, FullToken};
+use crate::lex_full::{lex_full_fidelity_with_errors, FullToken, LexError};
 use crate::lexer::Span;
 use crate::output::{Output, Step};
 use crate::syntax_kind::SyntaxKind;
@@ -29,13 +29,23 @@ pub enum StrStep<'a> {
 pub struct LexedStr<'a> {
     text: &'a str,
     tokens: Vec<(FullToken, Span)>,
+    /// What upstream's lexer would have raised on. rust-analyzer's
+    /// `LexedStr` carries the same field, and `build_tree` merges it into
+    /// the parse errors — a lexical error is a parse error to every
+    /// reader above.
+    errors: Vec<LexError>,
 }
 
 impl<'a> LexedStr<'a> {
     /// Tokenize source text.
     pub fn new(text: &'a str) -> Self {
-        let tokens = lex_full_fidelity(text);
-        Self { text, tokens }
+        let (tokens, errors) = lex_full_fidelity_with_errors(text);
+        Self { text, tokens, errors }
+    }
+
+    /// The lexical errors, in source order.
+    pub fn errors(&self) -> impl Iterator<Item = (usize, &str)> + '_ {
+        self.errors.iter().map(|e| (e.offset, e.message.as_str()))
     }
 
     /// The original source text.

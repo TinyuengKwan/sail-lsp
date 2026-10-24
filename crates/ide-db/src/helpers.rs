@@ -7,7 +7,7 @@
 //! consumes without ceremony.
 
 // Re-export from canonical location in hir-def.
-pub use hir_def::callable_info::{CallableSignature, Parameter};
+pub use hir::callable_info::{CallableSignature, Parameter};
 
 /// Built-in Sail names → one-line Markdown documentation. Used by hover
 /// and completion to surface tooltip text for things like `bits`,
@@ -64,109 +64,6 @@ pub fn builtin_docs(name: &str) -> Option<&'static str> {
     }
 }
 
-/// Walk backwards from `offset` in `text` collecting any `//`,
-/// `/* */`, or `/*! */` comment block(s) immediately above the line
-/// that contains `offset`. Returns the joined comment text, or
-/// `None` when there are no preceding comments.
-///
-/// Pure text scan, no Sail-specific knowledge. Used by hover and
-/// completion to surface doc comments without re-walking the AST.
-pub fn extract_comments(text: &str, offset: usize) -> Option<String> {
-    let mut lines = Vec::new();
-    let mut current_offset = offset;
-
-    // Move to the beginning of the line containing the offset
-    while current_offset > 0 && text.as_bytes()[current_offset - 1] != b'\n' {
-        current_offset -= 1;
-    }
-
-    while current_offset > 0 {
-        // Skip whitespace and move to the end of the previous line
-        while current_offset > 0 && text.as_bytes()[current_offset - 1].is_ascii_whitespace() {
-            current_offset -= 1;
-        }
-
-        let line_end = current_offset;
-
-        // Check for block comment ending with */
-        if line_end >= 2 && &text[line_end - 2..line_end] == "*/" {
-            // Walk backwards to find the matching /*
-            let block_end = line_end;
-            let mut search = line_end - 2;
-            let mut found_start = None;
-            while search >= 2 {
-                if &text[search - 2..search] == "/*" {
-                    found_start = Some(search - 2);
-                    break;
-                }
-                search -= 1;
-                if search == 0 {
-                    break;
-                }
-            }
-            if search == 0 && text.starts_with("/*") {
-                found_start = Some(0);
-            }
-
-            if let Some(start) = found_start {
-                let block = &text[start..block_end];
-                let inner = if block.starts_with("/*!") {
-                    &block[3..block.len() - 2]
-                } else {
-                    &block[2..block.len() - 2]
-                };
-
-                let mut block_lines: Vec<String> = Vec::new();
-                for comment_line in inner.lines() {
-                    let trimmed = comment_line.trim();
-                    let trimmed = trimmed.strip_prefix('*').map(|s| s.trim()).unwrap_or(trimmed);
-                    block_lines.push(trimmed.to_string());
-                }
-
-                while block_lines.first().is_some_and(|l| l.is_empty()) {
-                    block_lines.remove(0);
-                }
-                while block_lines.last().is_some_and(|l| l.is_empty()) {
-                    block_lines.pop();
-                }
-
-                if !block_lines.is_empty() {
-                    block_lines.extend(lines.into_iter().rev());
-                    lines = block_lines;
-                    lines.reverse();
-                }
-
-                current_offset = start;
-                while current_offset > 0 && text.as_bytes()[current_offset - 1] != b'\n' {
-                    current_offset -= 1;
-                }
-                continue;
-            }
-        }
-
-        while current_offset > 0 && text.as_bytes()[current_offset - 1] != b'\n' {
-            current_offset -= 1;
-        }
-
-        let line = text[current_offset..line_end].trim();
-        if line.starts_with("//") {
-            let comment_text = line.trim_start_matches('/').trim();
-            lines.push(comment_text.to_string());
-        } else if line.is_empty() {
-            continue;
-        } else {
-            break;
-        }
-    }
-
-    if lines.is_empty() {
-        None
-    } else {
-        lines.reverse();
-        Some(lines.join("\n"))
-    }
-}
-
 /// Render a callable as an LSP completion snippet with `${1:...}`
 /// placeholders for each parameter. Empty parameter lists become
 /// just `name()`.
@@ -207,9 +104,9 @@ fn snippet_escape(text: &str) -> String {
 /// as `Scope::Local` so hover + find-references can resolve local names.
 pub fn enrich_parsed_with_local_bindings(
     parsed: &mut syntax::parser_lower::ParsedFile,
-    bodies: &hir_def::bodies::CallableBodies,
+    bodies: &hir::CallableBodies,
 ) {
-    use hir_def::hir::{Expr, Statement};
+    use hir::{Expr, Statement};
     use syntax::parser_lower::{Decl, DeclKind, DeclRole, Scope};
 
     for entry in bodies.entries() {
@@ -255,7 +152,7 @@ pub fn enrich_parsed_with_local_bindings(
                             }
                             Statement::Var { pat, .. } => {
                                 // Extract name from Pat::Bind
-                                if let Some(hir_def::Pat::Bind(name)) = body.pat(*pat) {
+                                if let Some(hir::Pat::Bind(name)) = body.pat(*pat) {
                                     if let Some(span) = entry.source_map.pat_syntax(*pat) {
                                         parsed.decls.push(Decl {
                                             name: name.clone(),
@@ -276,7 +173,7 @@ pub fn enrich_parsed_with_local_bindings(
                 }
                 // Extract name from Pat::Bind
                 Expr::Foreach { pat, .. } => {
-                    if let Some(hir_def::Pat::Bind(name)) = entry.body.pat(*pat) {
+                    if let Some(hir::Pat::Bind(name)) = entry.body.pat(*pat) {
                         if let Some(span) = entry.source_map.pat_syntax(*pat) {
                             parsed.decls.push(Decl {
                                 name: name.clone(),
@@ -298,24 +195,24 @@ pub fn enrich_parsed_with_local_bindings(
 }
 
 fn collect_binding_decls_inner(
-    body: &hir_def::Body,
-    pat_id: hir_def::PatId,
+    body: &hir::Body,
+    pat_id: hir::PatId,
     kind: syntax::parser_lower::DeclKind,
     parsed: &mut syntax::parser_lower::ParsedFile,
-    source_map: &hir_def::body::BodySourceMap,
+    source_map: &hir::BodySourceMap,
 ) {
     collect_binding_decls_inner_with_fallback(body, pat_id, kind, parsed, source_map, None);
 }
 
 fn collect_binding_decls_inner_with_fallback(
-    body: &hir_def::Body,
-    pat_id: hir_def::PatId,
+    body: &hir::Body,
+    pat_id: hir::PatId,
     kind: syntax::parser_lower::DeclKind,
     parsed: &mut syntax::parser_lower::ParsedFile,
-    source_map: &hir_def::body::BodySourceMap,
-    fallback_span: Option<hir_def::Span>,
+    source_map: &hir::BodySourceMap,
+    fallback_span: Option<hir::Span>,
 ) {
-    use hir_def::Pat;
+    use hir::Pat;
     use syntax::parser_lower::{Decl, DeclRole, Scope};
 
     let Some(pat) = body.pat(pat_id) else { return };
@@ -425,4 +322,56 @@ fn collect_binding_decls_inner_with_fallback(
         }
         _ => {}
     }
+}
+
+/// The struct type a `STRUCT_EXPR` is annotated with.
+///
+/// From the literal's own name (`struct S { .. }`) is the caller's job;
+/// this answers the *annotation* — an enclosing `let x : T = ..`, a
+/// callable's return type, or an ascription `(.. : T)` that follows it.
+pub fn struct_literal_type_name(lit: &syntax::SyntaxNode) -> Option<String> {
+    use parser::SyntaxKind as SK;
+    let parent = lit.parent()?;
+    if !matches!(parent.kind(), SK::NAMED_DEF | SK::CAST_EXPR | SK::LET_EXPR | SK::CALLABLE_DEF) {
+        return None;
+    }
+    // `let x : S = struct S { .. }` nests the annotation inside a
+    // `TYPED_PAT`, so search the whole binding, not just direct children —
+    // and never inside the literal.
+    //
+    // A parameter's own annotation is not the expected type: in
+    // `function f(r : bar) = struct { .. }` with no return annotation, `bar`
+    // would be read as what the literal must be.
+    //
+    // The *outermost* type node of each sibling, never one nested inside
+    // it: `let r : Mem_read_request('n, .., RISCV_strong_access) = struct
+    // { .. }` has a struct name among the type arguments, and reading the
+    // innermost or the last called every field of that literal unknown.
+    let candidates: Vec<syntax::SyntaxNode> = parent
+        .children()
+        .filter(|c| c != lit && c.kind() != SK::PARAM_LIST)
+        .filter_map(|c| c.descendants().find(|d| matches!(d.kind(), SK::TYPE_NAMED | SK::TYPE_APP)))
+        .collect();
+    // An ascription follows what it annotates — `struct { .. } : phantom(32)`
+    // — and only an ascription does. Everywhere else the annotation precedes
+    // the literal, and the *last* one is the closest: a callable's return
+    // type comes after everything else in its header.
+    //
+    // Looking after the literal in a `let` reads the *next statement's*
+    // annotation, because Sail nests what follows into the binding's body:
+    // `let x : S1 = struct { f1 = 0 }; var y : S2 = ..` judged the first
+    // literal against `S2`.
+    let after_first = parent.kind() == SK::CAST_EXPR;
+    let before =
+        || candidates.iter().rev().find(|c| c.text_range().end() <= lit.text_range().start());
+    let after = || candidates.iter().find(|c| c.text_range().start() >= lit.text_range().end());
+    let ty = if after_first { after().or_else(before) } else { before().or_else(after) }?.clone();
+    // `S` is a `TYPE_NAMED` whose own token is the name; `S(1)` is a
+    // `TYPE_APP` whose name is a `TYPE_NAMED` child. Searching only the
+    // direct tokens found the first and not the second, so no literal
+    // annotated with a parameterised struct type was ever checked.
+    ty.descendants_with_tokens()
+        .filter_map(|el| el.into_token())
+        .find(|t| t.kind() == SK::IDENT)
+        .map(|t| t.text().to_string())
 }

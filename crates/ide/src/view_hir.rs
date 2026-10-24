@@ -9,19 +9,26 @@ use ide_db::LineCol;
 /// Show the HIR expression and inferred type at the given position.
 ///
 /// Registered as custom LSP command `sail-lsp/viewHir`.
-pub fn view_hir_at(file: &dyn FileDb, position: LineCol) -> String {
+///
+/// Reads the same salsa queries the rest of the server reads. Re-parsing the
+/// file here would show a tree nothing else in the process is looking at.
+pub(crate) fn view_hir(
+    db: &dyn salsa::Database,
+    input: base_db::FileText,
+    file: &dyn FileDb,
+    position: LineCol,
+) -> String {
     let offset = file.offset_at(&position);
-    let text = file.text();
-    if text.is_empty() {
+    if file.text().is_empty() {
         return "(empty file)".to_string();
     }
-
-    let (cst_root, _) = syntax::parse_text(text);
-    let bodies = hir_def::bodies::CallableBodies::from_cst(&cst_root);
+    let Some(bodies) = file.bodies() else {
+        return "(no callable bodies)".to_string();
+    };
 
     let mut result = Vec::new();
 
-    for entry in bodies.entries() {
+    for (clause_index, entry) in bodies.entries().iter().enumerate() {
         // Check if offset is within this callable's body span
         if offset < entry.body_span.start || offset > entry.body_span.end {
             continue;
@@ -38,35 +45,12 @@ pub fn view_hir_at(file: &dyn FileDb, position: LineCol) -> String {
             result.push(format!("ExprId: {:?}", expr_id));
             result.push(format!("Expr: {:?}", expr));
 
-            // Type info: run inline inference on body
-            // (check_file takes SourceFileInfo, use text-based adapter)
-            struct TextAdapter<'a>(&'a str);
-            impl hir_def::callgraph::WorkspaceFile for TextAdapter<'_> {
-                fn content_hash(&self) -> u64 {
-                    0
-                }
-                fn callgraph(&self) -> Option<&hir_def::callgraph::CallGraph> {
-                    None
-                }
-            }
-            impl hir_def::callgraph::SourceFileInfo for TextAdapter<'_> {
-                fn text(&self) -> &str {
-                    self.0
-                }
-                fn item_tree(&self) -> Option<&hir_def::ItemTree> {
-                    None
-                }
-            }
-            let adapter = TextAdapter(text);
-            let check_result = hir_ty::infer::check_file(&adapter);
-            if let Some(ref tc) = check_result {
-                if let Some(ty) = tc.type_of_expr.get(expr_id) {
-                    result.push(format!("Type: {:?}", ty));
-                } else {
-                    result.push("Type: (not inferred for this ExprId)".to_string());
-                }
-            } else {
-                result.push("Type: (typecheck unavailable)".to_string());
+            // Type info from the per-callable inference query.
+            let _ = clause_index;
+            let ty = hir::Semantics::new(db).expr_ty_in(input, &entry.name, expr_id);
+            match ty {
+                Some(ty) => result.push(format!("Type: {:?}", ty)),
+                None => result.push("Type: (not inferred for this ExprId)".to_string()),
             }
         } else if let Some(pat_id) = source_map.pat_at_offset(offset) {
             let pat = &body[pat_id];
@@ -91,10 +75,14 @@ mod tests {
     use super::*;
     use ide_db::test_utils::TestFile;
 
+    fn view(source: &str, position: LineCol) -> String {
+        let file = TestFile::new(source);
+        view_hir(file.db(), file.input(), &file, position)
+    }
+
     #[test]
     fn view_hir_in_function_body() {
-        let file = TestFile::new("function f(x : int) -> int = x + 1\n");
-        let output = view_hir_at(&file, LineCol { line: 0, col: 30 });
+        let output = view("function f(x : int) -> int = x + 1\n", LineCol { line: 0, col: 30 });
         assert!(
             output.contains("In callable: f") || output.contains("Expr"),
             "should show HIR info, got: {output}"
@@ -102,9 +90,18 @@ mod tests {
     }
 
     #[test]
+    fn view_hir_shows_an_inferred_type() {
+        let output = view("function f(x : int) -> int = x + 1\n", LineCol { line: 0, col: 30 });
+        assert!(output.contains("Type:"), "should show a type, got: {output}");
+        assert!(
+            !output.contains("(typecheck unavailable)"),
+            "inference should be reachable, got: {output}"
+        );
+    }
+
+    #[test]
     fn view_hir_outside_body() {
-        let file = TestFile::new("val x : int\n");
-        let output = view_hir_at(&file, LineCol { line: 0, col: 0 });
+        let output = view("val x : int\n", LineCol { line: 0, col: 0 });
         assert!(output.contains("not inside"));
     }
 }

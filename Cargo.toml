@@ -53,8 +53,13 @@ syntax = { path = "crates/syntax", version = "0.1.0" }
 hir-expand = { path = "crates/hir-expand", version = "0.1.0" }
 project-model = { path = "crates/project-model", version = "0.1.0" }
 hir-def = { path = "crates/hir-def", version = "0.1.0" }
-hir = { path = "crates/hir", version = "0.1.0" }
-hir-ty = { path = "crates/hir-ty", version = "0.1.0" }
+# `default-features = false` so the *binary* decides whether the solver is
+# in the build. Without it every ide crate turned hir's default on and
+# `--no-default-features` on sail-lsp dropped nothing: the "no-z3 build"
+# compiled, linked libz3 all the same, and the packaged server died on
+# any machine with a different z3 (`libz3.so.4.16 => not found`).
+hir = { path = "crates/hir", version = "0.1.0", default-features = false }
+hir-ty = { path = "crates/hir-ty", version = "0.1.0", default-features = false }
 ide-db = { path = "crates/ide-db", version = "0.1.0" }
 ide = { path = "crates/ide", version = "0.1.0" }
 ide-assists = { path = "crates/ide-assists", version = "0.1.0" }

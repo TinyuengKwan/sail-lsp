@@ -17,9 +17,9 @@ pub(super) fn collect_effect_hints(
     current_file: &dyn FileDb,
     begin: usize,
     end: usize,
-    hints: &mut Vec<IdeDbInlayHint>,
+    hints: &mut Vec<InlayHint>,
     transitive_effects: Option<
-        &std::collections::HashMap<String, std::collections::BTreeSet<hir_def::EffectTag>>,
+        &std::collections::HashMap<String, std::collections::BTreeSet<hir::EffectTag>>,
     >,
 ) {
     let Some(bodies) = current_file.bodies() else {
@@ -42,17 +42,17 @@ pub(super) fn collect_effect_hints(
         }
         let effect_strs: Vec<&str> = effects
             .iter()
-            .filter(|e| !matches!(e, hir_def::EffectTag::Scattered | hir_def::EffectTag::NonExec))
+            .filter(|e| !matches!(e, hir::EffectTag::Scattered | hir::EffectTag::NonExec))
             .map(|e| e.as_str())
             .collect();
         if effect_strs.is_empty() {
             continue;
         }
         let label = format!("/* {} */", effect_strs.join(", "));
-        hints.push(IdeDbInlayHint {
+        hints.push(InlayHint {
             offset: name_span.end,
             label,
-            kind: IdeDbInlayHintKind::Other,
+            kind: InlayHintKind::Other,
             tooltip: Some(format!("Effects of `{}`: {}", entry.name, effect_strs.join(", "))),
             padding_left: Some(true),
             padding_right: Some(false),

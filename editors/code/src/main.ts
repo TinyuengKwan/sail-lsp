@@ -51,6 +51,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         traceOutputChannel: outputChannel,
         middleware: {},
         initializationOptions: getInitializationOptions(),
+        synchronize: { configurationSection: "sail-lsp" },
     };
 
     client = new LanguageClient("sail-lsp", "Sail Language Server", serverOptions, clientOptions);
@@ -210,7 +211,11 @@ function getInitializationOptions(): unknown {
             timeoutMs: config.get<number>("z3.timeoutMs", 1000),
         },
         workspace: {
+            projectFile: config.get<string | null>("workspace.projectFile", null),
+            projectVariables: config.get<Record<string, boolean | string>>("workspace.projectVariables", {}),
+            projectModules: config.get<string[]>("workspace.projectModules", []),
             maxFiles: config.get<number>("workspace.maxFiles", 10000),
+            target: config.get<string | null>("workspace.target", null),
             includePaths: config.get<string[]>("workspace.includePaths", []),
         },
     };

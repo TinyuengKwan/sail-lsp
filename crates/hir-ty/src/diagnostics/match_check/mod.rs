@@ -189,6 +189,9 @@ pub struct Arm {
     pub pat: MatchPat,
     pub guard_span: Option<Span>,
     pub arm_span: Span,
+    /// The arm's pattern in the body arena, so a diagnostic about this arm
+    /// resolves its location the same way every other pattern diagnostic does.
+    pub pat_id: Option<hir_def::PatId>,
 }
 
 /// Result of an exhaustiveness analysis.
@@ -197,8 +200,10 @@ pub struct UsefulnessReport {
     /// Witnesses (concrete patterns) that aren't covered by any arm.
     /// Empty if the match is exhaustive.
     pub missing_witnesses: Vec<MatchPat>,
-    /// Arms whose pattern was completely subsumed by an earlier arm.
-    pub redundant: Vec<Span>,
+    /// Arms whose pattern was completely subsumed by an earlier arm, as
+    /// `(pattern id, span)`. The id is `None` only for arms lowered without a
+    /// body arena.
+    pub redundant: Vec<(Option<hir_def::PatId>, Span)>,
 }
 
 /// Lower a `Pat` from a Body arena to a `MatchPat`. Walks `Pat` children
@@ -307,6 +312,7 @@ where
 pub fn lower_arms_hir<P>(
     body: &hir_def::body::Body,
     arms: &[hir_def::hir::MatchArm],
+    source_map: Option<&hir_def::BodySourceMap>,
     pattern_constants: &P,
 ) -> Vec<Arm>
 where
@@ -315,11 +321,13 @@ where
     arms.iter()
         .map(|arm| {
             let pat = lower_pattern_hir(body, arm.pat, pattern_constants);
-            // Spans are not available from Body alone after migration.
-            // Use placeholder spans; proper fix is to pass BodySourceMap.
-            let guard_span = arm.guard.map(|_| Span::new(0, 0));
-            let arm_span = Span::new(0, 0);
-            Arm { pat, guard_span, arm_span }
+            // An arm is located by its pattern. Without the source map every
+            // arm reports at offset 0, which makes a redundant-arm diagnostic
+            // point at the top of the file instead of at the arm.
+            let span_of = |id| source_map.and_then(|sm| sm.pat_syntax(id));
+            let arm_span = span_of(arm.pat).unwrap_or(Span::new(0, 0));
+            let guard_span = arm.guard.map(|_| arm_span);
+            Arm { pat, guard_span, arm_span, pat_id: Some(arm.pat) }
         })
         .collect()
 }
@@ -336,7 +344,6 @@ pub struct RecordFields {
 /// callers that want to precompute union payloads before constructing
 /// the lazy `resolve_variant` closure.
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub struct UnionVariants {
     pub variants: Vec<(String, Vec<MatchTy>)>,
 }
@@ -374,7 +381,7 @@ impl<'a> Cx for EnvCx<'a> {
                             .iter()
                             .map(|v| CtorInfo {
                                 name: v.clone(),
-                                arity: self.constructor_arity.get(v).copied().unwrap_or(0),
+                                arity: self.ctor_sub_tys(v, ty).len(),
                             })
                             .collect(),
                     )
@@ -409,25 +416,15 @@ impl<'a> Cx for EnvCx<'a> {
         let Some(payload) = (self.resolve_variant)(name, scrutinee) else {
             return std::iter::repeat_n(MatchTy::Unknown, arity).collect();
         };
-        // Arity reconciliation: sail unions accept both `Foo(a, b)` and
-        // `Foo((a, b))`. If the recorded payload is a single tuple and the
-        // matrix arity expects N>1 slots, expand the tuple. If the
-        // payload is N>1 flat and the arity expects 1, collapse into a
-        // tuple. Mismatches we can't reconcile fall back to Unknowns.
-        if payload.len() == arity {
-            return payload;
-        }
-        if arity == 1 && payload.len() > 1 {
-            return vec![MatchTy::Tuple(payload)];
-        }
+        // Arity is determined after instantiation: `Ok : 'a` has two
+        // components when matching result((bool, bool), error). A declaration
+        // arity of one must not discard the second component of `Ok(a, b)`.
         if payload.len() == 1 {
             if let MatchTy::Tuple(items) = &payload[0] {
-                if items.len() == arity {
-                    return items.clone();
-                }
+                return items.clone();
             }
         }
-        std::iter::repeat_n(MatchTy::Unknown, arity).collect()
+        payload
     }
 
     fn record_field_tys(&self, scrutinee: &MatchTy, fields: &[String]) -> Vec<MatchTy> {

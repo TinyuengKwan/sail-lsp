@@ -34,13 +34,13 @@ pub fn cmd_symbols(path: &Path) -> Result<(), String> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
     let (root, _) = syntax::parse_text(&text);
-    let tree = hir_def::item_tree::ItemTree::build_from_cst(&root);
+    let tree = hir::ItemTree::build_from_cst(&root);
 
     println!("# Symbols in {}", path.display());
     println!();
     for item in tree.top_level_items() {
         let name = item.name(&tree);
-        let kind = item.item_kind(&tree);
+        let kind = item.def_kind(&tree);
         let span = item.span(&tree);
         println!("  {:?} {} [{}-{}]", kind, name, span.start, span.end);
     }
@@ -60,8 +60,8 @@ pub fn cmd_check(path: &Path) -> Result<(), String> {
     let (root, parse_errors) = syntax::parse_text(&text);
 
     // Build ItemTree + DefMap
-    let tree = std::sync::Arc::new(hir_def::item_tree::ItemTree::build_from_cst(&root));
-    let def_map = hir_def::nameres::DefMap::build(&tree);
+    let tree = std::sync::Arc::new(hir::ItemTree::build_from_cst(&root));
+    let def_map = hir::DefMap::build(&tree);
     let def_diags = def_map.diagnostics();
 
     let total_issues = parse_errors.len() + def_diags.len();
@@ -236,8 +236,8 @@ struct ScipFile {
     text: String,
     tokens: Vec<(parser::Token, parser::Span)>,
     parsed: Option<syntax::parser_lower::ParsedFile>,
-    item_tree: Option<std::sync::Arc<hir_def::ItemTree>>,
-    bodies: Option<std::sync::Arc<hir_def::bodies::CallableBodies>>,
+    item_tree: Option<std::sync::Arc<hir::ItemTree>>,
+    bodies: Option<std::sync::Arc<hir::CallableBodies>>,
     line_starts: Vec<usize>,
 }
 
@@ -246,9 +246,8 @@ impl ScipFile {
         let tokens = parser::tokenize(source);
         let (cst_root, _) = syntax::parse_text(source);
         let parsed = Some(syntax::cst_lower::parsed_file_from_cst(&cst_root, source));
-        let item_tree = Some(std::sync::Arc::new(hir_def::ItemTree::build_from_cst(&cst_root)));
-        let bodies =
-            Some(std::sync::Arc::new(hir_def::bodies::CallableBodies::from_cst(&cst_root)));
+        let item_tree = Some(std::sync::Arc::new(hir::ItemTree::build_from_cst(&cst_root)));
+        let bodies = Some(std::sync::Arc::new(hir::CallableBodies::from_cst(&cst_root)));
         let mut line_starts = vec![0usize];
         for (i, ch) in source.char_indices() {
             if ch == '\n' {
@@ -259,20 +258,20 @@ impl ScipFile {
     }
 }
 
-impl hir_def::callgraph::WorkspaceFile for ScipFile {
+impl hir::callgraph::WorkspaceFile for ScipFile {
     fn content_hash(&self) -> u64 {
         0
     }
-    fn callgraph(&self) -> Option<&hir_def::callgraph::CallGraph> {
+    fn callgraph(&self) -> Option<&hir::callgraph::CallGraph> {
         None
     }
 }
 
-impl hir_def::callgraph::SourceFileInfo for ScipFile {
+impl hir::callgraph::SourceFileInfo for ScipFile {
     fn text(&self) -> &str {
         &self.text
     }
-    fn item_tree(&self) -> Option<&hir_def::ItemTree> {
+    fn item_tree(&self) -> Option<&hir::ItemTree> {
         self.item_tree.as_deref()
     }
 }
@@ -311,7 +310,7 @@ impl ide_db::FileDb for ScipFile {
             std::sync::OnceLock::new();
         EMPTY.get_or_init(std::collections::HashMap::new)
     }
-    fn bodies(&self) -> Option<&hir_def::bodies::CallableBodies> {
+    fn bodies(&self) -> Option<&hir::CallableBodies> {
         self.bodies.as_deref()
     }
 }
@@ -324,7 +323,7 @@ impl ide_db::FileDb for ScipFile {
 /// `METRIC:name:value:unit` format.
 #[allow(clippy::print_stdout, clippy::print_stderr)]
 pub fn cmd_analysis_stats(dir: &Path, verbose: bool) -> Result<(), String> {
-    use hir_def::callgraph::SourceFileInfo as _;
+    use hir::callgraph::SourceFileInfo as _;
     use ide::analysis::{Analysis, AnalysisHost};
     use std::time::Instant;
 
@@ -344,16 +343,17 @@ pub fn cmd_analysis_stats(dir: &Path, verbose: bool) -> Result<(), String> {
 
     let t0 = Instant::now();
     let mut host = AnalysisHost::new(None);
-    let mut files = base_db::Files::default();
+    let mut change = ide_db::apply_change::Change::new();
     let mut vfs = vfs::Vfs::default();
     let mut url_fids = Vec::new();
 
     for (path, text) in &sail_files {
         let url = url::Url::from_file_path(path).map_err(|_| "bad path")?;
         let fid = vfs.file_id_for_url(&url);
-        files.set_file_contents(fid, text, base_db::Durability::HIGH);
+        change.change_file(fid, text.clone());
     }
-    files.apply_pending(host.raw_database_mut());
+    host.apply_change(std::mem::take(&mut change));
+    let files = host.raw_database().files().clone();
 
     for (path, _text) in &sail_files {
         if let Ok(url) = url::Url::from_file_path(path) {
@@ -396,7 +396,7 @@ pub fn cmd_analysis_stats(dir: &Path, verbose: bool) -> Result<(), String> {
     let mut item_count = 0usize;
     for (_url, fid) in &url_fids {
         if let Some(ft) = files.file_text(*fid) {
-            if let Some(tree) = hir_def::def_query::file_item_tree(analysis.db(), ft).as_ref() {
+            if let Some(tree) = hir::def_query::file_item_tree(analysis.db(), ft).as_ref() {
                 item_count += tree.top_level_items().len();
             }
         }
@@ -411,10 +411,10 @@ pub fn cmd_analysis_stats(dir: &Path, verbose: bool) -> Result<(), String> {
     let mut type_error_count = 0usize;
     for (_url, fid) in &url_fids {
         if let Some(ft) = files.file_text(*fid) {
-            let ids = hir_def::def_query::file_def_with_body_ids(analysis.db(), ft);
+            let ids = hir::def_query::file_def_with_body_ids(analysis.db(), ft);
             for &id in ids {
                 callable_count += 1;
-                let tcr = hir_ty::query::infer(analysis.db(), id);
+                let tcr = hir::ty_query::infer(analysis.db(), id);
                 type_error_count += tcr.0.inference_diagnostics().len();
                 type_error_count += tcr.0.type_mismatches.len();
             }
@@ -435,7 +435,9 @@ pub fn cmd_analysis_stats(dir: &Path, verbose: bool) -> Result<(), String> {
     let config = ide_diagnostics::DiagnosticsConfig::new();
     let mut diag_count = 0usize;
     for (_url, fid) in &url_fids {
-        let diags = analysis.file_diagnostics(*fid, &config);
+        let diags = analysis
+            .file_diagnostics(*fid, &config)
+            .expect("the CLI has no other thread to cancel it");
         diag_count += diags.len();
     }
     let t_diag = t0.elapsed();
@@ -463,7 +465,7 @@ pub fn cmd_analysis_stats(dir: &Path, verbose: bool) -> Result<(), String> {
             if let Some(sf) = analysis.file_by_id(*fid) {
                 let lines = sf.text().lines().count();
                 let ft = files.file_text(*fid).unwrap();
-                let ids = hir_def::def_query::file_def_with_body_ids(analysis.db(), ft);
+                let ids = hir::def_query::file_def_with_body_ids(analysis.db(), ft);
                 eprintln!("  {:<50} {:>5} lines  {:>3} callables", short, lines, ids.len());
             }
         }

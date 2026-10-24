@@ -174,17 +174,187 @@ FileText (salsa input)
   -> signature_index_query(db, ft)  -> HashMap<String, CallableSignature>
 
 WorkspaceFiles (salsa input)
-  -> workspace_context_query(db, wf) -> WorkspaceContext
-     (reads top_level_env_query x N files)
+  -> directory(db, wf, range) -> shared declaration directory
+  -> workspace_context(db, wf) -> complete compatibility/reference view
 ```
 
-Per-item inference: editing one function body only re-infers that function.
+For configured source projects, `WorkspaceSourceProject` and per-file directive
+events feed a pure preprocessing plan. `Change` applies its active file set,
+module ownership and `WorkspacePreprocessing` regions together. Semantic CSTs
+preserve offsets while removing inactive nodes; raw CSTs remain available for
+editing. Body-only changes backdate the event projection and reuse the plan.
+
+Per-item inference: a body edit reuses other callable results while their
+body-query dependencies remain cached. LRU eviction can require revalidating
+another callable in the edited file; it must not invalidate unrelated files.
 `body_with_source_map_query` has LRU=512 (matching RA).
 
-Workspace context is a salsa tracked query (`workspace_context_query` in
-`hir-ty/src/query.rs`), not a global static. It takes a `WorkspaceFiles` salsa
-input and reads `top_level_env_query` for each file to build the combined
-workspace environment.
+Type inference and type navigation use an incremental declaration index in
+`hir-ty/src/infer/dependencies/index.rs`. The complete `workspace_context` query
+remains available for compatibility and reference tests; it is no longer a
+production inference dependency.
+
+```text
+infer(def) -> callable_body(def)
+           -> callable_environment(file, names)
+                -> file_symbols(file) -> top_level_env(file)
+                -> directory(workspace, range) -> file_directory(file)
+                -> contribution_selection(file, names) -> file_contributions(file)
+```
+
+Callable roots are extracted from the already-read body, without adding another
+tracked body-to-names query. Equal root sets reuse the same environment query.
+Names use interned `Name` values. Each file exports immutable symbol contributions;
+workspace merges follow file order and preserve insert-first versus append
+semantics for signatures, overloads, constructors and scattered declarations.
+Shared empty tables avoid allocating a full set of empty `Arc` maps per symbol.
+
+The immutable declaration directory groups up to 32 file leaves per query and
+shares unchanged branches. A signature edit preserving names retains the whole
+directory; a rename rebuilds the affected leaf, batch and ancestor path. Bloom
+masks only prune candidates: exact leaf membership determines matches. Each
+directory memoizes up to 16,384 name lookups; this cache contains no database
+state and is excluded from equality. Retained directories keep their original
+contents across edits. A cache miss can still visit many branches when masks
+are saturated; this is not a constant-time lookup guarantee.
+
+Selections follow signature/type/constraint references to a fixed point,
+including overload members, mapping directions, constructors, enum members and
+generated bitfield accessors. Field-to-record edges use a separate key namespace.
+Missing names depend on the directory, so insertion and renaming are observed.
+Reads are grouped by contributing file into semantic projection queries. Signature
+changes rebuild only that file's contributions; unchanged projections backdate
+and preserve unrelated inference results. Salsa records the reverse dependencies.
+Type navigation uses the same index; spelling suggestions read per-file function
+name projections only when needed.
+
+Semantic equality covers types, constraints, effects, record fields, mappings,
+overloads and declaration locations. Hashes are not used to decide semantic
+projection equality. Exhaustive field patterns require an explicit projection
+when environment structs gain a semantic field. Local declarations retain their
+precedence over workspace contributions.
+
+Shared fields, recursive unions and file-global constraints can broaden a
+selection. Roots are conservative source/HIR names rather than resolved scope
+edges; a local binding can add an unnecessary global dependency. Traversing all
+cached callables after an edit still validates query dependencies throughout the
+workspace, even when only three inference results change. Cold/body-edit targets
+and rust-analyzer performance parity remain unachieved.
+
+Regression tests retain old `Arc` results and verify dependent recomputation and
+unrelated reuse for signatures, types, mappings, overloads, additions/deletions,
+renames and workspace membership changes. They compare selected inference with
+the complete-environment path, including expression/pattern types and diagnostics.
+Changing a body to call a different function removes its old dependency.
+
+Semantic diagnostics use the file's cached CST and ItemTree. They fall back to
+parsing only for a `FileDb` implementation that cannot provide these caches.
+`incremental_stats` checks body-edit reuse and signature-edit invalidation,
+including actual diagnostic changes in a cross-file consumer. The body-query
+LRU can require revalidating another callable in the edited file.
+
+### Type inference state and applied types
+
+Speculative inference snapshots cover variable bindings, fresh variable IDs,
+pending obligations and placeholder-name mappings. Successful probes commit the
+underlying `ena` snapshot; failed probes roll back. Inner commits remain undoable
+by an outer snapshot. Placeholder mappings use an undo log of changed entries,
+so a rejected candidate cannot leave a name pointing to a subsequently reused
+variable ID. Snapshots close in LIFO order, including diagnostic-only probes.
+
+`TyKind::Named(name, args)` and `TyKind::App` both represent applied types. The
+unifier uses the same comparison form for both, including nested applications,
+argument count and argument types. Resolving a type and checking for a recursive
+inference-variable binding traverse `Named` arguments as well. Finalization turns
+unresolved variables inside those arguments into unknown types; known bindings
+and numeric placeholders propagate into them. Raw unification is reflexive for
+an unbound variable, and an error type does not bind and poison that variable.
+
+Direct inference-table regression tests cover these invariants alongside the
+existing source-level diagnostic, hover and incremental tests. This does not
+make all compatibility checks strict: undecidable numeric constraints,
+configuration-dependent aliases and recovery/coercion policy remain separate
+from structural unification correctness.
+
+### Subtyping and dependent constraints
+
+`subtype::is_subtype(actual, expected)` is directional and transactional. It
+checks interval containment, tuple components, application arguments and
+function variance. Its result separates proof, pending constraint and failure.
+Coercion accepts pending goals for inference recovery using `Deferred`, retains
+them in the table, and never retries the opposite subtype direction.
+
+`InferenceTable::check_compatibility(expected, actual)` now routes ordinary
+expectations through that directional relation, including nested tuples, type
+applications and function variance. It distinguishes `Proven`, `Deferred`,
+`Recovery` and `Mismatch`; the boolean `unify` adapter means acceptable for
+continued inference, not a proof. Legacy binding machinery may resolve variables
+before a second directional check. It cannot rescue a known nested mismatch.
+Explicit recovery still handles erased refinements, configuration-dependent
+aliases and struct literals with erased generic arguments. Mapping selection and
+semantic equality now use the same directional relation. Alias expansion substitutes
+actual parameters before using the body. Generic vectors retain their element
+argument when compared with other vectors.
+
+Tuple expectations reach individual elements. When `if` or `match` has an
+expected type, every branch is checked against that type without also requiring
+one branch's inferred type to be a subtype of another. Numeric literal match
+arms add an equality only within the arm. Numeric `let 'n = ...` bindings retain
+singleton identity and known bounds, as do global numeric `as` binders. General
+branch joining and flow-sensitive refinement remain incomplete.
+
+Type instantiation, alias expansion, existential freshening and skolemization
+share `infer/substitution.rs`. Substitution is simultaneous: inserted replacements
+are not substituted again. Numeric alias arguments retain their AST, including
+conditional expressions. Braced parameterized alias bodies use the full CST type
+reader so existential binders reach the substitution engine. At an existential
+binder, shadowed mappings are removed;
+free variables in active replacements trigger alpha-renaming of conflicting
+binders in both the body and predicate. Fresh names avoid existing free and bound
+names and are deterministic within the operation, keeping Salsa results stable.
+The common path borrows the small substitution maps; binder entry uses copy-on-write.
+Legacy textual arguments and inference placeholders use whole-variable tokens,
+with parentheses around inserted expressions. Unknown boolean operands remain
+Unknown under conjunction, disjunction and negation. This operation is distinct
+from the solver's deliberately transitive, cycle-checked numeric normalization.
+
+Numeric evaluation and polynomial/linear normalization use checked arithmetic;
+constant division and remainder follow Sail's Euclidean convention. Overflow
+and zero division defer. The optional Z3 backend translates opaque numeric
+functions with their arguments, uses structural cache keys, and adds only
+valid exponent facts. Lightweight evaluation remains bounded by `i64`.
+
+`ScopedObligation` retains the goal, cause, source expression, lexical assumptions
+and referenced inference placeholders. Finalization resolves live bindings before
+fallback can erase distinct unknowns to `_`, then solves under the captured
+context. Failed goals are reported at their origin; unresolved goals remain in
+the inference result. Compatibility/recovery unknowns are quiet, while explicit
+reportable constraints retain their warning policy. Nested expression scopes do
+not overwrite already captured evidence, and rollback removes speculative goals.
+Assumption slices are shared by goals captured together. Early subtype checks use
+the inexpensive solver; optional SMT is deferred to final contextual solving,
+without a duplicate normalization-stage SMT call.
+
+Conditional numeric equality uses three outcomes: proven, disproven and unknown.
+A known condition selects its branch; an unknown condition cannot bind a branch
+variable just to satisfy the equality. Parsing preserves nested conditional ASTs.
+
+Actual existentials open into fresh rigid witnesses and scoped assumptions;
+expected existentials introduce flexible witnesses and retain their predicates.
+Universe levels prevent local rigid witnesses from escaping into older inference
+variables, including through nested bindings. Values leaving a local elimination
+scope are repackaged with their predicates. Snapshot rollback restores names,
+levels, bindings and obligations. Generated names avoid user variables and type
+arguments. Local type-pattern aliases preserve witness identity under shadowing.
+
+Mapping direction selection and semantic equality use the directional relation;
+equality requires both directions. Structural binding collection is explicitly
+non-proving. Constructor payloads share existential witness allocation and keep
+unresolved predicates. Scoped goals retain universe and rigid-variable metadata;
+quantified entailment uses bounded concrete counterexamples and, when enabled,
+exact supported SMT translations. Unknown remains unknown. General flow joins,
+complete kind checking, arbitrary integers and cancellation-aware SMT budgets
+remain outside this implementation.
 
 ### Completion provider architecture (ide-completion)
 
@@ -255,3 +425,37 @@ rebuild include graph + SourceRoots + WorkspaceSymbolIndex. Progress reported.
 `salsa::Cancelled` panic -> LSP `ContentModified` error response.
 Async handlers on thread pool can be effectively cancelled when `on_did_change`
 modifies salsa inputs (snapshot revision mismatch triggers Cancelled).
+
+### Dependent types and interactive solver limits
+
+`hir-ty` uses one numeric/constraint AST, with inline small integers and arbitrary
+precision for larger values. Arguments retain Type/Int/Bool/Order distinctions;
+alias expansion preserves symbolic configuration constants. Refinement facts are
+lexically scoped, and joins preserve representable ranges, tuples, conditional
+indices and existential alternatives. Erased widths cannot become proof evidence.
+
+`Analysis::with_db` owns a solver budget shared by nested inference and solver
+fallbacks. Direct inference installs the same bounded default when no request
+scope exists. Limits are 200 ms of native checks, 50 ms per check and 64 checks;
+translation and other analysis work are outside that time account. Active checks
+use a scoped watchdog and Z3's cross-thread interrupt handle, plus a resource
+limit. Timeout/cancellation yields Unknown. No detached solver task or watchdog
+outlives its context. Salsa cancellation is polled between expressions and goals.
+A query that encounters a resource-limited check records an untracked read, so it
+can retry next revision; normal inference retains precise dependency reuse.
+
+
+### Include instances and physical sources
+
+Preprocessing records individual visits keyed by root occurrence, module and
+include path. Additional active visits use stable, tagged analysis file handles;
+VFS paths and URLs stay physical. `WorkspacePreprocessing` maps analysis handles
+back to physical source inputs and stores separate region masks. Raw parsing and
+source text are shared, while item trees, module scopes and inference use the
+instance identity. `Change` installs the complete projection before publishing
+a snapshot. Empty guarded revisits do not create extra semantic files.
+
+Position requests select an active view; diagnostics aggregate views at physical
+locations. Rename maps semantic edits back to source files and rejects edits to
+tokens active in multiple contexts. Physical dependency cycles are not sufficient
+evidence of recursive inclusion; the ordered visit walk supplies that evidence.

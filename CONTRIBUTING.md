@@ -62,16 +62,34 @@ cargo run --example corpus_check -- --workspace /path/to/sail-riscv
 Expected: **0 errors, 0 false positives**. All remaining warnings should be
 true positives (genuinely unused variables, code style suggestions).
 
-See [docs/corpus-validation.md](docs/corpus-validation.md) for the full
-fix history and methodology.
+### Validation
 
-### Analysis stats
+Each tool measures something the others cannot, because a checker that reported
+nothing would score perfectly on false positives alone:
 
-Performance benchmarking tool (mirrors RA's analysis-stats):
+| Measures | Tool | Oracle |
+|---|---|---|
+| false positives | `corpus_check`, `conformance_check` | files upstream `sail` accepts |
+| false negatives | `mutation_check` | `sail --just-check` on mutated programs (`docs/mutation-oracle.txt`) |
+| conformance | `conformance_check` | upstream `test/` corpora and `.expect` files (`docs/upstream-accepts.txt`) |
+| coverage, goto-def, hover | `analysis_stats` | — |
+| completion recall | `completion_check` | names the corpus already writes |
+| protocol positions | `protocol_check` | — |
+| the real server loop | `server_check` (`cargo test -p sail-lsp server_check`) | an in-memory client driving `run_server` |
+| incremental reuse | `incremental_stats` | retained `Arc` results |
 
 ```bash
+cargo run --release --example conformance_check -- --list ../sail/test/typecheck
 cargo run --release --example analysis_stats -- /path/to/sail-riscv
+cargo run --release --example completion_check -- /path/to/sail-riscv
+cargo run --release --example incremental_stats -- 1600 32
 ```
+
+`conformance_check` exits 0 only with no false positives and no false
+negatives. **Rebuild the examples after changing any crate** — a stale example
+binary silently reports the previous run's numbers. Use
+`scripts/regen_upstream_accepts.py` to regenerate the accept/reject list after
+syncing the stdlib (`scripts/sync_stdlib.py`).
 
 ## Code style conventions
 

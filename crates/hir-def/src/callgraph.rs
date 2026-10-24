@@ -9,6 +9,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::body::Body;
+use crate::expr_store::body::BodySourceMap;
 use crate::expr_store::hir::Expr;
 use crate::Span;
 
@@ -39,7 +40,7 @@ pub struct CallSite {
 }
 
 /// Per-file callable callgraph.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CallGraph {
     forward: HashMap<String, HashSet<String>>,
     reverse: HashMap<String, HashSet<String>>,
@@ -64,7 +65,7 @@ impl CallGraph {
             // positions. The deduped forward/reverse maps stay
             // for O(1) edge queries; sites is the per-position
             // index.
-            for (callee, callee_span) in extract_call_sites(&entry.body) {
+            for (callee, callee_span) in extract_call_sites(&entry.body, &entry.source_map) {
                 forward.entry(entry.name.clone()).or_default().insert(callee.clone());
                 reverse.entry(callee.clone()).or_default().insert(entry.name.clone());
                 sites.push(CallSite { caller: entry.name.clone(), callee, callee_span });
@@ -86,7 +87,6 @@ impl CallGraph {
     }
 
     /// All call sites originating from `caller`.
-    #[allow(dead_code)]
     pub fn call_sites_in<'a, 'b>(
         &'a self,
         caller: &'b str,
@@ -103,37 +103,36 @@ impl CallGraph {
     }
 
     /// Total number of concrete call sites in the file.
-    #[allow(dead_code)]
+    /// Every call site in this file, in no particular order.
+    pub fn call_sites_in_file(&self) -> impl Iterator<Item = &CallSite> {
+        self.sites.iter()
+    }
+
     pub fn site_count(&self) -> usize {
         self.sites.len()
     }
 
     /// Number of distinct caller names in the graph.
-    #[allow(dead_code)]
     pub fn caller_count(&self) -> usize {
         self.forward.len()
     }
 
     /// True iff the graph has no edges (no calls anywhere).
-    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.forward.values().all(HashSet::is_empty)
     }
 
     /// Direct callees of `caller`.
-    #[allow(dead_code)]
     pub fn callees_of<'a>(&'a self, caller: &str) -> impl Iterator<Item = &'a str> + 'a {
         self.forward.get(caller).into_iter().flat_map(|set| set.iter().map(|s| s.as_str()))
     }
 
     /// Direct callers of `callee`.
-    #[allow(dead_code)]
     pub fn callers_of<'a>(&'a self, callee: &str) -> impl Iterator<Item = &'a str> + 'a {
         self.reverse.get(callee).into_iter().flat_map(|set| set.iter().map(|s| s.as_str()))
     }
 
     /// True iff `name` reaches itself via forward edges (per-file only).
-    #[allow(dead_code)]
     pub fn is_recursive(&self, name: &str) -> bool {
         if !self.forward.contains_key(name) {
             return false;
@@ -163,7 +162,6 @@ impl CallGraph {
     }
 
     /// All caller names in the graph.
-    #[allow(dead_code)]
     pub fn callers(&self) -> impl Iterator<Item = &str> {
         self.forward.keys().map(|s| s.as_str())
     }
@@ -268,7 +266,6 @@ impl WorkspaceCallGraph {
     }
 
     /// Number of distinct callers in the merged graph.
-    #[allow(dead_code)]
     pub fn caller_count(&self) -> usize {
         self.forward.len()
     }
@@ -344,14 +341,20 @@ where
 }
 
 /// Extract call sites from a body (callee name + span, not deduped).
-fn extract_call_sites(body: &Body) -> Vec<(String, Span)> {
+/// Every call in `body`, with where its callee is written.
+///
+/// The span used to be `Span::new(0, 0)`, under a comment saying it was
+/// "not available from Body alone" and that callers needing it should use
+/// the source map — which the only caller has, one field away. Everything
+/// that asked a call site where it was got the top of the file: the call
+/// hierarchy's ranges, and any assist trying to reach a call's arguments.
+fn extract_call_sites(body: &Body, source_map: &BodySourceMap) -> Vec<(String, Span)> {
     let mut out: Vec<(String, Span)> = Vec::new();
     for (_, hir) in body.iter_exprs() {
         if let Expr::Call { callee, .. } = hir {
             if let Some(Expr::Ident(name)) = body.expr(*callee) {
-                // Span not available from Body alone; use placeholder.
-                // Callers that need accurate spans should use BodySourceMap.
-                out.push((name.clone(), Span::new(0, 0)));
+                let span = source_map.expr_syntax(*callee).unwrap_or(Span::new(0, 0));
+                out.push((name.clone(), span));
             }
         }
     }

@@ -1,24 +1,16 @@
-use std::collections::HashSet;
-
 use ide_db::FileDb;
 
-use crate::reporting::{diagnostic_for_error, Error as ReportingError, WarningEmitter};
+use crate::reporting::WarningEmitter;
 use crate::types::DiagnosticCode;
-use hir_def::diagnostics::{Diagnostic as HirDiagnostic, Severity};
-use parser::{Span, Token};
+use hir::diagnostics::{Diagnostic as HirDiagnostic, Severity};
 
-/// A lexical error (replaces chumsky::error::Rich after ).
-pub struct LexError {
-    pub span: Span,
-    pub message: String,
-}
-
-pub fn compute_parse_diagnostics(file: &dyn FileDb, lex_errors: &[LexError]) -> Vec<HirDiagnostic> {
+/// Lexical errors used to arrive here, through a `LexError` type and a
+/// `collect_lex_errors` pass whose one caller passed the empty slice.
+/// They arrive through `Parse::errors()` now — `LexedStr` carries them and
+/// `build_tree` merges them, which is rust-analyzer's route — so the type,
+/// the parameter and the pass are gone rather than left as a second way in.
+pub fn compute_parse_diagnostics(file: &dyn FileDb) -> Vec<HirDiagnostic> {
     let mut collector = ParseDiagnosticCollector::new(file);
-    collector.collect_lex_errors(lex_errors);
-    if let Some(tokens) = file.tokens() {
-        collector.collect_bracket_diagnostics(tokens);
-    }
     // Check for config bitvector truncation in directives
     if let Some(text) = Some(file.text()) {
         // Match `$option NAME:WIDTH VALUE` patterns in the file text
@@ -51,7 +43,7 @@ pub fn compute_parse_diagnostics(file: &dyn FileDb, lex_errors: &[LexError]) -> 
             // Missing extern purity: `val name = {backend: "..."} : type`
             // should have `pure` or `impure` annotation.
             // Only applies to ValSpec entries (not functions/mappings).
-            if id.item_kind(item_tree) == hir_def::ItemKind::ValSpec {
+            if id.def_kind(item_tree) == hir::DefKind::ValSpec {
                 // Extern bindings have `= { lem: "...", c: "..." }` in their text.
                 // Look for `= {` followed by a string literal (distinguishes from
                 // function body `= { ... }` which has expressions, not strings).
@@ -157,149 +149,18 @@ fn line_offsets(text: &str) -> impl Iterator<Item = (usize, &str)> {
     })
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum BracketKind {
-    Round,
-    Square,
-    Curly,
-    CurlyBar,
-    SquareBar,
-}
-
-impl BracketKind {
-    fn expected_closer(self) -> &'static str {
-        match self {
-            BracketKind::Round => ")",
-            BracketKind::Square => "]",
-            BracketKind::Curly => "}",
-            BracketKind::CurlyBar => "|}",
-            BracketKind::SquareBar => "|]",
-        }
-    }
-
-    fn closer_text(self) -> &'static str {
-        self.expected_closer()
-    }
-}
-
-fn open_bracket_kind(token: &Token) -> Option<BracketKind> {
-    match token {
-        Token::LeftBracket => Some(BracketKind::Round),
-        Token::LeftSquareBracket => Some(BracketKind::Square),
-        Token::LeftCurlyBracket => Some(BracketKind::Curly),
-        Token::LeftCurlyBar => Some(BracketKind::CurlyBar),
-        Token::LeftSquareBar => Some(BracketKind::SquareBar),
-        _ => None,
-    }
-}
-
-fn close_bracket_kind(token: &Token) -> Option<BracketKind> {
-    match token {
-        Token::RightBracket => Some(BracketKind::Round),
-        Token::RightSquareBracket => Some(BracketKind::Square),
-        Token::RightCurlyBracket => Some(BracketKind::Curly),
-        Token::RightCurlyBar => Some(BracketKind::CurlyBar),
-        Token::RightSquareBar => Some(BracketKind::SquareBar),
-        _ => None,
-    }
-}
-
-struct ParseDiagnosticCollector<'a> {
-    file: &'a dyn FileDb,
+struct ParseDiagnosticCollector {
     diagnostics: Vec<HirDiagnostic>,
-    seen_errors: HashSet<(DiagnosticCode, usize, usize)>,
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     warnings: WarningEmitter,
 }
 
-impl<'a> ParseDiagnosticCollector<'a> {
-    fn new(file: &'a dyn FileDb) -> Self {
-        Self {
-            file,
-            diagnostics: Vec::new(),
-            seen_errors: HashSet::new(),
-            warnings: WarningEmitter::new(),
-        }
+impl ParseDiagnosticCollector {
+    fn new(_file: &dyn FileDb) -> Self {
+        Self { diagnostics: Vec::new(), warnings: WarningEmitter::new() }
     }
 
     fn finish(self) -> Vec<HirDiagnostic> {
         self.diagnostics
-    }
-
-    fn emit_error(&mut self, code: DiagnosticCode, span: Span, error: ReportingError) {
-        if !self.seen_errors.insert((code.clone(), span.start, span.end)) {
-            return;
-        }
-        self.diagnostics.push(diagnostic_for_error(self.file, code, error));
-    }
-
-    fn collect_lex_errors(&mut self, lex_errors: &[LexError]) {
-        for error in lex_errors {
-            self.emit_error(
-                DiagnosticCode::SailError("lexical-error"),
-                error.span,
-                ReportingError::Lex { span: error.span, message: error.message.clone() },
-            );
-        }
-    }
-
-    fn collect_bracket_diagnostics(&mut self, tokens: &[(Token, Span)]) {
-        let mut stack: Vec<(BracketKind, Span)> = Vec::new();
-
-        for (token, span) in tokens {
-            if let Some(kind) = open_bracket_kind(token) {
-                stack.push((kind, *span));
-                continue;
-            }
-
-            let Some(close_kind) = close_bracket_kind(token) else {
-                continue;
-            };
-
-            let mut matched = false;
-            while let Some((open_kind, _)) = stack.last().copied() {
-                if open_kind == close_kind {
-                    stack.pop();
-                    matched = true;
-                    break;
-                }
-
-                self.emit_error(
-                    DiagnosticCode::SyntaxError,
-                    Span::new(span.start, span.start),
-                    ReportingError::Syntax {
-                        span: Span::new(span.start, span.start),
-                        message: format!("expected '{}'", open_kind.expected_closer()),
-                    },
-                );
-                stack.pop();
-            }
-
-            if !matched {
-                self.emit_error(
-                    DiagnosticCode::SyntaxError,
-                    *span,
-                    ReportingError::Syntax {
-                        span: *span,
-                        message: format!("unexpected '{}'", close_kind.closer_text()),
-                    },
-                );
-            }
-        }
-
-        let eof = tokens
-            .last()
-            .map(|(_, span)| Span::new(span.end, span.end))
-            .unwrap_or_else(|| Span::new(0, 0));
-        for (open_kind, _) in stack.into_iter().rev().take(5) {
-            self.emit_error(
-                DiagnosticCode::SyntaxError,
-                eof,
-                ReportingError::Syntax {
-                    span: eof,
-                    message: format!("expected '{}'", open_kind.expected_closer()),
-                },
-            );
-        }
     }
 }

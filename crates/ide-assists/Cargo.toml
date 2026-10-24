@@ -12,7 +12,10 @@ publish = false
 base-db.workspace = true
 parser.workspace = true
 syntax.workspace = true
-hir-def.workspace = true
+# Depends only on the top-level `hir` package, as in rust-analyzer.
+# Anything from a `hir-xxx` subpackage is re-exported there.
+hir = { workspace = true, default-features = false }
+salsa.workspace = true
 ide-db.workspace = true
 ide-diagnostics.workspace = true
 url.workspace = true

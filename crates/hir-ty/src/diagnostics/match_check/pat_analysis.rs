@@ -67,10 +67,17 @@ pub fn compute_match_usefulness(
         let arm_rows = expand_arm_to_rows(arm);
         // Useless arm = no row in `arm_rows` extends the prefix.
         let any_useful = arm_rows.iter().any(|row| {
-            is_useful(&prefix, row.pats.as_slice(), std::slice::from_ref(scrutinee_ty), cx, 0)
+            is_useful(
+                &prefix,
+                row.pats.as_slice(),
+                std::slice::from_ref(scrutinee_ty),
+                cx,
+                0,
+                Unclassified::Uncovered,
+            )
         });
         if !any_useful && arm.guard_span.is_none() {
-            report.redundant.push(arm.arm_span);
+            report.redundant.push((arm.pat_id, arm.arm_span));
         }
         // Only un-guarded rows go into the prefix; guarded rows might
         // not actually fire even if they syntactically match.
@@ -91,6 +98,23 @@ pub fn compute_match_usefulness(
     report
 }
 
+/// What to assume about a column whose type could not be classified.
+///
+/// The two callers need opposite conservatism. Asking "is this arm
+/// reachable?" must assume an unclassified column is *not* covered, or an arm
+/// after a more specific one is called unreachable when it is not — Sail code
+/// routinely ends a match with `LoadReserved(p)` after `LoadReserved(Data)`,
+/// and the payload type is often one this checker cannot enumerate. Asking
+/// "is this match exhaustive?" must assume the opposite, or every match on an
+/// unclassified type is reported non-exhaustive.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Unclassified {
+    /// Treat as already covered — used when looking for missing arms.
+    Covered,
+    /// Treat as not covered — used when asking whether an arm is reachable.
+    Uncovered,
+}
+
 /// `is_useful(M, p)` — does pattern stack `p` cover any value not
 /// already covered by some row of `M`?
 fn is_useful(
@@ -99,6 +123,7 @@ fn is_useful(
     tys: &[MatchTy],
     cx: &impl Cx,
     depth: usize,
+    unclassified: Unclassified,
 ) -> bool {
     if depth >= MATCH_CHECK_DEPTH_LIMIT {
         return false;
@@ -123,12 +148,13 @@ fn is_useful(
 
     match head {
         MatchPat::Wild | MatchPat::VectorConcat { .. } => {
-            is_useful_wild(matrix, tail, head_ty, tail_tys, cx, depth)
+            is_useful_wild(matrix, tail, head_ty, tail_tys, cx, depth, unclassified)
         }
         MatchPat::Ctor { name, args } => {
-            let mut new_pats = args.clone();
-            new_pats.extend_from_slice(tail);
             let sub_tys = cx.ctor_sub_tys(name, head_ty);
+            let args = constructor_args(args, sub_tys.len());
+            let mut new_pats = args.to_vec();
+            new_pats.extend_from_slice(tail);
             let mut new_tys: Vec<MatchTy> = if sub_tys.len() == args.len() {
                 sub_tys
             } else {
@@ -136,7 +162,7 @@ fn is_useful(
             };
             new_tys.extend_from_slice(tail_tys);
             let specialized = specialize_ctor(matrix, name, args.len());
-            is_useful(&specialized, &new_pats, &new_tys, cx, depth + 1)
+            is_useful(&specialized, &new_pats, &new_tys, cx, depth + 1, unclassified)
         }
         MatchPat::Tuple(items) => {
             let mut new_pats = items.clone();
@@ -149,15 +175,15 @@ fn is_useful(
             let mut new_tys = sub_tys;
             new_tys.extend_from_slice(tail_tys);
             let specialized = specialize_tuple(matrix, items.len());
-            is_useful(&specialized, &new_pats, &new_tys, cx, depth + 1)
+            is_useful(&specialized, &new_pats, &new_tys, cx, depth + 1, unclassified)
         }
         MatchPat::Literal(key) => {
             let specialized = specialize_literal(matrix, key);
-            is_useful(&specialized, tail, tail_tys, cx, depth + 1)
+            is_useful(&specialized, tail, tail_tys, cx, depth + 1, unclassified)
         }
         MatchPat::Nil => {
             let specialized = specialize_nil(matrix);
-            is_useful(&specialized, tail, tail_tys, cx, depth + 1)
+            is_useful(&specialized, tail, tail_tys, cx, depth + 1, unclassified)
         }
         MatchPat::Cons(hd, tl) => {
             let elem_ty = match head_ty {
@@ -170,7 +196,7 @@ fn is_useful(
             let mut new_tys = vec![elem_ty, list_ty];
             new_tys.extend_from_slice(tail_tys);
             let specialized = specialize_cons(matrix);
-            is_useful(&specialized, &new_pats, &new_tys, cx, depth + 1)
+            is_useful(&specialized, &new_pats, &new_tys, cx, depth + 1, unclassified)
         }
         MatchPat::Vec(items) => {
             let elem_ty = match head_ty {
@@ -182,7 +208,7 @@ fn is_useful(
             let mut new_tys: Vec<MatchTy> = std::iter::repeat_n(elem_ty, items.len()).collect();
             new_tys.extend_from_slice(tail_tys);
             let specialized = specialize_vec(matrix, items.len());
-            is_useful(&specialized, &new_pats, &new_tys, cx, depth + 1)
+            is_useful(&specialized, &new_pats, &new_tys, cx, depth + 1, unclassified)
         }
         MatchPat::Struct { fields } => {
             let field_names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
@@ -196,7 +222,7 @@ fn is_useful(
             };
             new_tys.extend_from_slice(tail_tys);
             let specialized = specialize_struct(matrix, &field_names);
-            is_useful(&specialized, &new_pats, &new_tys, cx, depth + 1)
+            is_useful(&specialized, &new_pats, &new_tys, cx, depth + 1, unclassified)
         }
         MatchPat::Or(_) => {
             // Or-patterns should have been expanded by `expand_arm_to_rows`
@@ -206,7 +232,7 @@ fn is_useful(
                 for branch in branches {
                     let mut alt = vec![branch.clone()];
                     alt.extend_from_slice(tail);
-                    if is_useful(matrix, &alt, tys, cx, depth + 1) {
+                    if is_useful(matrix, &alt, tys, cx, depth + 1, unclassified) {
                         found = true;
                         break;
                     }
@@ -227,6 +253,7 @@ fn is_useful_wild(
     tail_tys: &[MatchTy],
     cx: &impl Cx,
     depth: usize,
+    unclassified: Unclassified,
 ) -> bool {
     if depth >= MATCH_CHECK_DEPTH_LIMIT {
         return false;
@@ -236,7 +263,7 @@ fn is_useful_wild(
     if let MatchTy::List(elem_ty) = head_ty {
         // Nil branch.
         let nil_specialized = specialize_nil(matrix);
-        if is_useful(&nil_specialized, tail, tail_tys, cx, depth + 1) {
+        if is_useful(&nil_specialized, tail, tail_tys, cx, depth + 1, unclassified) {
             return true;
         }
         // Cons branch.
@@ -245,7 +272,7 @@ fn is_useful_wild(
         cons_pats.extend_from_slice(tail);
         let mut cons_tys: Vec<MatchTy> = vec![(**elem_ty).clone(), head_ty.clone()];
         cons_tys.extend_from_slice(tail_tys);
-        if is_useful(&cons_specialized, &cons_pats, &cons_tys, cx, depth + 1) {
+        if is_useful(&cons_specialized, &cons_pats, &cons_tys, cx, depth + 1, unclassified) {
             return true;
         }
         return false;
@@ -283,7 +310,7 @@ fn is_useful_wild(
             if default.is_empty() {
                 return false;
             }
-            return is_useful(&default, tail, tail_tys, cx, depth + 1);
+            return is_useful(&default, tail, tail_tys, cx, depth + 1, unclassified);
         }
         let field_names: Vec<String> = field_entries.iter().map(|(n, _)| n.clone()).collect();
         let specialized = specialize_struct(matrix, &field_names);
@@ -292,7 +319,7 @@ fn is_useful_wild(
         new_pats.extend_from_slice(tail);
         let mut new_tys: Vec<MatchTy> = field_entries.into_iter().map(|(_, t)| t).collect();
         new_tys.extend_from_slice(tail_tys);
-        return is_useful(&specialized, &new_pats, &new_tys, cx, depth + 1);
+        return is_useful(&specialized, &new_pats, &new_tys, cx, depth + 1, unclassified);
     }
     let ctors = cx.ctors_for(head_ty);
     match ctors {
@@ -311,7 +338,7 @@ fn is_useful_wild(
                     v
                 };
                 let specialized = specialize_ctor(matrix, &info.name, info.arity);
-                if is_useful(&specialized, &new_pats, &new_tys, cx, depth + 1) {
+                if is_useful(&specialized, &new_pats, &new_tys, cx, depth + 1, unclassified) {
                     return true;
                 }
             }
@@ -327,26 +354,19 @@ fn is_useful_wild(
             if default.is_empty() && !matrix.iter().any(|r| matches!(&r.pats[0], MatchPat::Wild)) {
                 return true;
             }
-            is_useful(&default, tail, tail_tys, cx, depth + 1)
+            is_useful(&default, tail, tail_tys, cx, depth + 1, unclassified)
         }
         CtorSet::Unknown => {
-            // We don't know the type at this column at all (typically a
-            // constructor sub-position whose payload type we didn't
-            // track). Be conservative: any non-empty matrix counts as
-            // covering the universe — we can't honestly claim a
-            // specific witness on a type we couldn't classify.
+            // The column's type could not be classified. Which way to err is
+            // the caller's call — see `Unclassified`.
             if matrix.is_empty() {
                 return true;
             }
-            // Still recurse into the tail through the default matrix so
-            // multi-column matches with a known column further right
-            // still get checked. If the default is empty, treat as
-            // covered.
             let default = default_matrix(matrix);
             if default.is_empty() {
-                return false;
+                return unclassified == Unclassified::Uncovered;
             }
-            is_useful(&default, tail, tail_tys, cx, depth + 1)
+            is_useful(&default, tail, tail_tys, cx, depth + 1, unclassified)
         }
     }
 }
@@ -382,7 +402,7 @@ fn specialize_ctor(matrix: &[Row], name: &str, arity: usize) -> Vec<Row> {
                 out.push(Row { pats, arm_span: row.arm_span, has_guard: row.has_guard });
             }
             MatchPat::Ctor { name: n, args } if n == name => {
-                let mut row_args: Vec<MatchPat> = args.clone();
+                let mut row_args = constructor_args(args, arity).to_vec();
                 row_args.resize(arity, MatchPat::Wild);
                 row_args.extend_from_slice(&row.pats[1..]);
                 out.push(Row { pats: row_args, arm_span: row.arm_span, has_guard: row.has_guard });
@@ -400,6 +420,16 @@ fn specialize_ctor(matrix: &[Row], name: &str, arity: usize) -> Vec<Row> {
         }
     }
     out
+}
+
+fn constructor_args(args: &[MatchPat], arity: usize) -> &[MatchPat] {
+    // Both surface spellings denote the same constructor payload.
+    if let [MatchPat::Tuple(items)] = args {
+        if items.len() == arity {
+            return items;
+        }
+    }
+    args
 }
 
 /// Specialize for a Tuple pattern: rows with a tuple head get their
@@ -574,6 +604,10 @@ fn collect_witnesses(
     cx: &impl Cx,
     depth: usize,
 ) -> Vec<MatchPat> {
+    // Looking for missing arms: a column whose type could not be classified
+    // must count as covered, or every match on such a type is reported
+    // non-exhaustive.
+    let unclassified = Unclassified::Covered;
     if depth >= MATCH_CHECK_DEPTH_LIMIT {
         return Vec::new();
     }
@@ -608,7 +642,7 @@ fn collect_witnesses(
     if let MatchTy::List(elem_ty) = head_ty {
         let mut witnesses = Vec::new();
         let nil_specialized = specialize_nil(matrix);
-        if is_useful(&nil_specialized, tail, tail_tys, cx, depth + 1) {
+        if is_useful(&nil_specialized, tail, tail_tys, cx, depth + 1, unclassified) {
             witnesses.push(MatchPat::Nil);
         }
         let cons_specialized = specialize_cons(matrix);
@@ -618,7 +652,7 @@ fn collect_witnesses(
         full_pats.extend_from_slice(tail);
         let mut full_tys = cons_tys.clone();
         full_tys.extend_from_slice(tail_tys);
-        if is_useful(&cons_specialized, &full_pats, &full_tys, cx, depth + 1) {
+        if is_useful(&cons_specialized, &full_pats, &full_tys, cx, depth + 1, unclassified) {
             witnesses.push(MatchPat::Cons(Box::new(MatchPat::Wild), Box::new(MatchPat::Wild)));
         }
         return witnesses;
@@ -640,7 +674,7 @@ fn collect_witnesses(
         new_pats.extend_from_slice(tail);
         let mut new_tys: Vec<MatchTy> = field_entries.iter().map(|(_, t)| t.clone()).collect();
         new_tys.extend_from_slice(tail_tys);
-        if is_useful(&specialized, &new_pats, &new_tys, cx, depth + 1) {
+        if is_useful(&specialized, &new_pats, &new_tys, cx, depth + 1, unclassified) {
             return vec![MatchPat::Struct {
                 fields: field_names.into_iter().map(|n| (n, MatchPat::Wild)).collect(),
             }];
@@ -665,13 +699,35 @@ fn collect_witnesses(
                     v
                 };
                 let specialized = specialize_ctor(matrix, &info.name, info.arity);
-                if is_useful(&specialized, &new_pats, &new_tys, cx, depth + 1) {
-                    // This constructor is uncovered. Build a witness:
-                    // `Ctor(_, _, ..., _)` with `arity` wildcards.
-                    witnesses.push(MatchPat::Ctor {
-                        name: info.name.clone(),
-                        args: std::iter::repeat_n(MatchPat::Wild, info.arity).collect(),
-                    });
+                if is_useful(&specialized, &new_pats, &new_tys, cx, depth + 1, unclassified) {
+                    // This constructor is uncovered. Say *which* values of it
+                    // are, when the gap is inside one argument: reporting
+                    // `Some(_)` for `opt(opt(bool))` when only
+                    // `Some(Some(false))` is missing sends a reader looking
+                    // at arms that are already there.
+                    let sub_witnesses = if info.arity >= 1 {
+                        collect_witnesses(&specialized, &new_pats, &new_tys, cx, depth + 1)
+                    } else {
+                        Vec::new()
+                    };
+                    if sub_witnesses.is_empty() {
+                        witnesses.push(MatchPat::Ctor {
+                            name: info.name.clone(),
+                            args: std::iter::repeat_n(MatchPat::Wild, info.arity).collect(),
+                        });
+                    } else {
+                        // Each sub-witness names a missing value of the first
+                        // argument; the rest stay wild.
+                        for sub in sub_witnesses {
+                            let mut args = Vec::with_capacity(info.arity);
+                            args.push(sub);
+                            args.extend(std::iter::repeat_n(
+                                MatchPat::Wild,
+                                info.arity.saturating_sub(1),
+                            ));
+                            witnesses.push(MatchPat::Ctor { name: info.name.clone(), args });
+                        }
+                    }
                 }
             }
             witnesses

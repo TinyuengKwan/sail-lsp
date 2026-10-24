@@ -24,15 +24,12 @@
 //! - `HygieneFrame`: $include has no hygiene concerns
 
 pub mod analysis_scope;
-pub mod db;
 pub mod in_file;
 pub mod include_graph;
+pub mod preprocess;
 pub mod query;
 
 pub use analysis_scope::AnalysisScope;
-pub use db::ExpandDatabase;
 pub use in_file::{FilePosition, FileRange, InFile};
 pub use include_graph::IncludeGraph;
-pub use query::{
-    include_paths, typed_include_paths, ArcIncludeGraph, IncludePath, WorkspaceIncludeGraph,
-};
+pub use query::{include_paths, typed_include_paths, ArcIncludeGraph, IncludePath};

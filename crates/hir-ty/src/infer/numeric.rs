@@ -104,15 +104,7 @@ impl<'a> NumericTextParser<'a> {
             if matches!(&base, NumericExpr::Const(2)) {
                 Some(NumericExpr::Exp(Box::new(exp)))
             } else {
-                // Non-2 base: fall back to symbol
-                Some(NumericExpr::Symbol(format!(
-                    "{}^{:?}",
-                    match &base {
-                        NumericExpr::Const(n) => n.to_string(),
-                        _ => "?".to_string(),
-                    },
-                    exp
-                )))
+                None
             }
         } else {
             Some(base)
@@ -122,7 +114,11 @@ impl<'a> NumericTextParser<'a> {
     fn parse_unary(&mut self) -> Option<NumericExpr> {
         self.skip_ws();
         if self.consume_char('-') {
-            Some(NumericExpr::Neg(Box::new(self.parse_unary()?)))
+            Some(match self.parse_unary()? {
+                NumericExpr::Const(v) => NumericExpr::from_integer(-num_bigint::BigInt::from(v)),
+                NumericExpr::BigConst(v) => NumericExpr::from_integer(-v),
+                other => NumericExpr::Neg(Box::new(other)),
+            })
         } else {
             self.parse_primary()
         }
@@ -131,12 +127,27 @@ impl<'a> NumericTextParser<'a> {
     fn parse_primary(&mut self) -> Option<NumericExpr> {
         self.skip_ws();
         if self.consume_char('(') {
-            let expr = self.parse_add_sub()?;
+            let expr = self.parse_if_or_arith()?;
             self.skip_ws();
             self.consume_char(')').then_some(expr)
         } else {
             let token = self.consume_token()?;
-            parse_int_literal(&token).map(NumericExpr::Const).or_else(|| {
+            if self.consume_char('(') {
+                let mut args = Vec::new();
+                if !self.consume_char(')') {
+                    loop {
+                        args.push(self.parse_if_or_arith()?);
+                        if self.consume_char(')') {
+                            break;
+                        }
+                        if !self.consume_char(',') {
+                            return None;
+                        }
+                    }
+                }
+                return Some(NumericExpr::App { name: token, args });
+            }
+            NumericExpr::integer_literal(&token).or_else(|| {
                 Some(if token.starts_with('\'') {
                     NumericExpr::Var(token)
                 } else {
@@ -151,7 +162,7 @@ impl<'a> NumericTextParser<'a> {
         let rest = &self.input[self.pos..];
         let mut len = 0;
         for ch in rest.chars() {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '\'' | '#') {
+            if ch.is_alphanumeric() || matches!(ch, '_' | '\'' | '#') {
                 len += ch.len_utf8();
             } else {
                 break;
@@ -212,13 +223,14 @@ impl<'a> NumericTextParser<'a> {
     fn consume_until_keyword(&mut self, kw: &str) -> Option<String> {
         self.skip_ws();
         let start = self.pos;
+        let mut depth = 0usize;
         loop {
             if self.pos >= self.input.len() {
                 return None;
             }
             let rest = &self.input[self.pos..];
             // Check if keyword appears at word boundary
-            if rest.starts_with(kw) {
+            if depth == 0 && rest.starts_with(kw) {
                 let after = self.pos + kw.len();
                 let at_boundary = after >= self.input.len()
                     || !self.input.as_bytes()[after].is_ascii_alphanumeric()
@@ -234,12 +246,18 @@ impl<'a> NumericTextParser<'a> {
                     return Some(text);
                 }
             }
-            self.pos += 1;
+            let ch = self.input[self.pos..].chars().next()?;
+            match ch {
+                '(' | '[' | '{' => depth += 1,
+                ')' | ']' | '}' => depth = depth.checked_sub(1)?,
+                _ => {}
+            }
+            self.pos += ch.len_utf8();
         }
     }
 }
 
-pub(super) fn parse_numeric_expr_text(text: &str) -> Option<NumericExpr> {
+pub(crate) fn parse_numeric_expr_text(text: &str) -> Option<NumericExpr> {
     NumericTextParser::new(text).parse()
 }
 
@@ -251,66 +269,12 @@ pub(super) fn negate_constraint(expr: ConstraintExpr) -> ConstraintExpr {
     }
 }
 
-/// Parse a constraint from expression source text (e.g. `x == 8`).
-/// Handles the common comparison patterns without requiring a full
-/// core_ast parse.
+/// Source predicates use the same numeric AST as signatures. In particular,
+/// a bare configuration name is a Symbol, while `'n` is a quantified Var;
+/// separate parsers must not give one name two different SMT identities.
 pub(super) fn constraint_expr_from_expr_text(text: &str) -> Option<ConstraintExpr> {
-    let text = text.trim();
-    // Handle `a == b`, `a != b`, `a < b`, etc.
-    for (op_str, op) in &[
-        ("==", CompareOp::Eq),
-        ("!=", CompareOp::Neq),
-        ("<=", CompareOp::Lte),
-        (">=", CompareOp::Gte),
-        ("<", CompareOp::Lt),
-        (">", CompareOp::Gt),
-    ] {
-        if let Some(pos) = text.find(op_str) {
-            let lhs_text = text[..pos].trim();
-            let rhs_text = text[pos + op_str.len()..].trim();
-            let lhs = numeric_expr_from_text(lhs_text)?;
-            let rhs = numeric_expr_from_text(rhs_text)?;
-            return Some(ConstraintExpr::Compare { lhs, op: *op, rhs });
-        }
-    }
-    // Handle `x in {a, b, c}` — set membership constraint
-    // Handle `x in {a, b, c}` — set membership constraint
-    if let Some(in_pos) = text.find(" in ") {
-        let var_text = text[..in_pos].trim();
-        let set_text = text[in_pos + 4..].trim();
-        if let Some(value) = numeric_expr_from_text(var_text) {
-            let inner = set_text.trim_start_matches('{').trim_end_matches('}');
-            let items: Vec<NumericExpr> =
-                inner.split(',').filter_map(|s| numeric_expr_from_text(s.trim())).collect();
-            if !items.is_empty() {
-                return Some(ConstraintExpr::InSet { value, items });
-            }
-        }
-    }
-    // Handle `true` / `false`
-    if text == "true" {
-        return Some(ConstraintExpr::Bool(true));
-    }
-    if text == "false" {
-        return Some(ConstraintExpr::Bool(false));
-    }
-    None
-}
-
-fn numeric_expr_from_text(text: &str) -> Option<NumericExpr> {
-    let text = text.trim();
-    if text.is_empty() {
-        return None;
-    }
-    // Try as integer
-    if let Ok(n) = text.parse::<i64>() {
-        return Some(NumericExpr::Const(n));
-    }
-    // Identifier (variable)
-    if text.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '\'') {
-        return Some(NumericExpr::Var(text.to_string()));
-    }
-    None
+    let parsed = super::parse_constraint_text(text.trim());
+    (!matches!(parsed, ConstraintExpr::Unsupported)).then_some(parsed)
 }
 
 fn numeric_expr_collect_vars(expr: &NumericExpr, out: &mut HashSet<String>) {
@@ -329,7 +293,7 @@ fn numeric_expr_collect_vars(expr: &NumericExpr, out: &mut HashSet<String>) {
             numeric_expr_collect_vars(lhs, out);
             numeric_expr_collect_vars(rhs, out);
         }
-        NumericExpr::Const(_) | NumericExpr::Symbol(_) => {}
+        NumericExpr::Const(_) | NumericExpr::BigConst(_) | NumericExpr::Symbol(_) => {}
         NumericExpr::App { args, .. } => {
             for a in args {
                 numeric_expr_collect_vars(a, out);
@@ -356,7 +320,7 @@ fn numeric_symbol_assumption(
     for assumption in assumptions {
         match assumption {
             ConstraintExpr::Compare {
-                lhs: NumericExpr::Symbol(symbol),
+                lhs: NumericExpr::Symbol(symbol) | NumericExpr::Var(symbol),
                 op: CompareOp::Eq,
                 rhs,
             } if symbol == name => {
@@ -370,7 +334,7 @@ fn numeric_symbol_assumption(
             ConstraintExpr::Compare {
                 lhs,
                 op: CompareOp::Eq,
-                rhs: NumericExpr::Symbol(symbol),
+                rhs: NumericExpr::Symbol(symbol) | NumericExpr::Var(symbol),
             } if symbol == name => {
                 if let Some(value) =
                     eval_numeric_expr_with_assumptions(lhs, subst, assumptions, visited)
@@ -379,9 +343,10 @@ fn numeric_symbol_assumption(
                     return Some(value);
                 }
             }
-            ConstraintExpr::InSet { value: NumericExpr::Symbol(symbol), items }
-                if symbol == name && items.len() == 1 =>
-            {
+            ConstraintExpr::InSet {
+                value: NumericExpr::Symbol(symbol) | NumericExpr::Var(symbol),
+                items,
+            } if symbol == name && items.len() == 1 => {
                 if let Some(value) =
                     eval_numeric_expr_with_assumptions(&items[0], subst, assumptions, visited)
                 {
@@ -418,60 +383,141 @@ fn eval_numeric_expr_with_assumptions(
 
     match expr {
         NumericExpr::Const(value) => Some(*value),
-        NumericExpr::Var(name) => numeric_var_expr(name, subst).and_then(|expr| {
-            eval_numeric_expr_with_assumptions(&expr, subst, assumptions, visited)
-        }),
+        NumericExpr::BigConst(value) => num_traits::ToPrimitive::to_i64(value),
+        NumericExpr::Var(name) => {
+            if !visited.insert(name.clone()) {
+                return None;
+            }
+            let result = numeric_var_expr(name, subst).and_then(|expr| {
+                eval_numeric_expr_with_assumptions(&expr, subst, assumptions, visited)
+            });
+            visited.remove(name);
+            result.or_else(|| numeric_symbol_assumption(name, subst, assumptions, visited))
+        }
         NumericExpr::Symbol(name) => parse_int_literal(name)
             .or_else(|| numeric_symbol_assumption(name, subst, assumptions, visited)),
         NumericExpr::Neg(inner) => {
-            Some(-eval_numeric_expr_with_assumptions(inner, subst, assumptions, visited)?)
+            eval_numeric_expr_with_assumptions(inner, subst, assumptions, visited)?.checked_neg()
         }
-        NumericExpr::Add(lhs, rhs) => Some(
+        NumericExpr::Add(lhs, rhs) => {
             eval_numeric_expr_with_assumptions(lhs, subst, assumptions, visited)?
-                + eval_numeric_expr_with_assumptions(rhs, subst, assumptions, visited)?,
-        ),
-        NumericExpr::Sub(lhs, rhs) => Some(
+                .checked_add(eval_numeric_expr_with_assumptions(rhs, subst, assumptions, visited)?)
+        }
+        NumericExpr::Sub(lhs, rhs) => {
             eval_numeric_expr_with_assumptions(lhs, subst, assumptions, visited)?
-                - eval_numeric_expr_with_assumptions(rhs, subst, assumptions, visited)?,
-        ),
-        NumericExpr::Mul(lhs, rhs) => Some(
+                .checked_sub(eval_numeric_expr_with_assumptions(rhs, subst, assumptions, visited)?)
+        }
+        NumericExpr::Mul(lhs, rhs) => {
             eval_numeric_expr_with_assumptions(lhs, subst, assumptions, visited)?
-                * eval_numeric_expr_with_assumptions(rhs, subst, assumptions, visited)?,
-        ),
+                .checked_mul(eval_numeric_expr_with_assumptions(rhs, subst, assumptions, visited)?)
+        }
         NumericExpr::Div(lhs, rhs) => {
             let rhs = eval_numeric_expr_with_assumptions(rhs, subst, assumptions, visited)?;
-            (rhs != 0).then_some(
-                eval_numeric_expr_with_assumptions(lhs, subst, assumptions, visited)? / rhs,
-            )
+            eval_numeric_expr_with_assumptions(lhs, subst, assumptions, visited)?
+                .checked_div_euclid(rhs)
         }
         NumericExpr::Mod(lhs, rhs) => {
             let rhs = eval_numeric_expr_with_assumptions(rhs, subst, assumptions, visited)?;
-            (rhs != 0).then_some(
-                eval_numeric_expr_with_assumptions(lhs, subst, assumptions, visited)? % rhs,
-            )
+            eval_numeric_expr_with_assumptions(lhs, subst, assumptions, visited)?
+                .checked_rem_euclid(rhs)
         }
         NumericExpr::Exp(inner) => {
             // 2^n: evaluate inner, then compute 2^n via bit shift.
             // Mirrors Nexp::Exp::eval in nexp.rs:119-126.
             let n = eval_numeric_expr_with_assumptions(inner, subst, assumptions, visited)?;
-            if (0..=63).contains(&n) {
+            if (0..63).contains(&n) {
                 Some(1i64 << n)
             } else {
                 None // overflow guard
             }
         }
         NumericExpr::App { .. } => None, // opaque application — not evaluable
-        NumericExpr::If { cond: _, then_expr, else_expr } => {
-            // We cannot reliably evaluate the string condition here.
-            // If both branches yield the same value, return it; otherwise None.
-            let t = eval_numeric_expr_with_assumptions(then_expr, subst, assumptions, visited)?;
-            let e = eval_numeric_expr_with_assumptions(else_expr, subst, assumptions, visited)?;
-            if t == e {
-                Some(t)
-            } else {
-                None
+        NumericExpr::If { cond, then_expr, else_expr } => {
+            match eval_condition(cond, subst, assumptions, visited) {
+                Some(true) => {
+                    eval_numeric_expr_with_assumptions(then_expr, subst, assumptions, visited)
+                }
+                Some(false) => {
+                    eval_numeric_expr_with_assumptions(else_expr, subst, assumptions, visited)
+                }
+                None => {
+                    let t =
+                        eval_numeric_expr_with_assumptions(then_expr, subst, assumptions, visited)?;
+                    let e =
+                        eval_numeric_expr_with_assumptions(else_expr, subst, assumptions, visited)?;
+                    (t == e).then_some(t)
+                }
             }
         }
+    }
+}
+
+/// Evaluate a conditional with the same cycle guard as its numeric operands.
+/// This never invokes SMT or starts a second numeric evaluation context.
+fn eval_condition(
+    c: &ConstraintExpr,
+    subst: &Subst,
+    assumptions: &[ConstraintExpr],
+    visited: &mut HashSet<String>,
+) -> Option<bool> {
+    if assumptions.iter().any(|a| a == c) {
+        return Some(true);
+    }
+    if assumptions.iter().any(|a| matches!(a, ConstraintExpr::Not(inner) if inner.as_ref() == c)) {
+        return Some(false);
+    }
+    match c {
+        ConstraintExpr::Bool(b) => Some(*b),
+        ConstraintExpr::BoolVar(name) => {
+            let key = format!("bool:{name}");
+            if !visited.insert(key.clone()) {
+                return None;
+            }
+            let value = subst.values.get(name).map(|s| parse_constraint_text(s));
+            let result = value.and_then(|c| eval_condition(&c, subst, assumptions, visited));
+            visited.remove(&key);
+            result
+        }
+        ConstraintExpr::Compare { lhs, op, rhs } => {
+            let lhs = eval_numeric_expr_with_assumptions(lhs, subst, assumptions, visited)?;
+            let rhs = eval_numeric_expr_with_assumptions(rhs, subst, assumptions, visited)?;
+            Some(match op {
+                CompareOp::Eq => lhs == rhs,
+                CompareOp::Neq => lhs != rhs,
+                CompareOp::Lt => lhs < rhs,
+                CompareOp::Lte => lhs <= rhs,
+                CompareOp::Gt => lhs > rhs,
+                CompareOp::Gte => lhs >= rhs,
+            })
+        }
+        ConstraintExpr::Not(inner) => {
+            eval_condition(inner, subst, assumptions, visited).map(|b| !b)
+        }
+        ConstraintExpr::And(xs) | ConstraintExpr::Or(xs) => {
+            let conjunction = matches!(c, ConstraintExpr::And(_));
+            let mut unknown = false;
+            for x in xs {
+                match eval_condition(x, subst, assumptions, visited) {
+                    Some(b) if b != conjunction => return Some(b),
+                    None => unknown = true,
+                    _ => {}
+                }
+            }
+            (!unknown).then_some(conjunction)
+        }
+        ConstraintExpr::InSet { value, items } => {
+            let value = eval_numeric_expr_with_assumptions(value, subst, assumptions, visited)?;
+            let mut unknown = false;
+            for item in items {
+                match eval_numeric_expr_with_assumptions(item, subst, assumptions, visited) {
+                    Some(n) if n == value => return Some(true),
+                    None => unknown = true,
+                    _ => {}
+                }
+            }
+            (!unknown).then_some(false)
+        }
+        _ => None,
     }
 }
 
@@ -480,7 +526,12 @@ pub(super) fn eval_numeric_expr(
     subst: &Subst,
     assumptions: &[ConstraintExpr],
 ) -> Option<i64> {
-    eval_numeric_expr_with_assumptions(expr, subst, assumptions, &mut HashSet::new())
+    eval_numeric_expr_with_assumptions(expr, subst, assumptions, &mut HashSet::new()).or_else(
+        || {
+            super::integer::eval(expr, subst, assumptions)
+                .and_then(|n| num_traits::ToPrimitive::to_i64(&n))
+        },
+    )
 }
 
 fn linear_numeric_expr(
@@ -489,8 +540,21 @@ fn linear_numeric_expr(
     subst: &Subst,
     assumptions: &[ConstraintExpr],
 ) -> Option<(i64, i64)> {
+    linear_numeric_expr_inner(expr, target, subst, assumptions, 0)
+}
+fn linear_numeric_expr_inner(
+    expr: &NumericExpr,
+    target: &str,
+    subst: &Subst,
+    assumptions: &[ConstraintExpr],
+    depth: usize,
+) -> Option<(i64, i64)> {
+    if depth > 64 {
+        return None;
+    }
     match expr {
         NumericExpr::Const(value) => Some((0, *value)),
+        NumericExpr::BigConst(value) => num_traits::ToPrimitive::to_i64(value).map(|n| (0, n)),
         NumericExpr::Var(name) if name == target => Some((1, 0)),
         NumericExpr::Var(name) => subst
             .values
@@ -502,42 +566,52 @@ fn linear_numeric_expr(
                     parse_numeric_expr_text(&text)
                 })
             })
-            .and_then(|expr| linear_numeric_expr(&expr, target, subst, assumptions)),
+            .and_then(|expr| {
+                linear_numeric_expr_inner(&expr, target, subst, assumptions, depth + 1)
+            }),
         NumericExpr::Symbol(name) => {
             eval_numeric_expr(&NumericExpr::Symbol(name.clone()), subst, assumptions)
                 .map(|value| (0, value))
         }
         NumericExpr::Neg(inner) => {
-            let (coeff, constant) = linear_numeric_expr(inner, target, subst, assumptions)?;
-            Some((-coeff, -constant))
+            let (coeff, constant) =
+                linear_numeric_expr_inner(inner, target, subst, assumptions, depth + 1)?;
+            Some((coeff.checked_neg()?, constant.checked_neg()?))
         }
         NumericExpr::Add(lhs, rhs) => {
-            let (left_coeff, left_const) = linear_numeric_expr(lhs, target, subst, assumptions)?;
-            let (right_coeff, right_const) = linear_numeric_expr(rhs, target, subst, assumptions)?;
-            Some((left_coeff + right_coeff, left_const + right_const))
+            let (left_coeff, left_const) =
+                linear_numeric_expr_inner(lhs, target, subst, assumptions, depth + 1)?;
+            let (right_coeff, right_const) =
+                linear_numeric_expr_inner(rhs, target, subst, assumptions, depth + 1)?;
+            Some((left_coeff.checked_add(right_coeff)?, left_const.checked_add(right_const)?))
         }
         NumericExpr::Sub(lhs, rhs) => {
-            let (left_coeff, left_const) = linear_numeric_expr(lhs, target, subst, assumptions)?;
-            let (right_coeff, right_const) = linear_numeric_expr(rhs, target, subst, assumptions)?;
-            Some((left_coeff - right_coeff, left_const - right_const))
+            let (left_coeff, left_const) =
+                linear_numeric_expr_inner(lhs, target, subst, assumptions, depth + 1)?;
+            let (right_coeff, right_const) =
+                linear_numeric_expr_inner(rhs, target, subst, assumptions, depth + 1)?;
+            Some((left_coeff.checked_sub(right_coeff)?, left_const.checked_sub(right_const)?))
         }
         NumericExpr::Mul(lhs, rhs) => match (
-            linear_numeric_expr(lhs, target, subst, assumptions),
-            linear_numeric_expr(rhs, target, subst, assumptions),
+            linear_numeric_expr_inner(lhs, target, subst, assumptions, depth + 1),
+            linear_numeric_expr_inner(rhs, target, subst, assumptions, depth + 1),
         ) {
             (Some((0, left_const)), Some((right_coeff, right_const))) => {
-                Some((left_const * right_coeff, left_const * right_const))
+                Some((left_const.checked_mul(right_coeff)?, left_const.checked_mul(right_const)?))
             }
             (Some((left_coeff, left_const)), Some((0, right_const))) => {
-                Some((left_coeff * right_const, left_const * right_const))
+                Some((left_coeff.checked_mul(right_const)?, left_const.checked_mul(right_const)?))
             }
             _ => None,
         },
         NumericExpr::Div(lhs, rhs) => {
-            let (left_coeff, left_const) = linear_numeric_expr(lhs, target, subst, assumptions)?;
+            let (left_coeff, left_const) =
+                linear_numeric_expr_inner(lhs, target, subst, assumptions, depth + 1)?;
             let rhs = eval_numeric_expr(rhs, subst, assumptions)?;
-            (rhs != 0 && left_coeff % rhs == 0 && left_const % rhs == 0)
-                .then_some((left_coeff / rhs, left_const / rhs))
+            if left_coeff.checked_rem(rhs)? != 0 || left_const.checked_rem(rhs)? != 0 {
+                return None;
+            }
+            Some((left_coeff.checked_div(rhs)?, left_const.checked_div(rhs)?))
         }
         NumericExpr::Mod(_, _)
         | NumericExpr::Exp(_)
@@ -557,7 +631,8 @@ pub(super) fn app_text(name: &str, args: &[TyArg]) -> String {
                 .map(|arg| match arg {
                     TyArg::Type(ty) => ty.display_text(),
                     TyArg::Nexp(n) => n.to_string_repr(),
-                    TyArg::Value(value) => value.clone(),
+                    TyArg::Bool(c) => c.to_text(),
+                    TyArg::Order(value) | TyArg::Value(value) => value.clone(),
                 })
                 .collect::<Vec<_>>()
                 .join(", ")
@@ -574,7 +649,7 @@ pub(super) fn ty_contains_var(ty: &Ty, name: &str) -> bool {
         TyKind::Error
         | TyKind::Infer(crate::ty::InferTy(_))
         | TyKind::Scalar(_)
-        | TyKind::Adt(_, _) => false,
+        | TyKind::Named(_, _) => false,
         TyKind::Param(var) => var == name,
         TyKind::Tuple(items) => items.iter().any(|item| ty_contains_var(item, name)),
         TyKind::FnPtr(crate::ty::FnSig { params, ret }) => {
@@ -582,7 +657,7 @@ pub(super) fn ty_contains_var(ty: &Ty, name: &str) -> bool {
         }
         TyKind::App { args, .. } => args.iter().any(|arg| match arg {
             TyArg::Type(ty) => ty_contains_var(ty, name),
-            TyArg::Nexp(_) | TyArg::Value(_) => false,
+            TyArg::Nexp(_) | TyArg::Bool(_) | TyArg::Order(_) | TyArg::Value(_) => false,
         }),
         TyKind::Exist { vars, inner, .. } => {
             // If the name is bound by the existential, it's not free
@@ -596,11 +671,92 @@ pub(super) fn ty_contains_var(ty: &Ty, name: &str) -> bool {
     }
 }
 
+/// Equality can bind inference parameters, but a failed/unknown attempt never
+/// leaks partial substitutions. Callers needing recovery retain the goal.
+pub(super) fn numeric_equality(
+    expected: &NumericExpr,
+    actual: &NumericExpr,
+    subst: &mut Subst,
+    assumptions: &[ConstraintExpr],
+) -> ConstraintStatus {
+    let status = numeric_equality_without_binding(expected, actual, subst, assumptions);
+    if status != ConstraintStatus::Unknown {
+        return status;
+    }
+    if matches!(expected, NumericExpr::If { .. }) || matches!(actual, NumericExpr::If { .. }) {
+        return status;
+    }
+    let mut candidate = subst.clone();
+    if bind_numeric_equality(expected, actual, &mut candidate) {
+        *subst = candidate;
+        ConstraintStatus::Satisfied
+    } else {
+        ConstraintStatus::Unknown
+    }
+}
+
+/// Equality of rigid expressions must never solve a free variable by binding it.
+pub(super) fn numeric_equality_without_binding(
+    expected: &NumericExpr,
+    actual: &NumericExpr,
+    subst: &Subst,
+    assumptions: &[ConstraintExpr],
+) -> ConstraintStatus {
+    if super::integer::contradictory(assumptions, subst) {
+        return ConstraintStatus::Satisfied;
+    }
+    if expected == actual {
+        return ConstraintStatus::Satisfied;
+    }
+    for (conditional, other) in [(expected, actual), (actual, expected)] {
+        if let NumericExpr::If { cond, then_expr, else_expr } = conditional {
+            if let Some(value) = eval_condition(cond, subst, assumptions, &mut HashSet::new()) {
+                return numeric_equality_without_binding(
+                    if value { then_expr } else { else_expr },
+                    other,
+                    subst,
+                    assumptions,
+                );
+            }
+            let a = numeric_equality_without_binding(then_expr, other, subst, assumptions);
+            let b = numeric_equality_without_binding(else_expr, other, subst, assumptions);
+            return if a == b { a } else { ConstraintStatus::Unknown };
+        }
+    }
+    for (expression, constant) in [(expected, actual), (actual, expected)] {
+        let expression = subst_numeric_expr(expression, subst);
+        if let Some(value) = eval_numeric_expr(constant, subst, assumptions) {
+            if let Some(Err(())) = super::nexp_simplify::solve_linear(&expression, value) {
+                return ConstraintStatus::Failed;
+            }
+        }
+    }
+    let e = subst_numeric_expr(expected, subst);
+    let a = subst_numeric_expr(actual, subst);
+    if let Some(delta) = super::integer::difference(&e, &a) {
+        return if num_traits::Zero::is_zero(&delta) {
+            ConstraintStatus::Satisfied
+        } else {
+            ConstraintStatus::Failed
+        };
+    }
+    if matches!(super::integer::witness(&e, &a), Some(Err(()))) {
+        return ConstraintStatus::Failed;
+    }
+    let goal =
+        ConstraintExpr::Compare { lhs: expected.clone(), op: CompareOp::Eq, rhs: actual.clone() };
+    super::solver::solve_without_smt(&goal, subst, assumptions)
+}
+
 pub(super) fn unify_numeric_expr(
     expected: &NumericExpr,
     actual: &NumericExpr,
     subst: &mut Subst,
 ) -> bool {
+    numeric_equality(expected, actual, subst, &[]) == ConstraintStatus::Satisfied
+}
+
+fn bind_numeric_equality(expected: &NumericExpr, actual: &NumericExpr, subst: &mut Subst) -> bool {
     if let (Some(expected), Some(actual)) =
         (eval_numeric_expr(expected, subst, &[]), eval_numeric_expr(actual, subst, &[]))
     {
@@ -624,6 +780,20 @@ pub(super) fn unify_numeric_expr(
         }
     }
 
+    if let NumericExpr::Var(name) = expected {
+        if !name.starts_with("'_sk")
+            && !subst.values.contains_key(name)
+            && !subst.types.contains_key(name)
+        {
+            let mut free = HashSet::new();
+            numeric_expr_collect_vars(actual, &mut free);
+            if !free.contains(name) {
+                subst.values.insert(name.clone(), actual.to_string_repr());
+                return true;
+            }
+        }
+    }
+
     // Try linear solving from expected side
     let mut unresolved = HashSet::new();
     numeric_expr_collect_vars(expected, &mut unresolved);
@@ -632,50 +802,35 @@ pub(super) fn unify_numeric_expr(
         let variable = unresolved.into_iter().next().expect("single unresolved variable");
         if let Some(actual_value) = eval_numeric_expr(actual, subst, &[]) {
             if let Some((coeff, constant)) = linear_numeric_expr(expected, &variable, subst, &[]) {
-                let delta = actual_value - constant;
-                if coeff != 0 && delta % coeff == 0 {
-                    subst.values.insert(variable, (delta / coeff).to_string());
-                    return true;
+                if let Some(delta) = actual_value.checked_sub(constant) {
+                    if coeff != 0 && delta.checked_rem(coeff) == Some(0) {
+                        if let Some(value) = delta.checked_div(coeff) {
+                            subst.values.insert(variable, value.to_string());
+                            return true;
+                        }
+                    }
                 }
             }
         }
     }
 
-    // Symmetric: try linear solving from actual side
-    let mut unresolved_actual = HashSet::new();
-    numeric_expr_collect_vars(actual, &mut unresolved_actual);
-    unresolved_actual
-        .retain(|name| !subst.values.contains_key(name) && !subst.types.contains_key(name));
-    if unresolved_actual.len() == 1 {
-        let variable = unresolved_actual.into_iter().next().expect("single unresolved variable");
-        if let Some(expected_value) = eval_numeric_expr(expected, subst, &[]) {
-            if let Some((coeff, constant)) = linear_numeric_expr(actual, &variable, subst, &[]) {
-                let delta = expected_value - constant;
-                if coeff != 0 && delta % coeff == 0 {
-                    subst.values.insert(variable, (delta / coeff).to_string());
-                    return true;
-                }
-            }
-        }
-    }
-
-    // Structural unification for If-then-else: conditions must match
-    // textually and both branches must unify.
-    if let (
-        NumericExpr::If { cond: c1, then_expr: t1, else_expr: e1 },
-        NumericExpr::If { cond: c2, then_expr: t2, else_expr: e2 },
-    ) = (expected, actual)
-    {
-        // Compare conditions structurally (via PartialEq) or textually as fallback.
-        if c1 == c2 || normalized_value_text(&c1.to_text()) == normalized_value_text(&c2.to_text())
+    if let Some(Ok((variable, value))) = super::integer::witness(&expected_subst, &actual_subst) {
+        let mut free = HashSet::new();
+        numeric_expr_collect_vars(expected, &mut free);
+        if free.contains(&variable)
+            && !variable.starts_with("'_sk")
+            && !subst.values.contains_key(&variable)
+            && !subst.types.contains_key(&variable)
         {
-            return unify_numeric_expr(t1, t2, subst) && unify_numeric_expr(e1, e2, subst);
+            subst.values.insert(variable, value.to_string());
+            return true;
         }
     }
-    // If one side is If and the other is not, be permissive:
-    // the LSP can't evaluate the condition without full constraint context.
+
+    // Branch-dependent equations cannot bind a variable unconditionally.
+    // Their equality is decided by the contextual solver or retained as Unknown.
     if matches!(expected, NumericExpr::If { .. }) || matches!(actual, NumericExpr::If { .. }) {
-        return true;
+        return expected_subst == actual_subst;
     }
 
     // Z3 fallback for non-polynomial expressions (div, mod, exp).
@@ -708,9 +863,13 @@ pub(super) fn unify_numeric_expr(
 /// Check if a numeric expression contains operations that
 /// can't be represented in polynomial form (division, modulo,
 /// exponentiation with non-constant exponent).
+#[cfg(any(feature = "z3-solver", test))]
 pub(super) fn contains_non_polynomial(expr: &NumericExpr) -> bool {
     match expr {
-        NumericExpr::Const(_) | NumericExpr::Var(_) | NumericExpr::Symbol(_) => false,
+        NumericExpr::Const(_)
+        | NumericExpr::BigConst(_)
+        | NumericExpr::Var(_)
+        | NumericExpr::Symbol(_) => false,
         NumericExpr::Neg(inner) => contains_non_polynomial(inner),
         NumericExpr::Add(lhs, rhs) | NumericExpr::Sub(lhs, rhs) | NumericExpr::Mul(lhs, rhs) => {
             contains_non_polynomial(lhs) || contains_non_polynomial(rhs)

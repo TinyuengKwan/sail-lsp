@@ -23,7 +23,8 @@ pub use crate::anchored_path::{AnchoredPath, AnchoredPathBuf};
 pub use crate::vfs_path::VfsPath;
 pub use paths::{AbsPath, AbsPathBuf};
 
-/// Opaque handle to a file in the VFS.
+/// File handle. The high bit is reserved for semantic include instances;
+/// only physical handles may be passed to the VFS.
 #[derive(Copy, Clone, Debug, Ord, PartialOrd, Eq, PartialEq, Hash)]
 pub struct FileId(u32);
 
@@ -33,6 +34,16 @@ impl FileId {
     pub const fn from_raw(raw: u32) -> FileId {
         assert!(raw <= Self::MAX);
         FileId(raw)
+    }
+
+    /// A semantic view, never interned as a VFS path or assigned a URL.
+    pub const fn for_instance(index: u32) -> FileId {
+        assert!(index <= Self::MAX);
+        FileId(index | 0x8000_0000)
+    }
+
+    pub const fn is_instance(self) -> bool {
+        self.0 & 0x8000_0000 != 0
     }
 
     pub const fn index(self) -> u32 {

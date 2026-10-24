@@ -1,6 +1,6 @@
 #![cfg(feature = "z3-solver")]
 //! Z3-backed second-chance solver for numeric constraints. Behind the
-//! `z3-solver` cargo feature so the default build stays Z3-free.
+//! `z3-solver` cargo feature (enabled by default; optional without default features).
 //!
 //! This module lives as a submodule of `typecheck` (included via
 //! `#[path = "typecheck_z3.rs"] mod typecheck_z3;`) so it has direct
@@ -10,7 +10,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, OnceLock};
 
-use z3::ast::{Bool, Int};
+use z3::ast::{Ast, Bool, Int};
 use z3::SatResult;
 
 use super::{
@@ -25,10 +25,14 @@ pub static Z3_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
 pub static Z3_CACHE_MISSES: AtomicU64 = AtomicU64::new(0);
 
 const Z3_CACHE_CAPACITY: usize = 4096;
-const Z3_QUERY_TIMEOUT_MS: u32 = 1000;
 
 #[derive(Hash, PartialEq, Eq, Clone)]
-struct Z3CacheKey(String);
+struct Z3CacheKey {
+    goal: ConstraintExpr,
+    assumptions: Vec<ConstraintExpr>,
+    values: Vec<(String, String)>,
+    types: Vec<(String, super::Ty)>,
+}
 
 struct Z3Cache {
     map: HashMap<Z3CacheKey, ConstraintStatus>,
@@ -68,12 +72,82 @@ fn cache_insert(key: Z3CacheKey, status: ConstraintStatus) {
 }
 
 /// Try to decide `expr` using Z3 with exponential fallback.
+/// Refute a universally quantified goal using an exact SMT translation.
+/// Opaque functions and approximated powers cannot supply counterexamples.
+pub(super) fn try_prove_quantified(
+    expr: &ConstraintExpr,
+    subst: &Subst,
+    assumptions: &[ConstraintExpr],
+) -> ConstraintStatus {
+    let _budget = crate::solver_budget::SolverBudget::enter(
+        crate::CancellationToken::never(),
+        Default::default(),
+    );
+    fn exact_numeric(e: &NumericExpr) -> bool {
+        match e {
+            NumericExpr::App { .. } | NumericExpr::Exp(_) => false,
+            NumericExpr::Neg(x) => exact_numeric(x),
+            NumericExpr::Add(a, b) | NumericExpr::Sub(a, b) | NumericExpr::Mul(a, b) => {
+                exact_numeric(a) && exact_numeric(b)
+            }
+            NumericExpr::Div(a, b) | NumericExpr::Mod(a, b) => {
+                exact_numeric(a) && matches!(b.as_ref(), NumericExpr::Const(n) if *n != 0)
+            }
+            NumericExpr::If { cond, then_expr, else_expr } => {
+                exact(cond) && exact_numeric(then_expr) && exact_numeric(else_expr)
+            }
+            _ => true,
+        }
+    }
+    fn exact(c: &ConstraintExpr) -> bool {
+        match c {
+            ConstraintExpr::Unsupported | ConstraintExpr::App { .. } => false,
+            ConstraintExpr::Compare { lhs, rhs, .. } => exact_numeric(lhs) && exact_numeric(rhs),
+            ConstraintExpr::InSet { value, items } => {
+                exact_numeric(value) && items.iter().all(exact_numeric)
+            }
+            ConstraintExpr::And(xs) | ConstraintExpr::Or(xs) => xs.iter().all(exact),
+            ConstraintExpr::Not(x) => exact(x),
+            _ => true,
+        }
+    }
+    let expr = super::constraint::apply_subst_constraint_expr(expr, subst);
+    let assumptions: Vec<_> = assumptions
+        .iter()
+        .map(|a| super::constraint::apply_subst_constraint_expr(a, subst))
+        .collect();
+    if !exact(&expr) || !assumptions.iter().all(exact) {
+        return ConstraintStatus::Unknown;
+    }
+    let mut env = HashMap::new();
+    let solver = z3::Solver::new();
+    for a in &assumptions {
+        let Some(a) = translate_constraint(a, &Subst::default(), &mut env) else {
+            return ConstraintStatus::Unknown;
+        };
+        solver.assert(a);
+    }
+    let Some(goal) = translate_constraint(&expr, &Subst::default(), &mut env) else {
+        return ConstraintStatus::Unknown;
+    };
+    solver.assert(goal.not());
+    match check_solver(&solver) {
+        SatResult::Unsat => ConstraintStatus::Satisfied,
+        SatResult::Sat => ConstraintStatus::Failed,
+        SatResult::Unknown => ConstraintStatus::Unknown,
+    }
+}
+
 pub fn try_solve(
     expr: &ConstraintExpr,
     subst: &Subst,
     assumptions: &[ConstraintExpr],
 ) -> ConstraintStatus {
-    if contains_unsupported(expr) {
+    let _budget = crate::solver_budget::SolverBudget::enter(
+        crate::CancellationToken::never(),
+        Default::default(),
+    );
+    if contains_unsupported(expr) || super::solver::has_erased_inputs(expr, subst, assumptions) {
         return ConstraintStatus::Unknown;
     }
     for assumption in assumptions {
@@ -82,7 +156,7 @@ pub fn try_solve(
         }
     }
 
-    let key = Z3CacheKey(build_cache_key(expr, subst, assumptions));
+    let key = build_cache_key(expr, subst, assumptions);
     if let Some(cached) = cache_lookup(&key) {
         Z3_CACHE_HITS.fetch_add(1, Ordering::Relaxed);
         return cached;
@@ -126,7 +200,11 @@ fn contains_exp_constraint(expr: &ConstraintExpr) -> bool {
             items.iter().any(contains_exp_constraint)
         }
         ConstraintExpr::Not(inner) => contains_exp_constraint(inner),
-        ConstraintExpr::App { args, .. } => args.iter().any(contains_exp_constraint),
+        ConstraintExpr::App { args, .. } => args.iter().any(|a| match a {
+            crate::ty::TyArg::Bool(c) => contains_exp_constraint(c),
+            crate::ty::TyArg::Nexp(n) => contains_exp_numeric(n),
+            _ => false,
+        }),
         ConstraintExpr::BoolVar(_) => false,
     }
 }
@@ -135,7 +213,10 @@ fn contains_exp_constraint(expr: &ConstraintExpr) -> bool {
 fn contains_exp_numeric(expr: &NumericExpr) -> bool {
     match expr {
         NumericExpr::Exp(_) => true,
-        NumericExpr::Const(_) | NumericExpr::Var(_) | NumericExpr::Symbol(_) => false,
+        NumericExpr::Const(_)
+        | NumericExpr::BigConst(_)
+        | NumericExpr::Var(_)
+        | NumericExpr::Symbol(_) => false,
         NumericExpr::Neg(inner) => contains_exp_numeric(inner),
         NumericExpr::Add(a, b)
         | NumericExpr::Sub(a, b)
@@ -177,51 +258,26 @@ fn solve_with_z3_bounded_exp(
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
-    // Build bounding assertions for each exponential variable.
+    // Valid consequences only. Never assume a machine-word bound on Sail's
+    // arbitrary-precision exponent, nor encode 2^63 as a negative integer.
     let mut exp_bounds: Vec<Bool> = Vec::new();
     let zero = Int::from_i64(0);
     let one = Int::from_i64(1);
-    let max_exp = Int::from_i64(64);
-
+    let two = Int::from_i64(2);
     for (pow2_name, pow2_var) in &pow2_vars {
-        // pow2(n) >= 1
-        exp_bounds.push(pow2_var.ge(&one));
-
-        // Look up the exponent variable: strip "pow2:" prefix to get the
-        // inner expression name, then look for "v:<name>" in the env.
-        let inner_name = &pow2_name["pow2:".len()..];
-        // Try to find the exponent variable in env.
-        let exp_var = env
-            .get(&format!("v:{}", inner_name))
-            .or_else(|| env.get(&format!("s:{}", inner_name)))
-            .cloned();
-        if let Some(ev) = exp_var {
-            // 0 <= exponent <= 64
-            exp_bounds.push(ev.ge(&zero));
-            exp_bounds.push(ev.le(&max_exp));
-        }
-
-        // Concrete pow2(k) = 2^k facts for k in 0..=64.
-        // These help Z3 reason about specific exponent values.
-        if let Some(ev) = env
-            .get(&format!("v:{}", inner_name))
-            .or_else(|| env.get(&format!("s:{}", inner_name)))
-            .cloned()
-        {
-            for k in 0..=64i64 {
-                let k_val = Int::from_i64(k);
-                let pow_val = Int::from_i64(1i64.wrapping_shl(k as u32));
-                let eq_k = ev.eq(&k_val);
-                let eq_pow = pow2_var.eq(&pow_val);
-                // k == exponent => pow2 == 2^k
-                exp_bounds.push(eq_k.implies(&eq_pow));
-            }
+        let Some(exponent) = env.get(&format!("pow2arg:{}", &pow2_name[5..])) else {
+            continue;
+        };
+        exp_bounds.push(exponent.ge(&zero).implies(pow2_var.ge(&one)));
+        let mut value = one.clone();
+        for k in 0..=128i64 {
+            exp_bounds.push(exponent.eq(Int::from_i64(k)).implies(pow2_var.eq(&value)));
+            value = Int::mul(&[&value, &two]).simplify();
         }
     }
 
     // First query: assumptions + exp_bounds + !expr; if Unsat, expr is valid.
     let solver = z3::Solver::new();
-    set_timeout(&solver);
     for a in &z3_assumptions {
         solver.assert(a);
     }
@@ -229,13 +285,12 @@ fn solve_with_z3_bounded_exp(
         solver.assert(b);
     }
     solver.assert(z3_expr.not());
-    match solver.check() {
+    match check_solver(&solver) {
         SatResult::Unsat => ConstraintStatus::Satisfied,
         SatResult::Unknown => ConstraintStatus::Unknown,
         SatResult::Sat => {
             // Not always implied; check if ever satisfied.
             let solver2 = z3::Solver::new();
-            set_timeout(&solver2);
             for a in &z3_assumptions {
                 solver2.assert(a);
             }
@@ -243,7 +298,7 @@ fn solve_with_z3_bounded_exp(
                 solver2.assert(b);
             }
             solver2.assert(&z3_expr);
-            match solver2.check() {
+            match check_solver(&solver2) {
                 SatResult::Unsat => ConstraintStatus::Failed,
                 _ => ConstraintStatus::Unknown,
             }
@@ -258,6 +313,10 @@ pub fn try_solve_unique(
     assumptions: &[ConstraintExpr],
     var_name: &str,
 ) -> Option<i64> {
+    let _budget = crate::solver_budget::SolverBudget::enter(
+        crate::CancellationToken::never(),
+        Default::default(),
+    );
     if contains_unsupported(expr) {
         return None;
     }
@@ -272,9 +331,9 @@ pub fn try_solve_unique(
     // Translate assumptions.
     let mut z3_assumptions: Vec<Bool> = Vec::new();
     for assumption in assumptions {
-        match translate_constraint(assumption, subst, &mut env) {
-            Some(b) => z3_assumptions.push(b),
-            None => return None,
+        {
+            let b = translate_constraint(assumption, subst, &mut env)?;
+            z3_assumptions.push(b)
         }
     }
 
@@ -285,13 +344,12 @@ pub fn try_solve_unique(
 
     // Step 1: Find a satisfying assignment.
     let solver = z3::Solver::new();
-    set_timeout(&solver);
     for a in &z3_assumptions {
         solver.assert(a);
     }
     solver.assert(&z3_expr);
 
-    if solver.check() != SatResult::Sat {
+    if check_solver(&solver) != SatResult::Sat {
         return None;
     }
 
@@ -301,7 +359,6 @@ pub fn try_solve_unique(
 
     // Step 2: Assert var_name != v and check UNSAT (uniqueness).
     let solver2 = z3::Solver::new();
-    set_timeout(&solver2);
     for a in &z3_assumptions {
         solver2.assert(a);
     }
@@ -309,7 +366,7 @@ pub fn try_solve_unique(
     let v_const = Int::from_i64(v);
     solver2.assert(var_z3.eq(&v_const).not());
 
-    match solver2.check() {
+    match check_solver(&solver2) {
         SatResult::Unsat => Some(v), // Unique!
         _ => None,                   // Multiple solutions or unknown
     }
@@ -338,24 +395,22 @@ fn solve_with_z3(
     // First query: is `expr` implied by assumptions?  Assert
     // assumptions + !expr; if Unsat, `expr` is valid.
     let solver = z3::Solver::new();
-    set_timeout(&solver);
     for a in &z3_assumptions {
         solver.assert(a);
     }
     solver.assert(z3_expr.not());
-    match solver.check() {
+    match check_solver(&solver) {
         SatResult::Unsat => ConstraintStatus::Satisfied,
         SatResult::Unknown => ConstraintStatus::Unknown,
         SatResult::Sat => {
             // `expr` is not always implied; check whether it is
             // ever satisfied given the assumptions.
             let solver2 = z3::Solver::new();
-            set_timeout(&solver2);
             for a in &z3_assumptions {
                 solver2.assert(a);
             }
             solver2.assert(&z3_expr);
-            match solver2.check() {
+            match check_solver(&solver2) {
                 SatResult::Unsat => ConstraintStatus::Failed,
                 _ => ConstraintStatus::Unknown,
             }
@@ -363,23 +418,81 @@ fn solve_with_z3(
     }
 }
 
-fn set_timeout(solver: &z3::Solver) {
+fn check_solver(solver: &z3::Solver) -> SatResult {
+    let Some(permit) = crate::solver_budget::start_check() else {
+        crate::solver_budget::SolverBudget::mark_budget_exhausted();
+        crate::solver_budget::SolverBudget::mark_incomplete();
+        return SatResult::Unknown;
+    };
+    // Do not use Z3's native timeout timer: libz3 4.8.12 can deadlock
+    // concurrent contexts while recycling its timer workers. A scoped watchdog
+    // borrows the documented cross-thread interrupt handle and is joined before
+    // the context can be reused or destroyed. No detached computation survives.
     let mut params = z3::Params::new();
-    params.set_u32("timeout", Z3_QUERY_TIMEOUT_MS);
+    params.set_u32("rlimit", permit.timeout_ms.saturating_mul(2000));
     solver.set_params(&params);
+    let tokens = permit.cancellation_tokens();
+    let interrupted = std::sync::atomic::AtomicBool::new(false);
+    let result = std::thread::scope(|scope| {
+        let (done, receiver) = std::sync::mpsc::channel::<()>();
+        let handle = solver.get_context().handle();
+        let interrupted = &interrupted;
+        let timeout = std::time::Duration::from_millis(permit.timeout_ms as u64);
+        let deadline = std::time::Instant::now() + timeout;
+        scope.spawn(move || loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            // Consume completion before interrupting: a delayed watchdog may
+            // start after a quick check has already sent its result.
+            match receiver.recv_timeout(remaining.min(std::time::Duration::from_millis(5))) {
+                Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            }
+            if std::time::Instant::now() >= deadline
+                || tokens.iter().any(crate::CancellationToken::is_cancelled)
+            {
+                interrupted.store(true, Ordering::Relaxed);
+                handle.interrupt();
+                break;
+            }
+        });
+        let result = solver.check();
+        let _ = done.send(());
+        result
+    });
+    if result == SatResult::Unknown || permit.cancelled() || interrupted.load(Ordering::Relaxed) {
+        let reason = solver.get_reason_unknown().unwrap_or_default();
+        if interrupted.load(Ordering::Relaxed)
+            || reason.contains("resource")
+            || reason.contains("timeout")
+            || reason.contains("canceled")
+        {
+            crate::solver_budget::SolverBudget::mark_budget_exhausted();
+        }
+        crate::solver_budget::SolverBudget::mark_incomplete();
+        SatResult::Unknown
+    } else {
+        result
+    }
 }
 
 fn contains_unsupported(expr: &ConstraintExpr) -> bool {
     match expr {
         ConstraintExpr::Unsupported => true,
         ConstraintExpr::Bool(_) => false,
-        ConstraintExpr::Compare { .. } => false,
-        ConstraintExpr::InSet { .. } => false,
+        ConstraintExpr::Compare { .. } | ConstraintExpr::InSet { .. } => {
+            super::solver::has_erased_numeric(expr)
+        }
         ConstraintExpr::And(items) | ConstraintExpr::Or(items) => {
             items.iter().any(contains_unsupported)
         }
         ConstraintExpr::Not(inner) => contains_unsupported(inner),
-        ConstraintExpr::App { args, .. } => args.iter().any(contains_unsupported),
+        ConstraintExpr::App { args, .. } => args.iter().any(|a| match a {
+            crate::ty::TyArg::Bool(c) => contains_unsupported(c),
+            crate::ty::TyArg::Type(_) | crate::ty::TyArg::Order(_) | crate::ty::TyArg::Value(_) => {
+                true
+            }
+            _ => false,
+        }),
         ConstraintExpr::BoolVar(_) => false,
     }
 }
@@ -394,6 +507,14 @@ fn intern_var(name: &str, env: &mut HashMap<String, Int>) -> Int {
     int
 }
 
+fn uninterpreted_numeric(name: &str, args: &[Int]) -> Int {
+    let sort = z3::Sort::int();
+    let domain = vec![&sort; args.len()];
+    let function = z3::FuncDecl::new(format!("sail!{name}/{}", args.len()), &domain, &sort);
+    let args: Vec<&dyn z3::ast::Ast> = args.iter().map(|a| a as &dyn z3::ast::Ast).collect();
+    function.apply(&args).as_int().expect("integer function result")
+}
+
 fn translate_numeric(
     expr: &NumericExpr,
     subst: &Subst,
@@ -401,24 +522,25 @@ fn translate_numeric(
 ) -> Option<Int> {
     match expr {
         NumericExpr::Const(value) => Some(Int::from_i64(*value)),
+        NumericExpr::BigConst(value) => value.to_string().parse::<Int>().ok(),
         NumericExpr::Var(name) => {
-            // Try the substitution first: values (string form) then types.
-            if let Some(text) = subst.values.get(name) {
-                if let Some(resolved) = parse_numeric_expr_text(text) {
-                    if !matches!(&resolved, NumericExpr::Var(bound) if bound == name) {
-                        return translate_numeric(&resolved, subst, env);
-                    }
+            let marker = format!("resolving:{name}");
+            if env.contains_key(&marker) {
+                return None;
+            }
+            let replacement =
+                subst.values.get(name).and_then(|s| parse_numeric_expr_text(s)).or_else(|| {
+                    subst.types.get(name).and_then(|ty| parse_numeric_expr_text(&ty.display_text()))
+                });
+            if let Some(replacement) = replacement {
+                if !matches!(&replacement, NumericExpr::Var(n) if n == name) {
+                    env.insert(marker.clone(), Int::from_i64(0));
+                    let value = translate_numeric(&replacement, subst, env);
+                    env.remove(&marker);
+                    return value;
                 }
             }
-            if let Some(ty) = subst.types.get(name) {
-                let text = ty.display_text();
-                if let Some(resolved) = parse_numeric_expr_text(&text) {
-                    if !matches!(&resolved, NumericExpr::Var(bound) if bound == name) {
-                        return translate_numeric(&resolved, subst, env);
-                    }
-                }
-            }
-            Some(intern_var(&format!("v:{}", name), env))
+            Some(intern_var(&format!("v:{name}"), env))
         }
         NumericExpr::Symbol(name) => {
             if let Some(value) = super::parse_int_literal(name) {
@@ -456,49 +578,38 @@ fn translate_numeric(
             Some(lhs.modulo(&rhs))
         }
         NumericExpr::Exp(inner) => {
-            // Exponentiation: 2^n (base is always 2).
-            //
-            // Strategy 1: Constant folding — if inner is a concrete value,
-            // compute 2^n directly.
-            if let NumericExpr::Const(n) = inner.as_ref() {
-                if *n >= 0 && *n <= 63 {
-                    return Some(Int::from_i64(1i64 << n));
+            let exponent = translate_numeric(inner, subst, env)?;
+            if let Some(n) = exponent.simplify().as_i64() {
+                if (0..=1024).contains(&n) {
+                    let mut value = Int::from_i64(1);
+                    let two = Int::from_i64(2);
+                    for _ in 0..n {
+                        value = Int::mul(&[&value, &two]).simplify();
+                    }
+                    return Some(value);
                 }
             }
-            // Strategy 2: Try to evaluate inner to constant via substitution.
-            let exp_z3 = translate_numeric(inner, subst, env)?;
-
-            // Strategy 3: Use Z3's power function via the SMT-LIB `^`
-            // operator. The z3 Rust crate exposes this as `Int::power`.
-            let _base = Int::from_i64(2);
-            // z3::ast::Int::power takes a u32 exponent for concrete values;
-            // for symbolic exponents we use an uninterpreted function with
-            // bounding constraints that Z3 can reason about.
-            //
-            // Create uninterpreted `pow2(n)` with constraints:
-            // - pow2(n) >= 1 (2^n >= 1 for n >= 0)
-            // - pow2(n) >= 2 * pow2(n-1) when n > 0 (monotonicity)
-            // - 0 <= n <= 64 (bounded exponent, per upstream)
-            let result_var = intern_var(&format!("pow2:{}", inner_display(inner)), env);
-
-            // Bound: pow2(n) >= 1
-            let one = Int::from_i64(1);
-            let _ge_one = result_var.ge(&one);
-
-            // Bound: 0 <= exp <= 64
-            let zero = Int::from_i64(0);
-            let max_exp = Int::from_i64(64);
-            let _bounds = z3::ast::Bool::and(&[&exp_z3.ge(&zero), &exp_z3.le(&max_exp)]);
-
-            Some(result_var)
+            let value = uninterpreted_numeric("pow2", &[exponent.clone()]);
+            // AST text is after substitution, unlike source text. Equal
+            // arguments share a function application; distinct ones do not.
+            let key = exponent.to_string();
+            env.insert(format!("pow2:{key}"), value.clone());
+            env.insert(format!("pow2arg:{key}"), exponent);
+            Some(value)
         }
         NumericExpr::App { name, args } => {
-            // Fall back to a fresh Z3 variable named after the application.
-            // We still recurse to intern any sub-vars.
-            for a in args {
-                let _ = translate_numeric(a, subst, env);
+            let args = args
+                .iter()
+                .map(|arg| translate_numeric(arg, subst, env))
+                .collect::<Option<Vec<_>>>()?;
+            match (name.as_str(), args.as_slice()) {
+                ("div", [a, b]) => Some(a.div(b)),
+                ("mod", [a, b]) => Some(a.modulo(b)),
+                ("abs", [a]) => Some(a.ge(Int::from_i64(0)).ite(a, &a.unary_minus())),
+                ("min", [a, b]) => Some(a.le(b).ite(a, b)),
+                ("max", [a, b]) => Some(a.ge(b).ite(a, b)),
+                _ => Some(uninterpreted_numeric(&format!("app:{name}"), &args)),
             }
-            Some(intern_var(&format!("app:{}", name), env))
         }
         NumericExpr::If { cond, then_expr, else_expr } => {
             let then_z3 = translate_numeric(then_expr, subst, env)?;
@@ -517,15 +628,6 @@ fn translate_numeric(
 }
 
 /// Display helper for Exp variable naming.
-fn inner_display(expr: &NumericExpr) -> String {
-    match expr {
-        NumericExpr::Const(n) => n.to_string(),
-        NumericExpr::Var(v) => v.clone(),
-        NumericExpr::Symbol(s) => s.clone(),
-        _ => format!("{:?}", expr),
-    }
-}
-
 fn translate_constraint(
     expr: &ConstraintExpr,
     subst: &Subst,
@@ -585,211 +687,109 @@ fn translate_constraint(
             Some(inner.not())
         }
         ConstraintExpr::Unsupported => None,
-        ConstraintExpr::App { .. } | ConstraintExpr::BoolVar(_) => None,
-    }
-}
-
-fn build_cache_key(expr: &ConstraintExpr, subst: &Subst, assumptions: &[ConstraintExpr]) -> String {
-    let mut buf = String::new();
-    // Assumptions, sorted by their canonical text.
-    let mut assumption_texts: Vec<String> = assumptions.iter().map(constraint_to_text).collect();
-    assumption_texts.sort();
-    buf.push_str("A[");
-    for (idx, text) in assumption_texts.iter().enumerate() {
-        if idx > 0 {
-            buf.push(';');
-        }
-        buf.push_str(text);
-    }
-    buf.push(']');
-    // Substitution entries, sorted by key.
-    buf.push_str("V[");
-    let mut value_entries: Vec<(&str, &str)> =
-        subst.values.entries.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-    value_entries.sort();
-    for (idx, (k, v)) in value_entries.iter().enumerate() {
-        if idx > 0 {
-            buf.push(';');
-        }
-        buf.push_str(k);
-        buf.push('=');
-        buf.push_str(v);
-    }
-    buf.push(']');
-    buf.push_str("T[");
-    let mut type_entries: Vec<(String, String)> =
-        subst.types.entries.iter().map(|(k, v)| (k.clone(), v.display_text())).collect();
-    type_entries.sort();
-    for (idx, (k, v)) in type_entries.iter().enumerate() {
-        if idx > 0 {
-            buf.push(';');
-        }
-        buf.push_str(k);
-        buf.push('=');
-        buf.push_str(v);
-    }
-    buf.push(']');
-    // Expression.
-    buf.push_str("E[");
-    buf.push_str(&constraint_to_text(expr));
-    buf.push(']');
-    buf
-}
-
-fn constraint_to_text(expr: &ConstraintExpr) -> String {
-    let mut buf = String::new();
-    write_constraint(&mut buf, expr);
-    buf
-}
-
-fn write_constraint(buf: &mut String, expr: &ConstraintExpr) {
-    match expr {
-        ConstraintExpr::Bool(value) => {
-            buf.push_str(if *value { "true" } else { "false" });
-        }
-        ConstraintExpr::Compare { lhs, op, rhs } => {
-            buf.push('(');
-            buf.push_str(match op {
-                CompareOp::Eq => "=",
-                CompareOp::Neq => "/=",
-                CompareOp::Lt => "<",
-                CompareOp::Lte => "<=",
-                CompareOp::Gt => ">",
-                CompareOp::Gte => ">=",
-            });
-            buf.push(' ');
-            write_numeric(buf, lhs);
-            buf.push(' ');
-            write_numeric(buf, rhs);
-            buf.push(')');
-        }
-        ConstraintExpr::InSet { value, items } => {
-            buf.push_str("(in ");
-            write_numeric(buf, value);
-            buf.push_str(" {");
-            for (idx, item) in items.iter().enumerate() {
-                if idx > 0 {
-                    buf.push(',');
+        ConstraintExpr::BoolVar(name) => {
+            let marker = format!("resolving-bool:{name}");
+            if env.contains_key(&marker) {
+                return None;
+            }
+            if let Some(text) = subst
+                .values
+                .get(name)
+                .cloned()
+                .or_else(|| subst.types.get(name).map(|t| t.display_text()))
+            {
+                let replacement = super::parse_constraint_text(&text);
+                if replacement != *expr {
+                    env.insert(marker.clone(), Int::from_i64(0));
+                    let result = translate_constraint(&replacement, subst, env);
+                    env.remove(&marker);
+                    return result;
                 }
-                write_numeric(buf, item);
             }
-            buf.push_str("})");
-        }
-        ConstraintExpr::And(items) => {
-            buf.push_str("(and");
-            for item in items {
-                buf.push(' ');
-                write_constraint(buf, item);
-            }
-            buf.push(')');
-        }
-        ConstraintExpr::Or(items) => {
-            buf.push_str("(or");
-            for item in items {
-                buf.push(' ');
-                write_constraint(buf, item);
-            }
-            buf.push(')');
-        }
-        ConstraintExpr::Not(inner) => {
-            buf.push_str("(not ");
-            write_constraint(buf, inner);
-            buf.push(')');
-        }
-        ConstraintExpr::Unsupported => {
-            buf.push('?');
+            Some(Bool::new_const(format!("sail!bool:{name}")))
         }
         ConstraintExpr::App { name, args } => {
-            buf.push_str(name);
-            buf.push('(');
-            for (idx, arg) in args.iter().enumerate() {
-                if idx > 0 {
-                    buf.push_str(", ");
-                }
-                write_constraint(buf, arg);
-            }
-            buf.push(')');
-        }
-        ConstraintExpr::BoolVar(v) => {
-            buf.push_str(v);
+            use crate::ty::TyArg;
+            use z3::ast::{Ast, Dynamic};
+            let values = args
+                .iter()
+                .map(|a| match a {
+                    TyArg::Bool(c) => translate_constraint(c, subst, env).map(Dynamic::from),
+                    TyArg::Nexp(n) => translate_numeric(n, subst, env).map(Dynamic::from),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()?;
+            let sorts: Vec<_> = values.iter().map(Ast::get_sort).collect();
+            let signature = sorts.iter().map(ToString::to_string).collect::<Vec<_>>().join(",");
+            let domain: Vec<_> = sorts.iter().collect();
+            let fun = z3::FuncDecl::new(
+                format!("sail!predicate:{name}({signature})"),
+                &domain,
+                &z3::Sort::bool(),
+            );
+            let args: Vec<&dyn Ast> = values.iter().map(|a| a as &dyn Ast).collect();
+            fun.apply(&args).as_bool()
         }
     }
 }
 
-fn write_numeric(buf: &mut String, expr: &NumericExpr) {
-    match expr {
-        NumericExpr::Const(value) => {
-            buf.push_str(&value.to_string());
+fn build_cache_key(
+    expr: &ConstraintExpr,
+    subst: &Subst,
+    assumptions: &[ConstraintExpr],
+) -> Z3CacheKey {
+    let mut values = subst.values.entries.to_vec();
+    let mut types = subst.types.entries.to_vec();
+    values.sort_by(|a, b| a.0.cmp(&b.0));
+    types.sort_by(|a, b| a.0.cmp(&b.0));
+    Z3CacheKey { goal: expr.clone(), assumptions: assumptions.to_vec(), values, types }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    #[test]
+    fn a_running_solver_observes_request_cancellation() {
+        use crate::solver_budget::{SolverBudget, SolverLimits};
+        use std::time::{Duration, Instant};
+        let token = crate::CancellationToken::new();
+        let _budget = SolverBudget::enter(
+            token.clone(),
+            SolverLimits {
+                total: Duration::from_secs(1),
+                per_check: Duration::from_secs(1),
+                checks: 1,
+            },
+        );
+        let solver = z3::Solver::new();
+        // An unsatisfiable pigeonhole instance keeps the native solver busy
+        // long enough to exercise the interrupt handle, without large numerals.
+        let cells: Vec<Vec<Bool>> = (0..24)
+            .map(|p| (0..23).map(|h| Bool::new_const(format!("cancel_p{p}_h{h}"))).collect())
+            .collect();
+        for row in &cells {
+            solver.assert(Bool::or(&row.iter().collect::<Vec<_>>()));
         }
-        NumericExpr::Var(name) => {
-            buf.push_str("v:");
-            buf.push_str(name);
-        }
-        NumericExpr::Symbol(name) => {
-            buf.push_str("s:");
-            buf.push_str(name);
-        }
-        NumericExpr::Neg(inner) => {
-            buf.push_str("(- ");
-            write_numeric(buf, inner);
-            buf.push(')');
-        }
-        NumericExpr::Add(lhs, rhs) => {
-            buf.push_str("(+ ");
-            write_numeric(buf, lhs);
-            buf.push(' ');
-            write_numeric(buf, rhs);
-            buf.push(')');
-        }
-        NumericExpr::Sub(lhs, rhs) => {
-            buf.push_str("(- ");
-            write_numeric(buf, lhs);
-            buf.push(' ');
-            write_numeric(buf, rhs);
-            buf.push(')');
-        }
-        NumericExpr::Mul(lhs, rhs) => {
-            buf.push_str("(* ");
-            write_numeric(buf, lhs);
-            buf.push(' ');
-            write_numeric(buf, rhs);
-            buf.push(')');
-        }
-        NumericExpr::Div(lhs, rhs) => {
-            buf.push_str("(/ ");
-            write_numeric(buf, lhs);
-            buf.push(' ');
-            write_numeric(buf, rhs);
-            buf.push(')');
-        }
-        NumericExpr::Mod(lhs, rhs) => {
-            buf.push_str("(mod ");
-            write_numeric(buf, lhs);
-            buf.push(' ');
-            write_numeric(buf, rhs);
-            buf.push(')');
-        }
-        NumericExpr::Exp(inner) => {
-            buf.push_str("(^ 2 ");
-            write_numeric(buf, inner);
-            buf.push(')');
-        }
-        NumericExpr::App { name, args } => {
-            buf.push_str("app:");
-            buf.push_str(name);
-            for a in args {
-                buf.push(' ');
-                write_numeric(buf, a);
+        for h in 0..23 {
+            for p in 0..24 {
+                for q in p + 1..24 {
+                    solver.assert(Bool::or(&[&cells[p][h].not(), &cells[q][h].not()]));
+                }
             }
         }
-        NumericExpr::If { cond, then_expr, else_expr } => {
-            buf.push_str("(ite ");
-            write_constraint(buf, cond);
-            buf.push(' ');
-            write_numeric(buf, then_expr);
-            buf.push(' ');
-            write_numeric(buf, else_expr);
-            buf.push(')');
-        }
+        let started = Instant::now();
+        let status = std::thread::scope(|scope| {
+            scope.spawn(move || {
+                std::thread::sleep(Duration::from_millis(10));
+                token.cancel();
+            });
+            check_solver(&solver)
+        });
+        assert_eq!(status, SatResult::Unknown);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "cancellation should interrupt native checking"
+        );
+        assert!(SolverBudget::incomplete_count() > 0);
     }
 }

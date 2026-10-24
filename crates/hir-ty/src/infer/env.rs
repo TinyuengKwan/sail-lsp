@@ -14,7 +14,7 @@ use crate::ty::{ConstraintExpr, Ty, TyArg};
 #[allow(unused_imports)]
 use super::*;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TopLevelEnv {
     pub(crate) functions: HashMap<String, Vec<Arc<TypeScheme>>>,
     pub(crate) mappings: HashMap<String, Vec<Arc<MappingScheme>>>,
@@ -29,28 +29,48 @@ pub struct TopLevelEnv {
     /// Types with scattered clauses; match exhaustiveness is skipped.
     pub(crate) scattered_open_types: HashSet<String>,
     pub(crate) type_aliases: HashMap<String, Ty>,
+    /// `type is_mem_width('w) = 'w in {1, 2, 4, 8}` — a type alias whose
+    /// body is a *constraint*. Upstream expands these before proving
+    /// anything (`Env.expand_constraint_synonyms`, from `prove`).
+    pub(crate) constraint_synonyms: HashMap<String, (Vec<String>, ConstraintExpr)>,
     /// Parameterised alias schemes for on-demand substitution.
     pub(crate) alias_schemes: HashMap<String, Arc<AliasScheme>>,
-    pub(crate) cross_file_function_names: HashSet<String>,
-    pub(crate) cross_file_constructor_names: HashSet<String>,
-    pub(crate) cross_file_value_names: HashSet<String>,
-    pub(crate) cross_file_register_names: HashSet<String>,
+    pub(crate) cross_file_function_names: Arc<HashSet<String>>,
+    pub(crate) cross_file_constructor_names: Arc<HashSet<String>>,
+    /// Payload signatures for the constructors above. Separate from
+    /// `constructors` so nothing that walks the local ones picks these up.
+    pub(crate) cross_file_constructor_schemes: Arc<HashMap<String, Vec<Arc<TypeScheme>>>>,
+    /// Signatures for mappings declared in another file. `val encdec : ast
+    /// <-> bits(32)` and its `mapping clause`es routinely live apart.
+    pub(crate) cross_file_mapping_schemes: Arc<HashMap<String, Vec<Arc<MappingScheme>>>>,
+    pub(crate) cross_file_value_names: Arc<HashSet<String>>,
+    pub(crate) cross_file_register_names: Arc<HashSet<String>>,
     /// Cross-file callable arities for arity-only checking on cross-file calls.
-    pub(crate) cross_file_function_arity: HashMap<String, Vec<(usize, usize)>>,
+    pub(crate) cross_file_function_arity: Arc<HashMap<String, Vec<(usize, usize)>>>,
     /// Cross-file schemes for return type propagation (not full unification).
     pub(crate) cross_file_schemes: Option<Arc<HashMap<String, Vec<Arc<TypeScheme>>>>>,
     pub(crate) known_field_names: HashSet<String>,
     /// Whether cross_file_* sets reflect the full workspace.
     pub(crate) has_workspace_context: bool,
+    /// Whether to report a call whose callee resolves to nothing. Off until
+    /// union constructors with existential payloads and `outcome`
+    /// declarations are registered as callables; without them this fires on
+    /// valid code.
+    pub(crate) report_unknown_calls: bool,
     pub(crate) global_constraints: Vec<ConstraintExpr>,
     pub(crate) vector_order: VectorOrder,
-    pub(crate) symbol_index: WorkspaceSymbolIndex,
+    pub(crate) symbol_index: Arc<WorkspaceSymbolIndex>,
 }
 
 /// Unified index mapping symbol names to their defining file and kind.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WorkspaceSymbolIndex {
-    entries: HashMap<String, (base_db::FileText, SymbolKind)>,
+    pub(super) entries: HashMap<String, (base_db::FileText, SymbolKind)>,
+    /// Types, kept apart from the value namespace above. Sail's are
+    /// separate — a `struct S` and a `let S` can coexist — and folding them
+    /// together would let a type entry win the `or_insert` race and answer
+    /// a question about the value.
+    pub(super) types: HashMap<String, base_db::FileText>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,153 +94,86 @@ impl WorkspaceSymbolIndex {
     pub fn get_file(&self, name: &str) -> Option<base_db::FileText> {
         self.entries.get(name).map(|(f, _)| *f)
     }
+
+    pub fn insert_type(&mut self, name: String, file: base_db::FileText) {
+        self.types.entry(name).or_insert(file);
+    }
+
+    /// The file declaring a type by this name.
+    pub fn get_type_file(&self, name: &str) -> Option<base_db::FileText> {
+        self.types.get(name).copied()
+    }
 }
 
 /// Parameterised alias scheme for on-demand substitution.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AliasScheme {
     pub params: Vec<String>,
     pub body: Ty,
     pub config_dependent: bool,
+    pub kind_bounds: HashMap<String, Kind>,
 }
 
 impl AliasScheme {
     /// Substitute actual args into the alias body. Returns `None` on arity mismatch.
     pub fn substitute(&self, args: &[crate::ty::TyArg]) -> Option<Ty> {
-        use crate::ty::TyArg;
-        if args.len() != self.params.len() {
-            return None;
-        }
-        let mut type_subst: HashMap<String, Ty> = HashMap::new();
-        let mut value_subst: HashMap<String, String> = HashMap::new();
-        for (name, arg) in self.params.iter().zip(args.iter()) {
-            let bare = name.strip_prefix('\'').unwrap_or(name).to_string();
-            match arg {
-                TyArg::Type(t) => {
-                    type_subst.insert(name.clone(), t.clone());
-                    type_subst.insert(bare, t.clone());
+        for (param, arg) in self.params.iter().zip(args) {
+            let found = match arg {
+                TyArg::Bool(_) => Some(Kind::Bool),
+                TyArg::Order(_) => Some(Kind::Order),
+                TyArg::Nexp(_) => Some(Kind::Int),
+                TyArg::Type(t)
+                    if matches!(
+                        t.kind(),
+                        TyKind::Scalar(_) | TyKind::Tuple(_) | TyKind::FnPtr(_)
+                    ) =>
+                {
+                    Some(Kind::Type)
                 }
-                TyArg::Value(s) => {
-                    value_subst.insert(name.clone(), s.clone());
-                    value_subst.insert(bare, s.clone());
-                }
-                TyArg::Nexp(n) => {
-                    let s = n.to_string_repr();
-                    value_subst.insert(name.clone(), s.clone());
-                    value_subst.insert(bare, s);
-                }
+                _ => None,
+            };
+            if self.kind_bounds.get(param).zip(found).is_some_and(|(want, found)| *want != found) {
+                return None;
             }
         }
-        Some(substitute_alias_body(&self.body, &type_subst, &value_subst))
+        super::substitution::apply_arguments(&self.body, &self.params, args)
     }
 }
 
-fn substitute_alias_body(
-    ty: &Ty,
-    type_subst: &HashMap<String, Ty>,
-    value_subst: &HashMap<String, String>,
-) -> Ty {
-    use crate::ty::{TyArg, TyKind};
-    match ty.kind() {
-        TyKind::Param(name) => {
-            if let Some(r) = type_subst.get(name.as_str()) {
-                return r.clone();
-            }
-            let bare = name.strip_prefix('\'').unwrap_or(name);
-            type_subst.get(bare).cloned().unwrap_or_else(|| ty.clone())
-        }
-        TyKind::App { name, args, text } => {
-            let new_args: Vec<TyArg> = args
-                .iter()
-                .map(|a| match a {
-                    TyArg::Type(t) => {
-                        TyArg::Type(substitute_alias_body(t, type_subst, value_subst))
-                    }
-                    TyArg::Value(s) => {
-                        // Replace tick-prefixed param names inside the
-                        // textual numeric expression. Conservative: only
-                        // substitute whole-tick-token occurrences.
-                        let mut out = s.clone();
-                        for (k, v) in value_subst {
-                            // Only handle apostrophe-prefixed keys here.
-                            if k.starts_with('\'') {
-                                out = out.replace(k, v);
-                            }
-                        }
-                        TyArg::numeric(out)
-                    }
-                    TyArg::Nexp(n) => {
-                        // Re-serialise via Value path so substitution applies.
-                        let s = n.to_string_repr();
-                        let mut out = s;
-                        for (k, v) in value_subst {
-                            if k.starts_with('\'') {
-                                out = out.replace(k, v);
-                            }
-                        }
-                        TyArg::numeric(out)
-                    }
-                })
-                .collect();
-            Ty::app(name.clone(), new_args, text.clone())
-        }
-        TyKind::Adt(name, args) => {
-            let new_args: Vec<TyArg> = args
-                .iter()
-                .map(|a| match a {
-                    TyArg::Type(t) => {
-                        TyArg::Type(substitute_alias_body(t, type_subst, value_subst))
-                    }
-                    other => other.clone(),
-                })
-                .collect();
-            Ty::adt_with_args(name.clone(), new_args)
-        }
-        TyKind::Tuple(items) => Ty::tuple(
-            items.iter().map(|t| substitute_alias_body(t, type_subst, value_subst)).collect(),
-        ),
-        TyKind::FnPtr(crate::ty::FnSig { params, ret }) => {
-            let p =
-                params.iter().map(|t| substitute_alias_body(t, type_subst, value_subst)).collect();
-            let r = substitute_alias_body(ret, type_subst, value_subst);
-            Ty::function(p, r)
-        }
-        TyKind::Bidir { lhs, rhs } => Ty::bidir(
-            substitute_alias_body(lhs, type_subst, value_subst),
-            substitute_alias_body(rhs, type_subst, value_subst),
-        ),
-        TyKind::Exist { vars, constraint, inner } => {
-            // Don't substitute into shadowed vars.
-            let filtered_type: HashMap<String, Ty> = type_subst
-                .iter()
-                .filter(|(k, _)| !vars.contains(k))
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            let filtered_value: HashMap<String, String> = value_subst
-                .iter()
-                .filter(|(k, _)| !vars.contains(k))
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            Ty::exist(
-                vars.clone(),
-                constraint.clone(),
-                substitute_alias_body(inner, &filtered_type, &filtered_value),
-            )
-        }
-        _ => ty.clone(),
-    }
-}
-
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RecordInfo {
     pub(crate) params: Vec<String>,
     pub(crate) fields: HashMap<String, Ty>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BitfieldInfo {
     pub(crate) underlying: Ty,
     pub(crate) fields: HashMap<String, Ty>,
+}
+
+pub(super) fn empty_names() -> Arc<HashSet<String>> {
+    static EMPTY: std::sync::OnceLock<Arc<HashSet<String>>> = std::sync::OnceLock::new();
+    EMPTY.get_or_init(Default::default).clone()
+}
+pub(super) fn empty_schemes() -> Arc<HashMap<String, Vec<Arc<TypeScheme>>>> {
+    static EMPTY: std::sync::OnceLock<Arc<HashMap<String, Vec<Arc<TypeScheme>>>>> =
+        std::sync::OnceLock::new();
+    EMPTY.get_or_init(Default::default).clone()
+}
+pub(super) fn empty_mappings() -> Arc<HashMap<String, Vec<Arc<MappingScheme>>>> {
+    static EMPTY: std::sync::OnceLock<Arc<HashMap<String, Vec<Arc<MappingScheme>>>>> =
+        std::sync::OnceLock::new();
+    EMPTY.get_or_init(Default::default).clone()
+}
+pub(super) fn empty_arities() -> Arc<HashMap<String, Vec<(usize, usize)>>> {
+    static EMPTY: std::sync::OnceLock<Arc<HashMap<String, Vec<(usize, usize)>>>> =
+        std::sync::OnceLock::new();
+    EMPTY.get_or_init(Default::default).clone()
+}
+pub(super) fn empty_index() -> Arc<WorkspaceSymbolIndex> {
+    static EMPTY: std::sync::OnceLock<Arc<WorkspaceSymbolIndex>> = std::sync::OnceLock::new();
+    EMPTY.get_or_init(Default::default).clone()
 }
 
 impl Default for TopLevelEnv {
@@ -238,18 +191,22 @@ impl Default for TopLevelEnv {
             unions: HashMap::new(),
             scattered_open_types: HashSet::new(),
             type_aliases: HashMap::new(),
+            constraint_synonyms: HashMap::new(),
             alias_schemes: HashMap::new(),
-            cross_file_function_names: HashSet::new(),
-            cross_file_constructor_names: HashSet::new(),
-            cross_file_value_names: HashSet::new(),
-            cross_file_register_names: HashSet::new(),
-            cross_file_function_arity: HashMap::new(),
+            cross_file_function_names: empty_names(),
+            cross_file_constructor_names: empty_names(),
+            cross_file_constructor_schemes: empty_schemes(),
+            cross_file_mapping_schemes: empty_mappings(),
+            cross_file_value_names: empty_names(),
+            cross_file_register_names: empty_names(),
+            cross_file_function_arity: empty_arities(),
             cross_file_schemes: None,
             known_field_names: HashSet::new(),
             has_workspace_context: false,
+            report_unknown_calls: false,
             global_constraints: Vec::new(),
             vector_order: VectorOrder::Dec,
-            symbol_index: WorkspaceSymbolIndex::default(),
+            symbol_index: empty_index(),
         }
     }
 }
@@ -257,6 +214,20 @@ impl Default for TopLevelEnv {
 impl TopLevelEnv {
     pub fn function_names(&self) -> impl Iterator<Item = &String> {
         self.functions.keys()
+    }
+
+    /// Mapping names. A mapping is callable in both directions, so for
+    /// "is this name bound to something callable" it counts alongside
+    /// functions.
+    pub fn mapping_names(&self) -> impl Iterator<Item = &String> {
+        self.mappings.keys()
+    }
+
+    /// Enum members. A scattered `enum clause E = M` registers `M` here and
+    /// in `enums`, but not in `constructors`, so callers that want every
+    /// constant pattern name need both.
+    pub fn enum_member_names(&self) -> impl Iterator<Item = &String> {
+        self.enums.values().flatten()
     }
 
     pub fn constructor_names(&self) -> impl Iterator<Item = &String> {
@@ -276,14 +247,61 @@ impl TopLevelEnv {
     }
 
     /// Build a `TopLevelEnv` from a rowan CST root node.
+    ///
+    /// Uses only the default preprocessor symbols; callers that know the
+    /// workspace's `default Order` should prefer
+    /// [`TopLevelEnv::from_cst_with_symbols`].
     pub fn from_cst(root: &syntax::SyntaxNode) -> (Self, HashSet<String>) {
+        let mut symbols = syntax::preprocess::default_symbols();
+        Self::from_cst_with_symbols(root, &mut symbols)
+    }
+
+    /// Build a `TopLevelEnv`, honouring conditional compilation.
+    ///
+    /// Definitions inside a non-taken `$ifdef` / `$ifndef` / `$iftarget`
+    /// branch are skipped, exactly as in ItemTree lowering. Without this the
+    /// environment holds *both* branches — in the bundled prelude that means
+    /// two conflicting `subrange_bits`, `bitvector_access` and
+    /// `bitvector_update` signatures, one dec-ordered and one inc-ordered.
+    pub fn from_cst_with_symbols(
+        root: &syntax::SyntaxNode,
+        symbols: &mut HashSet<String>,
+    ) -> (Self, HashSet<String>) {
         use parser::SyntaxKind as SK;
 
         let mut env = Self::default();
         let mut pattern_constants = HashSet::new();
+        let mut cond = syntax::preprocess::CondFilter::new();
+        let mut declaration_symbols = symbols.clone();
+        let mut declaration_filter = syntax::preprocess::CondFilter::new();
+        let explicit_vals = hir_def::item_tree::generated::explicit_val_names(
+            root.children()
+                .filter(|node| declaration_filter.accept(node, &mut declaration_symbols, None)),
+        );
 
         for def_node in root.children() {
+            if !cond.accept(&def_node, symbols, None) {
+                continue;
+            }
             let kind = def_node.kind();
+            // `default Order dec | inc`. Handled before the name extraction
+            // below: `default`, `Order`, `dec` and `inc` are all keywords, so
+            // the definition has no IDENT at all and the extraction's `None`
+            // arm would `continue` past it.
+            if kind == SK::DEFAULT_DEF {
+                let mut toks = def_node
+                    .descendants_with_tokens()
+                    .filter_map(|el| el.into_token())
+                    .filter(|t| !t.kind().is_trivia());
+                if toks.any(|t| t.kind() == SK::KW_ORDER) {
+                    match toks.next().map(|t| t.kind()) {
+                        Some(SK::KW_DEC) => env.vector_order = VectorOrder::Dec,
+                        Some(SK::KW_INC) => env.vector_order = VectorOrder::Inc,
+                        _ => {}
+                    }
+                }
+                continue;
+            }
             // Extract name (first IDENT descendant)
             let name = match cst_ident_text(&def_node) {
                 Some(n) => n,
@@ -295,6 +313,7 @@ impl TopLevelEnv {
                     if matches!(first_kw.as_deref(), Some("let") | Some("var")) {
                         let ty = find_type_child(&def_node)
                             .map(|n| type_from_cst_node(&n))
+                            .or_else(|| literal_type_after_eq(&def_node))
                             .unwrap_or(Ty::error());
                         for tok in def_node.descendants_with_tokens() {
                             if let Some(t) = tok.as_token() {
@@ -304,8 +323,22 @@ impl TopLevelEnv {
                                 if t.kind() == SK::IDENT {
                                     env.values.insert(t.text().to_string(), ty.clone());
                                 }
+                                // `let 'cap_size = 32` binds the value
+                                // `cap_size` — `atomic_pat: | kid` is
+                                // `P_var (P_id (id_of_kid kid), ..)`
+                                // (parser.mly:541-543) and `id_of_kid` drops
+                                // the `'` (ast_util.ml:983). The item tree
+                                // records the definition; without this the
+                                // environment had no type for it.
+                                if t.kind() == SK::TY_VAR {
+                                    env.values.insert(
+                                        t.text().trim_start_matches('\'').to_string(),
+                                        ty.clone(),
+                                    );
+                                }
                             }
                         }
+                        preserve_global_numeric_binders(&def_node, &mut env);
                     }
                     continue;
                 }
@@ -313,19 +346,29 @@ impl TopLevelEnv {
 
             match kind {
                 SK::CALLABLE_SPEC => {
-                    // val name : type_signature
-                    let first_kw = first_keyword_text(&def_node);
-                    if first_kw.as_deref() == Some("mapping") {
-                        if let Some(type_node) = find_type_child(&def_node) {
-                            if let Some(mapping) = mapping_scheme_from_cst(&type_node) {
-                                env.mappings.entry(name).or_default().push(Arc::new(mapping));
-                            }
-                        }
-                    } else {
-                        if let Some(type_node) = find_type_child(&def_node) {
+                    // `val name : typschm`. A bidirectional signature declares
+                    // a mapping whichever keyword introduced it — `val f : A
+                    // <-> B` is how a mapping is declared separately from its
+                    // clauses. Filing it under functions instead gave it a
+                    // function's arity, so calling it with the components of a
+                    // tuple side drew a spurious argument-count error.
+                    if let Some(type_node) = find_type_child(&def_node) {
+                        if let Some(mapping) = mapping_scheme_from_cst(&type_node) {
+                            env.mappings.entry(name).or_default().push(Arc::new(mapping));
+                        } else {
                             let scheme = scheme_from_cst_node(&type_node);
                             env.functions.entry(name).or_default().push(Arc::new(scheme));
                         }
+                    }
+                }
+                SK::OUTCOME_DEF => {
+                    // `outcome name : typschm [with ...] [= { defs }]`
+                    // declares a callable, and `instantiation` supplies its
+                    // implementation. Register it like a val spec so calls to
+                    // it resolve (parse_ast.ml `OV_outcome`).
+                    if let Some(type_node) = find_type_child(&def_node) {
+                        let scheme = scheme_from_cst_node(&type_node);
+                        env.functions.entry(name).or_default().push(Arc::new(scheme));
                     }
                 }
                 SK::CALLABLE_DEF => {
@@ -341,8 +384,44 @@ impl TopLevelEnv {
                         // Build scheme from CST structure.
                         // 1. Direct child TYPE_* = ret type or inline sig
                         // 2. PARAM_LIST child TYPE_* nodes = param types
-                        let direct_type = find_type_child(&def_node);
+                        //
+                        // The `typquant` comes first, and its constraint is
+                        // a type node too — searching from the start of the
+                        // definition would read `forall 'n, 0 < 'n <= 8 .`
+                        // as the signature.
+                        let (quantifiers, quant_constraints, quant_end) =
+                            super::callable_typquant(&def_node);
+                        let direct_type = match quant_end {
+                            Some(end) => def_node
+                                .children()
+                                .find(|c| c.kind().is_type_node() && c.text_range().start() >= end),
+                            None => find_type_child(&def_node),
+                        };
                         let param_types = extract_param_types_from_param_list(&def_node);
+
+                        // Inline quantifiers have the same kinds as a `val`
+                        // scheme. In particular `bool('b)` must retain a
+                        // Boolean predicate through freshening, not become
+                        // an unprintable type inference variable `bool(_)`.
+                        let inline_scheme = |mut scheme: TypeScheme| {
+                            scheme.kind_bounds.extend(super::kinds::declared(&def_node));
+                            for ty in scheme.params.iter().chain(std::iter::once(&scheme.ret)) {
+                                super::kinds::infer(ty, &mut scheme.kind_bounds);
+                            }
+                            scheme.params = scheme
+                                .params
+                                .iter()
+                                .map(|ty| super::kinds::normalize(ty, &scheme.kind_bounds))
+                                .collect();
+                            scheme.ret = super::kinds::normalize(&scheme.ret, &scheme.kind_bounds);
+                            for constraint in &mut scheme.constraints {
+                                constraint.expr = super::kinds::normalize_constraint(
+                                    &constraint.expr,
+                                    &scheme.kind_bounds,
+                                );
+                            }
+                            Arc::new(scheme)
+                        };
 
                         match direct_type {
                             Some(ref tn) if has_preceding_arrow(&def_node, tn) => {
@@ -360,35 +439,45 @@ impl TopLevelEnv {
                                     param_types
                                 };
                                 let implicit = vec![false; params.len()];
-                                env.functions.entry(name).or_default().push(Arc::new(TypeScheme {
-                                    quantifiers: Vec::new(),
-                                    kind_bounds: HashMap::new(),
-                                    constraints: Vec::new(),
-                                    params,
-                                    implicit_params: implicit,
-                                    ret,
-                                    declared_effects: Vec::new(),
-                                    is_declared_pure: false,
-                                }));
+                                env.functions.entry(name).or_default().push(inline_scheme(
+                                    TypeScheme {
+                                        quantifiers,
+                                        kind_bounds: HashMap::new(),
+                                        constraints: quant_constraints,
+                                        params,
+                                        implicit_params: implicit,
+                                        ret,
+                                        declared_effects: Vec::new(),
+                                        is_declared_pure: false,
+                                    },
+                                ));
                             }
                             Some(ref tn) => {
                                 // Full inline sig (`: (T) -> R`)
-                                let scheme = scheme_from_cst_node(tn);
-                                env.functions.entry(name).or_default().push(Arc::new(scheme));
+                                let mut scheme = scheme_from_cst_node(tn);
+                                // A `typquant` on the definition head binds
+                                // for the signature written after it.
+                                if !quantifiers.is_empty() || !quant_constraints.is_empty() {
+                                    scheme.quantifiers.extend(quantifiers);
+                                    scheme.constraints.extend(quant_constraints);
+                                }
+                                env.functions.entry(name).or_default().push(inline_scheme(scheme));
                             }
                             None if !param_types.is_empty() => {
                                 // No ret type, only param types from `: Type`
                                 let implicit = vec![false; param_types.len()];
-                                env.functions.entry(name).or_default().push(Arc::new(TypeScheme {
-                                    quantifiers: Vec::new(),
-                                    kind_bounds: HashMap::new(),
-                                    constraints: Vec::new(),
-                                    params: param_types,
-                                    implicit_params: implicit,
-                                    ret: Ty::error(),
-                                    declared_effects: Vec::new(),
-                                    is_declared_pure: false,
-                                }));
+                                env.functions.entry(name).or_default().push(inline_scheme(
+                                    TypeScheme {
+                                        quantifiers,
+                                        kind_bounds: HashMap::new(),
+                                        constraints: quant_constraints,
+                                        params: param_types,
+                                        implicit_params: implicit,
+                                        ret: Ty::error(),
+                                        declared_effects: Vec::new(),
+                                        is_declared_pure: false,
+                                    },
+                                ));
                             }
                             _ => {}
                         }
@@ -458,8 +547,11 @@ impl TopLevelEnv {
                             env.records.insert(name, RecordInfo { params, fields });
                         }
                         Some("enum") => {
-                            // Enum members: all IDENTs inside { }
-                            let members = extract_braced_idents(&def_node);
+                            // Enum members: all IDENTs inside `{ }`, or the
+                            // bar-separated `enum E = A | B | C` spelling,
+                            // which the grammar leaves as a chain of
+                            // `BIN_EXPR`s rather than a braced list.
+                            let members = extract_enum_members(&def_node);
                             let entry = env.enums.entry(name.clone()).or_default();
                             for member in &members {
                                 pattern_constants.insert(member.clone());
@@ -468,15 +560,13 @@ impl TopLevelEnv {
                                     entry.push(member.clone());
                                 }
                             }
-                            // Sail compiler auto-generates `num_of_{name} : name -> nat`
-                            // for each enum definition. Register it so callers resolve.
-                            let num_of_name = format!("num_of_{name}");
-                            env.functions.entry(num_of_name).or_default().push(Arc::new(
-                                plain_scheme(
-                                    vec![Ty::named(name.clone())],
-                                    Ty::named("nat".to_string()),
-                                ),
-                            ));
+                            register_enum_bindings(
+                                &def_node,
+                                &name,
+                                members.len(),
+                                &explicit_vals,
+                                &mut env,
+                            );
                         }
                         Some("union") => {
                             // Union variants: Name : Type inside { }
@@ -548,6 +638,7 @@ impl TopLevelEnv {
                                         is_declared_pure: false,
                                     }),
                                 );
+                                env.unions.entry(name).or_default().push(ctor_name.clone());
                                 pattern_constants.insert(ctor_name);
                             }
                         }
@@ -563,8 +654,10 @@ impl TopLevelEnv {
                         Some("let") | Some("var") => {
                             let ty = find_type_child(&def_node)
                                 .map(|n| type_from_cst_node(&n))
+                                .or_else(|| literal_type_after_eq(&def_node))
                                 .unwrap_or(Ty::error());
                             env.values.insert(name, ty);
+                            preserve_global_numeric_binders(&def_node, &mut env);
                         }
                         Some("bitfield") => {
                             if let Some(info) = bitfield_info_from_cst(&def_node) {
@@ -623,13 +716,9 @@ impl TopLevelEnv {
                     }
                 }
                 SK::SCATTERED_CLAUSE_DEF => {
-                    // Detect clause type from the FIRST keyword token.
-                    let first_kw = def_node
-                        .descendants_with_tokens()
-                        .filter_map(|el| el.into_token())
-                        .find(|t| !t.kind().is_trivia())
-                        .map(|t| t.kind());
-                    if first_kw == Some(SK::KW_ENUM) {
+                    // Visibility may precede the clause keyword.
+                    let has = |kind| def_node.children_with_tokens().any(|t| t.kind() == kind);
+                    if has(SK::KW_ENUM) {
                         // Enum clause → register member.
                         let idents = cst_ident_texts(&def_node);
                         if idents.len() >= 2 {
@@ -642,7 +731,7 @@ impl TopLevelEnv {
                                 entry.push(member_name.clone());
                             }
                         }
-                    } else if first_kw == Some(SK::KW_UNION) {
+                    } else if has(SK::KW_UNION) {
                         // Union clause → register constructor with correct tuple type.
                         // E.g., "union clause instruction = FVVTYPE : (fvvfunct6, ...)"
                         let idents = cst_ident_texts(&def_node);
@@ -699,7 +788,7 @@ impl TopLevelEnv {
                         Some(type_from_cst_node(&type_node))
                     } else {
                         let text = def_node.text().to_string();
-                        text.find('=').and_then(|eq| {
+                        definition_eq_index(&text).and_then(|eq| {
                             // Skip `==` and `=>` (won't occur at top level
                             // of a TYPE_ALIAS_DEF but defensive).
                             let bytes = text.as_bytes();
@@ -710,6 +799,12 @@ impl TopLevelEnv {
                                 let body_text = text[eq + 1..].trim();
                                 if body_text.is_empty() {
                                     None
+                                } else if body_text.contains('{') {
+                                    // The lightweight text reader treats braced types as
+                                    // opaque names, losing existential binders/predicates.
+                                    // Reuse the full CST reader for these alias bodies,
+                                    // including existentials nested in tuples/applications.
+                                    Some(super::type_from_type_text(body_text))
                                 } else {
                                     let tr = hir_def::hir::type_ref::type_ref_from_text(body_text);
                                     Some(super::workspace::ty_from_type_ref_pub(&tr))
@@ -722,7 +817,7 @@ impl TopLevelEnv {
                         // the alias name and `=`. Looks for `'<word>` tokens.
                         let mut params: Vec<String> = Vec::new();
                         let text = def_node.text().to_string();
-                        if let Some(eq_idx) = text.find('=') {
+                        if let Some(eq_idx) = definition_eq_index(&text) {
                             // Skip `==`/`=>`.
                             let bytes = text.as_bytes();
                             let real_eq = if bytes.get(eq_idx + 1) == Some(&b'=')
@@ -757,6 +852,10 @@ impl TopLevelEnv {
                                 }
                             }
                         }
+                        let mut kind_bounds = super::kinds::declared(&def_node);
+                        super::kinds::infer(&underlying, &mut kind_bounds);
+                        let underlying = super::kinds::normalize(&underlying, &kind_bounds);
+                        let synonym_params = params.clone();
                         let config_dependent =
                             super::workspace::contains_config_dependent(&underlying);
                         env.alias_schemes.insert(
@@ -765,8 +864,21 @@ impl TopLevelEnv {
                                 params,
                                 body: underlying.clone(),
                                 config_dependent,
+                                kind_bounds,
                             }),
                         );
+                        // The body may be a constraint rather than a type.
+                        let full = def_node.text().to_string();
+                        if let Some(eq) = definition_eq_index(&full) {
+                            if let Some(c) =
+                                Some(super::parse_constraint_text(full[eq + 1..].trim()))
+                            {
+                                if !matches!(c, ConstraintExpr::Unsupported) {
+                                    env.constraint_synonyms
+                                        .insert(name.clone(), (synonym_params, c));
+                                }
+                            }
+                        }
                         env.type_aliases.insert(name, underlying);
                     }
                 }
@@ -790,22 +902,6 @@ impl TopLevelEnv {
                         let result = constraint_expr_from_expr_text(body);
                         if let Some(constraint) = result {
                             env.global_constraints.push(constraint);
-                        }
-                    }
-                }
-                SK::DEFAULT_DEF => {
-                    // `default Order dec` or `default Order inc`
-                    let tokens: Vec<String> = def_node
-                        .descendants_with_tokens()
-                        .filter_map(|el| el.into_token())
-                        .filter(|t| !t.kind().is_trivia())
-                        .map(|t| t.text().to_string())
-                        .collect();
-                    if tokens.len() >= 3 && tokens[1].eq_ignore_ascii_case("Order") {
-                        if tokens[2].eq_ignore_ascii_case("dec") {
-                            env.vector_order = VectorOrder::Dec;
-                        } else if tokens[2].eq_ignore_ascii_case("inc") {
-                            env.vector_order = VectorOrder::Inc;
                         }
                     }
                 }
@@ -837,7 +933,17 @@ impl TopLevelEnv {
             || self.cross_file_constructor_names.contains(name)
             || self.cross_file_value_names.contains(name)
             || self.cross_file_register_names.contains(name)
-            || self.known_field_names.contains(name)
+    }
+
+    pub(crate) fn value_binding_exists(&self, name: &str) -> bool {
+        self.lookup_value(&LocalEnv::new(), name).is_some()
+            || self.functions.contains_key(name)
+            || self.constructors.contains_key(name)
+            || self.overloads.contains_key(name)
+            || self.cross_file_function_names.contains(name)
+            || self.cross_file_constructor_names.contains(name)
+            || self.cross_file_value_names.contains(name)
+            || self.cross_file_register_names.contains(name)
     }
 
     pub(crate) fn lookup_value(&self, locals: &LocalEnv, name: &str) -> Option<Ty> {
@@ -847,10 +953,34 @@ impl TopLevelEnv {
             .or_else(|| self.values.get(name).cloned())
             // Registers are accessed via bare identifiers (e.g., `x25 = v`).
             .or_else(|| self.registers.get(name).cloned())
-            // Bitfield field names used as vector indices return `int`
-            // so the identifier is recognized as a valid index.
+            // A nullary enum member is a *value*: `Read_plain`, the whole
+            // `Barrier_RISCV_*` family. Nothing here looked at `enums`, so
+            // they fell through to the constructor branch below — where the
+            // prelude's `union barrier_kind = { Barrier_RISCV_i : unit, .. }`
+            // declares the same names, a constructor is a function, and two
+            // declarations of one name make that branch give up entirely.
             .or_else(|| {
-                if self.known_field_names.contains(name)
+                let mut hits =
+                    self.enums.iter().filter(|(_, members)| members.iter().any(|m| m == name));
+                let (ename, _) = hits.next()?;
+                if hits.next().is_some() {
+                    return None;
+                }
+                Some(Ty::named(ename))
+            })
+            // A *bitfield* field name is an index: `v[SSI]` reads bit SSI,
+            // so the bare name has to type as an integer.
+            //
+            // `known_field_names` holds struct fields too, and answering
+            // `int` for those turns every binding that shares a name with
+            // some struct field anywhere in the workspace into an integer.
+            // A library struct with a field called `value` is enough to
+            // break 34 unrelated expressions in sail-riscv — which is what
+            // happened the moment one became visible.
+            .or_else(|| {
+                let is_bitfield_field =
+                    self.bitfields.values().any(|bf| bf.fields.contains_key(name));
+                if is_bitfield_field
                     && !self.values.contains_key(name)
                     && !self.registers.contains_key(name)
                 {
@@ -893,12 +1023,23 @@ impl TopLevelEnv {
                         out.extend(schemes.iter().cloned());
                     }
                 }
+                // An overload can contain bidirectional mappings as well as
+                // functions. Their two directions participate in the same
+                // argument/return-type selection as the other candidates.
+                out.extend(self.derived_mapping_functions(&format!("{member}_forwards")));
+                out.extend(self.derived_mapping_functions(&format!("{member}_backwards")));
             }
             if !out.is_empty() {
                 return out;
             }
         }
         if let Some(schemes) = self.functions.get(name) {
+            out.extend(schemes.iter().cloned());
+        }
+        // Local constructors come before anything cross-file: a file that
+        // declares `union U('a) = { Err : 'a, Ok : bits(16) }` means its own
+        // `Ok`, not the prelude's `result` constructor of the same name.
+        if let Some(schemes) = self.constructors.get(name) {
             out.extend(schemes.iter().cloned());
         }
         // Cross-file fallback for direct function lookup
@@ -909,8 +1050,115 @@ impl TopLevelEnv {
                 }
             }
         }
-        if let Some(schemes) = self.constructors.get(name) {
-            out.extend(schemes.iter().cloned());
+        // A `union clause ast = ZICBOZ : regidx` in another file left
+        // `ZICBOZ` with a name but no payload type, so `mapping clause
+        // encdec = ZICBOZ(rs1)` bound `rs1` to `error()` — the single
+        // largest source of untyped expressions on sail-riscv.
+        if out.is_empty() {
+            if let Some(schemes) = self.cross_file_constructor_schemes.get(name) {
+                out.extend(schemes.iter().cloned());
+            }
+        }
+        if out.is_empty() {
+            out.extend(self.derived_mapping_functions(name));
+        }
+        out
+    }
+
+    /// Identify an original overload candidate by allocation identity. Equal
+    /// signatures need not denote the same declaration. Synthesized mapping
+    /// signatures have no stable allocation here and deliberately return None.
+    pub(crate) fn selected_overload_name(
+        &self,
+        group: &str,
+        selected: &Arc<TypeScheme>,
+    ) -> Option<String> {
+        let members = self.overloads.get(group)?;
+        let mut found = None;
+        for member in members {
+            let matches = self
+                .functions
+                .get(member)
+                .into_iter()
+                .flatten()
+                .chain(
+                    self.cross_file_schemes
+                        .as_ref()
+                        .and_then(|cf| cf.get(member))
+                        .into_iter()
+                        .flatten(),
+                )
+                .any(|scheme| Arc::ptr_eq(scheme, selected));
+            if matches {
+                if found.as_ref().is_some_and(|name| name != member) {
+                    return None;
+                }
+                found = Some(member.clone());
+            }
+        }
+        found
+    }
+
+    /// The four functions upstream derives from a mapping.
+    ///
+    /// `mapping X : A <-> B` — or a bidirectional `val X : A <-> B` — yields
+    /// `X_forwards : A -> B`, `X_backwards : B -> A`,
+    /// `X_forwards_matches : A -> bool` and `X_backwards_matches : B -> bool`,
+    /// carrying the mapping's own quantifiers and constraints
+    /// (`rewrites.ml:3430-3459`). Source calls them: sail-riscv writes
+    /// `page_based_mem_type_forwards_matches(...)` and
+    /// `pmpAddrMatchType_encdec(...)` directly, and this environment recorded
+    /// the mapping and none of its four, so those calls had no signature at
+    /// all.
+    ///
+    /// Derived on a miss rather than synthesized when the mapping is read,
+    /// because the mapping is usually in another file from the call and
+    /// `lookup_mappings` is what already knows about the cross-file table.
+    /// The eager version was written first and reached only the defining
+    /// file, which is why it is not what is here.
+    fn derived_mapping_functions(&self, name: &str) -> SmallVec<[Arc<TypeScheme>; 4]> {
+        let mut out: SmallVec<[Arc<TypeScheme>; 4]> = SmallVec::new();
+        let suffixes = ["_forwards_matches", "_backwards_matches", "_forwards", "_backwards"];
+        let Some(suffix) = suffixes.into_iter().find(|s| name.ends_with(s)) else { return out };
+        let base = &name[..name.len() - suffix.len()];
+        for mapping in self.lookup_mappings(base) {
+            let (param, ret) = match suffix {
+                "_forwards" => (mapping.lhs.clone(), mapping.rhs.clone()),
+                "_backwards" => (mapping.rhs.clone(), mapping.lhs.clone()),
+                "_forwards_matches" => (mapping.lhs.clone(), Ty::named("bool".to_string())),
+                _ => (mapping.rhs.clone(), Ty::named("bool".to_string())),
+            };
+            let mut scheme = plain_scheme(vec![param], ret);
+            scheme.quantifiers = mapping.quantifiers.clone();
+            scheme.constraints = mapping.constraints.clone();
+            out.push(Arc::new(scheme));
+        }
+        out
+    }
+
+    /// Overload members, including implementations defined in another file.
+    ///
+    /// Separate from [`TopLevelEnv::lookup_functions`] on purpose. The main
+    /// call path reports a type error when every candidate fails to unify,
+    /// and cross-file quantified schemes are not reliable enough for that.
+    /// Operator resolution only asks "is there a candidate that fits" and
+    /// reports nothing on failure, so it can afford them — and it needs
+    /// them, because an operator's implementation almost always lives in the
+    /// prelude.
+    pub(crate) fn lookup_overload_members_cross_file(
+        &self,
+        name: &str,
+    ) -> SmallVec<[Arc<TypeScheme>; 4]> {
+        let mut out = self.lookup_functions(name);
+        if !out.is_empty() {
+            return out;
+        }
+        let Some(members) = self.overloads.get(name) else { return out };
+        let Some(cf) = self.cross_file_schemes.as_ref() else { return out };
+        for member in members {
+            if let Some(schemes) = cf.get(member) {
+                out.extend(schemes.iter().cloned());
+            }
         }
         out
     }
@@ -920,20 +1168,24 @@ impl TopLevelEnv {
         if let Some(schemes) = self.mappings.get(name) {
             out.extend(schemes.iter().cloned());
         }
+        if out.is_empty() {
+            if let Some(schemes) = self.cross_file_mapping_schemes.get(name) {
+                out.extend(schemes.iter().cloned());
+            }
+        }
         out
     }
 }
 
-fn synthesize_bitfield_accessors(
+pub(crate) fn synthesize_bitfield_accessors(
     env: &mut TopLevelEnv,
     bitfield_name: &str,
     field_name: &str,
     field_ty: Ty,
 ) {
     let bitfield_ty = Ty::named(bitfield_name.to_string());
-    let getter_name = format!("_get_{bitfield_name}_{field_name}");
-    let setter_name = format!("_set_{bitfield_name}_{field_name}");
-    let updater_name = format!("_update_{bitfield_name}_{field_name}");
+    let (_, getter_name, updater_name, setter_name) =
+        hir_def::bitfield::accessor_names(bitfield_name, field_name);
     let overload_name = format!("_mod_{field_name}");
 
     env.functions
@@ -945,10 +1197,13 @@ fn synthesize_bitfield_accessors(
         Ty::named("unit".to_string()),
     )));
     env.functions
-        .entry(updater_name)
+        .entry(updater_name.clone())
         .or_default()
         .push(Arc::new(plain_scheme(vec![bitfield_ty.clone(), field_ty.clone()], bitfield_ty)));
     env.overloads.entry(overload_name).or_default().extend([getter_name, setter_name]);
+    // `overload update_<field> = {_update_<bitfield>_<field>}` is emitted
+    // alongside the updater (bitfield.ml:164-167).
+    env.overloads.entry(format!("update_{field_name}")).or_default().push(updater_name);
 }
 
 pub(crate) fn apply_callable_signature_metadata(
@@ -1017,15 +1272,15 @@ pub(crate) fn apply_callable_signature_metadata(
         });
         if let Some(idx) = matched_idx {
             let scheme = Arc::make_mut(&mut schemes[idx]);
-            if scheme.params.len() == 1 {
-                if let TyKind::Tuple(items) = scheme.params[0].kind() {
-                    if items.len() == implicit_params.len() {
-                        let new_params = items.clone();
-                        scheme.params = new_params;
-                    }
-                }
+            // The clause is not authoritative about arity. `val f :
+            // ((string, string)) -> string` takes one tuple, and
+            // `function f(s1, s2) = ..` destructures it; flattening the
+            // parameter to match the clause made every call site expect two
+            // arguments. `(A, B) -> C` already arrives as two parameters, so
+            // a lone tuple parameter here is always the `((A, B))` spelling.
+            if scheme.params.len() == implicit_params.len() {
+                scheme.implicit_params = implicit_params.clone();
             }
-            scheme.implicit_params = implicit_params.clone();
             if scheme.ret.is_unknown() {
                 if let Some(ret) = return_type.as_deref() {
                     scheme.ret = Ty::named(ret.to_string());
@@ -1064,12 +1319,55 @@ pub(crate) fn apply_callable_signature_metadata(
 
 pub(crate) fn infer_literal_type(literal: &Literal) -> Ty {
     match literal {
-        Literal::Bool(_) => Ty::named("bool".to_string()),
+        Literal::Bool(value) => {
+            Ty::app("bool", vec![TyArg::Bool(ConstraintExpr::Bool(*value))], "")
+        }
         Literal::Unit => Ty::named("unit".to_string()),
         Literal::Number(text) => {
             if text.contains('.') {
                 Ty::named("real".to_string())
             } else {
+                // Upstream gives a literal the singleton `atom(3)`
+                // (`infer_lit`, type_check.ml). Doing that here draws false
+                // positives on sail-riscv, all of one shape: two singletons
+                // never join. `if c then 1 else 2` makes `atom(1)` and
+                // `atom(2)` disagree, where upstream generalises to `{'n, 'n
+                // in {1, 2}. atom('n)}`. The literal's value is used against
+                // a range annotation in `infer_expr_hir_with` instead, which
+                // needs no join.
+                //
+                // **Measured again, 2026-08-29, and the answer is still no.**
+                // The count is 257 now rather than 381, every one still
+                // `atom(A) is not a subtype of atom(B)`. Two supporting
+                // fixes take sail-riscv back to 0 — an array literal reading
+                // its expectation instead of letting the first element set
+                // the element type, and a literal *pattern* not deciding
+                // what the scrutinee is — and every other probe is then
+                // worse: conformance 1 false positive → 4 (a list literal, a
+                // vector literal and a register assignment, each with no
+                // expectation to read and elements that must *join*),
+                // mutation 98.1% → 97.4%, inference coverage 7 untyped → 11,
+                // all four of the new ones a `match` whose arms are
+                // different literals.
+                //
+                // The imprecision is load-bearing. `int` for a literal is
+                // what lets joins, overload resolution and unification work
+                // without a subsumption layer; the two lost mutants are
+                // `add_int`/`sub_int` mutated to return `bool`, no longer
+                // caught because with singleton operands the prelude's
+                // `add_atom : forall 'n 'm. (atom('n), atom('m)) -> atom('n
+                // + 'm)` is the more specific overload and wins — which is
+                // upstream's own resolution, and upstream rejects those
+                // files only because it does not see our bundled prelude.
+                //
+                // What it would take is the rest of upstream's numeric
+                // system, not a change here: generalising a join to `{'n, 'n
+                // in {..}. atom('n)}`, reading `int` as `{'n. atom('n)}` in
+                // subsumption, and checking every merge point — match arms,
+                // `if` branches, array and list elements, an assignment's
+                // value — against its expectation rather than against the
+                // first thing that arrived. Until that exists, this line
+                // stays.
                 Ty::named("int".to_string())
             }
         }
@@ -1090,6 +1388,32 @@ pub(crate) fn infer_literal_type(literal: &Literal) -> Ty {
 pub(crate) fn bits_ty(width: impl ToString) -> Ty {
     let width = width.to_string();
     Ty::app("bits", vec![TyArg::numeric(width.clone())], format!("bits({width})"))
+}
+
+/// Consume the same generated-name inventory as navigation and completion.
+fn register_enum_bindings(
+    node: &syntax::SyntaxNode,
+    name: &str,
+    members: usize,
+    explicit_vals: &HashSet<String>,
+    env: &mut TopLevelEnv,
+) {
+    use hir_def::item_tree::generated::{enum_bindings, Kind};
+    for binding in enum_bindings(node, name, members) {
+        if binding.kind == Kind::EnumNumber && explicit_vals.contains(&binding.name) {
+            continue;
+        }
+        if binding.kind == Kind::EnumVector {
+            env.values.insert(binding.name, vector_ty(members, Ty::named(name.to_owned())));
+            continue;
+        }
+        let (root, _) =
+            syntax::parse_text(&format!("val {} : {}", binding.name, binding.type_text));
+        let Some(ty) = root.children().next().and_then(|node| find_type_child(&node)) else {
+            continue;
+        };
+        env.functions.entry(binding.name).or_default().push(Arc::new(scheme_from_cst_node(&ty)));
+    }
 }
 
 pub(crate) fn register_ty(inner: Ty) -> Ty {
@@ -1137,9 +1461,13 @@ pub(crate) fn ty_to_match_ty(ty: &Ty) -> MatchTy {
     match ty.kind() {
         TyKind::Scalar(crate::ty::Scalar::Bool) => MatchTy::Bool,
         TyKind::Scalar(s) => MatchTy::Named(s.name().to_string(), Vec::new()),
-        TyKind::Adt(name, _) if name == "bool" => MatchTy::Bool,
-        TyKind::Adt(name, _) if name == "unit" => MatchTy::Named("unit".to_string(), Vec::new()),
-        TyKind::Adt(name, _) => MatchTy::Named(name.clone(), Vec::new()),
+        TyKind::Named(name, _) | TyKind::App { name, .. }
+            if matches!(name.as_str(), "bool" | "atom_bool") =>
+        {
+            MatchTy::Bool
+        }
+        TyKind::Named(name, _) if name == "unit" => MatchTy::Named("unit".to_string(), Vec::new()),
+        TyKind::Named(name, _) => MatchTy::Named(name.clone(), Vec::new()),
         TyKind::App { name, args, .. } if name == "list" => match args.first() {
             Some(TyArg::Type(elem)) => MatchTy::List(Box::new(ty_to_match_ty(elem))),
             _ => MatchTy::List(Box::new(MatchTy::Unknown)),
@@ -1174,7 +1502,7 @@ pub(crate) fn ty_to_match_ty(ty: &Ty) -> MatchTy {
                 .iter()
                 .filter_map(|arg| match arg {
                     TyArg::Type(t) => Some(ty_to_match_ty(t)),
-                    TyArg::Nexp(_) | TyArg::Value(_) => None,
+                    TyArg::Nexp(_) | TyArg::Bool(_) | TyArg::Order(_) | TyArg::Value(_) => None,
                 })
                 .collect();
             MatchTy::Named(name.clone(), lowered)
@@ -1200,8 +1528,12 @@ pub(crate) fn ty_to_match_ty_with_subst(
         TyKind::Param(name) => subst.get(name).cloned().unwrap_or(MatchTy::Unknown),
         TyKind::Scalar(crate::ty::Scalar::Bool) => MatchTy::Bool,
         TyKind::Scalar(s) => MatchTy::Named(s.name().to_string(), Vec::new()),
-        TyKind::Adt(name, _) if name == "bool" => MatchTy::Bool,
-        TyKind::Adt(name, _) => {
+        TyKind::Named(name, _) | TyKind::App { name, .. }
+            if matches!(name.as_str(), "bool" | "atom_bool") =>
+        {
+            MatchTy::Bool
+        }
+        TyKind::Named(name, _) => {
             let mt = MatchTy::Named(name.clone(), Vec::new());
             promote_record_ty(&mt, records)
         }
@@ -1237,7 +1569,7 @@ pub(crate) fn ty_to_match_ty_with_subst(
                 .iter()
                 .filter_map(|arg| match arg {
                     TyArg::Type(t) => Some(ty_to_match_ty_with_subst(t, subst, records)),
-                    TyArg::Nexp(_) | TyArg::Value(_) => None,
+                    TyArg::Nexp(_) | TyArg::Bool(_) | TyArg::Order(_) | TyArg::Value(_) => None,
                 })
                 .collect();
             let mt = MatchTy::Named(name.clone(), lowered);
@@ -1276,34 +1608,128 @@ pub(crate) fn promote_record_ty<V>(ty: &MatchTy, records: &HashMap<String, V>) -
     }
 }
 
-pub(crate) fn build_env_from_files<F: hir_def::callgraph::SourceFileInfo + ?Sized>(
-    files: &[&F],
-) -> TopLevelEnv {
-    let mut env = TopLevelEnv::default();
-    for &file in files {
-        let text = file.text();
-        let (cst_root, _) = syntax::parse_text(text);
-        let (mut file_env, _) = TopLevelEnv::from_cst(&cst_root);
-        let parsed_file = syntax::cst_lower::parsed_file_from_cst(&cst_root, text);
-        apply_callable_signature_metadata(&parsed_file, text, &mut file_env);
-        for (name, schemes) in file_env.functions {
-            env.functions.entry(name).or_default().extend(schemes);
+/// The `=` that separates a definition from its body.
+///
+/// `text.find('=')` is not it: `type regno ('n : Int), 0 <= 'n < 32 =
+/// atom('n)` has its first `=` inside the `<=` of the constraint, so the
+/// alias's body came out as `'n < 32 = atom('n)` and every use of `regno`
+/// classified as garbage. `==`, `=>`, `<=`, `>=` and `!=` are all operators,
+/// not separators.
+fn definition_eq_index(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'=' {
+            let before = i.checked_sub(1).map(|j| bytes[j]);
+            let after = bytes.get(i + 1).copied();
+            let is_operator = matches!(before, Some(b'<' | b'>' | b'!' | b'='))
+                || matches!(after, Some(b'=' | b'>'));
+            if !is_operator {
+                return Some(i);
+            }
+            // Step past a two-character operator so `==` is not read twice.
+            if after == Some(b'=') {
+                i += 1;
+            }
         }
-        for (name, schemes) in file_env.mappings {
-            env.mappings.entry(name).or_default().extend(schemes);
-        }
-        for (name, members) in file_env.overloads {
-            env.overloads.entry(name).or_default().extend(members);
-        }
-        env.values.extend(file_env.values);
-        env.registers.extend(file_env.registers);
-        env.records.extend(file_env.records);
-        env.bitfields.extend(file_env.bitfields);
-        env.type_aliases.extend(file_env.type_aliases);
-        env.global_constraints.extend(file_env.global_constraints);
-        for (name, schemes) in file_env.constructors {
-            env.constructors.entry(name).or_default().extend(schemes);
-        }
+        i += 1;
     }
-    env
+    None
+}
+
+/// The type of a top-level `let`'s initialiser, when the initialiser states
+/// one on its own.
+///
+/// Upstream checks the whole `letbind` and binds each name at what it infers
+/// (`check_letdef`, type_check.ml). This environment is built *before*
+/// anything can be inferred against it, so only the initialisers that need no
+/// environment are read — a literal is one. Everything else stays untyped,
+/// which is what it was.
+///
+/// `test/c/pointer_assign.sail` is why: `let STATUS_1 = 0x0000_0002` had no
+/// type, so `c | STATUS_1` had no operand it could resolve the operator by.
+fn literal_type_after_eq(node: &syntax::SyntaxNode) -> Option<Ty> {
+    use parser::SyntaxKind as SK;
+    let lit = find_type_after_eq(node)?;
+    // An immutable sizeof binding has an exact symbolic value even when the
+    // configuration is unavailable. Preserve it for dependent branch facts.
+    if lit.kind() == SK::SIZEOF_EXPR && first_keyword_text(node).as_deref() == Some("let") {
+        let expr = find_type_child(&lit)?;
+        let value = NumericExpr::parse(&expr.text().to_string())?;
+        return Some(Ty::app("atom", vec![TyArg::Nexp(value)], ""));
+    }
+    if lit.kind() != SK::LITERAL_EXPR {
+        return None;
+    }
+    let tok = lit
+        .descendants_with_tokens()
+        .filter_map(|e| e.into_token())
+        .find(|t| !t.kind().is_trivia())?;
+    let text = tok.text().to_string();
+    let literal = match tok.kind() {
+        SK::NUM_LIT => Literal::Number(text),
+        SK::HEX_LIT => Literal::Hex(text),
+        SK::BIN_LIT => Literal::Binary(text),
+        SK::STRING_LIT => Literal::String(text),
+        SK::KW_BITZERO => Literal::BitZero,
+        SK::KW_BITONE => Literal::BitOne,
+        SK::KW_TRUE => Literal::Bool(true),
+        SK::KW_FALSE => Literal::Bool(false),
+        SK::UNIT => Literal::Unit,
+        _ => return None,
+    };
+    let ty = infer_literal_type(&literal);
+    (!ty.is_error()).then_some(ty)
+}
+
+/// `let (x as 'n) : range(lo, hi) = ...` gives x the singleton atom('n).
+/// Keep this identity instead of widening x to the annotation's entire range.
+fn preserve_global_numeric_binders(node: &syntax::SyntaxNode, env: &mut TopLevelEnv) {
+    use parser::SyntaxKind as SK;
+    let tokens: Vec<_> = node
+        .descendants_with_tokens()
+        .filter_map(|t| t.into_token())
+        .filter(|t| !t.kind().is_trivia())
+        .take_while(|t| t.kind() != SK::EQ)
+        .collect();
+    for triple in tokens.windows(3) {
+        if triple[0].kind() != SK::IDENT
+            || triple[1].kind() != SK::KW_AS
+            || triple[2].kind() != SK::TY_VAR
+        {
+            continue;
+        }
+        let name = triple[0].text().to_string();
+        let Some(ty) = env.values.get(&name) else {
+            continue;
+        };
+        if !super::constraint::is_numeric_scalar_ty(ty) {
+            continue;
+        }
+        let variable = NumericExpr::Var(triple[2].text().to_string());
+        if let Some((lo, hi)) = super::expr::concrete_range_bounds(ty) {
+            if let (Ok(lo), Ok(hi)) = (i64::try_from(lo), i64::try_from(hi)) {
+                env.global_constraints.push(ConstraintExpr::And(vec![
+                    ConstraintExpr::Compare {
+                        lhs: NumericExpr::Const(lo),
+                        op: CompareOp::Lte,
+                        rhs: variable.clone(),
+                    },
+                    ConstraintExpr::Compare {
+                        lhs: variable.clone(),
+                        op: CompareOp::Lte,
+                        rhs: NumericExpr::Const(hi),
+                    },
+                ]));
+            }
+        }
+        env.values.insert(
+            name,
+            Ty::app(
+                "atom",
+                vec![TyArg::Nexp(variable.clone())],
+                format!("atom({})", variable.to_string_repr()),
+            ),
+        );
+    }
 }

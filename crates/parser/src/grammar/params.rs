@@ -12,6 +12,14 @@ impl<'t> Parser<'t> {
         if self.at(SK::UNIT) && self.pos() < end_pos {
             self.bump_any(); // ()
         }
+        // An unparenthesised type-variable parameter: `function a 'n = ..`.
+        // `atomic_pat: | kid` binds the value `n` and constrains it to
+        // `atom('n)` (parser.mly:541-543), so this is one parameter.
+        if self.at(SK::TY_VAR) && self.pos() < end_pos {
+            let pm = self.start();
+            self.bump_any();
+            pm.complete(self, SK::PARAM_LIST);
+        }
         // Handle bare IDENT (or IDENT(args)) as a param.
         // Covers: `function f value_name = { ... }`
         //         `function f BAR(x) = x`
@@ -40,10 +48,49 @@ impl<'t> Parser<'t> {
                     self.bump_any();
                 }
             }
+            // Vector-subrange and vector-concat pattern parameters:
+            //   `function foo imm[19] @ imm[9..0] @ imm[18..11] = ...`
+            // Upstream's `funcl_patexp: pat Eq exp` (parser.mly:921-923)
+            // accepts an arbitrary pattern here, including `P_vector_subrange`
+            // and `P_vector_concat`, with no parentheses required.
+            loop {
+                if self.at(T!['[']) && self.pos() < end_pos {
+                    let mut depth = 0u32;
+                    loop {
+                        if self.at_end() || self.pos() >= end_pos {
+                            break;
+                        }
+                        if self.at(T!['[']) {
+                            depth += 1;
+                        }
+                        if self.at(T![']']) {
+                            depth -= 1;
+                            self.bump_any();
+                            if depth == 0 {
+                                break;
+                            }
+                            continue;
+                        }
+                        self.bump_any();
+                    }
+                } else if self.at(T![@]) && self.nth(1) == SK::IDENT && self.pos() < end_pos {
+                    self.bump_any(); // @
+                    self.bump_any(); // ident
+                } else {
+                    break;
+                }
+            }
             // Optional type annotation: `: type`
+            //
+            // `->` terminates it. In the unparenthesised clause form
+            // `function f x : atom('n) -> bool = ...` the arrow separates the
+            // parameter pattern from the *return* type (`funcl_patexp_typ:
+            // pat MinusGt typ Eq exp`, parser.mly:930); without stopping here
+            // the parameter would take the function type `atom('n) -> bool`.
             if self.at(T![:]) && self.pos() < end_pos {
                 self.bump_any();
-                let recovery = super::TYPE_RECOVERY.union(TokenSet::new(&[T![as], T![match]]));
+                let recovery =
+                    super::TYPE_RECOVERY.union(TokenSet::new(&[T![as], T![match], T![->]]));
                 self.parse_type_expr(recovery);
             }
             // Optional `as id` binding
@@ -51,6 +98,60 @@ impl<'t> Parser<'t> {
                 self.bump_any();
                 if self.at(SK::IDENT) && self.pos() < end_pos {
                     self.bump_any();
+                }
+            }
+            // `@ <part> [: type]` continues the *same* parameter.
+            //
+            // The loop above reads `@ ident` only where no annotation
+            // follows, and the marker used to close here — so
+            // `function clause decode splitting : bits(4) @ vop : bits(2) @
+            // rest : bits(2)` put `splitting` in the `PARAM_LIST` and left
+            // the other two parts outside it, in the `CALLABLE_DEF`. They
+            // were lowered by nothing, so every use of `vop` and `rest` was
+            // an unresolved identifier — which a text scan for "this name
+            // looks bound somewhere" then hid.
+            while self.at(T![@]) && self.pos() < end_pos {
+                self.bump_any(); // @
+                let part_start = self.pos();
+                if matches!(self.current(), SK::IDENT | SK::HEX_LIT | SK::BIN_LIT | SK::NUM_LIT)
+                    || self.at(T![_])
+                {
+                    self.bump_any();
+                }
+                // `[..]` — a vector pattern, or a subrange suffix.
+                while self.at(T!['[']) && self.pos() < end_pos {
+                    let mut depth = 0u32;
+                    loop {
+                        if self.at_end() || self.pos() >= end_pos {
+                            break;
+                        }
+                        if self.at(T!['[']) {
+                            depth += 1;
+                        }
+                        if self.at(T![']']) {
+                            depth -= 1;
+                            self.bump_any();
+                            if depth == 0 {
+                                break;
+                            }
+                            continue;
+                        }
+                        self.bump_any();
+                    }
+                }
+                if self.at(T![:]) && self.pos() < end_pos {
+                    self.bump_any();
+                    let recovery = super::TYPE_RECOVERY.union(TokenSet::new(&[
+                        T![as],
+                        T![match],
+                        T![->],
+                        T![@],
+                    ]));
+                    self.parse_type_expr(recovery);
+                }
+                // Nothing consumed — stop rather than spin.
+                if self.pos() == part_start {
+                    break;
                 }
             }
             pm.complete(self, SK::PARAM_LIST);
@@ -149,7 +250,7 @@ impl<'t> Parser<'t> {
         let am = self.start();
         self.bump_any(); // (
         self.parse_comma_sep(T![')'], |p| {
-            p.parse_expr();
+            p.parse_expr_or_assign();
         });
         self.expect(T![')']);
         am.complete(self, SK::ARG_LIST)

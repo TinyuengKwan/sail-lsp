@@ -5,7 +5,7 @@
 use hir_def::name::Name;
 use syntax::SyntaxNodePtr;
 
-use crate::ModuleDef;
+use crate::Def;
 
 /// The kind of a file symbol, for filtering and display.
 ///
@@ -42,13 +42,13 @@ pub struct FileSymbol {
     /// The symbol name.
     pub name: Name,
     /// The definition this symbol refers to.
-    pub def: ModuleDef,
+    pub def: Def,
     /// Source location of the declaration.
     pub loc: DeclarationLocation,
     /// Name of the containing definition, if any (e.g., enum name for members).
     pub container_name: Option<Name>,
     /// The kind of symbol (function, struct, etc.).
-    /// Sail-specific: RA derives kind from `def: ModuleDef`, but an explicit
+    /// Sail-specific: RA derives kind from `def: Def`, but an explicit
     /// enum is clearer for consumers.
     pub kind: FileSymbolKind,
     /// Whether this is a scattered clause (not the head definition).

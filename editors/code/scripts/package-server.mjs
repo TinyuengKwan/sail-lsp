@@ -21,8 +21,14 @@ const destinationPath = path.join(serverDir, sourceName);
 
 if (!existsSync(sourcePath)) {
     console.error(`missing built server binary: ${sourcePath}`);
+    // `--features vendored` builds Z3 from source and links it statically.
+    // Without it the binary needs the exact `libz3.so.4.x` it was built
+    // against, which the user's machine will not have: the previously
+    // bundled server was built against 4.16 and died with
+    // `libz3.so.4.16 => not found` on a machine carrying 4. A packaged
+    // server may depend on libc and libstdc++ and nothing else.
     console.error(
-        `build it first, for example: cargo build --release -p sail-lsp --target ${rustTarget} --target-dir target/vscode/${targetOs}-${targetArch}`,
+        `build it first, for example: cargo build --release -p sail-lsp --features vendored --target ${rustTarget} --target-dir target/vscode/${targetOs}-${targetArch}`,
     );
     process.exit(1);
 }

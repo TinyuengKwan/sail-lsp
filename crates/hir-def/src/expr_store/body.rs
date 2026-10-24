@@ -12,13 +12,11 @@ use crate::expr_store::{ExpressionStore, ExpressionStoreBuilder, ExpressionStore
 use crate::Span;
 
 /// Create an ExprId from a raw u32 index. Used in tests.
-#[allow(dead_code)]
 pub fn expr_id_from_raw(raw: u32) -> ExprId {
     Idx::from_raw(RawIdx::from_u32(raw))
 }
 
 /// Create a PatId from a raw u32 index. Used in tests.
-#[allow(dead_code)]
 pub fn pat_id_from_raw(raw: u32) -> PatId {
     Idx::from_raw(RawIdx::from_u32(raw))
 }
@@ -30,6 +28,11 @@ pub struct Body {
     pub params: Box<[PatId]>,
     pub body_expr: ExprId,
     pub mapping_arms: Vec<crate::expr_store::hir::MappingArm>,
+    /// A function clause's guard: `function f (A(v) if v == 0x0) = ..`.
+    ///
+    /// It lives inside the parameter list as bare tokens, so nothing lowered
+    /// it and no type error inside a guard was ever visible.
+    pub guard: Option<ExprId>,
 }
 
 impl std::ops::Deref for Body {
@@ -43,7 +46,13 @@ impl Body {
     /// Create a Body from its constituent parts.
     /// Used in tests and when constructing bodies programmatically.
     pub fn new(store: ExpressionStore, params: Vec<PatId>, body_expr: ExprId) -> Self {
-        Body { store, params: params.into_boxed_slice(), body_expr, mapping_arms: Vec::new() }
+        Body {
+            store,
+            params: params.into_boxed_slice(),
+            body_expr,
+            mapping_arms: Vec::new(),
+            guard: None,
+        }
     }
 
     /// Create an empty Body.
@@ -51,7 +60,7 @@ impl Body {
         let mut builder = ExpressionStoreBuilder::new();
         let id = builder.alloc_expr(Expr::Missing, Span::new(0, 0));
         let (store, _source_map) = builder.finish();
-        Body { store, params: Box::new([]), body_expr: id, mapping_arms: Vec::new() }
+        Body { store, params: Box::new([]), body_expr: id, mapping_arms: Vec::new(), guard: None }
     }
 
     /// Lower a CST node into a Body + BodySourceMap.
@@ -153,9 +162,33 @@ impl std::ops::Index<PatId> for Body {
 pub struct BodySourceMap {
     pub file_id: Option<base_db::FileId>,
     pub store: ExpressionStoreSourceMap,
+    /// Where the callable starts in the file as it is *now*.
+    ///
+    /// `body_with_source_map` reads this fresh on every revision, which is
+    /// what makes the query re-execute at all: its only other input is
+    /// `callable_body`, which is deliberately backdated across an edit
+    /// above the callable, and a query whose inputs all verify unchanged
+    /// returns its memo — positions and all, from before the edit.
+    ///
+    /// It is also the datum a raw inference span needs: an
+    /// `InferenceResult` that was reused records the base it was inferred
+    /// with, and the difference is how far its spans have to move.
+    pub def_base: usize,
 }
 
 impl BodySourceMap {
+    /// Move a span recorded when the callable started at `was` to where it
+    /// starts now.
+    pub fn rebase(&self, span: Span, was: usize) -> Span {
+        let delta = self.def_base as i64 - was as i64;
+        if delta == 0 {
+            return span;
+        }
+        let lo = (span.start as i64 + delta).max(0) as usize;
+        let hi = (span.end as i64 + delta).max(0) as usize;
+        Span::new(lo, hi)
+    }
+
     pub fn expr_at_span(&self, span: Span) -> Option<ExprId> {
         self.store.expr_at_span(span)
     }

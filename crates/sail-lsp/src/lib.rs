@@ -13,9 +13,9 @@
 //!   dispatch (RA lazy pattern).
 //! - **op_queue** — typed operation queue for deferred workspace reload and
 //!   prime_caches.
-//! - **TaskPool\<Task\>** — generic rayon-backed pool; `Task` enum in
-//!   `main_loop.rs` (backed by rayon instead of RA's `stdx::thread::Pool`,
-//!   no `ThreadIntent` priority).
+//! - **TaskPool\<Task\>** — generic pool over RA's `stdx::thread::Pool`;
+//!   `Task` enum in `main_loop.rs`. Every job says what it is for
+//!   (`ThreadIntent`), and the pool counts what is extant.
 //! - **DiagnosticCollection** — `native_syntax` + `native_semantic` slots with
 //!   generation tracking (drops RA's `check`/flycheck slot).
 //! - **prime_caches** — pre-warms salsa queries after workspace scan.
@@ -29,11 +29,9 @@
 //!   resolves `$SAIL_DIR` or writes vendored files to a temp dir.
 //! - **`code_action_helpers.rs`** — `code_action_kind_allowed` + lazy code
 //!   action data helpers isolated from `lsp-types` in IDE crates.
-//! - **`hover_ext.rs`** — `append_callable_context_to_hover` post-processing
-//!   for Sail effect/callee footers.
 //! - **`GlobalState::include_graph`** — `$include` dependency DAG used for
 //!   cross-file diagnostic propagation and scope enforcement.
-//! - **`GlobalState::workspace_index`** — `SymbolIndex` for O(1)
+//! - **`GlobalState::symbol_index`** — `SymbolIndex` for O(1)
 //!   name→location lookups without per-request file scans.
 //! - **`send_request`** — fire-and-forget (RA uses a registered `ReqHandler`
 //!   callback; sail-lsp drops server→client responses).
@@ -46,9 +44,9 @@ pub mod lsp;
 
 mod code_action_helpers;
 mod diagnostics;
+mod flycheck;
 mod global_state;
 mod handlers;
-mod hover_ext;
 mod main_loop;
 mod mem_docs;
 mod op_queue;
@@ -69,6 +67,10 @@ pub(crate) use lsp::to_proto;
 
 #[cfg(test)]
 mod integrated_benchmarks;
+/// The probe that enters where a client does — see its module docs for the
+/// four defects that were invisible to the five that enter at `Analysis`.
+#[cfg(test)]
+mod server_check;
 #[cfg(test)]
 mod tests;
 

@@ -13,10 +13,9 @@ base-db.workspace = true
 salsa.workspace = true
 parser.workspace = true
 syntax.workspace = true
-hir-expand.workspace = true
-hir.workspace = true
-hir-def.workspace = true
-hir-ty.workspace = true
+# ide should depend only on the top-level `hir` package. If you need
+# something from a `hir-xxx` subpackage, re-export the API via `hir`.
+hir = { workspace = true, default-features = false }
 ide-db.workspace = true
 ide-assists.workspace = true
 ide-completion.workspace = true
@@ -27,6 +26,11 @@ serde_json.workspace = true
 url.workspace = true
 vfs.workspace = true
 pulldown-cmark.workspace = true
+
+[features]
+# Exposes `ide::fixture` so other crates' tests can build an `Analysis` from a
+# fixture string and run the real diagnostics pipeline over it.
+test-utils = ["ide-db/test-utils"]
 
 [dev-dependencies]
 ide-db = { workspace = true, features = ["test-utils"] }

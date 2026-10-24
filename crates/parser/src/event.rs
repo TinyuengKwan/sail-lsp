@@ -23,7 +23,7 @@ pub enum Event {
         kind: SyntaxKind,
         /// Number of raw tokens this token covers in the input.
         /// Always 0 in sail-lsp (unused); ra uses this to advance the raw cursor.
-        #[allow(dead_code)]
+        #[expect(dead_code)]
         n_raw_tokens: usize,
     },
     /// A parse error at the current position.

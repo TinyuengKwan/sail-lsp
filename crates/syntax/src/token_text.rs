@@ -10,19 +10,19 @@ use rowan::GreenToken;
 /// or an owned copy from a `GreenToken`.
 pub struct TokenText<'a>(Repr<'a>);
 
-#[allow(dead_code)] // WIP: will be used when SyntaxToken methods are wired
+#[expect(dead_code)] // WIP: will be used when SyntaxToken methods are wired
 enum Repr<'a> {
     Borrowed(&'a str),
     Owned(GreenToken),
 }
 
 impl<'a> TokenText<'a> {
-    #[allow(dead_code)] // WIP: will be used when SyntaxToken methods are wired
+    #[expect(dead_code)] // WIP: will be used when SyntaxToken methods are wired
     pub(crate) fn borrowed(text: &'a str) -> Self {
         TokenText(Repr::Borrowed(text))
     }
 
-    #[allow(dead_code)] // WIP: will be used when SyntaxToken methods are wired
+    #[expect(dead_code)] // WIP: will be used when SyntaxToken methods are wired
     pub(crate) fn owned(green: GreenToken) -> Self {
         TokenText(Repr::Owned(green))
     }

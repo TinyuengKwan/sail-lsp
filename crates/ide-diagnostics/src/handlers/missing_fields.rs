@@ -2,7 +2,7 @@
 //! Fix: insert missing fields with type-aware default values .
 
 use crate::Diagnostic;
-use hir_def::diagnostics::DiagnosticCode;
+use hir::diagnostics::DiagnosticCode;
 use ide_db::source_change::SourceChange;
 use ide_db::text_edit::TextEdit;
 

@@ -5,20 +5,20 @@
 //!   2. Else → slow scan all nodes in scope
 //!   3. At each candidate location, attempt matching against the pattern.
 
-use hir_def::in_file::FileRange;
+use hir::FileRange;
 use syntax::SyntaxNode;
 
 use crate::matching::{Match, Matcher, SsrMatches};
 use crate::resolving::ResolvedRule;
 
 /// Cache of usages for definitions found in patterns.
-#[allow(dead_code)]
+#[expect(dead_code)]
 pub(crate) struct UsageCache {
     usages: Vec<(hir::PathResolution, Vec<FileRange>)>,
 }
 
 impl UsageCache {
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub(crate) fn new() -> Self {
         Self { usages: Vec::new() }
     }

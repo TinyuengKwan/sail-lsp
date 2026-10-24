@@ -77,7 +77,14 @@ pub fn parse_text_with_fixities(
 /// Wraps `parse_text` converting `ParseError` → `SyntaxError`.
 pub(crate) fn parse_text_to_syntax_errors(text: &str) -> (SyntaxNode, Vec<SyntaxError>) {
     let (root, errors) = parse_text(text);
-    let syntax_errors = errors.into_iter().map(|e| parse_error_to_syntax_error(&e, text)).collect();
+    // Parse errors only. `Parse::errors()` runs `validation::validate` when
+    // the errors are read, which is rust-analyzer's arrangement
+    // (`syntax/src/lib.rs:101`, its only call site) — validating here as
+    // well stored the validation errors *and* recomputed them on read, so
+    // every one was reported twice: one unclosed paren gave two
+    // `expected ')'`.
+    let syntax_errors: Vec<SyntaxError> =
+        errors.into_iter().map(|e| parse_error_to_syntax_error(&e, text)).collect();
     (root, syntax_errors)
 }
 
@@ -87,7 +94,9 @@ pub(crate) fn parse_text_with_fixities_to_syntax_errors(
     fixities: FixityContext,
 ) -> (SyntaxNode, Vec<SyntaxError>) {
     let (root, errors) = parse_text_with_fixities(text, fixities);
-    let syntax_errors = errors.into_iter().map(|e| parse_error_to_syntax_error(&e, text)).collect();
+    // Parse errors only; see `parse_text_to_syntax_errors`.
+    let syntax_errors: Vec<SyntaxError> =
+        errors.into_iter().map(|e| parse_error_to_syntax_error(&e, text)).collect();
     (root, syntax_errors)
 }
 
@@ -179,6 +188,16 @@ fn build_tree_from_output(
         builder.finish_node();
         depth -= 1;
     }
+
+    // A lexical error is a parse error to every reader above. This is
+    // rust-analyzer's arrangement — `build_tree` merges `lexed.errors()`
+    // into the same list the parser's own `Step::Error`s land in — and it
+    // is why the seven things upstream's lexer raises on now reach the
+    // editor: nothing above this point asks the lexer anything.
+    errors.extend(
+        lexed.errors().map(|(offset, message)| ParseError { message: message.to_owned(), offset }),
+    );
+    errors.sort_by_key(|e| e.offset);
 
     (builder.finish(), errors)
 }

@@ -6,10 +6,11 @@
 use base_db::FileId;
 
 use crate::defs::Definition;
-use crate::line_index::TextRange;
 use crate::search::FileReference;
 use crate::source_change::SourceChange;
 use crate::text_edit::TextEdit;
+
+mod bitfield;
 
 /// Rename error — wraps a human-readable message.
 ///
@@ -59,7 +60,11 @@ impl IdentifierKind {
                 "Invalid identifier: contains whitespace: `{new_name}`"
             )));
         }
-        if crate::keywords::SAIL_KEYWORDS.contains(&new_name) {
+        // Through `is_keyword`, which had no caller because this asked
+        // the word list directly — and the list is not the question. A
+        // rename to `module` passed here and produced a file `sail`
+        // rejects before it type-checks anything.
+        if crate::keywords::is_keyword(new_name) {
             return Err(RenameError(format!("Invalid name: `{new_name}` is a keyword")));
         }
         Ok((new_name.to_string(), IdentifierKind::Ident))
@@ -76,77 +81,35 @@ pub fn source_edit_from_references(references: &[FileReference], new_name: &str)
         .collect()
 }
 
-/// Find all whole-word occurrences of `name` in `text`, returning
-/// FileReferences with byte-offset TextRanges.
-///
-/// This is the backend for `Definition::rename` when operating
-/// on raw text without a full FileDb.
-pub fn find_name_in_text(name: &str, text: &str) -> Vec<FileReference> {
-    use crate::search::ReferenceCategory;
-
-    let name_len = name.len();
-    let bytes = text.as_bytes();
-    let mut refs = Vec::new();
-    let mut pos = 0;
-    while pos + name_len <= text.len() {
-        if let Some(idx) = text[pos..].find(name) {
-            let start = pos + idx;
-            let end = start + name_len;
-
-            let before_ok = start == 0 || !is_ident_char(bytes[start - 1]);
-            let after_ok = end >= text.len() || !is_ident_char(bytes[end]);
-
-            if before_ok && after_ok && !is_in_comment_or_string(text, start) {
-                let range = base_db::text_range(start, end);
-                refs.push(FileReference { range, name: None, category: ReferenceCategory::READ });
-            }
-            pos = start + 1;
-        } else {
-            break;
-        }
-    }
-    refs
-}
-
-fn is_ident_char(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_' || b == b'\''
-}
-
-/// Simple heuristic: check if a byte offset is inside a line comment or string.
-fn is_in_comment_or_string(text: &str, offset: usize) -> bool {
-    let prefix = &text[..offset];
-    // Line comment check
-    let line_start = prefix.rfind('\n').map(|p| p + 1).unwrap_or(0);
-    let line = &prefix[line_start..];
-    if let Some(comment_pos) = line.find("//") {
-        if line_start + comment_pos < offset {
-            return true;
-        }
-    }
-    // Block comment check (/* ... */)
-    if let Some(block_start) = prefix.rfind("/*") {
-        if prefix[block_start..].find("*/").is_none() {
-            return true;
-        }
-    }
-    // String literal check (count unescaped quotes)
-    let quote_count = prefix.chars().filter(|&c| c == '"').count();
-    quote_count % 2 != 0
-}
-
 impl Definition {
-    /// Rename this definition and all its references across files.
-    /// Steps:
-    /// 1. Validate new_name via IdentifierKind::classify
-    /// 2. Find all occurrences of old_name in provided files
-    /// 3. Build SourceChange with per-file edits
+    /// Rename this definition and every mention of it.
+    ///
+    /// rust-analyzer's rename is this method; ours was here in its shape
+    /// and had no caller, and inside it scanned each file's raw text for
+    /// the old name, skipping what looked like a comment or a string. It
+    /// goes through `FindUsages` now — the same search find-references
+    /// uses — so it renames the definition rather than the spelling.
+    ///
+    /// `scope` is how a local stays in its own file: a binding site is a
+    /// position, and a position means nothing in another file.
     pub fn rename(
         &self,
-        db: &dyn hir_def::db::DefDatabase,
-        files: &[(FileId, &str)],
+        db: &dyn salsa::Database,
+        files: &[(FileId, &dyn crate::FileDb)],
+        scope: Option<crate::search::SearchScope>,
         new_name: &str,
     ) -> Result<SourceChange> {
         let (_validated, kind) = IdentifierKind::classify(new_name)?;
+
+        if let Some(loc) = self.def_location() {
+            if let Some((tree, item)) = loc.item(db) {
+                if tree.generated.contains_key(&item) {
+                    return Err(RenameError(
+                        "A generated binding cannot be renamed independently of its generating declaration.".into(),
+                    ));
+                }
+            }
+        }
 
         if kind == IdentifierKind::Underscore {
             match self {
@@ -163,12 +126,84 @@ impl Definition {
             .name(db)
             .ok_or_else(|| RenameError("Cannot rename: definition has no name".into()))?;
 
+        let search = crate::search::FindUsages::new(self.clone(), old_name.as_str());
         let mut source_change = SourceChange::new();
+        let canonical = self.canonical(db);
+        let mut generated_searches = Vec::new();
+        let bitfield = bitfield::BitfieldRename::prepare(db, files, &canonical, new_name)?;
+        if let Some(bitfield) = &bitfield {
+            for (def, name, renamed) in &bitfield.helpers {
+                generated_searches
+                    .push((crate::search::FindUsages::new(def.clone(), name), renamed.clone()));
+            }
+        }
+        if let Some(loc) = canonical.def_location() {
+            if let Some((tree, owner)) = loc.item(db) {
+                if let Some(at) =
+                    hir::source_order::at_offset(db, loc.file_text, owner.name_span(tree).start)
+                {
+                    for (&item, origin) in &tree.generated {
+                        if origin.owner != owner || !origin.derived_name {
+                            continue;
+                        }
+                        let name = item.name(tree).as_str();
+                        let old_owner = owner.name(tree).as_str();
+                        let renamed = if name == format!("num_of_{old_owner}") {
+                            format!("num_of_{new_name}")
+                        } else if origin.kind == hir::generated::Kind::BitfieldFunction {
+                            let Some((prefix, suffix)) = ["Mk_", "_get_", "_update_", "_set_"]
+                                .into_iter()
+                                .find_map(|prefix| {
+                                    name.strip_prefix(&format!("{prefix}{old_owner}"))
+                                        .map(|suffix| (prefix, suffix))
+                                })
+                            else {
+                                continue;
+                            };
+                            format!("{prefix}{new_name}{suffix}")
+                        } else if let Some(suffix) = name.strip_prefix(old_owner) {
+                            format!("{new_name}{suffix}")
+                        } else {
+                            continue;
+                        };
+                        if let Some(def) = hir::def_at_declaration_in_namespace(
+                            db,
+                            at,
+                            name,
+                            hir::source_order::bindings::Namespace::Value,
+                        )
+                        .and_then(Definition::from_def)
+                        {
+                            generated_searches
+                                .push((crate::search::FindUsages::new(def, name), renamed));
+                        }
+                    }
+                }
+            }
+        }
 
-        for &(file_id, text) in files {
-            let refs = find_name_in_text(old_name.as_str(), text);
-            if !refs.is_empty() {
-                let edits = source_edit_from_references(&refs, new_name);
+        for &(file_id, file) in files {
+            if scope.as_ref().is_some_and(|scope| !scope.contains(file_id)) {
+                continue;
+            }
+            let mut edits: Vec<TextEdit> = search
+                .spans_in_file(file)
+                .into_iter()
+                .map(|(span, _)| TextEdit {
+                    range: base_db::text_range(span.start, span.end),
+                    new_text: new_name.to_owned(),
+                })
+                .collect();
+            for (search, renamed) in &generated_searches {
+                edits.extend(search.spans_in_file(file).into_iter().map(|(span, _)| TextEdit {
+                    range: base_db::text_range(span.start, span.end),
+                    new_text: renamed.clone(),
+                }));
+            }
+            if let Some(bitfield) = &bitfield {
+                edits.extend(bitfield.shared_edits(db, file)?);
+            }
+            if !edits.is_empty() {
                 source_change.insert_source_edit(file_id, edits);
             }
         }
@@ -176,30 +211,39 @@ impl Definition {
         Ok(source_change)
     }
 
-    /// Get the range of the identifier to rename.
-    ///
-    /// Returns the file + text range of the definition's name token.
-    pub fn range_for_rename(
-        &self,
-        db: &dyn hir_def::db::DefDatabase,
-    ) -> Option<(FileId, TextRange)> {
-        let file_id = self.file_id(db)?;
-        let loc = self.def_location()?;
-        let item_tree = hir_def::def_query::file_item_tree(db, loc.file_text).as_ref()?;
-        let def_map = hir_def::def_query::crate_def_map(db, loc.file_text).as_ref()?;
-        let raw_id = loc.raw_def_id();
-        let def_data = def_map.0.get(raw_id)?;
-        let mod_item = item_tree.top_level_items().get(def_data.item_tree_index)?;
-        let span = mod_item.span(item_tree);
-
-        let range = base_db::text_range(span.start, span.end);
-        Some((file_id, range))
-    }
+    // There is no `range_for_rename`. It said in its doc that it
+    // returned "the definition's name token" and returned
+    // `mod_item.span(item_tree)` — the whole definition — so a
+    // `prepareRename` through it would have selected the entire `function
+    // foo(x) = x`. It had no caller: `ide::rename::prepare_rename` answers
+    // from the token under the cursor, which is what the request asks
+    // about and is right for a *use* as well as a definition.
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A name upstream's lexer refuses is not a valid rename target.
+    ///
+    /// `import` and `module` raise in upstream's keyword table
+    /// (`lexer.mll:119-120`) rather than becoming tokens, so they are not
+    /// in `SAIL_KEYWORDS` — and this check asked that list directly, so a
+    /// rename to `module` was accepted and produced a file `sail` rejects
+    /// before it type-checks anything.
+    #[test]
+    fn a_reserved_word_is_not_a_rename_target() {
+        for name in ["module", "import"] {
+            assert!(
+                IdentifierKind::classify(name).is_err(),
+                "{name} is reserved and must be refused"
+            );
+        }
+        // And an ordinary keyword still is.
+        assert!(IdentifierKind::classify("function").is_err());
+        // While a name that merely contains one is fine.
+        assert!(IdentifierKind::classify("module_id").is_ok());
+    }
 
     #[test]
     fn classify_valid_ident() {
@@ -230,35 +274,22 @@ mod tests {
     }
 
     #[test]
-    fn find_name_whole_word() {
-        let refs = find_name_in_text("foo", "foo(bar, foo)");
-        assert_eq!(refs.len(), 2);
-    }
-
-    #[test]
-    fn find_name_skips_substrings() {
-        let refs = find_name_in_text("foo", "foobar foo_x xfoo");
-        assert_eq!(refs.len(), 0);
-    }
-
-    #[test]
-    fn find_name_skips_comments() {
-        let refs = find_name_in_text("foo", "foo // foo\nfoo");
-        assert_eq!(refs.len(), 2); // first + last, not the one in comment
-    }
-
-    #[test]
-    fn find_name_skips_strings() {
-        let refs = find_name_in_text("foo", "foo \"foo\" foo");
-        assert_eq!(refs.len(), 2); // first + last, not the one in string
-    }
-
-    #[test]
     fn source_edit_builds_replacements() {
-        let refs = find_name_in_text("old", "old(old)");
+        use crate::search::ReferenceCategory;
+        let refs = vec![
+            FileReference {
+                range: base_db::text_range(0, 3),
+                name: None,
+                category: ReferenceCategory::READ,
+            },
+            FileReference {
+                range: base_db::text_range(4, 7),
+                name: None,
+                category: ReferenceCategory::READ,
+            },
+        ];
         let edits = source_edit_from_references(&refs, "new");
         assert_eq!(edits.len(), 2);
-        assert_eq!(edits[0].new_text, "new");
-        assert_eq!(edits[1].new_text, "new");
+        assert!(edits.iter().all(|e| e.new_text == "new"));
     }
 }

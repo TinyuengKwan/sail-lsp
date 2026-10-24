@@ -129,6 +129,17 @@ impl DiagnosticCode {
                 DiagnosticCode::SailLint("unsolved-constraint", Severity::Warning)
             }
             "unreachable-code" => DiagnosticCode::SailLint("unreachable-code", Severity::Hint),
+            // Distinct from `unreachable-code`/`redundant-type-annotation`: those are
+            // findings about code that cannot run or an annotation that says nothing,
+            // and these two are style lints with a fix. Sharing a code made a client
+            // that silences one silence the other, and made the corpus summary
+            // attribute every one of them to the wrong lint.
+            "remove-trailing-return" => {
+                DiagnosticCode::SailLint("remove-trailing-return", Severity::Hint)
+            }
+            "remove-unnecessary-else" => {
+                DiagnosticCode::SailLint("remove-unnecessary-else", Severity::Warning)
+            }
             "unreachable-after-escape" => {
                 DiagnosticCode::SailLint("unreachable-after-escape", Severity::Hint)
             }
@@ -154,6 +165,14 @@ pub struct Diagnostic {
     pub range: TextRange,
     pub severity: Severity,
     pub tags: Vec<DiagnosticTag>,
+    /// Secondary spans, with what to say at each. Upstream renders these
+    /// as `Caused by <location>` under the finding, and the IDE layer
+    /// sends them as `relatedInformation` — the same field
+    /// `unsolved_constraint` already travels through, which had no way in
+    /// from this side.
+    pub related: Vec<(TextRange, String)>,
+    /// Secondary spans in other semantic source instances.
+    pub related_in_files: Vec<(base_db::FileId, TextRange, String)>,
 }
 
 impl Diagnostic {
@@ -163,7 +182,20 @@ impl Diagnostic {
         range: TextRange,
         severity: Severity,
     ) -> Self {
-        Self { code, message, range, severity, tags: Vec::new() }
+        Self {
+            code,
+            message,
+            range,
+            severity,
+            tags: Vec::new(),
+            related: Vec::new(),
+            related_in_files: Vec::new(),
+        }
+    }
+
+    pub fn with_related(mut self, related: Vec<(TextRange, String)>) -> Self {
+        self.related = related;
+        self
     }
 
     pub fn with_tags(mut self, tags: Vec<DiagnosticTag>) -> Self {

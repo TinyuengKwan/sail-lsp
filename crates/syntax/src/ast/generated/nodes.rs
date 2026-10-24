@@ -1363,6 +1363,20 @@ impl AstNode for TypeNamed {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TypeParam {
+    pub(crate) syntax: SyntaxNode,
+}
+
+impl AstNode for TypeParam {
+    fn can_cast(kind: SK) -> bool { kind == SK::TYPE_PARAM }
+    fn cast(syntax: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(syntax.kind()) { Some(Self { syntax }) } else { None }
+    }
+    fn syntax(&self) -> &SyntaxNode { &self.syntax }
+    fn kind() -> SK { SK::TYPE_PARAM }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TypeParamList {
     pub(crate) syntax: SyntaxNode,
 }
@@ -1490,6 +1504,29 @@ impl AstNode for FieldInit {
 
 impl FieldInit {
     pub fn value(&self) -> Option<Expr> { support::child(&self.syntax) }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MappingClause {
+    pub(crate) syntax: SyntaxNode,
+}
+
+impl AstNode for MappingClause {
+    fn can_cast(kind: SK) -> bool { kind == SK::MAPPING_CLAUSE }
+    fn cast(syntax: SyntaxNode) -> Option<Self> {
+        if Self::can_cast(syntax.kind()) { Some(Self { syntax }) } else { None }
+    }
+    fn syntax(&self) -> &SyntaxNode { &self.syntax }
+    fn kind() -> SK { SK::MAPPING_CLAUSE }
+}
+
+impl MappingClause {
+    pub fn pat(&self) -> Option<Pat> { support::child(&self.syntax) }
+    pub fn guard(&self) -> Option<Expr> { support::child(&self.syntax) }
+    pub fn when_guard(&self) -> Option<Expr> {
+        let mut iter = self.syntax.children().filter_map(Expr::cast);
+        iter.nth(1)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

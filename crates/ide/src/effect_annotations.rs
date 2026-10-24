@@ -11,7 +11,7 @@
 //! }
 //! ```
 
-use hir_def::bodies::EffectTag;
+use hir::EffectTag;
 use ide_db::FileDb;
 use std::collections::BTreeSet;
 
@@ -37,8 +37,8 @@ pub fn effect_annotations(file: &dyn FileDb) -> Vec<EffectAnnotation> {
     }
 
     let (cst_root, _) = syntax::parse_text(text);
-    let bodies = hir_def::bodies::CallableBodies::from_cst(&cst_root);
-    let callgraph = hir_def::callgraph::CallGraph::from_callable_bodies(&bodies);
+    let bodies = hir::CallableBodies::from_cst(&cst_root);
+    let callgraph = hir::callgraph::CallGraph::from_callable_bodies(&bodies);
 
     // Collect direct effects
     let mut effects_map: std::collections::HashMap<String, BTreeSet<EffectTag>> =

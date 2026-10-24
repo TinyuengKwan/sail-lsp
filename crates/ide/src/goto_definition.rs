@@ -19,13 +19,14 @@
 //!    - Fast O(1) for cross-file navigation
 //!    - Does not handle shadowing or scope-awareness
 
-use ide_db::ide_types::{FileLocation, NavigationTarget, SymbolKind};
+use crate::navigation_target::NavigationTarget;
+use ide_db::ide_types::{FileLocation, SymbolKind};
 use ide_db::line_index::LineCol;
-use ide_db::workspace_index::SymbolIndex;
+use ide_db::symbol_index::SymbolIndex;
 use ide_db::FileDb;
 use url::Url;
 
-use hir_def::item_tree::ItemKind;
+use hir::DefKind;
 
 // Re-export the legacy generic version for callers that pass file iterators.
 pub use crate::navigation::symbol_definition_locations;
@@ -84,7 +85,7 @@ pub fn goto_definition_semantic<F: FileDb>(
             if let Some(expr_id) = entry.source_map.expr_at_offset(offset) {
                 // The cursor is inside this body — check if the name
                 // is a reference to a pattern-bound local variable.
-                if let hir_def::Expr::Ident(ref ident_name) = entry.body.store[expr_id] {
+                if let hir::Expr::Ident(ref ident_name) = entry.body.store[expr_id] {
                     if ident_name == &name {
                         // Search this body's patterns for the binding site
                         if let Some(nav) = find_local_binding_nav(entry, &name, file_url) {
@@ -97,8 +98,10 @@ pub fn goto_definition_semantic<F: FileDb>(
     }
 
     // 3. Check same-file top-level definitions
-    if let Some(parsed) = file.parsed() {
-        let targets = find_same_file_definition(parsed, &name, file_url);
+    if let Some(tree) = file.item_tree() {
+        let in_type_position = names_a_type(file.text(), file.offset_at(&position));
+        let targets =
+            find_same_file_definition(tree, file.file_text(), &name, file_url, in_type_position);
         if !targets.is_empty() {
             return Some(targets);
         }
@@ -107,48 +110,58 @@ pub fn goto_definition_semantic<F: FileDb>(
     None
 }
 
-/// Semantic goto-definition via `Semantics::classify_name_ref`.
+/// What the identifier under the cursor *is*, decided from its parent node.
 ///
-/// under the cursor. This is a thin wrapper that creates a `Semantics`,
-/// calls `classify_name_ref`, and returns the `PathResolution`.
-///
-/// Callers can use the returned `PathResolution` to build `NavigationTarget`s
-/// via the index or DefMap. Currently used as an auxiliary resolution path;
-/// the main `goto_definition_semantic` still handles local bindings and
-/// same-file definitions directly.
-pub fn classify_name_ref_at(
-    db: &dyn salsa::Database,
-    def_db: &dyn hir_def::db::DefDatabase,
-    file_text: base_db::FileText,
-    offset: usize,
-    name: &str,
-) -> Option<hir::NameRefKind> {
-    let sema = hir::Semantics::new(db);
-    sema.classify_name_ref(def_db, file_text, offset, name)
+/// rust-analyzer routes every navigation feature through one classifier
+/// (`ide-db/src/defs.rs`, `IdentClass::classify_node`) that dispatches on the
+/// parent syntax node: a `Name` defines something, a `NameRef` refers to
+/// something, and a field expression resolves through the receiver's type.
+/// sail-lsp had the `NameClass`/`NameRefClass` types but nothing that built
+/// them, so each feature matched on names by hand and every one of them
+/// missed a different set of constructs.
+pub enum IdentClass {
+    /// The identifier is itself a definition — a pattern binding, or the
+    /// name in a declaration. Navigating from it lands on itself, which is
+    /// what rust-analyzer does and what an editor expects.
+    Definition { name: String, span: base_db::TextRange },
+    /// A field of some record or bitfield: `x.field`, or `f` in
+    /// `struct { f = v }`.
+    Field { field: String },
+    /// Anything else — resolved by name, as before.
+    Reference { name: String },
 }
 
-/// Legacy version that returns just a PathResolution.
-/// Used by callers that only need the resolution, not the kind.
-pub fn classify_name_ref_path_at(
-    db: &dyn salsa::Database,
-    def_db: &dyn hir_def::db::DefDatabase,
-    file_text: base_db::FileText,
-    offset: usize,
-    name: &str,
-) -> Option<hir::PathResolution> {
-    let sema = hir::Semantics::new(db);
-    sema.classify_name_ref_path(def_db, file_text, offset, name)
+/// Classify the identifier at `offset` in a parsed file.
+pub fn classify_ident(root: &syntax::SyntaxNode, offset: usize, name: &str) -> IdentClass {
+    use parser::SyntaxKind as SK;
+
+    let parent = root
+        .descendants_with_tokens()
+        .filter_map(|el| el.into_token())
+        .find(|t| t.kind() == SK::IDENT && u32::from(t.text_range().start()) as usize == offset)
+        .and_then(|t| t.parent());
+    let span = parent
+        .as_ref()
+        .map(|_| base_db::text_range(offset, offset + name.len()))
+        .unwrap_or_else(|| base_db::text_range(offset, offset + name.len()));
+    match parent.map(|p| p.kind()) {
+        Some(SK::IDENT_PAT) => IdentClass::Definition { name: name.to_string(), span },
+        Some(SK::FIELD_ACCESS_EXPR) | Some(SK::FIELD_INIT) => {
+            IdentClass::Field { field: name.to_string() }
+        }
+        _ => IdentClass::Reference { name: name.to_string() },
+    }
 }
 
 /// Search a callable body's patterns for a binding with the given name.
 /// Returns the binding's location as a NavigationTarget.
 fn find_local_binding_nav(
-    entry: &hir_def::bodies::CallableBody,
+    entry: &hir::CallableBody,
     name: &str,
     file_url: &Url,
 ) -> Option<NavigationTarget> {
     for (pat_id, pat) in entry.body.iter_pats() {
-        if let hir_def::Pat::Bind(ref pat_name) = pat {
+        if let hir::Pat::Bind(ref pat_name) = pat {
             if pat_name == name {
                 if let Some(pat_span) = entry.source_map.pat_syntax(pat_id) {
                     return Some(NavigationTarget {
@@ -169,53 +182,144 @@ fn find_local_binding_nav(
     None
 }
 
-/// Search the file's parsed declarations for a top-level definition
-/// matching the given name.
+/// Where `name` is defined in this file.
+///
+/// From the item tree. A definition wins over a declaration — goto on a
+/// call should land on the `function f`, not its `val` — and the cursor
+/// lands on the name, which is what `name_span` records. Every producer
+/// here used to pass the whole definition span as the focus range, so
+/// goto put the cursor on the `function` keyword.
+/// Whether the token at `offset` sits where a *type* is expected.
+///
+/// Sail has two namespaces — `PerNs` is Types and Values — and nothing at a
+/// use site said which one it was in. `find_same_file_definition` matched
+/// on the spelling alone, so `x : int` in a file that also declares
+/// `val int : ..` navigated to the function, and every builtin type name
+/// reused as a value name did the same.
+pub fn names_a_type(text: &str, offset: usize) -> bool {
+    use parser::SyntaxKind as SK;
+    let (root, _) = syntax::parse_text(text);
+    let Some(token) = root
+        .descendants_with_tokens()
+        .filter_map(|el| el.into_token())
+        .find(|t| t.kind() == SK::IDENT && usize::from(t.text_range().start()) == offset)
+    else {
+        return false;
+    };
+    let Some(parent) = token.parent() else { return false };
+    if !parent.kind().is_type_node() {
+        return false;
+    }
+    // `instantiation sail_mem_read with pa_bits = physaddrbits_zero_extend`
+    // binds an outcome's parameter to a *function*, and the grammar wraps
+    // the right-hand side in a type node. It is a value there.
+    !parent.ancestors().any(|a| a.kind() == SK::INSTANTIATION_DEF)
+}
+
 fn find_same_file_definition(
-    parsed: &syntax::parser_lower::ParsedFile,
+    tree: &hir::ItemTree,
+    file_text: Option<(&dyn salsa::Database, base_db::FileText)>,
     name: &str,
     file_url: &Url,
+    in_type_position: bool,
 ) -> Vec<NavigationTarget> {
-    use syntax::parser_lower::DeclRole;
+    let declares_only = |kind: hir::DefKind| {
+        matches!(
+            kind,
+            hir::DefKind::ValSpec | hir::DefKind::MappingSpec | hir::DefKind::ScatteredHead
+        )
+    };
+    let make = |id: &hir::DefItem| {
+        let span = id.span(tree);
+        let name_span = id.name_span(tree);
+        NavigationTarget::new(
+            file_url.clone(),
+            name,
+            item_kind_to_symbol_kind(id.def_kind(tree)),
+            base_db::text_range(span.start, span.end),
+            base_db::text_range(name_span.start, name_span.end),
+        )
+    };
+    let named = |id: &&hir::DefItem| id.name(tree).as_str() == name;
+    // In type position, a declaration that can only be a *value* is not what
+    // the name means. Only these kinds are dropped, and only when something
+    // is left — a union constructor named in a value position still resolves
+    // to the union that declares it, and a name this rule cannot place goes
+    // through unfiltered rather than answering nothing.
+    let value_only = |kind: hir::DefKind| {
+        matches!(
+            kind,
+            hir::DefKind::Function
+                | hir::DefKind::ValSpec
+                | hir::DefKind::Mapping
+                | hir::DefKind::MappingSpec
+                | hir::DefKind::Register
+                | hir::DefKind::Let
+                | hir::DefKind::Var
+                | hir::DefKind::Overload
+        )
+    };
+    let right_namespace = |id: &&hir::DefItem| !in_type_position || !value_only(id.def_kind(tree));
 
-    let mut targets = Vec::new();
+    let mut targets: Vec<NavigationTarget> = tree
+        .top_level_items()
+        .iter()
+        .filter(named)
+        .filter(right_namespace)
+        .filter(|id| !declares_only(id.def_kind(tree)))
+        .map(make)
+        .collect();
+    if targets.is_empty() {
+        targets =
+            tree.top_level_items().iter().filter(named).filter(right_namespace).map(make).collect();
+    }
+    if !targets.is_empty() {
+        return targets;
+    }
+    // A local binding, from the bodies. The flat `decls` list this replaced
+    // held local declarations too and matched them without regard to scope,
+    // so a name bound anywhere in the file resolved from anywhere in it.
+    if let Some((db, ft)) = file_text {
+        for span in hir::Semantics::new(db).binding_sites(db, ft, name) {
+            let r = base_db::text_range(span.start, span.end);
+            targets.push(NavigationTarget::new(
+                file_url.clone(),
+                name.to_string(),
+                SymbolKind::Variable,
+                r,
+                r,
+            ));
+        }
+        if !targets.is_empty() {
+            return targets;
+        }
+    }
 
-    // First pass: look for non-clause declarations (definitions)
-    for decl in &parsed.decls {
-        if decl.name == name && decl.role == DeclRole::Definition {
+    // A field or a union/enum member is not a top-level item — the item tree
+    // records it on the definition that declares it — but it is a name an
+    // editor jumps to, and the flat `decls` list this replaced had them.
+    for &id in tree.top_level_items() {
+        for field in id.fields(tree) {
+            if field.name.as_str() != name {
+                continue;
+            }
+            let r = base_db::text_range(field.name_span.start, field.name_span.end);
             targets.push(NavigationTarget {
                 file_id: None,
                 url: file_url.clone(),
                 name: name.to_string(),
-                kind: decl_kind_to_symbol_kind(&decl.kind),
-                full_range: base_db::text_range(decl.span.start, decl.span.end),
-                focus_range: base_db::text_range(decl.span.start, decl.span.end),
+                kind: match id.def_kind(tree) {
+                    hir::DefKind::Enum | hir::DefKind::Union => SymbolKind::EnumMember,
+                    _ => SymbolKind::Field,
+                },
+                full_range: r,
+                focus_range: r,
                 detail: None,
                 docs: None,
                 children: Vec::new(),
             });
         }
     }
-
-    // If no definitions found, include declarations (val specs)
-    if targets.is_empty() {
-        for decl in &parsed.decls {
-            if decl.name == name && decl.role == DeclRole::Declaration {
-                targets.push(NavigationTarget {
-                    file_id: None,
-                    url: file_url.clone(),
-                    name: name.to_string(),
-                    kind: decl_kind_to_symbol_kind(&decl.kind),
-                    full_range: base_db::text_range(decl.span.start, decl.span.end),
-                    focus_range: base_db::text_range(decl.span.start, decl.span.end),
-                    detail: None,
-                    docs: None,
-                    children: Vec::new(),
-                });
-            }
-        }
-    }
-
     targets
 }
 
@@ -235,6 +339,7 @@ pub fn goto_definition_field_or_method(
     offset: usize,
     file_url: &Url,
     index: &SymbolIndex,
+    url_of: &dyn Fn(base_db::FileId) -> Option<Url>,
 ) -> Option<Vec<NavigationTarget>> {
     let source = file_text.text(db);
 
@@ -247,7 +352,7 @@ pub fn goto_definition_field_or_method(
     // Both branches look up the token name in the SymbolIndex.
     let _resolution = sema.resolve_field_or_method(file_text, offset)?;
 
-    let targets = symbol_index_to_nav_targets(index, &token_name, file_url);
+    let targets = symbol_index_to_nav_targets(index, &token_name, file_url, url_of);
     if !targets.is_empty() {
         return Some(targets);
     }
@@ -289,6 +394,7 @@ fn symbol_index_to_nav_targets(
     index: &SymbolIndex,
     name: &str,
     current_url: &Url,
+    url_of: &dyn Fn(base_db::FileId) -> Option<Url>,
 ) -> Vec<NavigationTarget> {
     let entries = index.find(name);
     if entries.is_empty() {
@@ -298,7 +404,7 @@ fn symbol_index_to_nav_targets(
     // Prefer definitions (Function, Struct, etc.) over declarations (ValSpec)
     let definitions: Vec<_> = entries
         .iter()
-        .filter(|e| !matches!(e.kind, ItemKind::ValSpec | ItemKind::MappingSpec))
+        .filter(|e| !matches!(e.kind, DefKind::ValSpec | DefKind::MappingSpec))
         .collect();
 
     let chosen =
@@ -307,27 +413,29 @@ fn symbol_index_to_nav_targets(
     // Prefer entries from the same file
     let mut sorted = chosen;
     sorted.sort_by(|a, b| {
-        let a_same = a.url == *current_url;
-        let b_same = b.url == *current_url;
+        let a_same = url_of(a.file_id).as_ref() == Some(current_url);
+        let b_same = url_of(b.file_id).as_ref() == Some(current_url);
         b_same.cmp(&a_same)
     });
 
     sorted
         .into_iter()
-        .map(|entry| NavigationTarget {
-            file_id: None,
-            url: entry.url.clone(),
-            name: entry.name.clone(),
-            kind: item_kind_to_symbol_kind(entry.kind),
-            full_range: base_db::text_range(entry.span.start, entry.span.end),
-            focus_range: base_db::text_range(entry.span.start, entry.span.end),
-            detail: if entry.signature_text.is_empty() {
-                None
-            } else {
-                Some(entry.signature_text.clone())
-            },
-            docs: entry.doc.clone(),
-            children: Vec::new(),
+        .filter_map(|entry| {
+            Some(NavigationTarget {
+                file_id: Some(entry.file_id),
+                url: url_of(entry.file_id)?,
+                name: entry.name.clone(),
+                kind: item_kind_to_symbol_kind(entry.kind),
+                full_range: base_db::text_range(entry.span.start, entry.span.end),
+                focus_range: base_db::text_range(entry.name_span.start, entry.name_span.end),
+                detail: if entry.signature_text.is_empty() {
+                    None
+                } else {
+                    Some(entry.signature_text.clone())
+                },
+                docs: entry.doc.clone(),
+                children: Vec::new(),
+            })
         })
         .collect()
 }
@@ -338,50 +446,76 @@ fn symbol_index_to_nav_targets(
 /// doesn't find a result in the current file.
 ///
 /// Mirrors the legacy API (kept for backward compatibility).
-pub fn goto_definition(index: &SymbolIndex, symbol_key: &str, uri_hint: &Url) -> Vec<FileLocation> {
-    crate::navigation::definition_locations_indexed(index, symbol_key, uri_hint)
+pub fn goto_definition(
+    index: &SymbolIndex,
+    symbol_key: &str,
+    uri_hint: &Url,
+    url_of: &dyn Fn(base_db::FileId) -> Option<Url>,
+) -> Vec<FileLocation> {
+    crate::navigation::definition_locations_indexed(index, symbol_key, uri_hint, url_of)
 }
 
-/// Convert a `DeclKind` to a `SymbolKind`.
-fn decl_kind_to_symbol_kind(kind: &syntax::parser_lower::DeclKind) -> SymbolKind {
-    use syntax::parser_lower::DeclKind;
+/// Convert an `DefKind` to a `SymbolKind` for NavigationTarget.
+pub fn item_kind_to_symbol_kind(kind: DefKind) -> SymbolKind {
     match kind {
-        DeclKind::Function => SymbolKind::Function,
-        DeclKind::Value => SymbolKind::Function,
-        DeclKind::Mapping => SymbolKind::Function,
-        DeclKind::Overload => SymbolKind::Function,
-        DeclKind::Register => SymbolKind::Variable,
-        DeclKind::Parameter => SymbolKind::Variable,
-        DeclKind::Type => SymbolKind::Struct,
-        DeclKind::Struct => SymbolKind::Struct,
-        DeclKind::Union => SymbolKind::Struct, // Sail unions mapped to Struct kind
-        DeclKind::Bitfield => SymbolKind::Struct,
-        DeclKind::Enum => SymbolKind::Enum,
-        DeclKind::EnumMember => SymbolKind::EnumMember,
-        DeclKind::Newtype => SymbolKind::Struct,
-        DeclKind::Let | DeclKind::Var => SymbolKind::Variable,
+        DefKind::Function => SymbolKind::Function,
+        DefKind::ValSpec | DefKind::Outcome => SymbolKind::Function,
+        DefKind::Struct => SymbolKind::Struct,
+        DefKind::Union => SymbolKind::Struct, // Sail unions mapped to Struct kind
+        DefKind::Enum => SymbolKind::Enum,
+        DefKind::Bitfield => SymbolKind::Struct,
+        DefKind::Newtype => SymbolKind::Struct,
+        DefKind::TypeAlias => SymbolKind::TypeAlias,
+        DefKind::Register => SymbolKind::Variable,
+        DefKind::Mapping | DefKind::MappingSpec => SymbolKind::Function,
+        DefKind::Let | DefKind::Var => SymbolKind::Variable,
+        DefKind::Overload => SymbolKind::Function,
+        DefKind::ScatteredHead | DefKind::ScatteredClause => SymbolKind::Function,
+        DefKind::Constraint => SymbolKind::TypeAlias,
+        DefKind::Field => SymbolKind::Field,
+        DefKind::Variant => SymbolKind::EnumMember,
+        DefKind::TerminationMeasure | DefKind::EndMarker | DefKind::Instantiation => {
+            SymbolKind::Variable
+        }
     }
 }
 
-/// Convert an `ItemKind` to a `SymbolKind` for NavigationTarget.
-pub fn item_kind_to_symbol_kind(kind: ItemKind) -> SymbolKind {
-    match kind {
-        ItemKind::Function => SymbolKind::Function,
-        ItemKind::ValSpec => SymbolKind::Function,
-        ItemKind::Struct => SymbolKind::Struct,
-        ItemKind::Union => SymbolKind::Struct, // Sail unions mapped to Struct kind
-        ItemKind::Enum => SymbolKind::Enum,
-        ItemKind::Bitfield => SymbolKind::Struct,
-        ItemKind::Newtype => SymbolKind::Struct,
-        ItemKind::TypeAlias => SymbolKind::TypeAlias,
-        ItemKind::Register => SymbolKind::Variable,
-        ItemKind::Mapping | ItemKind::MappingSpec => SymbolKind::Function,
-        ItemKind::Let | ItemKind::Var => SymbolKind::Variable,
-        ItemKind::Overload => SymbolKind::Function,
-        ItemKind::ScatteredHead | ItemKind::ScatteredClause => SymbolKind::Function,
-        ItemKind::Constraint => SymbolKind::TypeAlias,
-        ItemKind::TerminationMeasure | ItemKind::EndMarker | ItemKind::Instantiation => {
-            SymbolKind::Variable
-        }
+#[cfg(test)]
+mod namespace_tests {
+    use crate::fixture;
+
+    /// A name in type position does not resolve to a value.
+    ///
+    /// Sail has two namespaces and `find_same_file_definition` matched on
+    /// the spelling alone, so `x : int` in a file that also declares
+    /// `val int : ..` navigated to the function — a wrong answer, which is
+    /// worse than none.
+    #[test]
+    fn a_type_position_does_not_resolve_to_a_value() {
+        let source = "\
+default Order dec
+val int : unit -> unit
+type myint = int
+struct S = { f : int }
+function f(x : S) -> unit = ()
+";
+        let (analysis, files) = fixture::analysis(source);
+        let url = analysis.url_for_file_id(files[0].0).expect("url");
+        let li = ide_db::line_index::LineIndex::new(source);
+
+        // `x : S` — the struct, not anything else.
+        let at = source.find("x : S").expect("fixture") + 4;
+        let targets = analysis.goto_definition(url, li.line_col(at)).expect("no cancellation");
+        assert_eq!(targets.len(), 1, "{targets:?}");
+        assert_eq!(targets[0].kind, ide_db::ide_types::SymbolKind::Struct);
+
+        // `type myint = int` — `int` names no type here, and the `val` is
+        // not one either, so nothing rather than the function.
+        let at = source.find("= int").expect("fixture") + 2;
+        let targets = analysis.goto_definition(url, li.line_col(at)).expect("no cancellation");
+        assert!(
+            targets.iter().all(|t| t.kind != ide_db::ide_types::SymbolKind::Function),
+            "a type resolved to a function: {targets:?}"
+        );
     }
 }

@@ -5,7 +5,7 @@ use base_db::FileId;
 use la_arena::Idx;
 
 use crate::item_tree;
-use crate::nameres::DefId;
+use crate::nameres::DefIdx;
 
 //
 // Provides the canonical API for creating IDs from locations and
@@ -18,13 +18,13 @@ use crate::nameres::DefId;
 /// Intern a location to obtain its ID.
 pub trait Intern {
     type ID: Copy;
-    fn intern(self, db: &dyn crate::db::DefDatabase) -> Self::ID;
+    fn intern(self, db: &dyn salsa::Database) -> Self::ID;
 }
 
 /// Look up the location data for an ID.
 pub trait Lookup {
     type Data;
-    fn lookup(self, db: &dyn crate::db::DefDatabase) -> Self::Data;
+    fn lookup(self, db: &dyn salsa::Database) -> Self::Data;
 }
 
 /// Identifier for a function definition.
@@ -65,17 +65,16 @@ pub struct LetId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct OverloadId(pub u32);
 
+// Each Location records where an item is defined: which file and which
+// index in the ItemTree's typed arena.
 //
-// Each Location records where an item is defined: which file and
-// which index in the ItemTree's typed arena.
-//
-// ```
-// pub struct ItemLoc<N> {
-//     pub container: ModuleId,
-//     pub id: AstId<N>,
-// }
-// ```
-// Sail version uses `FileId + Idx<T>` since Sail has no nested modules.
+// rust-analyzer writes `ItemLoc<N> { id: AstId<N> }`, where the `AstId` is
+// an index into a per-file `AstIdMap`. The index into the typed arena is
+// that, with the same property that makes it work: it is assigned in
+// source order and does not move unless the set of items does. There was
+// an `AstIdMap` here too, 238 lines of it, that nothing ever built — it
+// maps *syntax nodes* to ids, which is what RA needs to recover an
+// `ast::Fn` from a def, and what this design does not.
 
 /// Location of a function in the source.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -134,7 +133,7 @@ macro_rules! impl_intern {
     ($loc:ty, $id:ty, $field_ty:ty) => {
         impl Intern for $loc {
             type ID = $id;
-            fn intern(self, _db: &dyn crate::db::DefDatabase) -> $id {
+            fn intern(self, _db: &dyn salsa::Database) -> $id {
                 <$id>::from_raw(u32::from(self.item_tree_idx.into_raw()))
             }
         }
@@ -210,19 +209,19 @@ impl_intern!(OverloadLoc, OverloadId, item_tree::Overload);
 // NOTE: Lookup cannot be implemented without a backing store that maps
 // Id → Loc. Once IDs become `#[salsa::interned]`, salsa provides this
 // automatically via the generated `data()` method. For now, lookup is
-// performed through the DefMap (DefId → item info).
+// performed through the DefMap (DefIdx → item info).
 //
 // The Lookup trait is defined above but impls are deferred to the salsa
 // migration. Call sites that need Id→Loc today should use DefMap queries.
 
 /// All definitions visible in module scope.
-/// This is the typed alternative to the raw `DefId`. Consumers will
-/// gradually migrate from `DefId` to `ModuleDefId`.
+/// This is the typed alternative to the raw `DefIdx`. Consumers will
+/// gradually migrate from `DefIdx` to `DefId`.
 ///
 /// Variants mirror RA's `TraitId`/`AdtId`/`EnumVariantId`/`MacroId`/`ImplId`
 /// as plain u32 newtypes (not salsa-interned keys with Loc data).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ModuleDefId {
+pub enum DefId {
     FunctionId(FunctionId),
     TypeDefId(TypeDefId),
     RegisterId(RegisterId),
@@ -241,39 +240,39 @@ pub enum DefWithBodyId {
     LetId(LetId),
 }
 
-impl From<FunctionId> for ModuleDefId {
+impl From<FunctionId> for DefId {
     fn from(id: FunctionId) -> Self {
-        ModuleDefId::FunctionId(id)
+        DefId::FunctionId(id)
     }
 }
-impl From<TypeDefId> for ModuleDefId {
+impl From<TypeDefId> for DefId {
     fn from(id: TypeDefId) -> Self {
-        ModuleDefId::TypeDefId(id)
+        DefId::TypeDefId(id)
     }
 }
-impl From<RegisterId> for ModuleDefId {
+impl From<RegisterId> for DefId {
     fn from(id: RegisterId) -> Self {
-        ModuleDefId::RegisterId(id)
+        DefId::RegisterId(id)
     }
 }
-impl From<ValSpecId> for ModuleDefId {
+impl From<ValSpecId> for DefId {
     fn from(id: ValSpecId) -> Self {
-        ModuleDefId::ValSpecId(id)
+        DefId::ValSpecId(id)
     }
 }
-impl From<MappingId> for ModuleDefId {
+impl From<MappingId> for DefId {
     fn from(id: MappingId) -> Self {
-        ModuleDefId::MappingId(id)
+        DefId::MappingId(id)
     }
 }
-impl From<LetId> for ModuleDefId {
+impl From<LetId> for DefId {
     fn from(id: LetId) -> Self {
-        ModuleDefId::LetId(id)
+        DefId::LetId(id)
     }
 }
-impl From<OverloadId> for ModuleDefId {
+impl From<OverloadId> for DefId {
     fn from(id: OverloadId) -> Self {
-        ModuleDefId::OverloadId(id)
+        DefId::OverloadId(id)
     }
 }
 
@@ -294,42 +293,42 @@ impl From<LetId> for DefWithBodyId {
 }
 
 //
-// These conversions enable gradual migration from raw DefId to typed IDs.
-// Consumers can start using ModuleDefId in new code while old code
-// continues with DefId.
+// These conversions enable gradual migration from raw DefIdx to typed IDs.
+// Consumers can start using DefId in new code while old code
+// continues with DefIdx.
 
-impl ModuleDefId {
-    /// Extract the raw `DefId` (for backward compat during migration).
+impl DefId {
+    /// Extract the raw `DefIdx` (for backward compat during migration).
     pub fn as_raw(&self) -> u32 {
         match self {
-            ModuleDefId::FunctionId(id) => id.0,
-            ModuleDefId::TypeDefId(id) => id.0,
-            ModuleDefId::RegisterId(id) => id.0,
-            ModuleDefId::ValSpecId(id) => id.0,
-            ModuleDefId::MappingId(id) => id.0,
-            ModuleDefId::LetId(id) => id.0,
-            ModuleDefId::OverloadId(id) => id.0,
+            DefId::FunctionId(id) => id.0,
+            DefId::TypeDefId(id) => id.0,
+            DefId::RegisterId(id) => id.0,
+            DefId::ValSpecId(id) => id.0,
+            DefId::MappingId(id) => id.0,
+            DefId::LetId(id) => id.0,
+            DefId::OverloadId(id) => id.0,
         }
     }
 
-    /// Convert a raw `DefId` + `ItemKind` to a typed `ModuleDefId`.
-    pub fn from_def_id(def_id: DefId, kind: crate::item_tree::ItemKind) -> Self {
-        use crate::item_tree::ItemKind;
+    /// Convert a raw `DefIdx` + `DefKind` to a typed `DefId`.
+    pub fn from_def_idx(def_id: DefIdx, kind: crate::item_tree::DefKind) -> Self {
+        use crate::item_tree::DefKind;
         let raw = def_id.0;
         match kind {
-            ItemKind::Function => ModuleDefId::FunctionId(FunctionId(raw)),
-            ItemKind::ValSpec => ModuleDefId::ValSpecId(ValSpecId(raw)),
-            ItemKind::Mapping | ItemKind::MappingSpec => ModuleDefId::MappingId(MappingId(raw)),
-            ItemKind::Register => ModuleDefId::RegisterId(RegisterId(raw)),
-            ItemKind::Struct
-            | ItemKind::Union
-            | ItemKind::Enum
-            | ItemKind::Bitfield
-            | ItemKind::Newtype
-            | ItemKind::TypeAlias => ModuleDefId::TypeDefId(TypeDefId(raw)),
-            ItemKind::Let | ItemKind::Var => ModuleDefId::LetId(LetId(raw)),
-            ItemKind::Overload => ModuleDefId::OverloadId(OverloadId(raw)),
-            _ => ModuleDefId::FunctionId(FunctionId(raw)), // fallback
+            DefKind::Function => DefId::FunctionId(FunctionId(raw)),
+            DefKind::ValSpec => DefId::ValSpecId(ValSpecId(raw)),
+            DefKind::Mapping | DefKind::MappingSpec => DefId::MappingId(MappingId(raw)),
+            DefKind::Register => DefId::RegisterId(RegisterId(raw)),
+            DefKind::Struct
+            | DefKind::Union
+            | DefKind::Enum
+            | DefKind::Bitfield
+            | DefKind::Newtype
+            | DefKind::TypeAlias => DefId::TypeDefId(TypeDefId(raw)),
+            DefKind::Let | DefKind::Var => DefId::LetId(LetId(raw)),
+            DefKind::Overload => DefId::OverloadId(OverloadId(raw)),
+            _ => DefId::FunctionId(FunctionId(raw)), // fallback
         }
     }
 }

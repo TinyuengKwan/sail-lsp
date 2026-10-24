@@ -9,11 +9,11 @@ pub(super) fn collect_callgraph_caller_hints<'a>(
     current_file: &dyn FileDb,
     begin: usize,
     end: usize,
-    hints: &mut Vec<IdeDbInlayHint>,
+    hints: &mut Vec<InlayHint>,
 ) {
     let workspace_files: Vec<&dyn FileDb> = all_files.iter().map(|(_, f)| *f).collect();
     let workspace_callgraph =
-        hir_def::callgraph::cached_workspace_callgraph(workspace_files.iter().copied());
+        hir::callgraph::cached_workspace_callgraph(workspace_files.iter().copied());
     // Use ParsedFile callable_heads instead of core_ast.defs
     let Some(parsed) = current_file.parsed() else {
         return;
@@ -38,10 +38,10 @@ pub(super) fn collect_callgraph_caller_hints<'a>(
         }
         let label =
             if count == 1 { "(1 caller)".to_string() } else { format!("({count} callers)") };
-        hints.push(IdeDbInlayHint {
+        hints.push(InlayHint {
             offset: name_span.end,
             label,
-            kind: IdeDbInlayHintKind::Other,
+            kind: InlayHintKind::Other,
             tooltip: Some(format!(
                 "{name} is called from {count} site{} across the workspace",
                 if count == 1 { "" } else { "s" }

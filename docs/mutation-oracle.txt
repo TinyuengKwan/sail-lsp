@@ -1,0 +1,538 @@
+# Which mutants upstream Sail rejects — the oracle for `mutation_check`.
+#
+# Regenerate with:
+#   cargo run --release --example mutation_check -- \
+#       <corpus> --regen-oracle docs/mutation-oracle.txt
+#
+# ACCEPTED means the mutation left a valid program; those are excluded from
+# the score rather than counted as misses.
+REJECTED abstract_bool.sail#ret#0	-> int became -> bool
+REJECTED add_vec_exts_no_annot.sail#arity#0	dropped last arg `bit`
+REJECTED add_vec_exts_no_annot.sail#arity#4	dropped last arg `bit`
+REJECTED add_vec_exts_no_annot_overload.sail#arity#0	dropped last arg `bit`
+REJECTED add_vec_exts_no_annot_overload.sail#arity#4	dropped last arg `bit`
+ACCEPTED add_vec_lit.sail#range#0	range(.., 30) -> range(.., 29)
+REJECTED add_vec_lit.sail#range#1	range(.., 30) -> range(.., 29)
+ACCEPTED add_vec_lit.sail#arity#0	dropped last arg `inc`
+ACCEPTED add_vec_lit.sail#arity#2	dropped last arg `inc`
+REJECTED allpats.sail#bits#0	bits(4) -> bits(5)
+REJECTED allpats.sail#bits#2	bits(2) -> bits(3)
+REJECTED allpats.sail#argorder#0	(Athing, _) -> (_, Athing)
+REJECTED allpats.sail#argorder#3	(Athing, _) -> (_, Athing)
+REJECTED allpats.sail#arity#0	dropped last arg `int`
+REJECTED allpats.sail#arity#6	dropped last arg `_`
+ACCEPTED allpats.sail#field#0	field `elone` renamed away
+ACCEPTED allpats.sail#field#1	field `eltwo` renamed away
+ACCEPTED arm_FPEXC1.sail#arity#0	dropped last arg `dec`
+ACCEPTED arm_FPEXC1.sail#arity#6	dropped last arg `dec`
+REJECTED arm_FPEXC1.sail#ret#0	-> bit became -> bool
+REJECTED arm_types.sail#arity#0	dropped last arg `bit`
+REJECTED arm_types.sail#arity#22	dropped last arg `bit`
+ACCEPTED arm_types.sail#field#0	field `attrs` renamed away
+ACCEPTED arm_types.sail#field#5	field `inner` renamed away
+REJECTED as_pattern.sail#ret#0	-> int became -> bool
+REJECTED atomcase.sail#ret#0	-> int became -> bool
+REJECTED atomcase.sail#ret#1	-> int became -> bool
+SKIPPED bind_typ_var/v1.sail#arity#0
+SKIPPED bind_typ_var/v1.sail#arity#2
+REJECTED bind_typ_var.sail#arity#0	dropped last arg `bit`
+REJECTED bind_typ_var.sail#arity#4	dropped last arg `_`
+REJECTED bitfield_pc.sail#bits#0	bits(8) -> bits(9)
+REJECTED bitfield_pc.sail#bits#1	bits(8) -> bits(9)
+ACCEPTED bitfield_pc.sail#arity#0	dropped last arg `dec`
+REJECTED bitfield_updates.sail#bits#0	bits(32) -> bits(33)
+REJECTED bitfield_updates.sail#bits#1	bits(16) -> bits(17)
+REJECTED bitfield_updates0.sail#bits#0	bits(32) -> bits(33)
+REJECTED bitfield_updates0.sail#bits#1	bits(16) -> bits(17)
+REJECTED bits_alias_cast.sail#field#0	field `fld` renamed away
+REJECTED bits_alias_cast.sail#field#1	field `fld` renamed away
+REJECTED bits_concat_pattern.sail#bits#0	bits(64) -> bits(65)
+REJECTED bits_concat_pattern.sail#bits#3	bits(62) -> bits(63)
+REJECTED bits_concat_pattern.sail#ret#0	-> int became -> bool
+REJECTED bits_if.sail#argorder#0	(_, v) -> (v, _)
+REJECTED bits_if.sail#arity#0	dropped last arg `v`
+REJECTED bits_if.sail#ret#0	-> int became -> bool
+REJECTED bitwise_not.sail#arity#0	dropped last arg `bit`
+REJECTED bitwise_not.sail#arity#3	dropped last arg `bit`
+REJECTED bitwise_not_gen.sail#arity#0	dropped last arg `bit`
+REJECTED bitwise_not_gen.sail#arity#3	dropped last arg `bit`
+REJECTED bitwise_not_x3.sail#arity#0	dropped last arg `bit`
+REJECTED bitwise_not_x3.sail#arity#3	dropped last arg `bit`
+REJECTED bool_bits_mapping.sail#bits#0	bits(1) -> bits(2)
+SKIPPED bool_constraint/v1.sail#argorder#0
+SKIPPED bool_constraint/v1.sail#argorder#1
+SKIPPED bool_constraint/v1.sail#arity#0
+SKIPPED bool_constraint/v1.sail#arity#1
+SKIPPED bool_constraint/v2.sail#argorder#0
+SKIPPED bool_constraint/v2.sail#argorder#1
+SKIPPED bool_constraint/v2.sail#arity#0
+SKIPPED bool_constraint/v2.sail#arity#1
+SKIPPED bool_constraint/v3.sail#argorder#0
+SKIPPED bool_constraint/v3.sail#argorder#1
+SKIPPED bool_constraint/v3.sail#arity#0
+SKIPPED bool_constraint/v3.sail#arity#1
+SKIPPED bool_constraint/v4.sail#argorder#0
+SKIPPED bool_constraint/v4.sail#argorder#1
+SKIPPED bool_constraint/v4.sail#arity#0
+SKIPPED bool_constraint/v4.sail#arity#1
+REJECTED bool_constraint.sail#argorder#0	(b, n) -> (n, b)
+REJECTED bool_constraint.sail#argorder#1	(cond, n) -> (n, cond)
+REJECTED bool_constraint.sail#arity#0	dropped last arg `n`
+REJECTED bool_constraint.sail#arity#1	dropped last arg `n`
+REJECTED bool_in_ex_ctor.sail#bits#0	bits(32) -> bits(33)
+REJECTED boolean_ite_constraint.sail#arity#0	dropped last arg `ite`
+ACCEPTED bv_concat_implicit.sail#bits#0	bits(5) -> bits(6)
+ACCEPTED bv_concat_implicit.sail#bits#2	bits(5) -> bits(6)
+REJECTED bv_simple_index_bit.sail#arity#0	dropped last arg `bit`
+REJECTED bv_simple_index_bit.sail#arity#2	dropped last arg `bit`
+ACCEPTED bv_simple_index_bit.sail#ret#0	-> bit became -> bool
+REJECTED bv_simple_index_bit.sail#ret#2	-> bit became -> bool
+REJECTED cast_lexp1.sail#ret#0	-> int became -> bool
+REJECTED cast_lexp2.sail#ret#0	-> int became -> bool
+REJECTED cast_simple.sail#range#0	range(.., 10) -> range(.., 9)
+REJECTED cast_simple.sail#ret#0	-> int became -> bool
+REJECTED complete_pattern_let.sail#ret#0	-> int became -> bool
+SKIPPED config_bits_types.sail#bits#0
+SKIPPED config_bits_types.sail#bits#1
+SKIPPED config_int_types.sail#bits#0
+SKIPPED config_int_types.sail#range#0
+SKIPPED config_int_types.sail#arity#0
+SKIPPED config_int_types.sail#ret#0
+REJECTED cons_pattern_synonym.sail#arity#0	dropped last arg `bit`
+REJECTED cons_pattern_synonym.sail#arity#1	dropped last arg `bit`
+REJECTED decode_patterns.sail#bits#0	bits(1) -> bits(2)
+ACCEPTED decode_patterns.sail#arity#0	dropped last arg `dec`
+ACCEPTED decode_patterns.sail#arity#1	dropped last arg `dec`
+ACCEPTED deinfix_plus.sail#arity#0	dropped last arg `inc`
+ACCEPTED deinfix_plus.sail#arity#3	dropped last arg `inc`
+REJECTED enum_cast.sail#arity#0	dropped last arg `int`
+SKIPPED enum_map/v1.sail#bits#0
+SKIPPED enum_map/v1.sail#bits#1
+SKIPPED enum_map/v1.sail#ret#0
+SKIPPED enum_map/v2.sail#bits#0
+SKIPPED enum_map/v2.sail#bits#1
+SKIPPED enum_map/v2.sail#ret#0
+SKIPPED enum_map/v3.sail#bits#0
+SKIPPED enum_map/v3.sail#bits#1
+SKIPPED enum_map/v3.sail#ret#0
+SKIPPED enum_map/v4.sail#bits#0
+SKIPPED enum_map/v4.sail#bits#1
+SKIPPED enum_map/v4.sail#ret#0
+SKIPPED enum_map/v4.sail#ret#1
+SKIPPED enum_map/v5.sail#bits#0
+SKIPPED enum_map/v5.sail#bits#1
+REJECTED enum_map.sail#bits#0	bits(16) -> bits(17)
+REJECTED enum_map.sail#bits#1	bits(16) -> bits(17)
+REJECTED enum_map.sail#ret#0	-> string became -> bool
+REJECTED eqn_inst.sail#bits#0	bits(32) -> bits(33)
+REJECTED eqn_inst.sail#bits#1	bits(16) -> bits(17)
+REJECTED eqn_inst.sail#argorder#0	(x, y) -> (y, x)
+REJECTED eqn_inst.sail#argorder#1	(x, y) -> (y, x)
+REJECTED eqn_inst.sail#arity#0	dropped last arg `y`
+REJECTED eqn_inst.sail#arity#1	dropped last arg `y`
+ACCEPTED equation_arguments.sail#bits#0	bits(32) -> bits(33)
+ACCEPTED equation_arguments.sail#arity#0	dropped last arg `dec`
+ACCEPTED equation_arguments.sail#arity#3	dropped last arg `dec`
+REJECTED equation_return.sail#bits#0	bits(64) -> bits(65)
+REJECTED equation_return.sail#bits#1	bits(64) -> bits(65)
+REJECTED ex_cast.sail#arity#0	dropped last arg `bit`
+ACCEPTED ex_cons_infer.sail#bits#0	bits(32) -> bits(33)
+ACCEPTED ex_list_infer.sail#bits#0	bits(32) -> bits(33)
+SKIPPED ex_vector_infer/v1.sail#bits#0
+SKIPPED ex_vector_infer/v2.sail#bits#0
+ACCEPTED ex_vector_infer.sail#bits#0	bits(32) -> bits(33)
+REJECTED exist1.sail#range#0	range(.., 1) -> range(.., 0)
+REJECTED exist2.sail#range#0	range(.., 1) -> range(.., 0)
+REJECTED exist_simple.sail#range#0	range(.., 4) -> range(.., 3)
+REJECTED exist_subrange.sail#arity#0	dropped last arg `bit`
+REJECTED exist_subrange.sail#arity#1	dropped last arg `bit`
+REJECTED exist_tlb.sail#argorder#0	(vAddr, width) -> (width, vAddr)
+REJECTED exist_tlb.sail#argorder#2	(vAddr, LoadData) -> (LoadData, vAddr)
+ACCEPTED exist_tlb.sail#arity#0	dropped last arg `dec`
+ACCEPTED exist_tlb.sail#arity#13	dropped last arg `dec`
+SKIPPED existential_ast/v1.sail#bits#0
+SKIPPED existential_ast/v1.sail#bits#11
+SKIPPED existential_ast/v1.sail#range#0
+SKIPPED existential_ast/v1.sail#arity#0
+SKIPPED existential_ast/v1.sail#arity#4
+SKIPPED existential_ast/v2.sail#bits#0
+SKIPPED existential_ast/v2.sail#bits#12
+SKIPPED existential_ast/v2.sail#range#0
+SKIPPED existential_ast/v2.sail#arity#0
+SKIPPED existential_ast/v2.sail#arity#5
+SKIPPED existential_ast/v3.sail#bits#0
+SKIPPED existential_ast/v3.sail#bits#12
+SKIPPED existential_ast/v3.sail#range#0
+SKIPPED existential_ast/v3.sail#arity#0
+SKIPPED existential_ast/v3.sail#arity#5
+REJECTED existential_ast.sail#bits#0	bits(4) -> bits(5)
+REJECTED existential_ast.sail#bits#12	bits(4) -> bits(5)
+REJECTED existential_ast.sail#range#0	range(.., 31) -> range(.., 30)
+REJECTED existential_ast.sail#arity#0	dropped last arg `c`
+REJECTED existential_ast.sail#arity#5	dropped last arg `c`
+REJECTED existential_ast2.sail#bits#0	bits(4) -> bits(5)
+REJECTED existential_ast2.sail#bits#5	bits(4) -> bits(5)
+ACCEPTED existential_ast2.sail#range#0	range(.., 31) -> range(.., 30)
+REJECTED existential_ast2.sail#arity#0	dropped last arg `c`
+REJECTED existential_ast2.sail#arity#2	dropped last arg `c`
+SKIPPED existential_ast3/v1.sail#bits#0
+SKIPPED existential_ast3/v1.sail#bits#5
+SKIPPED existential_ast3/v1.sail#argorder#0
+SKIPPED existential_ast3/v1.sail#argorder#1
+SKIPPED existential_ast3/v1.sail#arity#0
+SKIPPED existential_ast3/v1.sail#arity#2
+SKIPPED existential_ast3/v2.sail#bits#0
+SKIPPED existential_ast3/v2.sail#bits#5
+SKIPPED existential_ast3/v2.sail#argorder#0
+SKIPPED existential_ast3/v2.sail#argorder#1
+SKIPPED existential_ast3/v2.sail#arity#0
+SKIPPED existential_ast3/v2.sail#arity#2
+SKIPPED existential_ast3/v3.sail#bits#0
+SKIPPED existential_ast3/v3.sail#bits#5
+SKIPPED existential_ast3/v3.sail#argorder#0
+SKIPPED existential_ast3/v3.sail#argorder#1
+SKIPPED existential_ast3/v3.sail#arity#0
+SKIPPED existential_ast3/v3.sail#arity#2
+SKIPPED existential_ast3/v4.sail#bits#0
+SKIPPED existential_ast3/v4.sail#bits#5
+SKIPPED existential_ast3/v4.sail#argorder#0
+SKIPPED existential_ast3/v4.sail#argorder#1
+SKIPPED existential_ast3/v4.sail#arity#0
+SKIPPED existential_ast3/v4.sail#arity#2
+SKIPPED existential_ast3/v5.sail#bits#0
+SKIPPED existential_ast3/v5.sail#bits#5
+SKIPPED existential_ast3/v5.sail#argorder#0
+SKIPPED existential_ast3/v5.sail#argorder#1
+SKIPPED existential_ast3/v5.sail#arity#0
+SKIPPED existential_ast3/v5.sail#arity#2
+SKIPPED existential_ast3/v6.sail#bits#0
+SKIPPED existential_ast3/v6.sail#bits#5
+SKIPPED existential_ast3/v6.sail#argorder#0
+SKIPPED existential_ast3/v6.sail#argorder#1
+SKIPPED existential_ast3/v6.sail#arity#0
+SKIPPED existential_ast3/v6.sail#arity#2
+REJECTED existential_ast3.sail#bits#0	bits(16) -> bits(17)
+REJECTED existential_ast3.sail#bits#5	bits(5) -> bits(6)
+REJECTED existential_ast3.sail#argorder#0	(datasize, n) -> (n, datasize)
+REJECTED existential_ast3.sail#argorder#1	(datasize, n) -> (n, datasize)
+REJECTED existential_ast3.sail#arity#0	dropped last arg `n`
+REJECTED existential_ast3.sail#arity#2	dropped last arg `n`
+REJECTED floor_pow2.sail#ret#0	-> int became -> bool
+REJECTED floor_pow2.sail#ret#1	-> int became -> bool
+ACCEPTED flow_gt1.sail#range#0	range(.., 63) -> range(.., 62)
+REJECTED flow_gt1.sail#range#1	range(.., 63) -> range(.., 62)
+ACCEPTED flow_gteq1.sail#range#0	range(.., 63) -> range(.., 62)
+REJECTED flow_gteq1.sail#range#1	range(.., 63) -> range(.., 62)
+ACCEPTED flow_lt1.sail#range#0	range(.., 63) -> range(.., 62)
+REJECTED flow_lt1.sail#range#1	range(.., 63) -> range(.., 62)
+ACCEPTED flow_lt2.sail#range#0	range(.., 63) -> range(.., 62)
+ACCEPTED flow_lt2.sail#range#1	range(.., 63) -> range(.., 62)
+ACCEPTED flow_lteq1.sail#range#0	range(.., 63) -> range(.., 62)
+REJECTED flow_lteq1.sail#range#1	range(.., 63) -> range(.., 62)
+REJECTED foreach_e.sail#ret#0	-> int became -> bool
+REJECTED foreach_var_updates.sail#ret#0	-> int became -> bool
+REJECTED foreach_var_updates.sail#ret#2	-> int became -> bool
+REJECTED fpthreesimp.sail#bits#0	bits(1) -> bits(2)
+REJECTED fpthreesimp.sail#argorder#0	(N, sign) -> (sign, N)
+REJECTED fpthreesimp.sail#arity#0	dropped last arg `sign`
+REJECTED funcl_guard.sail#bits#0	bits(4) -> bits(5)
+REJECTED funcl_guard.sail#ret#0	-> int became -> bool
+REJECTED guards.sail#ret#0	-> int became -> bool
+REJECTED if_overload.sail#arity#0	dropped last arg `bool`
+REJECTED if_var_updates.sail#ret#0	-> int became -> bool
+REJECTED if_var_updates.sail#ret#1	-> int became -> bool
+REJECTED implicit_vector.sail#arity#0	dropped last arg `int`
+REJECTED implicit_vector.sail#arity#1	dropped last arg `int`
+SKIPPED implicits/v1.sail#bits#0
+SKIPPED implicits/v1.sail#bits#3
+SKIPPED implicits/v1.sail#argorder#0
+SKIPPED implicits/v1.sail#argorder#2
+SKIPPED implicits/v1.sail#arity#0
+SKIPPED implicits/v1.sail#arity#5
+SKIPPED implicits/v2.sail#bits#0
+SKIPPED implicits/v2.sail#bits#1
+SKIPPED implicits/v2.sail#argorder#0
+SKIPPED implicits/v2.sail#argorder#2
+SKIPPED implicits/v2.sail#arity#0
+SKIPPED implicits/v2.sail#arity#3
+ACCEPTED implicits.sail#bits#0	bits(64) -> bits(65)
+ACCEPTED implicits.sail#bits#5	bits(64) -> bits(65)
+REJECTED implicits.sail#argorder#0	(m, x) -> (x, m)
+REJECTED implicits.sail#argorder#3	(x, m) -> (m, x)
+REJECTED implicits.sail#arity#0	dropped last arg `x`
+REJECTED implicits.sail#arity#9	dropped last arg `c`
+REJECTED inline_typ.sail#ret#0	-> int became -> bool
+REJECTED int_synonym.sail#argorder#0	(m, v) -> (v, m)
+REJECTED int_synonym.sail#argorder#2	(flag, value) -> (value, flag)
+ACCEPTED int_synonym.sail#arity#0	dropped last arg `dec`
+REJECTED int_synonym.sail#arity#2	dropped last arg `m`
+REJECTED issue1335.sail#bits#0	bits(8) -> bits(9)
+ACCEPTED issue434.sail#bits#0	bits(64) -> bits(65)
+REJECTED jal_encdec.sail#bits#0	bits(32) -> bits(33)
+REJECTED jal_encdec.sail#bits#2	bits(5) -> bits(6)
+REJECTED let_nat_shadow.sail#arity#0	dropped last arg `j`
+ACCEPTED let_subtyp_bug.sail#range#0	range(.., 5) -> range(.., 4)
+ACCEPTED let_subtyp_bug.sail#range#1	range(.., 5) -> range(.., 4)
+REJECTED let_subtyp_bug.sail#ret#0	-> nat became -> bool
+SKIPPED lexp_vec/v1.sail#argorder#0
+SKIPPED lexp_vec/v1.sail#arity#0
+SKIPPED lexp_vec/v1.sail#arity#3
+SKIPPED lexp_vec/v2.sail#argorder#0
+SKIPPED lexp_vec/v2.sail#arity#0
+SKIPPED lexp_vec/v2.sail#arity#3
+REJECTED lexp_vec.sail#argorder#0	(i, v) -> (v, i)
+ACCEPTED lexp_vec.sail#arity#0	dropped last arg `dec`
+ACCEPTED lexp_vec.sail#arity#3	dropped last arg `dec`
+REJECTED mapping_clause.sail#bits#0	bits(3) -> bits(4)
+REJECTED mapping_clause.sail#bits#1	bits(3) -> bits(4)
+REJECTED mapping_rreg.sail#bits#0	bits(1) -> bits(2)
+REJECTED mapping_rreg.sail#bits#2	bits(2) -> bits(3)
+REJECTED matchenv.sail#bits#0	bits(32) -> bits(33)
+ACCEPTED mixed_order_unification.sail#bits#0	bits(1) -> bits(2)
+ACCEPTED modify_assignment1.sail#range#0	range(.., 10) -> range(.., 9)
+ACCEPTED modify_assignment1.sail#range#1	range(.., 9) -> range(.., 8)
+ACCEPTED modify_type_chain.sail#range#0	range(.., 10) -> range(.., 9)
+REJECTED modify_type_chain.sail#range#2	range(.., 8) -> range(.., 7)
+REJECTED multiple_unifiers.sail#field#0	field `a` renamed away
+ACCEPTED multiple_unifiers.sail#field#1	field `b` renamed away
+REJECTED multiple_unifiers.sail#ret#0	-> int became -> bool
+REJECTED multiple_unifiers.sail#ret#1	-> int became -> bool
+REJECTED mutrec.sail#ret#0	-> int became -> bool
+REJECTED mutrec.sail#ret#2	-> int became -> bool
+REJECTED new_bitfields.sail#bits#0	bits(32) -> bits(33)
+ACCEPTED new_bitfields.sail#bits#3	bits(32) -> bits(33)
+SKIPPED nexp_synonym/v1.sail#arity#0
+SKIPPED nexp_synonym/v2.sail#arity#0
+REJECTED nexp_synonym.sail#arity#0	dropped last arg `v`
+ACCEPTED nlflow.sail#arity#0	dropped last arg `dec`
+ACCEPTED nlflow.sail#arity#1	dropped last arg `dec`
+REJECTED no_val_recur.sail#ret#0	-> int became -> bool
+ACCEPTED nzcv.sail#arity#0	dropped last arg `dec`
+ACCEPTED nzcv.sail#arity#1	dropped last arg `dec`
+REJECTED option_either.sail#range#0	range(.., 1) -> range(.., 0)
+REJECTED option_either.sail#arity#0	dropped last arg `bit`
+REJECTED option_either.sail#arity#2	dropped last arg `bit`
+REJECTED option_either.sail#ret#0	-> int became -> bool
+REJECTED option_either.sail#ret#1	-> int became -> bool
+REJECTED option_tuple.sail#arity#0	dropped last arg `nat`
+REJECTED option_tuple.sail#arity#1	dropped last arg `i`
+SKIPPED outcome_impl/v1.sail#bits#0
+SKIPPED outcome_impl/v1.sail#bits#3
+SKIPPED outcome_impl/v2.sail#bits#0
+SKIPPED outcome_impl/v2.sail#bits#2
+SKIPPED outcome_impl/v3.sail#bits#0
+SKIPPED outcome_impl/v3.sail#bits#3
+REJECTED outcome_impl.sail#bits#0	bits(64) -> bits(65)
+REJECTED outcome_impl.sail#bits#3	bits(64) -> bits(65)
+ACCEPTED outcome_impl.sail#arity#0	dropped last arg `dec`
+REJECTED outcome_impl_quant.sail#bits#0	bits(64) -> bits(65)
+REJECTED outcome_impl_quant.sail#bits#2	bits(32) -> bits(33)
+ACCEPTED outcome_impl_quant.sail#arity#0	dropped last arg `dec`
+REJECTED overlap_field.sail#field#0	field `field_A` renamed away
+ACCEPTED overlap_field.sail#field#2	field `field_B` renamed away
+ACCEPTED overload_int_nat.sail#ret#0	-> int became -> bool
+ACCEPTED overload_int_nat.sail#ret#1	-> string became -> bool
+REJECTED phantom_bitlist_struct.sail#field#0	field `bits` renamed away
+REJECTED phantom_num.sail#argorder#0	(n, _) -> (_, n)
+REJECTED phantom_num.sail#arity#0	dropped last arg `_`
+REJECTED phantom_num.sail#ret#0	-> int became -> bool
+REJECTED plus_one_unify.sail#ret#0	-> int became -> bool
+REJECTED poly_struct_infer.sail#field#0	field `f1` renamed away
+REJECTED poly_struct_infer.sail#field#2	field `f3` renamed away
+SKIPPED poly_vector/v1.sail#bits#0
+SKIPPED poly_vector/v1.sail#arity#0
+SKIPPED poly_vector/v1.sail#arity#2
+SKIPPED poly_vector/v1.sail#ret#0
+SKIPPED poly_vector/v2.sail#bits#0
+SKIPPED poly_vector/v2.sail#arity#0
+SKIPPED poly_vector/v2.sail#arity#2
+SKIPPED poly_vector/v2.sail#ret#0
+REJECTED poly_vector.sail#bits#0	bits(32) -> bits(33)
+ACCEPTED poly_vector.sail#arity#0	dropped last arg `bit`
+REJECTED poly_vector.sail#arity#2	dropped last arg `bit`
+REJECTED poly_vector.sail#ret#0	-> int became -> bool
+ACCEPTED pow_unify.sail#bits#0	bits(32) -> bits(33)
+REJECTED pow_unify.sail#ret#0	-> int became -> bool
+ACCEPTED procstate1.sail#arity#0	dropped last arg `dec`
+ACCEPTED procstate1.sail#arity#2	dropped last arg `dec`
+REJECTED procstate1.sail#field#0	field `N` renamed away
+REJECTED procstate1.sail#field#2	field `C` renamed away
+REJECTED pure_let_var2.sail#ret#0	-> int became -> bool
+REJECTED pure_loop_in_monad.sail#bits#0	bits(32) -> bits(33)
+REJECTED pure_loop_in_monad.sail#bits#1	bits(32) -> bits(33)
+ACCEPTED pure_record.sail#arity#0	dropped last arg `dec`
+ACCEPTED pure_record.sail#arity#1	dropped last arg `dec`
+REJECTED pure_record.sail#field#0	field `N` renamed away
+REJECTED pure_record.sail#field#1	field `Z` renamed away
+ACCEPTED pure_record2.sail#arity#0	dropped last arg `dec`
+ACCEPTED pure_record2.sail#arity#1	dropped last arg `dec`
+REJECTED pure_record2.sail#field#0	field `N` renamed away
+REJECTED pure_record2.sail#field#1	field `Z` renamed away
+ACCEPTED pure_record3.sail#arity#0	dropped last arg `dec`
+ACCEPTED pure_record3.sail#arity#1	dropped last arg `dec`
+REJECTED pure_record3.sail#field#0	field `N` renamed away
+REJECTED pure_record3.sail#field#1	field `Z` renamed away
+REJECTED recursion.sail#ret#0	-> int became -> bool
+SKIPPED reg_32_64/v1.sail#bits#0
+SKIPPED reg_32_64/v1.sail#bits#4
+SKIPPED reg_32_64/v1.sail#argorder#0
+SKIPPED reg_32_64/v1.sail#argorder#1
+SKIPPED reg_32_64/v1.sail#arity#0
+SKIPPED reg_32_64/v1.sail#arity#1
+SKIPPED reg_32_64/v2.sail#bits#0
+SKIPPED reg_32_64/v2.sail#bits#4
+SKIPPED reg_32_64/v2.sail#argorder#0
+SKIPPED reg_32_64/v2.sail#argorder#1
+SKIPPED reg_32_64/v2.sail#arity#0
+SKIPPED reg_32_64/v2.sail#arity#1
+SKIPPED reg_32_64/v3.sail#bits#0
+SKIPPED reg_32_64/v3.sail#bits#4
+SKIPPED reg_32_64/v3.sail#argorder#0
+SKIPPED reg_32_64/v3.sail#argorder#1
+SKIPPED reg_32_64/v3.sail#arity#0
+SKIPPED reg_32_64/v3.sail#arity#1
+REJECTED reg_32_64.sail#bits#0	bits(64) -> bits(65)
+REJECTED reg_32_64.sail#bits#4	bits(64) -> bits(65)
+REJECTED reg_32_64.sail#argorder#0	(r, data) -> (data, r)
+REJECTED reg_32_64.sail#argorder#1	(datasize, r) -> (r, datasize)
+REJECTED reg_32_64.sail#arity#0	dropped last arg `data`
+REJECTED reg_32_64.sail#arity#1	dropped last arg `r`
+REJECTED reg_mod.sail#range#0	range(.., 10) -> range(.., 9)
+REJECTED reg_option.sail#ret#0	-> int became -> bool
+ACCEPTED reg_ref.sail#range#0	range(.., 10) -> range(.., 9)
+REJECTED reg_ref.sail#range#1	range(.., 10) -> range(.., 9)
+ACCEPTED return_simple3.sail#argorder#0	(N, x) -> (x, N)
+REJECTED return_simple3.sail#arity#0	dropped last arg `x`
+REJECTED return_simple3.sail#ret#0	-> int became -> bool
+REJECTED scattered_mapping_doc.sail#ret#0	-> int became -> bool
+REJECTED set_constraint.sail#ret#0	-> int became -> bool
+ACCEPTED shadow_leak_check.sail#argorder#0	(x, y) -> (y, x)
+REJECTED shadow_leak_check.sail#arity#0	dropped last arg `y`
+REJECTED shadow_leak_check.sail#ret#0	-> int became -> bool
+REJECTED shadow_leak_check.sail#ret#1	-> int became -> bool
+REJECTED simple_record_access.sail#arity#0	dropped last arg `bit`
+REJECTED simple_record_access.sail#arity#1	dropped last arg `bit`
+ACCEPTED simple_record_access.sail#field#0	field `rsig` renamed away
+REJECTED simple_record_access.sail#field#1	field `bitf` renamed away
+ACCEPTED simple_scattered.sail#argorder#0	(x, y) -> (y, x)
+REJECTED simple_scattered.sail#arity#0	dropped last arg `bit`
+ACCEPTED simple_scattered.sail#arity#2	dropped last arg `y`
+REJECTED single_assign_in_block.sail#ret#0	-> int became -> bool
+REJECTED single_assign_in_block.sail#ret#1	-> int became -> bool
+REJECTED single_enum.sail#ret#0	-> int became -> bool
+REJECTED single_enum.sail#ret#1	-> int became -> bool
+REJECTED single_union.sail#ret#0	-> int became -> bool
+REJECTED single_union.sail#ret#1	-> int became -> bool
+REJECTED sizeof_fixed.sail#ret#0	-> int became -> bool
+REJECTED string_append_non_exec.sail#bits#0	bits(2) -> bits(3)
+REJECTED string_append_non_exec.sail#bits#2	bits(2) -> bits(3)
+REJECTED string_append_non_exec.sail#ret#0	-> string became -> bool
+REJECTED string_append_non_exec.sail#ret#1	-> string became -> bool
+SKIPPED string_literal_type/v1.sail#argorder#0
+SKIPPED string_literal_type/v1.sail#arity#0
+SKIPPED string_literal_type/v1.sail#arity#1
+ACCEPTED string_literal_type.sail#argorder#0	(x, z) -> (z, x)
+REJECTED string_literal_type.sail#arity#0	dropped last arg `z`
+ACCEPTED struct_kind_infer.sail#field#0	field `field1` renamed away
+ACCEPTED struct_kind_infer.sail#field#1	field `field2` renamed away
+SKIPPED struct_pattern/v1.sail#bits#0
+SKIPPED struct_pattern/v1.sail#arity#0
+SKIPPED struct_pattern/v1.sail#arity#1
+SKIPPED struct_pattern/v1.sail#field#0
+SKIPPED struct_pattern/v1.sail#field#1
+REJECTED struct_pattern.sail#bits#0	bits(32) -> bits(33)
+REJECTED struct_pattern.sail#arity#0	dropped last arg `b`
+REJECTED struct_pattern.sail#arity#1	dropped last arg `i`
+REJECTED struct_pattern.sail#field#0	field `field1` renamed away
+REJECTED struct_pattern.sail#field#1	field `field2` renamed away
+REJECTED struct_pattern_partial.sail#bits#0	bits(32) -> bits(33)
+REJECTED struct_pattern_partial.sail#arity#0	dropped last arg `b`
+REJECTED struct_pattern_partial.sail#arity#1	dropped last arg `i`
+REJECTED struct_pattern_partial.sail#field#0	field `field1` renamed away
+REJECTED struct_pattern_partial.sail#field#1	field `field2` renamed away
+REJECTED tautology.sail#arity#0	dropped last arg `r`
+REJECTED trailing_commas.sail#field#0	field `f1` renamed away
+ACCEPTED trailing_commas.sail#field#2	field `pair_field` renamed away
+SKIPPED tuple_assign/v1.sail#ret#0
+SKIPPED tuple_assign/v1.sail#ret#2
+REJECTED tuple_assign.sail#ret#0	-> int became -> bool
+ACCEPTED tuple_assign.sail#ret#2	-> int became -> bool
+SKIPPED tuple_bitvector_int_pat/v1.sail#argorder#0
+SKIPPED tuple_bitvector_int_pat/v1.sail#arity#0
+SKIPPED tuple_bitvector_int_pat/v2.sail#argorder#0
+SKIPPED tuple_bitvector_int_pat/v2.sail#arity#0
+REJECTED tuple_bitvector_int_pat.sail#argorder#0	(x, y) -> (y, x)
+REJECTED tuple_bitvector_int_pat.sail#arity#0	dropped last arg `y`
+REJECTED tuple_bitvector_int_pat2.sail#argorder#0	(x, y) -> (y, x)
+REJECTED tuple_bitvector_int_pat2.sail#arity#0	dropped last arg `y`
+REJECTED tuple_bitvector_int_pat3.sail#argorder#0	(x, y) -> (y, x)
+REJECTED tuple_bitvector_int_pat3.sail#arity#0	dropped last arg `y`
+REJECTED tuple_fun.sail#arity#0	dropped last arg `_`
+REJECTED tuple_fun.sail#ret#0	-> int became -> bool
+REJECTED tuple_type_cast.sail#argorder#0	(b, n) -> (n, b)
+REJECTED tuple_type_cast.sail#argorder#1	(b, n) -> (n, b)
+REJECTED tuple_type_cast.sail#arity#0	dropped last arg `n`
+REJECTED tuple_type_cast.sail#arity#1	dropped last arg `n`
+REJECTED tuple_type_cast.sail#ret#0	-> int became -> bool
+REJECTED tuple_type_cast.sail#ret#1	-> int became -> bool
+REJECTED type_div.sail#ret#0	-> int became -> bool
+REJECTED type_div.sail#ret#1	-> int became -> bool
+REJECTED type_if_then_else.sail#ret#0	-> int became -> bool
+ACCEPTED unsigned_index.sail#bits#0	bits(32) -> bits(33)
+REJECTED unsigned_index.sail#argorder#0	(v, n) -> (n, v)
+REJECTED unsigned_index.sail#arity#0	dropped last arg `n`
+REJECTED unsigned_index.sail#ret#0	-> bit became -> bool
+REJECTED val_spec_fn_spec.sail#bits#0	bits(8) -> bits(9)
+REJECTED val_spec_fn_spec.sail#bits#1	bits(8) -> bits(9)
+SKIPPED vec_length/v1.sail#bits#0
+SKIPPED vec_length/v1_inc.sail#bits#0
+SKIPPED vec_length/v2.sail#bits#0
+SKIPPED vec_length/v2_inc.sail#bits#0
+SKIPPED vec_length/v3.sail#bits#0
+REJECTED vec_length.sail#bits#0	bits(8) -> bits(9)
+REJECTED vec_length_inc.sail#bits#0	bits(8) -> bits(9)
+ACCEPTED vec_pat1.sail#arity#0	dropped last arg `inc`
+ACCEPTED vec_pat1.sail#arity#7	dropped last arg `inc`
+REJECTED vector_access.sail#arity#0	dropped last arg `bit`
+REJECTED vector_access_dec.sail#arity#0	dropped last arg `bit`
+ACCEPTED vector_append.sail#argorder#0	(v1, v2) -> (v2, v1)
+REJECTED vector_append.sail#arity#0	dropped last arg `bit`
+REJECTED vector_append.sail#arity#4	dropped last arg `bit`
+ACCEPTED vector_append_gen.sail#argorder#0	(v1, v2) -> (v2, v1)
+REJECTED vector_append_gen.sail#arity#0	dropped last arg `bit`
+REJECTED vector_append_gen.sail#arity#4	dropped last arg `bit`
+REJECTED vector_concat_assign.sail#arity#0	dropped last arg `v`
+REJECTED vector_pattern_split.sail#bits#0	bits(64) -> bits(65)
+ACCEPTED vector_subrange_gen.sail#arity#0	dropped last arg `inc`
+ACCEPTED vector_subrange_gen.sail#arity#3	dropped last arg `inc`
+ACCEPTED vector_subrange_mapping.sail#bits#0	bits(32) -> bits(33)
+REJECTED vector_subrange_mapping.sail#bits#1	bits(32) -> bits(33)
+SKIPPED vector_subrange_pattern/v1.sail#bits#0
+SKIPPED vector_subrange_pattern/v1.sail#arity#0
+SKIPPED vector_subrange_pattern/v2.sail#bits#0
+SKIPPED vector_subrange_pattern/v2.sail#arity#0
+SKIPPED vector_subrange_pattern/v3.sail#bits#0
+SKIPPED vector_subrange_pattern/v3.sail#arity#0
+SKIPPED vector_subrange_pattern/v4.sail#bits#0
+SKIPPED vector_subrange_pattern/v4.sail#arity#0
+REJECTED vector_subrange_pattern.sail#bits#0	bits(20) -> bits(21)
+REJECTED vector_subrange_pattern.sail#arity#0	dropped last arg `imm`
+SKIPPED wf_specs/wf_specs.sail#bits#0
+ACCEPTED wf_specs.sail#bits#0	bits(32) -> bits(33)
+ACCEPTED while_MM.sail#arity#0	dropped last arg `dec`
+ACCEPTED while_MM.sail#ret#0	-> int became -> bool
+REJECTED while_MP.sail#ret#0	-> int became -> bool
+REJECTED while_MP.sail#ret#1	-> int became -> bool
+ACCEPTED while_PM.sail#range#0	range(.., 64) -> range(.., 63)
+REJECTED while_PM.sail#arity#0	dropped last arg `bit`
+REJECTED while_PM.sail#arity#2	dropped last arg `bit`
+ACCEPTED while_PM.sail#ret#0	-> int became -> bool
+ACCEPTED while_PM.sail#ret#1	-> bit became -> bool
+REJECTED while_PP.sail#ret#0	-> int became -> bool
+REJECTED while_PP.sail#ret#2	-> int became -> bool
+REJECTED wildcard_mapping.sail#bits#0	bits(2) -> bits(3)
+REJECTED wildcard_mapping.sail#ret#0	-> int became -> bool
+REJECTED zero_length_bv.sail#bits#0	bits(0) -> bits(1)
+REJECTED zero_length_bv.sail#arity#0	dropped last arg `string`
+ACCEPTED zeros_implicit.sail#bits#0	bits(32) -> bits(33)
+REJECTED zeros_implicit.sail#bits#1	bits(64) -> bits(65)

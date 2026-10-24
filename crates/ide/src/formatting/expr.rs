@@ -253,6 +253,35 @@ pub(crate) fn rewrite_if_expr(
 ///
 /// Ensures single space around binary operators: `&`, `|`, `^`,
 /// `==`, `!=`, `>=`, `<=`.
+/// A child's text, with any `BIN_EXPR` inside it normalised first.
+///
+/// `apply_expr_rewrites` collects one replacement per `BIN_EXPR` and splices
+/// them into the source, and an outer node's replacement covers its inner
+/// ones. Built from raw source, that outer text silently discarded the inner
+/// rewrite: `(xs & slice_mask(j,i-j+1))` came out with the comma spaced and
+/// `i-j+1` untouched — and a *second* format pass then spaced it, so
+/// formatting the same file twice gave two different files.
+fn normalized_child(node: &SyntaxNode, snippet: &SnippetProvider) -> String {
+    if node.kind() == SK::BIN_EXPR {
+        if let Some(text) = normalize_binexpr_spacing(node, snippet) {
+            return text;
+        }
+    }
+    // Nothing to normalise below: keep the source verbatim rather than
+    // rebuilding it, so comments and string literals are untouched.
+    if !node.descendants().any(|d| d.kind() == SK::BIN_EXPR) {
+        return snippet.span_to_snippet(node.text_range()).to_string();
+    }
+    let mut out = String::new();
+    for child in node.children_with_tokens() {
+        match child {
+            rowan::NodeOrToken::Node(n) => out.push_str(&normalized_child(&n, snippet)),
+            rowan::NodeOrToken::Token(t) => out.push_str(t.text()),
+        }
+    }
+    out
+}
+
 pub(crate) fn normalize_binexpr_spacing(
     node: &SyntaxNode,
     snippet: &SnippetProvider,
@@ -303,9 +332,7 @@ pub(crate) fn normalize_binexpr_spacing(
             _ => {
                 found_op = false;
                 let text = match child {
-                    rowan::NodeOrToken::Node(n) => {
-                        snippet.span_to_snippet(n.text_range()).to_string()
-                    }
+                    rowan::NodeOrToken::Node(n) => normalized_child(&n, snippet),
                     rowan::NodeOrToken::Token(t) => t.text().to_string(),
                 };
                 parts.push(text);

@@ -9,9 +9,9 @@
 use base_db::FileId;
 
 use crate::item_id::{FunctionId, LetId, MappingId, RegisterId, TypeDefId, ValSpecId};
-use crate::item_tree::ItemKind;
+use crate::item_tree::DefKind;
 use crate::name::Name;
-use crate::nameres::{DefId, DefMap};
+use crate::nameres::{DefIdx, DefMap};
 use crate::per_ns::PerNs;
 use crate::workspace_def_map::WorkspaceDefMap;
 use std::collections::HashMap;
@@ -39,8 +39,8 @@ pub enum ResolveValueResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValueNs {
     /// Local variable binding (from let/var/match/foreach).
-    /// Keeps DefId since locals are expression-scoped, not module-level.
-    LocalBinding(DefId),
+    /// Keeps DefIdx since locals are expression-scoped, not module-level.
+    LocalBinding(DefIdx),
     /// A function definition (or function clause).
     FunctionId(FunctionId),
     /// Multiple functions/clauses with the same name (overloading).
@@ -63,9 +63,9 @@ pub enum ValueNs {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resolution {
     /// Resolved to a single local binding (let/var/match arm).
-    Def(DefId),
+    Def(DefIdx),
     /// Resolved to one or more module-level definitions.
-    Defs(Vec<crate::item_id::ModuleDefId>),
+    Defs(Vec<crate::item_id::DefId>),
     /// Resolved at workspace level (cross-file).
     Workspace(String),
     /// The name is not known in this resolver's scope.
@@ -78,32 +78,9 @@ enum Scope<'db> {
     /// All items and imported names of a module/file.
     Block { def_map: &'db DefMap },
     /// Local bindings from let/var/match/foreach.
-    Expr { bindings: HashMap<Name, DefId> },
+    Expr { bindings: HashMap<Name, DefIdx> },
     /// Workspace-wide definitions from all files.
     Workspace { def_map: &'db WorkspaceDefMap },
-}
-
-/// Check if a name is a Sail built-in type.
-fn is_builtin_type(name: &str) -> bool {
-    matches!(
-        name,
-        "int"
-            | "nat"
-            | "bool"
-            | "unit"
-            | "string"
-            | "real"
-            | "bit"
-            | "bits"
-            | "vector"
-            | "list"
-            | "option"
-            | "result"
-            | "range"
-            | "atom"
-            | "atom_bool"
-            | "implicit"
-    )
 }
 
 /// Scope-chain resolver: Expr > Block > Workspace.
@@ -179,7 +156,7 @@ impl<'db> Resolver<'db> {
     }
 
     /// Add a binding to the innermost expression scope.
-    pub fn add_binding(&mut self, name: Name, def: DefId) {
+    pub fn add_binding(&mut self, name: Name, def: DefIdx) {
         match self.scopes.last_mut() {
             Some(Scope::Expr { bindings }) => {
                 bindings.insert(name, def);
@@ -226,13 +203,9 @@ impl<'db> Resolver<'db> {
     /// Resolve in type namespace only.
     ///
     /// Takes `db` parameter`).
-    pub fn resolve_path_in_type_ns(
-        &self,
-        _db: &dyn crate::db::DefDatabase,
-        name: &str,
-    ) -> Option<TypeNs> {
+    pub fn resolve_path_in_type_ns(&self, _db: &dyn salsa::Database, name: &str) -> Option<TypeNs> {
         // Check builtin types first.
-        if is_builtin_type(name) {
+        if crate::is_builtin_type_name(name) {
             return Some(TypeNs::BuiltinType(Name::from(name)));
         }
         let name_key = Name::from(name);
@@ -242,9 +215,9 @@ impl<'db> Resolver<'db> {
                     let per_ns = def_map.root_scope().get(&name_key);
                     if let Some(item) = per_ns.types {
                         let type_def_id = TypeDefId(item.def.as_raw());
-                        let raw_id = crate::nameres::DefId(item.def.as_raw());
+                        let raw_id = crate::nameres::DefIdx(item.def.as_raw());
                         let type_ns = match def_map.kind_of(raw_id) {
-                            Some(ItemKind::TypeAlias) => TypeNs::TypeAliasId(type_def_id),
+                            Some(DefKind::TypeAlias) => TypeNs::TypeAliasId(type_def_id),
                             _ => TypeNs::AdtId(type_def_id),
                         };
                         return Some(type_ns);
@@ -270,7 +243,7 @@ impl<'db> Resolver<'db> {
     /// Takes `db` parameter`).
     pub fn resolve_path_in_value_ns(
         &self,
-        _db: &dyn crate::db::DefDatabase,
+        _db: &dyn salsa::Database,
         name: &str,
     ) -> Option<ValueNs> {
         let name_key = Name::from(name);
@@ -284,22 +257,41 @@ impl<'db> Resolver<'db> {
                 Scope::Block { def_map } => {
                     let ids = def_map.root_scope().get_values(&name_key);
                     if !ids.is_empty() {
-                        let first_raw = crate::nameres::DefId(ids[0].as_raw());
+                        // The definition wins over the declaration.
+                        //
+                        // A `val f : ...` declares f's type and a
+                        // `function f(..) = ..` defines it, and Sail lets
+                        // the two be written far apart. This took
+                        // `ids[0]` — whichever came *first in the file* —
+                        // so a name with a `val` above its `function`
+                        // resolved to the spec, and every feature that
+                        // asks what the name is got "val" for something
+                        // that is a function.
+                        let preferred = ids
+                            .iter()
+                            .find(|id| {
+                                matches!(
+                                    def_map.kind_of(crate::nameres::DefIdx(id.as_raw())),
+                                    Some(DefKind::Function | DefKind::Mapping)
+                                )
+                            })
+                            .unwrap_or(&ids[0]);
+                        let first_raw = crate::nameres::DefIdx(preferred.as_raw());
                         let first_kind = def_map.kind_of(first_raw);
                         match first_kind {
-                            Some(ItemKind::Register) => {
+                            Some(DefKind::Register) => {
                                 return Some(ValueNs::RegisterId(RegisterId(first_raw.0)));
                             }
-                            Some(ItemKind::Mapping | ItemKind::MappingSpec) => {
+                            Some(DefKind::Mapping | DefKind::MappingSpec) => {
                                 return Some(ValueNs::MappingId(MappingId(first_raw.0)));
                             }
-                            Some(ItemKind::ValSpec) => {
+                            Some(DefKind::ValSpec) => {
                                 return Some(ValueNs::ValSpecId(ValSpecId(first_raw.0)));
                             }
-                            Some(ItemKind::Let | ItemKind::Var) => {
+                            Some(DefKind::Let | DefKind::Var) => {
                                 return Some(ValueNs::LetId(LetId(first_raw.0)));
                             }
-                            Some(ItemKind::Function) => {
+                            Some(DefKind::Function) => {
                                 if ids.len() == 1 {
                                     return Some(ValueNs::FunctionId(FunctionId(first_raw.0)));
                                 } else {
@@ -335,26 +327,26 @@ impl<'db> Resolver<'db> {
     }
 
     /// Resolve in both namespaces, returning `PerNs`.
-    pub fn resolve_per_ns(&self, db: &dyn crate::db::DefDatabase, name: &str) -> PerNs {
-        use crate::item_id::ModuleDefId;
+    pub fn resolve_per_ns(&self, db: &dyn salsa::Database, name: &str) -> PerNs {
+        use crate::item_id::DefId;
         use crate::per_ns::ItemInNs;
         use crate::visibility::Visibility;
 
-        // Helper: wrap a raw DefId into a ModuleDefId using kind lookup.
+        // Helper: wrap a raw DefIdx into a DefId using kind lookup.
         let def_map = self.try_def_map();
-        let to_module_def = |raw_id: crate::nameres::DefId| -> ModuleDefId {
+        let to_module_def = |raw_id: crate::nameres::DefIdx| -> DefId {
             let kind = def_map
                 .and_then(|dm| dm.kind_of(raw_id))
-                .unwrap_or(crate::item_tree::ItemKind::Function);
-            ModuleDefId::from_def_id(raw_id, kind)
+                .unwrap_or(crate::item_tree::DefKind::Function);
+            DefId::from_def_idx(raw_id, kind)
         };
 
         let types = match self.resolve_path_in_type_ns(db, name) {
             Some(TypeNs::AdtId(id)) => {
-                Some(ItemInNs { def: ModuleDefId::TypeDefId(id), vis: Visibility::Public })
+                Some(ItemInNs { def: DefId::TypeDefId(id), vis: Visibility::Public })
             }
             Some(TypeNs::TypeAliasId(id)) => {
-                Some(ItemInNs { def: ModuleDefId::TypeDefId(id), vis: Visibility::Public })
+                Some(ItemInNs { def: DefId::TypeDefId(id), vis: Visibility::Public })
             }
             _ => None,
         };
@@ -363,24 +355,24 @@ impl<'db> Resolver<'db> {
                 Some(ItemInNs { def: to_module_def(id), vis: Visibility::Public })
             }
             Some(ValueNs::FunctionId(id)) => {
-                Some(ItemInNs { def: ModuleDefId::FunctionId(id), vis: Visibility::Public })
+                Some(ItemInNs { def: DefId::FunctionId(id), vis: Visibility::Public })
             }
             Some(ValueNs::ValSpecId(id)) => {
-                Some(ItemInNs { def: ModuleDefId::ValSpecId(id), vis: Visibility::Public })
+                Some(ItemInNs { def: DefId::ValSpecId(id), vis: Visibility::Public })
             }
             Some(ValueNs::RegisterId(id)) => {
-                Some(ItemInNs { def: ModuleDefId::RegisterId(id), vis: Visibility::Public })
+                Some(ItemInNs { def: DefId::RegisterId(id), vis: Visibility::Public })
             }
             Some(ValueNs::MappingId(id)) => {
-                Some(ItemInNs { def: ModuleDefId::MappingId(id), vis: Visibility::Public })
+                Some(ItemInNs { def: DefId::MappingId(id), vis: Visibility::Public })
             }
             Some(ValueNs::LetId(id)) => {
-                Some(ItemInNs { def: ModuleDefId::LetId(id), vis: Visibility::Public })
+                Some(ItemInNs { def: DefId::LetId(id), vis: Visibility::Public })
             }
             Some(ValueNs::FunctionIds(ref ids)) => ids
                 .first()
                 .copied()
-                .map(|id| ItemInNs { def: ModuleDefId::FunctionId(id), vis: Visibility::Public }),
+                .map(|id| ItemInNs { def: DefId::FunctionId(id), vis: Visibility::Public }),
             _ => None,
         };
         PerNs { types, values }
@@ -493,42 +485,6 @@ mod tests {
             unimplemented!()
         }
     }
-    impl hir_expand::db::ExpandDatabase for TestDb {
-        fn include_paths(&self, input: base_db::FileText) -> &[String] {
-            crate::def_query::include_paths(self, input)
-        }
-    }
-
-    impl crate::db::DefDatabase for TestDb {
-        fn file_item_tree(&self, input: base_db::FileText) -> Option<&std::sync::Arc<ItemTree>> {
-            crate::def_query::file_item_tree(self, input).as_ref()
-        }
-        fn callable_bodies(
-            &self,
-            input: base_db::FileText,
-        ) -> Option<&crate::bodies::CallableBodies> {
-            crate::def_query::callable_bodies(self, input).as_ref().map(|b| b.0.as_ref())
-        }
-        fn def_map(&self, input: base_db::FileText) -> Option<&DefMap> {
-            crate::def_query::crate_def_map(self, input).as_ref().map(|d| d.0.as_ref())
-        }
-        fn callgraph(&self, input: base_db::FileText) -> Option<&crate::callgraph::CallGraph> {
-            crate::def_query::callgraph(self, input).as_ref().map(|cg| cg.0.as_ref())
-        }
-        fn file_def_with_body_ids<'db>(
-            &'db self,
-            input: base_db::FileText,
-        ) -> &'db [crate::def_query::DefWithBodyId<'db>] {
-            crate::def_query::file_def_with_body_ids(self, input)
-        }
-        fn body_with_source_map<'db>(
-            &'db self,
-            id: crate::def_query::DefWithBodyId<'db>,
-        ) -> &'db crate::def_query::ArcBodyWithSourceMap {
-            crate::def_query::body_with_source_map(self, id)
-        }
-    }
-
     fn test_db() -> TestDb {
         TestDb::default()
     }
@@ -577,7 +533,7 @@ function clause pick(_) = 0
         let dm = build_def_map("function f() = 0\n");
         let mut r = Resolver::new(&dm);
         r.push_expr_scope();
-        let shadow_def = DefId(999);
+        let shadow_def = DefIdx(999);
         r.add_binding(Name::new("f"), shadow_def);
 
         match r.resolve_name("f") {
@@ -591,7 +547,7 @@ function clause pick(_) = 0
         let dm = build_def_map("function f() = 0\n");
         let mut r = Resolver::new(&dm);
         r.push_expr_scope();
-        r.add_binding(Name::new("f"), DefId(999));
+        r.add_binding(Name::new("f"), DefIdx(999));
         r.pop_scope();
 
         match r.resolve_name("f") {
@@ -605,18 +561,18 @@ function clause pick(_) = 0
         let dm = build_def_map("function f() = 0\n");
         let mut r = Resolver::new(&dm);
         r.push_expr_scope();
-        r.add_binding(Name::new("x"), DefId(10));
+        r.add_binding(Name::new("x"), DefIdx(10));
         r.push_expr_scope();
-        r.add_binding(Name::new("x"), DefId(20));
+        r.add_binding(Name::new("x"), DefIdx(20));
 
         match r.resolve_name("x") {
-            Resolution::Def(id) => assert_eq!(id, DefId(20)),
+            Resolution::Def(id) => assert_eq!(id, DefIdx(20)),
             other => panic!("expected Def(20), got {:?}", other),
         }
 
         r.pop_scope();
         match r.resolve_name("x") {
-            Resolution::Def(id) => assert_eq!(id, DefId(10)),
+            Resolution::Def(id) => assert_eq!(id, DefIdx(10)),
             other => panic!("expected Def(10), got {:?}", other),
         }
 
@@ -629,7 +585,7 @@ function clause pick(_) = 0
         let dm = build_def_map("function f() = 0\n");
         let mut r = Resolver::new(&dm);
         r.push_expr_scope();
-        r.add_binding(Name::new("x"), DefId(42));
+        r.add_binding(Name::new("x"), DefIdx(42));
         match r.resolve_name("f") {
             Resolution::Defs(ids) => assert_eq!(ids.len(), 1),
             other => panic!("expected Defs, got {:?}", other),
@@ -714,9 +670,9 @@ function clause pick(_) = 0
         let dm = build_def_map("function f() = 0\n");
         let mut r = Resolver::new(&dm);
         r.push_expr_scope();
-        r.add_binding(Name::new("x"), DefId(42));
+        r.add_binding(Name::new("x"), DefIdx(42));
         match r.resolve_path_in_value_ns(&test_db(), "x") {
-            Some(ValueNs::LocalBinding(id)) => assert_eq!(id, DefId(42)),
+            Some(ValueNs::LocalBinding(id)) => assert_eq!(id, DefIdx(42)),
             other => panic!("expected LocalBinding, got {:?}", other),
         }
     }

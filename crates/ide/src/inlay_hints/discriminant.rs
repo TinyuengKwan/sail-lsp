@@ -8,7 +8,7 @@ pub(super) fn collect_discriminant_hints(
     _current_file: &dyn FileDb,
     _begin: usize,
     _end: usize,
-    _hints: &mut Vec<IdeDbInlayHint>,
+    _hints: &mut Vec<InlayHint>,
     _config: &InlayHintsConfig,
 ) {
     // Walk ItemTree looking for enum definitions.

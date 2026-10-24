@@ -79,11 +79,11 @@ fn is_ident_char(b: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::check_assist;
+    use crate::tests::assist_labels;
 
     #[test]
     fn smoke() {
-        let labels = check_assist(remove_underscore, "let _x = 1\n", 4);
+        let labels = assist_labels(remove_underscore, "let _x = 1\n", 4);
         let _ = labels;
     }
 }

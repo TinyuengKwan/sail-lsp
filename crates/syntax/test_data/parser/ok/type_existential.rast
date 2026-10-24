@@ -1,0 +1,35 @@
+SOURCE_FILE@0..30
+  CALLABLE_SPEC@0..29
+    KW_VAL@0..3 "val"
+    WHITESPACE@3..4 " "
+    NAME@4..5
+      IDENT@4..5 "v"
+    WHITESPACE@5..6 " "
+    COLON@6..7 ":"
+    WHITESPACE@7..8 " "
+    TYPE_EXISTENTIAL@8..29
+      L_CURLY@8..9 "{"
+      TYPE_PARAM_LIST@9..11
+        TYPE_PARAM@9..11
+          TY_VAR@9..11 "'n"
+      COMMA@11..12 ","
+      WHITESPACE@12..13 " "
+      TYPE_APP@13..19
+        TYPE_VAR@13..15
+          TY_VAR@13..15 "'n"
+        WHITESPACE@15..16 " "
+        R_ANGLE@16..17 ">"
+        WHITESPACE@17..18 " "
+        TYPE_NAMED@18..19
+          NUM_LIT@18..19 "0"
+      DOT@19..20 "."
+      WHITESPACE@20..21 " "
+      TYPE_APP@21..28
+        TYPE_NAMED@21..24
+          IDENT@21..24 "int"
+        L_PAREN@24..25 "("
+        TYPE_VAR@25..27
+          TY_VAR@25..27 "'n"
+        R_PAREN@27..28 ")"
+      R_CURLY@28..29 "}"
+  WHITESPACE@29..30 "\n"

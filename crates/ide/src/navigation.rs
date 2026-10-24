@@ -5,7 +5,6 @@ use ide_db::{extract_symbol_decls, find_callable_signature, token_symbol_key, Fi
 use parser::Span;
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
-use syntax::parser_lower::{DeclRole, Scope};
 use url::Url;
 
 /// Re-export from ide_types.
@@ -145,129 +144,62 @@ where
     })
 }
 
-fn type_decls(file: &dyn FileDb) -> HashMap<String, usize> {
-    let mut out = HashMap::new();
-    let Some(parsed) = file.parsed() else {
-        return out;
-    };
-    for decl in &parsed.decls {
-        if decl.scope != syntax::parser_lower::Scope::TopLevel {
-            continue;
-        }
-        if matches!(
-            decl.kind,
-            syntax::parser_lower::DeclKind::Type
-                | syntax::parser_lower::DeclKind::Struct
-                | syntax::parser_lower::DeclKind::Union
-                | syntax::parser_lower::DeclKind::Enum
-                | syntax::parser_lower::DeclKind::Bitfield
-                | syntax::parser_lower::DeclKind::Newtype
-        ) {
-            out.insert(decl.name.clone(), decl.span.start);
-        }
-    }
-    out
+/// The name each `type_def` in this file declares, and where the name is.
+pub(crate) fn type_decls(file: &dyn FileDb) -> HashMap<String, usize> {
+    let Some((db, ft)) = file.file_text() else { return HashMap::new() };
+    hir::Semantics::new(db)
+        .type_decls(db, ft)
+        .into_iter()
+        .map(|(name, span, _)| (name, span.start))
+        .collect()
 }
 
+/// How a type definition shows up in an outline, or `None` if it is not one.
+/// Whether a definition of this kind *implements* a name, as
+/// goto-implementation means it: a body, a clause, or an overload that
+/// names the bodies to try.
+fn implements(kind: hir::DefKind) -> bool {
+    matches!(
+        kind,
+        hir::DefKind::Function
+            | hir::DefKind::Mapping
+            | hir::DefKind::Overload
+            | hir::DefKind::ScatteredClause
+    )
+}
+
+fn type_symbol_kind(kind: hir::DefKind) -> Option<SymbolKind> {
+    Some(match kind {
+        hir::DefKind::TypeAlias
+        | hir::DefKind::Struct
+        | hir::DefKind::Union
+        | hir::DefKind::Bitfield
+        | hir::DefKind::Newtype => SymbolKind::Struct,
+        hir::DefKind::Enum => SymbolKind::Enum,
+        _ => return None,
+    })
+}
+
+/// Where `symbol_key` is defined in this file, as the span of each name.
 fn symbol_definition_spans(file: &dyn FileDb, symbol_key: &str) -> Vec<Span> {
-    // Try ParsedFile first (has local scope bindings + decl roles)
-    if let Some(parsed) = file.parsed() {
-        let mut spans: Vec<Span> = parsed
-            .decls
-            .iter()
-            .filter(|decl| {
-                decl.name == symbol_key
-                    && decl.role == DeclRole::Definition
-                    && match decl.kind {
-                        syntax::parser_lower::DeclKind::Let
-                        | syntax::parser_lower::DeclKind::Var
-                        | syntax::parser_lower::DeclKind::Parameter => {
-                            decl.scope == Scope::TopLevel
-                        }
-                        _ => true,
-                    }
-            })
-            .map(|decl| {
-                // Definition location points to the identifier, not the full decl.
-                parsed
-                    .callable_heads
-                    .iter()
-                    .find(|h| {
-                        h.name == decl.name
-                            && h.name_span.start >= decl.span.start
-                            && h.name_span.end <= decl.span.end
-                    })
-                    .map(|h| h.name_span)
-                    .unwrap_or_else(|| {
-                        let text = file.text();
-                        let name_offset = text[decl.span.start..decl.span.end]
-                            .find(&decl.name)
-                            .map(|o| decl.span.start + o)
-                            .unwrap_or(decl.span.start);
-                        Span::new(name_offset, name_offset + decl.name.len())
-                    })
-            })
-            .collect();
-        if !spans.is_empty() {
-            spans.sort_unstable_by_key(|span| (span.start, span.end));
-            spans.dedup();
-            return spans;
-        }
-    }
-
-    // Fallback: use ItemTree (works when parsed() is None, e.g. SalsaFile path)
-    if let Some(item_tree) = file.item_tree() {
-        let spans: Vec<Span> = item_tree
-            .top_level_items()
-            .iter()
-            .filter(|id| id.name(item_tree).as_str() == symbol_key && !id.is_clause(item_tree))
-            .map(|id| id.span(item_tree))
-            .collect();
-        if !spans.is_empty() {
-            return spans;
-        }
-        // Also check clauses as fallback
-        return item_tree
-            .top_level_items()
-            .iter()
-            .filter(|id| id.name(item_tree).as_str() == symbol_key)
-            .map(|id| id.span(item_tree))
-            .collect();
-    }
-
-    Vec::new()
+    let Some((db, ft)) = file.file_text() else { return Vec::new() };
+    hir::Semantics::new(db).definition_spans(db, ft, symbol_key)
 }
 
-fn type_decls_with_kind(file: &dyn FileDb) -> HashMap<String, (usize, SymbolKind)> {
-    let mut out = HashMap::new();
-    let Some(parsed) = file.parsed() else {
-        return out;
-    };
-    for decl in &parsed.decls {
-        if decl.scope != syntax::parser_lower::Scope::TopLevel {
-            continue;
-        }
-        let Some(kind) = (match decl.kind {
-            syntax::parser_lower::DeclKind::Type
-            | syntax::parser_lower::DeclKind::Struct
-            | syntax::parser_lower::DeclKind::Union
-            | syntax::parser_lower::DeclKind::Bitfield
-            | syntax::parser_lower::DeclKind::Newtype => Some(SymbolKind::Struct),
-            syntax::parser_lower::DeclKind::Enum => Some(SymbolKind::Enum),
-            _ => None,
-        }) else {
-            continue;
-        };
-        out.insert(decl.name.clone(), (decl.span.start, kind));
-    }
-    out
+pub(crate) fn type_decls_with_kind(file: &dyn FileDb) -> HashMap<String, (usize, SymbolKind)> {
+    let Some((db, ft)) = file.file_text() else { return HashMap::new() };
+    hir::Semantics::new(db)
+        .type_decls(db, ft)
+        .into_iter()
+        .filter_map(|(name, span, kind)| Some((name, (span.start, type_symbol_kind(kind)?))))
+        .collect()
 }
 
+/// `(alias, aliased)` for each `type X = Y` in this file — the edges a type
+/// hierarchy walks.
 pub fn type_alias_edges(file: &dyn FileDb) -> Vec<(String, String)> {
-    let Some(parsed) = file.parsed() else {
-        return Vec::new();
-    };
-    parsed.type_aliases.iter().map(|a| (a.sub.clone(), a.sup.clone())).collect()
+    let Some((db, ft)) = file.file_text() else { return Vec::new() };
+    hir::Semantics::new(db).type_alias_edges(db, ft)
 }
 
 pub fn type_hierarchy_item<'a, F, I>(
@@ -358,105 +290,12 @@ pub fn type_name_candidates_at_position(
     }
 
     let mut names = vec![name.clone()];
-    if let Some(ty) = typed_bindings(file).get(&name).cloned() {
+    if let Some(ty) = crate::goto_type_definition::typed_bindings(file).get(&name).cloned() {
         names.push(ty);
     }
     names.sort();
     names.dedup();
     names
-}
-
-pub fn typed_bindings(file: &dyn FileDb) -> HashMap<String, String> {
-    let mut out = HashMap::new();
-    if let Some(parsed) = file.parsed() {
-        for decl in &parsed.decls {
-            if !matches!(
-                decl.kind,
-                syntax::parser_lower::DeclKind::Parameter
-                    | syntax::parser_lower::DeclKind::Let
-                    | syntax::parser_lower::DeclKind::Var
-            ) {
-                continue;
-            }
-
-            // Use name_span (binding identifier) for PatId matching,
-            // not the full declaration span. name_span aligns with Body's pattern spans.
-            let lookup_span = decl.name_span.unwrap_or(decl.span);
-            if let Some(ty) = file.binding_type_text(lookup_span) {
-                out.insert(decl.name.clone(), ty);
-            }
-        }
-    }
-
-    let Some(parsed) = file.parsed() else {
-        return out;
-    };
-    let text = file.text();
-    for binding in &parsed.typed_bindings {
-        out.entry(binding.name.clone())
-            .or_insert_with(|| text[binding.ty_span.start..binding.ty_span.end].trim().to_string());
-    }
-    out
-}
-
-pub fn parse_named_type(text: &str) -> Option<String> {
-    let lower = text.to_ascii_lowercase();
-    let builtins = [
-        "int", "nat", "bool", "string", "unit", "bits", "bit", "real", "list", "vector", "atom",
-        "implicit", "order", "type",
-    ];
-    let chars = text.chars().collect::<Vec<_>>();
-    let mut i = 0usize;
-    while i < chars.len() {
-        let ch = chars[i];
-        if ch.is_ascii_alphabetic() || ch == '_' {
-            let mut j = i + 1;
-            while j < chars.len()
-                && (chars[j].is_ascii_alphanumeric() || chars[j] == '_' || chars[j] == '\'')
-            {
-                j += 1;
-            }
-            let name = chars[i..j].iter().collect::<String>();
-            if !builtins.contains(&name.to_ascii_lowercase().as_str())
-                && !builtins.contains(&lower.as_str())
-            {
-                return Some(name);
-            }
-            i = j;
-        } else {
-            i += 1;
-        }
-    }
-    None
-}
-
-pub fn type_definition_locations<'a, F, I>(
-    files: I,
-    uri_hint: &Url,
-    ty_name: &str,
-) -> Vec<ide_db::ide_types::FileLocation>
-where
-    F: FileDb + 'a,
-    I: IntoIterator<Item = (&'a Url, &'a F)>,
-{
-    let mut locations = files
-        .into_iter()
-        .filter_map(|(uri, file)| {
-            type_decls(file).get(ty_name).copied().map(|offset| {
-                ide_db::span::file_location_from_span(
-                    uri,
-                    Span::new(offset, offset + ty_name.len()),
-                )
-            })
-        })
-        .collect::<Vec<_>>();
-    locations.sort_by_key(|location| {
-        Reverse(match (uri_hint.path_segments(), location.url.path_segments()) {
-            (Some(a), Some(b)) => a.zip(b).take_while(|(x, y)| x == y).count(),
-            _ => 0,
-        })
-    });
-    locations
 }
 
 pub fn implementation_locations<'a, F, I>(
@@ -470,24 +309,17 @@ where
 {
     let mut locations = Vec::new();
     for (uri, file) in files {
-        let Some(parsed) = file.parsed() else {
+        let Some(tree) = file.item_tree() else {
             continue;
         };
-        for decl in &parsed.decls {
-            if decl.name != name
-                || decl.role != DeclRole::Definition
-                || !matches!(
-                    decl.kind,
-                    syntax::parser_lower::DeclKind::Function
-                        | syntax::parser_lower::DeclKind::Mapping
-                        | syntax::parser_lower::DeclKind::Overload
-                )
-            {
+        for &id in tree.top_level_items() {
+            if id.name(tree).as_str() != name || !implements(id.def_kind(tree)) {
                 continue;
             }
+            let span = id.span(tree);
             locations.push(ide_db::ide_types::FileLocation {
                 url: uri.clone(),
-                range: base_db::text_range(decl.span.start, decl.span.end),
+                range: base_db::text_range(span.start, span.end),
             });
         }
     }
@@ -537,44 +369,19 @@ where
     F: FileDb + 'a,
     I: IntoIterator<Item = (&'a Url, &'a F)>,
 {
+    // From the item tree, whose `name_span` is the identifier goto should
+    // land on. The scrape searched `callable_heads` for a matching head and,
+    // failing that, searched the declaration's own text for the name.
     let mut declarations = files
         .into_iter()
         .flat_map(|(uri, file)| {
-            let Some(parsed) = file.parsed() else {
+            let Some((db, ft)) = file.file_text() else {
                 return Vec::new().into_iter();
             };
-            parsed
-                .decls
-                .iter()
-                .filter(move |decl| {
-                    decl.name == symbol_key
-                        && decl.scope == Scope::TopLevel
-                        && decl.role == DeclRole::Declaration
-                })
-                .map(move |decl| {
-                    // Use identifier span (name_span from callable_heads) if available,
-                    // otherwise compute from decl name position within the text.
-                    // Goto-declaration targets the identifier, not the full decl.
-                    let name_span = parsed
-                        .callable_heads
-                        .iter()
-                        .find(|h| {
-                            h.name == decl.name
-                                && h.name_span.start >= decl.span.start
-                                && h.name_span.end <= decl.span.end
-                        })
-                        .map(|h| h.name_span)
-                        .unwrap_or_else(|| {
-                            // Fallback: search for name in decl text
-                            let text = file.text();
-                            let name_offset = text[decl.span.start..decl.span.end]
-                                .find(&decl.name)
-                                .map(|o| decl.span.start + o)
-                                .unwrap_or(decl.span.start);
-                            parser::Span::new(name_offset, name_offset + decl.name.len())
-                        });
-                    ide_db::span::file_location_from_span(uri, name_span)
-                })
+            hir::Semantics::new(db)
+                .declaration_spans(db, ft, symbol_key)
+                .into_iter()
+                .map(|span| ide_db::span::file_location_from_span(uri, span))
                 .collect::<Vec<_>>()
                 .into_iter()
         })
@@ -686,130 +493,12 @@ where
     Some(changes)
 }
 
-// ---- dyn-dispatch wrappers ----
-//
-// The generic functions above require `F: Sized` because the inner
-// helpers (`location_from_span`, `range_from_span`) accept
-// `&dyn FileDb`, and the `&F -> &dyn FileDb` coercion needs
-// `F: Sized`.  These thin wrappers accept `&[(&Url, &dyn FileDb)]`
-// directly so callers that only have trait objects (e.g.
-// `hir::Semantics`) can use them without going through turbofish.
-
-pub fn symbol_definition_locations_dyn(
-    files: &[(&Url, &dyn FileDb)],
-    uri_hint: &Url,
-    symbol_key: &str,
-) -> Vec<ide_db::ide_types::FileLocation> {
-    let mut definitions: Vec<ide_db::ide_types::FileLocation> = files
-        .iter()
-        .flat_map(|(uri, file)| {
-            symbol_definition_spans(*file, symbol_key)
-                .into_iter()
-                .map(move |span| ide_db::span::file_location_from_span(uri, span))
-        })
-        .collect();
-    definitions.sort_by_key(|location| {
-        Reverse(match (uri_hint.path_segments(), location.url.path_segments()) {
-            (Some(p0), Some(p1)) => p0.zip(p1).take_while(|(a, b)| a == b).count(),
-            _ => 0,
-        })
-    });
-    definitions
-}
-
-pub fn symbol_declaration_locations_dyn(
-    files: &[(&Url, &dyn FileDb)],
-    uri_hint: &Url,
-    symbol_key: &str,
-) -> Vec<ide_db::ide_types::FileLocation> {
-    let mut declarations: Vec<ide_db::ide_types::FileLocation> = files
-        .iter()
-        .flat_map(|(uri, file)| {
-            let Some(parsed) = file.parsed() else {
-                return Vec::new().into_iter();
-            };
-            parsed
-                .decls
-                .iter()
-                .filter(move |decl| decl.name == symbol_key && decl.role == DeclRole::Declaration)
-                .map(move |decl| ide_db::ide_types::FileLocation {
-                    url: (*uri).clone(),
-                    range: base_db::text_range(decl.span.start, decl.span.end),
-                })
-                .collect::<Vec<_>>()
-                .into_iter()
-        })
-        .collect();
-    declarations.sort_by_key(|location| {
-        Reverse(match (uri_hint.path_segments(), location.url.path_segments()) {
-            (Some(p0), Some(p1)) => p0.zip(p1).take_while(|(a, b)| a == b).count(),
-            _ => 0,
-        })
-    });
-    declarations
-}
-
-pub fn implementation_locations_dyn(
-    files: &[(&Url, &dyn FileDb)],
-    uri_hint: &Url,
-    name: &str,
-) -> Vec<ide_db::ide_types::FileLocation> {
-    let mut locations = Vec::new();
-    for (uri, file) in files {
-        let Some(parsed) = file.parsed() else {
-            continue;
-        };
-        for decl in &parsed.decls {
-            if decl.name != name
-                || decl.role != DeclRole::Definition
-                || !matches!(
-                    decl.kind,
-                    syntax::parser_lower::DeclKind::Function
-                        | syntax::parser_lower::DeclKind::Mapping
-                        | syntax::parser_lower::DeclKind::Overload
-                )
-            {
-                continue;
-            }
-            locations.push(ide_db::ide_types::FileLocation {
-                url: (*uri).clone(),
-                range: base_db::text_range(decl.span.start, decl.span.end),
-            });
-        }
-    }
-    locations.sort_by_key(|location| {
-        Reverse(match (uri_hint.path_segments(), location.url.path_segments()) {
-            (Some(a), Some(b)) => a.zip(b).take_while(|(x, y)| x == y).count(),
-            _ => 0,
-        })
-    });
-    locations
-}
-
-pub fn type_definition_locations_dyn(
-    files: &[(&Url, &dyn FileDb)],
-    uri_hint: &Url,
-    ty_name: &str,
-) -> Vec<ide_db::ide_types::FileLocation> {
-    let mut locations: Vec<ide_db::ide_types::FileLocation> = files
-        .iter()
-        .filter_map(|(uri, file)| {
-            type_decls(*file).get(ty_name).copied().map(|offset| {
-                ide_db::span::file_location_from_span(
-                    uri,
-                    Span::new(offset, offset + ty_name.len()),
-                )
-            })
-        })
-        .collect();
-    locations.sort_by_key(|location| {
-        Reverse(match (uri_hint.path_segments(), location.url.path_segments()) {
-            (Some(a), Some(b)) => a.zip(b).take_while(|(x, y)| x == y).count(),
-            _ => 0,
-        })
-    });
-    locations
-}
+// There were four `*_dyn` wrappers here, written "so callers that only
+// have trait objects (e.g. `hir::Semantics`) can use them without going
+// through turbofish". No such caller ever existed — every handler reaches
+// the generic functions above directly. Deleted rather than kept: a
+// wrapper written for a hypothetical caller is ballast, and the generic
+// ones take the same arguments if one ever turns up.
 
 // The 'symbol_locations_use_identifier_spans' test that used to live
 // here was tightly coupled to sail_server::state::File (it used
@@ -822,50 +511,91 @@ pub fn type_definition_locations_dyn(
 // These use SymbolIndex for O(1) cross-file lookups
 // instead of iterating all files.
 
-use hir_def::item_tree::ItemKind;
-use ide_db::workspace_index::SymbolIndex;
+use hir::DefKind;
+use ide_db::symbol_index::SymbolIndex;
 
 /// Lookup definition locations from index. O(1) by name.
 pub fn definition_locations_indexed(
     index: &SymbolIndex,
     symbol_key: &str,
     uri_hint: &Url,
+    url_of: &dyn Fn(base_db::FileId) -> Option<Url>,
 ) -> Vec<FileLocation> {
+    definition_locations_indexed_in(index, symbol_key, uri_hint, url_of, false)
+}
+
+/// The same, told which namespace the use site is in.
+///
+/// Sail has two — `PerNs` is Types and Values — and this matched on the
+/// spelling alone, so `x : int` in a workspace that declares `val int : ..`
+/// navigated to the function. A wrong answer is worse than none.
+pub fn definition_locations_indexed_in(
+    index: &SymbolIndex,
+    symbol_key: &str,
+    uri_hint: &Url,
+    url_of: &dyn Fn(base_db::FileId) -> Option<Url>,
+    in_type_position: bool,
+) -> Vec<FileLocation> {
+    let value_only = |kind: DefKind| {
+        matches!(
+            kind,
+            DefKind::Function
+                | DefKind::ValSpec
+                | DefKind::Mapping
+                | DefKind::MappingSpec
+                | DefKind::Register
+                | DefKind::Let
+                | DefKind::Var
+                | DefKind::Overload
+        )
+    };
     let entries = index.find(symbol_key);
     let mut locs: Vec<FileLocation> = entries
         .iter()
+        .filter(|e| !in_type_position || !value_only(e.kind))
         .filter(|e| {
             matches!(
                 e.kind,
-                ItemKind::Function
-                    | ItemKind::Mapping
-                    | ItemKind::TypeAlias
-                    | ItemKind::Struct
-                    | ItemKind::Union
-                    | ItemKind::Enum
-                    | ItemKind::Bitfield
-                    | ItemKind::Newtype
-                    | ItemKind::Register
-                    | ItemKind::Let
-                    | ItemKind::Var
-                    | ItemKind::Overload
-                    | ItemKind::ScatteredHead
+                DefKind::Function
+                    | DefKind::Mapping
+                    | DefKind::TypeAlias
+                    | DefKind::Struct
+                    | DefKind::Union
+                    | DefKind::Enum
+                    | DefKind::Bitfield
+                    | DefKind::Newtype
+                    | DefKind::Register
+                    | DefKind::Let
+                    | DefKind::Var
+                    | DefKind::Overload
+                    | DefKind::ScatteredHead
             )
         })
         .filter(|e| !e.is_clause) // Prefer non-clause definitions
-        .map(|e| FileLocation {
-            url: e.url.clone(),
-            range: base_db::text_range(e.span.start, e.span.end),
+        .filter_map(|e| {
+            Some(FileLocation {
+                url: url_of(e.file_id)?,
+                // Navigation lands on the name, not on the keyword that opens
+                // the definition (`NavigationTarget::focus_range`'s contract).
+                range: base_db::text_range(e.name_span.start, e.name_span.end),
+            })
         })
         .collect();
 
-    // If no non-clause definitions found, include clauses
+    // If no non-clause definitions found, include clauses. Still only in
+    // the namespace asked for: this fallback is why a type position kept
+    // reaching a `val`, filtered out one line above.
     if locs.is_empty() {
         locs = entries
             .iter()
-            .map(|e| FileLocation {
-                url: e.url.clone(),
-                range: base_db::text_range(e.span.start, e.span.end),
+            .filter(|e| !in_type_position || !value_only(e.kind))
+            .filter_map(|e| {
+                Some(FileLocation {
+                    url: url_of(e.file_id)?,
+                    // Navigation lands on the name, not on the keyword that opens
+                    // the definition (`NavigationTarget::focus_range`'s contract).
+                    range: base_db::text_range(e.name_span.start, e.name_span.end),
+                })
             })
             .collect();
     }
@@ -885,20 +615,25 @@ pub fn declaration_locations_indexed(
     index: &SymbolIndex,
     symbol_key: &str,
     uri_hint: &Url,
+    url_of: &dyn Fn(base_db::FileId) -> Option<Url>,
 ) -> Vec<FileLocation> {
     let entries = index.find(symbol_key);
     let mut locs: Vec<FileLocation> = entries
         .iter()
-        .filter(|e| matches!(e.kind, ItemKind::ValSpec | ItemKind::MappingSpec))
-        .map(|e| FileLocation {
-            url: e.url.clone(),
-            range: base_db::text_range(e.span.start, e.span.end),
+        .filter(|e| matches!(e.kind, DefKind::ValSpec | DefKind::MappingSpec))
+        .filter_map(|e| {
+            Some(FileLocation {
+                url: url_of(e.file_id)?,
+                // Navigation lands on the name, not on the keyword that opens
+                // the definition (`NavigationTarget::focus_range`'s contract).
+                range: base_db::text_range(e.name_span.start, e.name_span.end),
+            })
         })
         .collect();
 
     if locs.is_empty() {
         // Fallback: use definitions
-        return definition_locations_indexed(index, symbol_key, uri_hint);
+        return definition_locations_indexed(index, symbol_key, uri_hint, url_of);
     }
     locs.sort_by_key(|loc| {
         Reverse(match (uri_hint.path_segments(), loc.url.path_segments()) {
@@ -914,14 +649,19 @@ pub fn implementation_locations_indexed(
     index: &SymbolIndex,
     symbol_key: &str,
     uri_hint: &Url,
+    url_of: &dyn Fn(base_db::FileId) -> Option<Url>,
 ) -> Vec<FileLocation> {
     let entries = index.find(symbol_key);
     let mut locs: Vec<FileLocation> = entries
         .iter()
-        .filter(|e| matches!(e.kind, ItemKind::Function | ItemKind::Mapping | ItemKind::Overload))
-        .map(|e| FileLocation {
-            url: e.url.clone(),
-            range: base_db::text_range(e.span.start, e.span.end),
+        .filter(|e| matches!(e.kind, DefKind::Function | DefKind::Mapping | DefKind::Overload))
+        .filter_map(|e| {
+            Some(FileLocation {
+                url: url_of(e.file_id)?,
+                // Navigation lands on the name, not on the keyword that opens
+                // the definition (`NavigationTarget::focus_range`'s contract).
+                range: base_db::text_range(e.name_span.start, e.name_span.end),
+            })
         })
         .collect();
 

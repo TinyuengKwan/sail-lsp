@@ -1,0 +1,9 @@
+SOURCE_FILE@0..19
+  SCATTERED_DEF@0..18
+    KW_SCATTERED@0..9 "scattered"
+    WHITESPACE@9..10 " "
+    KW_UNION@10..15 "union"
+    WHITESPACE@15..16 " "
+    NAME@16..18
+      IDENT@16..18 "su"
+  WHITESPACE@18..19 "\n"

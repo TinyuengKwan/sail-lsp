@@ -3,7 +3,7 @@
 //! Hint severity — informational.
 
 use crate::Diagnostic;
-use hir_def::diagnostics::{DiagnosticCode, Severity};
+use hir::diagnostics::{DiagnosticCode, Severity};
 
 use crate::{DiagnosticsContext, RedundantTypeAnnotation};
 

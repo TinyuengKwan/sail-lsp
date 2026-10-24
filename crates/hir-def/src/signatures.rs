@@ -3,7 +3,7 @@
 //! as structured data rather than raw signature strings. Used by
 //! type inference, hover, completion, and signature help.
 
-use crate::item_tree::{ItemTree, ModItem};
+use crate::item_tree::{DefItem, ItemTree};
 use crate::name::Name;
 use parser::Span;
 
@@ -43,7 +43,7 @@ impl FunctionSignature {
         let mut sigs = Vec::new();
         for item in tree.top_level_items() {
             match item {
-                ModItem::Function(id) => {
+                DefItem::Function(id) => {
                     let f = tree.function(*id);
                     sigs.push(FunctionSignature {
                         name: f.name.clone(),
@@ -54,7 +54,7 @@ impl FunctionSignature {
                         kind: SignatureKind::Function,
                     });
                 }
-                ModItem::ValSpec(id) => {
+                DefItem::ValSpec(id) => {
                     let v = tree.val_spec(*id);
                     sigs.push(FunctionSignature {
                         name: v.name.clone(),
@@ -65,7 +65,7 @@ impl FunctionSignature {
                         kind: SignatureKind::ValSpec,
                     });
                 }
-                ModItem::Mapping(id) => {
+                DefItem::Mapping(id) => {
                     let m = tree.mapping(*id);
                     sigs.push(FunctionSignature {
                         name: m.name.clone(),

@@ -1,15 +1,15 @@
 //! `add_missing_fields` assist.
 
 use crate::assist_context::{AssistContext, AssistId, AssistKind, Assists};
-use ide_db::text_edit::TextEdit;
 
 pub(crate) fn add_missing_fields(acc: &mut Assists, ctx: &AssistContext<'_>) -> Option<()> {
     use parser::SyntaxKind as SK;
 
-    let text = ctx.file.text();
     let offset = ctx.offset();
 
-    let (cst_root, _) = syntax::parse_text(text);
+    // The tree the assist run already parsed. Parsing the text a second
+    // time here built one unrelated to it.
+    let cst_root = ctx.source_file()?.clone();
 
     // Find STRUCT_EXPR at cursor
     let struct_expr = cst_root.descendants().find(|node| {
@@ -19,15 +19,7 @@ pub(crate) fn add_missing_fields(acc: &mut Assists, ctx: &AssistContext<'_>) -> 
         }
     })?;
 
-    // Extract struct name from the STRUCT_EXPR
-    let struct_name = struct_expr
-        .descendants_with_tokens()
-        .filter_map(|el| el.into_token())
-        .find(|t| t.kind() == SK::IDENT)?
-        .text()
-        .to_string();
-
-    // Collect already-initialized field names from FIELD_INIT children
+    // The fields already written.
     let initialized_fields: std::collections::HashSet<String> = struct_expr
         .children()
         .filter(|c| c.kind() == SK::FIELD_INIT)
@@ -39,34 +31,31 @@ pub(crate) fn add_missing_fields(acc: &mut Assists, ctx: &AssistContext<'_>) -> 
         })
         .collect();
 
-    // Find the struct definition to get all field names
+    // Which struct this literal builds.
+    //
+    // Sail's struct literal is `struct { f = v, … }` — it does not name
+    // its type. This used to take the first `IDENT` inside the literal as
+    // the struct's name, which is the first *field's* name, so it looked
+    // for a definition called `x` and found none: the assist could not
+    // fire at all. The type is the one struct that declares every field
+    // written so far; if two do, there is nothing to go on and this
+    // declines rather than guessing.
     let item_tree = ctx.file.item_tree()?;
-    let mut all_fields: Vec<String> = Vec::new();
-
-    for &id in item_tree.top_level_items() {
-        if id.name(item_tree).as_str() == struct_name
-            && matches!(id.item_kind(item_tree), hir_def::item_tree::ItemKind::Struct)
-        {
-            // Extract field names from the definition text
-            let id_span = id.span(item_tree);
-            let def_text = text.get(id_span.start..id_span.end)?;
-            // Find text between { and } — each line with `:` is a field
-            if let Some(brace_start) = def_text.find('{') {
-                if let Some(brace_end) = def_text.rfind('}') {
-                    let fields_text = &def_text[brace_start + 1..brace_end];
-                    for line in fields_text.split(',') {
-                        let line = line.trim();
-                        if let Some(colon_pos) = line.find(':') {
-                            let field_name = line[..colon_pos].trim();
-                            if !field_name.is_empty() {
-                                all_fields.push(field_name.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-            break;
-        }
+    let mut candidates = item_tree
+        .top_level_items()
+        .iter()
+        .filter(|&&id| matches!(id.def_kind(item_tree), hir::DefKind::Struct))
+        .map(|&id| {
+            let fields: Vec<String> =
+                id.fields(item_tree).iter().map(|f| f.name.to_string()).collect();
+            fields
+        })
+        .filter(|fields| {
+            !fields.is_empty() && initialized_fields.iter().all(|f| fields.iter().any(|d| d == f))
+        });
+    let all_fields = candidates.next()?;
+    if candidates.next().is_some() {
+        return None;
     }
 
     // Find missing fields
@@ -77,8 +66,17 @@ pub(crate) fn add_missing_fields(acc: &mut Assists, ctx: &AssistContext<'_>) -> 
         return None;
     }
 
-    // Build the insertion text
-    let missing_text = missing.iter().map(|f| format!("{f} = ()")).collect::<Vec<_>>().join(", ");
+    // Each field's value is what has to be typed, so it is a tabstop for
+    // a client that can expand snippets.
+    let missing_text = match ctx.config.snippet_cap {
+        Some(_) => missing
+            .iter()
+            .enumerate()
+            .map(|(i, f)| format!("{f} = ${{{}:()}}", i + 1))
+            .collect::<Vec<_>>()
+            .join(", "),
+        None => missing.iter().map(|f| format!("{f} = ()")).collect::<Vec<_>>().join(", "),
+    };
 
     // Find insertion point: before the closing `}`
     let close_brace = struct_expr
@@ -87,21 +85,26 @@ pub(crate) fn add_missing_fields(acc: &mut Assists, ctx: &AssistContext<'_>) -> 
         .filter(|t| t.kind() == SK::R_CURLY)
         .last()?;
 
+    // Replacing the space before the `}` rather than inserting at it, so
+    // the result reads `{ x = 1, y = () }` and not `{ x = 1 , y = ()}`.
     let insert_offset = usize::from(close_brace.text_range().start());
+    let file_text = ctx.file.text();
+    let before = file_text.get(..insert_offset)?.trim_end();
     let comma = if initialized_fields.is_empty() { "" } else { ", " };
-    let edit = TextEdit {
-        range: base_db::text_range(insert_offset, insert_offset),
-        new_text: format!("{comma}{missing_text}"),
-    };
+    let text = format!("{comma}{missing_text} ");
+    let range = base_db::text_range(before.len(), insert_offset);
 
-    acc.add_with_edits(
+    acc.add(
         AssistId("add_missing_fields", AssistKind::QuickFix),
         format!(
             "Add missing field(s): {}",
             missing.iter().map(|f| f.as_str()).collect::<Vec<_>>().join(", ")
         ),
         ctx.range,
-        vec![edit],
+        |builder| match ctx.config.snippet_cap {
+            Some(_) => builder.replace_snippet(range, text),
+            None => builder.replace(range, text),
+        },
     );
     Some(())
 }
@@ -109,11 +112,33 @@ pub(crate) fn add_missing_fields(acc: &mut Assists, ctx: &AssistContext<'_>) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::check_assist;
+    use crate::tests::{check_assist, check_assist_with_snippets};
+    use expect_test::expect;
 
     #[test]
-    fn smoke() {
-        let labels = check_assist(add_missing_fields, "struct Foo { x : int }\n", 0);
-        let _ = labels;
+    fn applies() {
+        check_assist(
+            add_missing_fields,
+            "struct P = { x : int, y : int }\nval f : unit -> P\nfunction f() = struct { x$0 = 1 }\n",
+            expect![[r#"
+                struct P = { x : int, y : int }
+                val f : unit -> P
+                function f() = struct { x = 1, y = () }
+            "#]],
+        );
+    }
+
+    /// Each field's value is a tabstop, so you land on the first one.
+    #[test]
+    fn leaves_the_cursor_at_the_first_value() {
+        check_assist_with_snippets(
+            add_missing_fields,
+            "struct P = { x : int, y : int }\nval f : unit -> P\nfunction f() = struct { x$0 = 1 }\n",
+            expect![[r#"
+                struct P = { x : int, y : int }
+                val f : unit -> P
+                function f() = struct { x = 1, y = ${1:()} }
+            "#]],
+        );
     }
 }

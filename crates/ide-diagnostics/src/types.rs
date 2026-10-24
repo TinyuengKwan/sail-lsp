@@ -7,4 +7,4 @@
 
 // Diagnostic, Severity, and DiagnosticTag are now defined/re-exported
 // from ide-diagnostics/src/lib.rs directly, matching RA's pattern.
-pub use hir_def::diagnostics::DiagnosticCode;
+pub use hir::diagnostics::DiagnosticCode;

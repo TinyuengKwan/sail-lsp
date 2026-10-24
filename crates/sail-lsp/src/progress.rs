@@ -14,27 +14,43 @@ use lsp_types::{
 pub struct ProgressReporter {
     sender: Sender<Message>,
     token: lsp_types::ProgressToken,
+    cancellable: bool,
 }
 
 impl ProgressReporter {
     /// Start a new progress sequence. Sends `WorkDoneProgressBegin`.
-    pub fn begin(sender: &Sender<Message>, title: &str) -> Self {
-        let token =
-            lsp_types::ProgressToken::String(format!("sail-lsp/{}", title.replace(' ', "-")));
+    ///
+    /// The token must already have been created with
+    /// `window/workDoneProgress/create`: a server that reports progress
+    /// under a token the client never agreed to is free to be ignored, and
+    /// this used to invent one from the title. `GlobalState::progress_token`
+    /// asks first — which needs the main thread, so the token is made there
+    /// and carried to whichever worker reports.
+    /// `cancellable` is what the client shows a cancel button for, and what
+    /// makes it send `window/workDoneProgress/cancel`. Every reporter said
+    /// `false`, so the one operation that *is* cancellable —
+    /// `prime_caches`, which already carries a `CancellationToken` and
+    /// restarts itself — could never be cancelled by the user.
+    pub fn begin(
+        sender: &Sender<Message>,
+        token: lsp_types::ProgressToken,
+        title: &str,
+        cancellable: bool,
+    ) -> Self {
         let begin = WorkDoneProgress::Begin(WorkDoneProgressBegin {
             title: title.to_string(),
-            cancellable: Some(false),
+            cancellable: Some(cancellable),
             message: None,
             percentage: Some(0),
         });
         send_progress(sender, &token, begin);
-        Self { sender: sender.clone(), token }
+        Self { sender: sender.clone(), token, cancellable }
     }
 
     /// Report intermediate progress.
     pub fn report(&self, message: &str, percentage: Option<u32>) {
         let report = WorkDoneProgress::Report(WorkDoneProgressReport {
-            cancellable: Some(false),
+            cancellable: Some(self.cancellable),
             message: Some(message.to_string()),
             percentage,
         });
@@ -59,7 +75,5 @@ fn send_progress(
     let _ = sender.send(Message::Notification(notif));
 }
 
-/// Check whether the client supports `window/workDoneProgress`.
-pub fn client_supports_progress(caps: &lsp_types::ClientCapabilities) -> bool {
-    caps.window.as_ref().and_then(|w| w.work_done_progress).unwrap_or(false)
-}
+// `client_supports_progress` was here, asking the same question as
+// `ClientCapabilities::work_done_progress_support` — which had no caller.

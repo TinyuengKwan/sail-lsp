@@ -1,21 +1,18 @@
-//! Minimal `sail.proj` / `*.sail_project` parser.
+//! Sail project syntax and configuration-aware module graphs.
 //!
-//! Parses the *ordered list of `.sail` files*
-//! mentioned in `files` clauses, with the surrounding `directory`
-//! prefix joined in. Module dependency edges, variables, and access
-//! control are skipped for now — the LSP wants to know which files to
-//! index, in what order, and that's the entire output of this pass.
+//! [`ProjectManifest`] evaluates variables and conditional expressions,
+//! resolves module requirements, and selects files in dependency order.
+//! It performs no filesystem access and is independent of the LSP server.
 //!
-//! Conservative `if`/`then`/`else` handling: both branches are walked
-//! and any files they mention are unioned in. The LSP indexes too
-//! many files rather than too few; under-indexing would cause
-//! cross-file goto-def to silently miss.
-//!
-//! Cycles in `directory` / `module` references can't happen because
-//! this parser doesn't follow inter-module edges; it only collects
-//! file leaves. Inputs that *also* contain a circular `requires`
-//! graph are still processed correctly here — the dependency
-//! validator that future stages add will need its own cycle check.
+//! [`parse_project`] is a conservative candidate catalog retained for
+//! syntax inspection: it collects both conditional branches without
+//! evaluating configuration. Use `ProjectManifest::resolve` for loading
+//! an active workspace.
+
+mod manifest;
+pub use manifest::{
+    ProjectManifest, ProjectOptions, ProjectValue, ResolvedModule, ResolvedProject,
+};
 
 use std::path::{Path, PathBuf};
 
@@ -222,7 +219,7 @@ enum Tok {
     /// `>`). The MVP doesn't evaluate them but still needs to
     /// recognise the token shape so they don't get mistaken for
     /// something structural.
-    OpCompare,
+    OpCompare(String),
     /// `..` (parent reference in expressions).
     DotDot,
     /// `/` (path separator in expressions or division).
@@ -334,7 +331,7 @@ fn lex(source: &str) -> Result<Vec<Tok>, ProjectParseError> {
                 i += 1;
             }
             b'=' if i + 1 < bytes.len() && bytes[i + 1] == b'=' => {
-                out.push(Tok::OpCompare);
+                out.push(Tok::OpCompare(source[i..i + 2].to_owned()));
                 i += 2;
             }
             b'=' => {
@@ -342,15 +339,15 @@ fn lex(source: &str) -> Result<Vec<Tok>, ProjectParseError> {
                 i += 1;
             }
             b'!' if i + 1 < bytes.len() && bytes[i + 1] == b'=' => {
-                out.push(Tok::OpCompare);
+                out.push(Tok::OpCompare(source[i..i + 2].to_owned()));
                 i += 2;
             }
             b'<' | b'>' => {
                 if i + 1 < bytes.len() && bytes[i + 1] == b'=' {
-                    out.push(Tok::OpCompare);
+                    out.push(Tok::OpCompare(source[i..i + 2].to_owned()));
                     i += 2;
                 } else {
-                    out.push(Tok::OpCompare);
+                    out.push(Tok::OpCompare(source[i..i + 1].to_owned()));
                     i += 1;
                 }
             }
@@ -382,15 +379,19 @@ fn lex(source: &str) -> Result<Vec<Tok>, ProjectParseError> {
                         break;
                     }
                     if c == b'\\' && i + 1 < bytes.len() {
-                        // Best-effort: keep escaped char as-is. We
-                        // don't decode escapes since the value is
-                        // ignored downstream.
-                        buf.push(bytes[i + 1] as char);
+                        buf.push(match bytes[i + 1] {
+                            b'n' => '\n',
+                            b't' => '\t',
+                            b'r' => '\r',
+                            b'b' => '\u{8}',
+                            c => c as char,
+                        });
                         i += 2;
                         continue;
                     }
-                    buf.push(c as char);
-                    i += 1;
+                    let c = source[i..].chars().next().unwrap();
+                    buf.push(c);
+                    i += c.len_utf8();
                 }
                 if !closed {
                     return Err(ProjectParseError::UnterminatedString(start));
@@ -531,6 +532,20 @@ impl<'a> Parser<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Is the parser sitting on `name {` — the head of a nested module?
+    ///
+    /// A clause ends where the next one begins, and the lexer drops the
+    /// newline that separates them. `requires`/`before`/`after` take a bare
+    /// identifier list, so without this the list swallows the *name* of the
+    /// module that follows it, then counts its `{` as a group and consumes
+    /// the whole body. `extensions { requires prelude  I { .. } .. }` is the
+    /// shape: on sail-riscv it cost 96 of 158 files, every one of them
+    /// inside a nested module under `extensions`.
+    fn at_module_head(&self) -> bool {
+        matches!(self.tokens.get(self.pos), Some(Tok::Id(_)))
+            && matches!(self.tokens.get(self.pos + 1), Some(Tok::LCurly))
     }
 
     fn skip_until_brace_or_then(&mut self) {
@@ -699,6 +714,9 @@ impl<'a> Parser<'a> {
         let mut out = Vec::new();
         let mut depth: i32 = 0;
         while let Some(tok) = self.peek() {
+            if depth == 0 && self.at_module_head() {
+                break;
+            }
             match tok {
                 Tok::LSquare | Tok::LCurly | Tok::LParen => {
                     depth += 1;
@@ -751,6 +769,9 @@ impl<'a> Parser<'a> {
         let mut out = Vec::new();
         let mut depth: i32 = 0;
         while let Some(tok) = self.peek() {
+            if depth == 0 && self.at_module_head() {
+                break;
+            }
             match tok {
                 Tok::LSquare | Tok::LCurly | Tok::LParen => {
                     depth += 1;
@@ -876,6 +897,39 @@ B {
 ";
         let parsed = parse_project(src).expect("parse");
         assert_eq!(names(&parsed), vec!["amod.sail", "bmod.sail"]);
+    }
+
+    /// A `requires` list ends where the next module begins.
+    ///
+    /// The lexer drops the newline between them, so a bare-identifier list
+    /// ran on into the following module's name and then swallowed its whole
+    /// body as a brace group. This is sail-riscv's own shape — every
+    /// extension lives in a nested module under `extensions { requires
+    /// prelude ... }` — and it cost 96 of the model's 158 files, which the
+    /// editor then analysed against a workspace missing most of itself:
+    /// 197 "Function not found" errors in one file that `corpus_check`
+    /// reports clean.
+    #[test]
+    fn a_nested_module_after_requires_is_not_swallowed() {
+        let src = "\
+outer {
+  requires prelude
+
+  inner {
+    requires core
+    files inner/a.sail
+  }
+
+  second {
+    before sys
+    files inner/b.sail
+  }
+}
+";
+        let parsed = parse_project(src).expect("parse");
+        assert_eq!(names(&parsed), vec!["inner/a.sail", "inner/b.sail"]);
+        let mods: Vec<&str> = parsed.modules.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(mods, vec!["inner", "second", "outer"]);
     }
 
     #[test]

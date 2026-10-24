@@ -1,0 +1,38 @@
+SOURCE_FILE@0..43
+  CALLABLE_DEF@0..42
+    KW_FUNCTION@0..8 "function"
+    WHITESPACE@8..9 " "
+    IDENT@9..10 "t"
+    UNIT@10..12 "()"
+    WHITESPACE@12..13 " "
+    EQ@13..14 "="
+    WHITESPACE@14..15 " "
+    BLOCK_EXPR@15..42
+      L_CURLY@15..16 "{"
+      WHITESPACE@16..17 " "
+      BLOCK_ITEM@17..40
+        REPEAT_EXPR@17..40
+          KW_REPEAT@17..23 "repeat"
+          WHITESPACE@23..24 " "
+          BLOCK_EXPR@24..32
+            L_CURLY@24..25 "{"
+            WHITESPACE@25..26 " "
+            BLOCK_ITEM@26..30
+              CALL_EXPR@26..30
+                IDENT_EXPR@26..27
+                  IDENT@26..27 "g"
+                ARG_LIST@27..30
+                  L_PAREN@27..28 "("
+                  LITERAL_EXPR@28..29
+                    NUM_LIT@28..29 "1"
+                  R_PAREN@29..30 ")"
+            WHITESPACE@30..31 " "
+            R_CURLY@31..32 "}"
+          WHITESPACE@32..33 " "
+          KW_UNTIL@33..38 "until"
+          WHITESPACE@38..39 " "
+          IDENT_EXPR@39..40
+            IDENT@39..40 "c"
+      WHITESPACE@40..41 " "
+      R_CURLY@41..42 "}"
+  WHITESPACE@42..43 "\n"

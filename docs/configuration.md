@@ -108,4 +108,41 @@ lspconfig.sail_lsp.setup({
 |-----|------|---------|-------------|
 | `maxFiles` | `number` | `10000` | Maximum files to scan in workspace |
 | `target` | `string?` | `null` | Compilation target for `$iftarget` directives |
-| `includePaths` | `string[]` | `[]` | Additional paths for `$include` resolution |
+| `includePaths` | `string[]` | `[]` | Fallback include search paths, absolute or relative to workspace roots. |
+| `projectFile` | `string?` | `null` | Manifest path relative to each workspace folder, or absolute. Auto-detection prefers `sail.proj`, otherwise requires exactly one `*.sail_project`. |
+| `projectVariables` | `object` | `{}` | Boolean/string overrides for manifest variables. |
+| `projectModules` | `string[]` | `[]` | Select root modules, their descendants and transitive requirements. Empty means all modules. |
+
+For example, VS Code can select the RMEM configuration with:
+
+```json
+{
+  "sail-lsp.workspace.projectFile": "model/riscv.sail_project",
+  "sail-lsp.workspace.projectVariables": { "RMEM": true },
+  "sail-lsp.workspace.projectModules": []
+}
+```
+
+Changes reload the active file set. Conditional branches are evaluated, and
+`requires`, `before`, and `after` determine file order. Only `requires` adds
+modules to the selected dependency closure. Invalid manifests report a server
+error and retain the last successfully loaded workspace; they do not silently
+index every file in the directory. Directory discovery remains available when
+there is no manifest. An explicitly empty project stays empty.
+
+Source preprocessing follows the selected root order and active includes.
+Only reached library files and the compiler's implicit `core/corelib.sail`
+enter the semantic workspace. `$define` propagates through includes and later
+files; `default Order` takes effect where declared. `target: null` takes the
+else branch of `$iftarget`; named targets and `$target_set` aliases are honored.
+Unresolved active includes are diagnosed, while missing inactive includes are
+ignored. Unsaved include edits trigger discovery using editor contents.
+
+Like the current Sail compiler, manifest `directory` expressions are evaluated
+but do not prefix file paths; use explicit path expressions instead. Generated
+`virtual` files are not supported and produce an explicit project error.
+The module graph controls selection, ordering and symbol visibility. A file
+can use its own module and the public declarations of its direct `requires`,
+plus the global scope. Requirements select dependencies transitively but do
+not re-export their names. `before`/`after` only affect ordering; `private`
+declarations are shared by files of the same module.

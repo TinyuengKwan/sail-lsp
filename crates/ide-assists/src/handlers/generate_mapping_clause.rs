@@ -14,7 +14,6 @@
 //! ```
 
 use crate::assist_context::{AssistContext, AssistId, AssistKind, Assists};
-use ide_db::text_edit::TextEdit;
 
 pub(crate) fn generate_mapping_clause(acc: &mut Assists, ctx: &AssistContext<'_>) -> Option<()> {
     let text = ctx.file.text();
@@ -23,7 +22,7 @@ pub(crate) fn generate_mapping_clause(acc: &mut Assists, ctx: &AssistContext<'_>
 
     // Find a MappingSpec at cursor position
     for &id in item_tree.top_level_items() {
-        if id.item_kind(item_tree) != hir_def::item_tree::ItemKind::MappingSpec {
+        if id.def_kind(item_tree) != hir::DefKind::MappingSpec {
             continue;
         }
         let id_span = id.span(item_tree);
@@ -35,8 +34,7 @@ pub(crate) fn generate_mapping_clause(acc: &mut Assists, ctx: &AssistContext<'_>
 
         // Check if any clause already exists
         let has_clause = item_tree.top_level_items().iter().any(|eid| {
-            eid.item_kind(item_tree) == hir_def::item_tree::ItemKind::Mapping
-                && eid.name(item_tree).as_str() == name
+            eid.def_kind(item_tree) == hir::DefKind::Mapping && eid.name(item_tree).as_str() == name
         });
 
         let label = if has_clause {
@@ -51,16 +49,20 @@ pub(crate) fn generate_mapping_clause(acc: &mut Assists, ctx: &AssistContext<'_>
         let insert_pos =
             text[insert_offset..].find('\n').map(|i| insert_offset + i + 1).unwrap_or(text.len());
 
-        let clause_text = format!("mapping clause {name} = TODO <-> TODO\n");
+        // Both sides are `TODO`, which is exactly what has to be typed.
+        let clause_text = match ctx.config.snippet_cap {
+            Some(_) => format!("mapping clause {name} = ${{1:TODO}} <-> ${{2:TODO}}\n"),
+            None => format!("mapping clause {name} = TODO <-> TODO\n"),
+        };
 
-        let edit =
-            TextEdit { range: base_db::text_range(insert_pos, insert_pos), new_text: clause_text };
-
-        acc.add_with_edits(
+        acc.add(
             AssistId("generate_mapping_clause", AssistKind::Generate),
             label,
             ctx.range,
-            vec![edit],
+            |builder| match ctx.config.snippet_cap {
+                Some(_) => builder.insert_snippet(insert_pos, clause_text),
+                None => builder.insert(insert_pos, clause_text),
+            },
         );
         return Some(());
     }
@@ -75,8 +77,9 @@ mod tests {
 
     fn check_assist(before: &str, expected: expect_test::Expect) {
         let file = TestFile::new(before);
-        let ctx = AssistContext::new(&file, base_db::text_range(0, 10));
-        let mut acc = Assists::new();
+        let cfg = crate::AssistConfig::default();
+        let ctx = AssistContext::new(&cfg, &file, base_db::text_range(0, 10));
+        let mut acc = Assists::new(base_db::FileId::from_raw(0));
         generate_mapping_clause(&mut acc, &ctx);
         let assists = acc.finish();
         if assists.is_empty() {
@@ -90,7 +93,7 @@ mod tests {
     #[test]
     fn generates_clause_for_mapping_spec() {
         // Note: The mapping spec must be recognized by the ItemTree
-        // as ItemKind::MappingSpec. If TestFile's pipeline doesn't
+        // as DefKind::MappingSpec. If TestFile's pipeline doesn't
         // produce this, the assist won't fire. This test verifies
         // the fallback behavior.
         check_assist(

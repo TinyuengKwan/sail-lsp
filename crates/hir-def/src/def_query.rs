@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use base_db::FileText;
-use syntax::parse_query::{parse_file, ParsedFileData};
+use syntax::parse_query::{semantic_parse_file as parse_file, ParsedFileData};
 
 use crate::bodies::CallableBodies;
 use crate::callgraph::CallGraph;
@@ -32,9 +32,47 @@ impl std::hash::Hash for ArcCallableBodies {
 }
 
 // Include queries moved to hir-expand — re-exported for backward compatibility.
-pub use hir_expand::query::{
-    include_paths, typed_include_paths, ArcIncludeGraph, IncludePath, WorkspaceIncludeGraph,
-};
+pub use hir_expand::query::{include_paths, typed_include_paths, ArcIncludeGraph, IncludePath};
+
+/// The `default Order dec | inc` declared by a single file, if any.
+#[salsa::tracked]
+pub fn file_default_order(
+    db: &dyn salsa::Database,
+    input: FileText,
+) -> Option<syntax::preprocess::DefaultOrder> {
+    let parsed: &ParsedFileData = parse_file(db, input);
+    let green = parsed.green.as_ref()?;
+    let root = syntax::SyntaxNode::new_root(green.as_ref().clone());
+    syntax::preprocess::default_order_of_file(&root)
+}
+
+/// The program-wide `default Order`, taken from whichever workspace file
+/// declares it.
+///
+/// Upstream reaches the same answer positionally: `default Order dec` is
+/// preprocessed before the `$include <prelude.sail>` that follows it, and the
+/// symbol set is global and mutable for the rest of the run
+/// (preprocess.ml:179-303). Sail permits only one default order per program,
+/// so resolving it workspace-wide is equivalent while staying compatible with
+/// per-file salsa queries.
+#[salsa::tracked]
+pub fn workspace_default_order(
+    db: &dyn salsa::Database,
+    ws: base_db::WorkspaceFiles,
+) -> Option<syntax::preprocess::DefaultOrder> {
+    ws.file_texts(db).iter().find_map(|&ft| file_default_order(db, ft))
+}
+
+/// Preprocessor symbols in effect for the whole workspace.
+fn workspace_symbols(db: &dyn salsa::Database) -> std::collections::HashSet<String> {
+    let mut symbols = syntax::preprocess::default_symbols();
+    if let Some(ws) = base_db::WorkspaceFiles::try_get(db) {
+        if let Some(order) = workspace_default_order(db, ws) {
+            order.apply(&mut symbols);
+        }
+    }
+    symbols
+}
 
 /// Build the per-file ItemTree from a parsed file.
 #[salsa::tracked(returns(ref))]
@@ -42,7 +80,7 @@ pub fn file_item_tree(db: &dyn salsa::Database, input: FileText) -> Option<Arc<I
     let parsed: &ParsedFileData = parse_file(db, input);
     let green = parsed.green.as_ref()?;
     let root = syntax::SyntaxNode::new_root(green.as_ref().clone());
-    let mut symbols = syntax::preprocess::default_symbols();
+    let mut symbols = workspace_symbols(db);
     Some(Arc::new(ItemTree::build_from_cst_full(&root, &mut symbols)))
 }
 
@@ -59,15 +97,18 @@ pub fn callable_bodies(db: &dyn salsa::Database, input: FileText) -> Option<ArcC
 #[derive(Clone, Debug)]
 pub struct ArcCallGraph(pub Arc<CallGraph>);
 
+// Structural: a callgraph is maps of names and spans, which compare
+// directly, and comparing them is what lets salsa backdate. `Arc::ptr_eq`
+// never reports equal, because a re-executed query always allocates.
 impl PartialEq for ArcCallGraph {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
+        self.0 == other.0
     }
 }
 impl Eq for ArcCallGraph {}
 impl std::hash::Hash for ArcCallGraph {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        std::ptr::hash(Arc::as_ptr(&self.0), state);
+        self.0.site_count().hash(state);
     }
 }
 
@@ -75,21 +116,23 @@ impl std::hash::Hash for ArcCallGraph {
 #[derive(Clone, Debug)]
 pub struct ArcDefMap(pub Arc<DefMap>);
 
+// Structural: a def map is one `ItemScope` plus a row per definition,
+// both of which compare directly. See `ArcCallGraph`.
 impl PartialEq for ArcDefMap {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
+        self.0 == other.0
     }
 }
 impl Eq for ArcDefMap {}
 impl std::hash::Hash for ArcDefMap {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        std::ptr::hash(Arc::as_ptr(&self.0), state);
+        self.0.len().hash(state);
     }
 }
 
 /// Build the per-file DefMap (name resolution index).
 #[salsa::tracked(returns(ref))]
-pub fn crate_def_map(db: &dyn salsa::Database, input: FileText) -> Option<ArcDefMap> {
+pub fn file_def_map(db: &dyn salsa::Database, input: FileText) -> Option<ArcDefMap> {
     let item_tree = file_item_tree(db, input).as_ref()?;
     Some(ArcDefMap(Arc::new(DefMap::build(item_tree))))
 }
@@ -107,15 +150,19 @@ pub struct ArcEffectMap(
     pub Arc<std::collections::HashMap<String, std::collections::BTreeSet<crate::EffectTag>>>,
 );
 
+// A `HashMap<String, BTreeSet<EffectTag>>` compares structurally already,
+// and comparing it is what lets salsa backdate: a re-executed query always
+// allocates a fresh `Arc`, so `Arc::ptr_eq` reports "changed" every time
+// and every dependent re-runs.
 impl PartialEq for ArcEffectMap {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
+        self.0 == other.0
     }
 }
 impl Eq for ArcEffectMap {}
 impl std::hash::Hash for ArcEffectMap {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        std::ptr::hash(Arc::as_ptr(&self.0), state);
+        self.0.len().hash(state);
     }
 }
 
@@ -176,20 +223,134 @@ pub fn transitive_effects(db: &dyn salsa::Database, input: FileText) -> ArcEffec
 
 use crate::body::{Body, BodySourceMap};
 
-/// Newtype for `Arc<(Body, BodySourceMap)>` with pointer-based Eq/Hash.
+/// One callable's `Body` and `BodySourceMap`, compared by the fingerprint
+/// of the callable it was lowered from — the same one `callable_body` uses,
+/// and for the same reason: `Arc::ptr_eq` can never report equal, so salsa
+/// could never backdate this and every dependent re-ran on any edit.
 #[derive(Clone, Debug)]
-pub struct ArcBodyWithSourceMap(pub Arc<(Body, BodySourceMap)>);
+pub struct ArcBodyWithSourceMap(pub Arc<(Body, BodySourceMap)>, u64);
 
 impl PartialEq for ArcBodyWithSourceMap {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
+        self.1 == other.1
     }
 }
 impl Eq for ArcBodyWithSourceMap {}
 impl std::hash::Hash for ArcBodyWithSourceMap {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        std::ptr::hash(Arc::as_ptr(&self.0), state);
+        self.1.hash(state);
     }
+}
+
+/// One callable's lowered body, keyed by the callable rather than the file.
+///
+/// `infer` used to read `callable_bodies(file)` — a whole-file query — and
+/// scan it for its own entry, so editing any function in a file re-inferred
+/// every function in it. rust-analyzer's `infer(def)` depends on
+/// `body(def)`; this is that dependency.
+///
+/// Its equality is a fingerprint of the callable's own source text and
+/// where it starts, which is exactly what its lowering is a function of.
+/// Two consequences worth knowing: an edit that does not touch a callable
+/// leaves its fingerprint alone, so salsa backdates this query and the
+/// callable's `infer` is reused; and an edit that shifts a later callable's
+/// start *does* change it, because the spans recorded in the body moved.
+/// rust-analyzer avoids the second by keeping spans in a separate
+/// `body_with_source_map` query and leaving `body` position-free — the
+/// same split would work here, and `Body` bundling its source map is what
+/// stands in the way.
+#[derive(Clone, Debug)]
+pub struct ArcCallableBody {
+    pub body: Arc<crate::bodies::CallableBody>,
+    /// The file's text, carried here rather than read from `FileText`
+    /// directly. Inference needs it to slice spans, and reading it from the
+    /// input would make every `infer` in a file depend on the whole file —
+    /// which is the dependency this query exists to break. Only spans inside
+    /// the callable are ever sliced, and both their content and the
+    /// callable's start are in the fingerprint, so a result that compares
+    /// equal yields the same characters.
+    pub text: Arc<str>,
+    fingerprint: u64,
+}
+
+impl ArcCallableBody {
+    /// The fingerprint of the callable's own source, for queries that
+    /// derive from this one and want to backdate with it.
+    pub fn fingerprint(&self) -> u64 {
+        self.fingerprint
+    }
+}
+
+impl PartialEq for ArcCallableBody {
+    fn eq(&self, other: &Self) -> bool {
+        self.fingerprint == other.fingerprint
+    }
+}
+impl Eq for ArcCallableBody {}
+impl std::hash::Hash for ArcCallableBody {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.fingerprint.hash(state);
+    }
+}
+
+#[salsa::tracked(returns(ref), lru = 512)]
+pub fn callable_body<'db>(
+    db: &'db dyn salsa::Database,
+    id: DefWithBodyId<'db>,
+) -> Option<ArcCallableBody> {
+    use std::hash::{Hash, Hasher};
+
+    let file = id.file(db);
+    let bodies = callable_bodies(db, file).as_ref()?;
+    let target_name = id.name(db);
+    let target_clause = id.clause_index(db);
+
+    let mut clause_idx = 0u32;
+    for entry in bodies.0.entries() {
+        if entry.name != target_name {
+            continue;
+        }
+        if clause_idx != target_clause {
+            clause_idx += 1;
+            continue;
+        }
+        let text: &Arc<str> = file.text(db);
+        let mut h = rustc_hash::FxHasher::default();
+        // The callable's own characters, and nothing about where they are.
+        // Hashing the start too meant a keystroke anywhere above re-inferred
+        // everything below it, which is what
+        // `typing_a_character_does_not_reinfer_the_file` measures. The
+        // positions this value still carries are the ones it was lowered
+        // with; `body_with_source_map` rebases them.
+        text.get(entry.def_span.start..entry.def_span.end).unwrap_or("").hash(&mut h);
+        return Some(ArcCallableBody {
+            body: Arc::new(entry.clone()),
+            text: Arc::clone(text),
+            fingerprint: h.finish(),
+        });
+    }
+    None
+}
+
+/// Where this callable starts in the file as it is now.
+///
+/// Read from `callable_bodies`, which re-runs whenever the file changes —
+/// unlike `callable_body`, whose whole point is that it does not.
+fn current_def_start<'db>(db: &'db dyn salsa::Database, id: DefWithBodyId<'db>) -> Option<usize> {
+    let bodies = callable_bodies(db, id.file(db)).as_ref()?;
+    let target_name = id.name(db);
+    let mut clause_idx = 0u32;
+    for entry in bodies.0.entries() {
+        if entry.name != target_name {
+            continue;
+        }
+        if clause_idx != id.clause_index(db) {
+            clause_idx += 1;
+            continue;
+        }
+        return Some(entry.def_span.start);
+    }
+    None
 }
 
 /// Per-callable Body + BodySourceMap query.
@@ -199,35 +360,37 @@ pub fn body_with_source_map<'db>(
     id: DefWithBodyId<'db>,
 ) -> ArcBodyWithSourceMap {
     let file = id.file(db);
-    let bodies = callable_bodies(db, file);
-
-    let target_name = id.name(db);
-    let target_clause = id.clause_index(db);
-
     let file_id = file.file_id(db);
 
-    if let Some(bodies) = bodies.as_ref() {
-        let mut clause_idx = 0u32;
-        for entry in bodies.0.entries() {
-            if entry.name == target_name {
-                if clause_idx == target_clause {
-                    let body = (*entry.body).clone();
-                    let mut source_map = (*entry.source_map).clone();
-                    // Populate file_id so BodySourceMap can produce
-                    // InFile<Span> via expr_syntax_in_file / pat_syntax_in_file.
-                    if source_map.file_id.is_none() {
-                        source_map.file_id = Some(file_id);
-                    }
-                    return ArcBodyWithSourceMap(Arc::new((body, source_map)));
-                }
-                clause_idx += 1;
-            }
+    // Through `callable_body`, so this inherits its fingerprint: an edit
+    // that leaves a callable alone leaves that query's value equal, and
+    // salsa backdates it instead of re-inferring.
+    //
+    // Positions are the one thing that edit *did* change. `callable_body`
+    // holds the ones the body was lowered with, so this query — which
+    // re-runs whenever the file does, and only clones — moves them to where
+    // the callable sits now. Everything that shows a user a position comes
+    // through here.
+    if let Some(cb) = callable_body(db, id).as_ref() {
+        let body = (*cb.body.body).clone();
+        let mut source_map = (*cb.body.source_map).clone();
+        // Populate file_id so BodySourceMap can produce InFile<Span> via
+        // expr_syntax_in_file / pat_syntax_in_file.
+        if source_map.file_id.is_none() {
+            source_map.file_id = Some(file_id);
         }
+        // Reading this is what makes this query re-run. Without it every
+        // input verifies unchanged after an edit above the callable and the
+        // memo is returned — with the positions it had before the edit.
+        // `a_reused_body_still_reports_where_it_is_now` fails on exactly
+        // that.
+        source_map.def_base = current_def_start(db, id).unwrap_or(cb.body.def_span.start);
+        return ArcBodyWithSourceMap(Arc::new((body, source_map)), cb.fingerprint());
     }
 
-    // Fallback: empty body (should not happen for valid CallableIds)
+    // No such callable — an empty body, and a fingerprint that says so.
     let fallback_map = BodySourceMap { file_id: Some(file_id), ..Default::default() };
-    ArcBodyWithSourceMap(Arc::new((Body::empty(), fallback_map)))
+    ArcBodyWithSourceMap(Arc::new((Body::empty(), fallback_map)), 0)
 }
 
 /// Salsa-interned identifier for a callable with a body.
@@ -257,6 +420,37 @@ pub fn file_def_with_body_ids<'db>(
         }
     }
     ids
+}
+
+/// Register the workspace's file set, and the operator fixities declared
+/// anywhere in it, as salsa inputs.
+///
+/// The two belong together: `parse_file` reads `WorkspaceFixities`, so a
+/// workspace registered without it parses every user-defined operator at the
+/// default level. Call this instead of setting `WorkspaceFiles` directly.
+///
+/// Fixities are collected from a first, fixity-free parse. That is sound
+/// because an `infix` declaration is a top-level item whose own parse does
+/// not depend on expression precedence.
+pub fn set_workspace_files(db: &mut dyn salsa::Database, file_texts: Vec<FileText>) {
+    // Create the fixity input *before* anything parses. `parse_file` only
+    // records a salsa dependency on an input that already exists, so a table
+    // created afterwards would never invalidate the fixity-free parses that
+    // collecting the declarations itself triggers.
+    if base_db::WorkspaceFixities::try_get(db).is_none() {
+        base_db::WorkspaceFixities::new(db, 0, std::collections::HashMap::new());
+    }
+    match base_db::WorkspaceFiles::try_get(db) {
+        Some(existing) if *existing.file_texts(db) == file_texts => {}
+        Some(existing) => {
+            use salsa::Setter;
+            existing.set_file_texts(db).to(file_texts.clone());
+        }
+        None => {
+            base_db::WorkspaceFiles::new(db, file_texts.clone());
+        }
+    }
+    update_workspace_fixities(db, file_texts);
 }
 
 /// Merge fixity declarations from all files into the `WorkspaceFixities` input.

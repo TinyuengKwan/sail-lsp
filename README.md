@@ -19,6 +19,19 @@ cargo build --release
 
 The Sail standard library is **embedded in the binary** — no extra setup needed.
 
+The bundled sources track Sail `ac09f8870` (October 2026). To synchronize with
+a local checkout and verify the bundle:
+
+```bash
+python3 scripts/sync_stdlib.py ../sail
+python3 scripts/sync_stdlib.py --check ../sail
+```
+
+The upstream commit is recorded in `crates/sail-lsp/data/sail-lib-revision`;
+extracted libraries use a directory specific to that revision. See
+[CONTRIBUTING.md](CONTRIBUTING.md#validation) for how conformance against
+upstream is measured.
+
 To use a different version of the stdlib (e.g. a local checkout of the `sail` compiler), set `SAIL_DIR`:
 
 ```bash
@@ -106,6 +119,12 @@ cargo test --workspace                  # run all tests
 cargo test -p hir-ty                    # single crate
 RUN_SLOW_BENCHES=1 cargo test -p sail-lsp --lib -- benchmarks  # benchmarks
 ```
+
+For incremental correctness and latency checks, run
+`cargo run --release --example incremental_stats -- 1600 32 signature`.
+The per-file contribution index preserves unrelated inference results after
+signature edits; the probe verifies reuse and changes to consumer diagnostics.
+Append `--profile` to inspect query timing and allocation counts.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for code style and architecture details.
 

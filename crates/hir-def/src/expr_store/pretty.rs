@@ -99,7 +99,7 @@ fn write_expr(body: &Body, id: ExprId, buf: &mut String, indent: usize) {
             buf.push('.');
             buf.push_str(field);
         }
-        Expr::Attribute { expr } => {
+        Expr::Attribute { expr, .. } => {
             buf.push_str("@attr ");
             write_expr(body, *expr, buf, indent);
         }
@@ -123,9 +123,9 @@ fn write_expr(body: &Body, id: ExprId, buf: &mut String, indent: usize) {
             buf.push_str(" in ");
             write_expr(body, *body_expr, buf, indent);
         }
-        Expr::Var { target, value, body: body_expr } => {
+        Expr::Var { pat, value, body: body_expr } => {
             buf.push_str("var ");
-            write_expr(body, *target, buf, indent);
+            write_pat(body, *pat, buf);
             buf.push_str(" = ");
             write_expr(body, *value, buf, indent);
             buf.push_str(" in ");
@@ -167,12 +167,12 @@ fn write_expr(body: &Body, id: ExprId, buf: &mut String, indent: usize) {
             buf.push_str(" until ");
             write_expr(body, *until, buf, indent);
         }
-        Expr::Foreach { pat, start, end, step, body: body_expr } => {
+        Expr::Foreach { descending, pat, start, end, step, body: body_expr } => {
             buf.push_str("foreach (");
             write_pat(body, *pat, buf);
             buf.push_str(" from ");
             write_expr(body, *start, buf, indent);
-            buf.push_str(" to ");
+            buf.push_str(if *descending == Some(true) { " downto " } else { " to " });
             write_expr(body, *end, buf, indent);
             if let Some(s) = step {
                 buf.push_str(" by ");
@@ -437,12 +437,19 @@ mod tests {
     fn pretty_print_simple_body() {
         // Create a trivial body with one ident expression
         let mut store = crate::expr_store::ExpressionStore {
+            assignment_bindings: Default::default(),
             exprs: Default::default(),
             pats: Default::default(),
             bindings: Default::default(),
         };
         let id = store.exprs.alloc(Expr::Ident("x".to_string()));
-        let body = Body { store, params: Box::new([]), body_expr: id, mapping_arms: Vec::new() };
+        let body = Body {
+            store,
+            params: Box::new([]),
+            body_expr: id,
+            mapping_arms: Vec::new(),
+            guard: None,
+        };
         assert_eq!(print_expr(&body, id), "x");
     }
 }

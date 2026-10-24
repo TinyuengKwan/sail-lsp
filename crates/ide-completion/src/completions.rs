@@ -19,6 +19,9 @@ pub(crate) mod flyimport;
 /// Item list completion — top-level and block-level keywords.
 pub(crate) mod item_list;
 
+/// Name-definition completion (`function fo|`).
+pub(crate) mod name;
+
 /// Keyword completion.
 pub(crate) mod keyword;
 
@@ -66,14 +69,6 @@ impl Completions {
     pub(crate) fn add_many<I: Into<CompletionItem>>(&mut self, items: impl IntoIterator<Item = I>) {
         self.buf.extend(items.into_iter().map(Into::into));
     }
-
-    /// Add an optional completion item.
-    #[allow(dead_code)]
-    pub(crate) fn add_opt(&mut self, item: Option<CompletionItem>) {
-        if let Some(item) = item {
-            self.buf.push(item);
-        }
-    }
 }
 
 use ide_db::FileDb;
@@ -112,7 +107,7 @@ pub(super) fn complete_name_ref(
                 postfix::complete_postfix(acc, ctx);
             }
             context::PathKind::Type { .. } => {
-                let type_names = crate::collect_type_names(all_files);
+                let type_names = crate::completions::type_::collect_type_names(ctx, all_files);
                 let type_name_refs: Vec<(&str, ide_db::defs::SymbolKind)> =
                     type_names.iter().map(|(n, k)| (n.as_str(), *k)).collect();
                 let type_items = type_::complete_type_pos(ctx.prefix, &type_name_refs);

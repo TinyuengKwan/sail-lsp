@@ -1,17 +1,18 @@
 //! `add_missing_match_arms` assist.
 
 use crate::assist_context::{AssistContext, AssistId, AssistKind, Assists};
-use ide_db::text_edit::TextEdit;
 
 pub(crate) fn add_missing_match_arms(acc: &mut Assists, ctx: &AssistContext<'_>) -> Option<()> {
-    use hir_def::item_tree::ItemKind;
+    use hir::DefKind;
 
     let text = ctx.file.text();
     let offset = ctx.offset();
 
     // Parse CST and find the MATCH_EXPR at cursor
-    let (cst_root, _) = syntax::parse_text(text);
-    let bodies = hir_def::bodies::CallableBodies::from_cst(&cst_root);
+    // The tree the assist run already parsed. Parsing the text a second
+    // time here built one unrelated to it.
+    let cst_root = ctx.source_file()?.clone();
+    let bodies = hir::CallableBodies::from_cst(&cst_root);
 
     // Find the callable body containing this offset
     let entry = bodies.entry_at_offset(offset)?;
@@ -20,13 +21,13 @@ pub(crate) fn add_missing_match_arms(acc: &mut Assists, ctx: &AssistContext<'_>)
 
     // Find the match expression at cursor
     let expr_id = source_map.expr_at_offset(offset)?;
-    let hir_def::hir::Expr::Match { scrutinee, arms } = body.expr(expr_id)? else {
+    let hir::Expr::Match { scrutinee, arms } = body.expr(expr_id)? else {
         return None;
     };
 
     // Get the scrutinee name (must be a simple ident for enum resolution)
     let _scrutinee_name = match body.expr(*scrutinee)? {
-        hir_def::hir::Expr::Ident(name) => name.clone(),
+        hir::Expr::Ident(name) => name.clone(),
         _ => return None, // Can't resolve complex scrutinee
     };
 
@@ -47,24 +48,20 @@ pub(crate) fn add_missing_match_arms(acc: &mut Assists, ctx: &AssistContext<'_>)
     let mut all_variants: Vec<String> = Vec::new();
     let mut enum_name: Option<String> = None;
 
-    // Check if the file has any enum definition
+    // The variants an enum or union declares.
+    //
+    // These used to be recovered by finding `{` and `}` in the item's
+    // *signature text* and splitting the inside on `,` — so
+    // `enum C = A | B`, Sail's bar-separated form, yielded no variants at
+    // all and the assist never fired on it. The item tree records the
+    // members; `fields` is what every other reader asks.
     for &id in item_tree.top_level_items() {
-        if id.item_kind(item_tree) == ItemKind::Enum || id.item_kind(item_tree) == ItemKind::Union {
-            // Check inline variants
-            let sig = id.signature(item_tree);
-            if let Some(brace_start) = sig.find('{') {
-                if let Some(brace_end) = sig.rfind('}') {
-                    let inner = &sig[brace_start + 1..brace_end];
-                    let variants: Vec<&str> = inner
-                        .split(',')
-                        .map(|s| s.trim().split(':').next().unwrap_or("").trim())
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                    if !variants.is_empty() {
-                        enum_name = Some(id.name(item_tree).as_str().to_string());
-                        all_variants = variants.iter().map(|s| s.to_string()).collect();
-                    }
-                }
+        if matches!(id.def_kind(item_tree), DefKind::Enum | DefKind::Union) {
+            let members: Vec<String> =
+                id.fields(item_tree).iter().map(|f| f.name.to_string()).collect();
+            if !members.is_empty() {
+                enum_name = Some(id.name(item_tree).as_str().to_string());
+                all_variants = members;
             }
         }
         // Also check scattered enum clauses (member_name field)
@@ -89,16 +86,16 @@ pub(crate) fn add_missing_match_arms(acc: &mut Assists, ctx: &AssistContext<'_>)
     for arm in arms {
         if let Some(pat) = body.pat(arm.pat) {
             match pat {
-                hir_def::hir::Pat::Bind(name) => {
+                hir::Pat::Bind(name) => {
                     if name == "_" {
                         return None; // Wildcard covers everything
                     }
                     covered.push(name.clone());
                 }
-                hir_def::hir::Pat::App { ctor, .. } => {
+                hir::Pat::App { ctor, .. } => {
                     covered.push(ctor.clone());
                 }
-                hir_def::hir::Pat::Wild => return None,
+                hir::Pat::Wild => return None,
                 _ => {}
             }
         }
@@ -120,20 +117,41 @@ pub(crate) fn add_missing_match_arms(acc: &mut Assists, ctx: &AssistContext<'_>)
 
     // Determine indentation from existing arms
     let indent = "    "; // default 4 spaces
+                         // Each new arm's body is a `todo`, which is the thing to type over —
+                         // so for a client that can expand snippets they are the tabstops, the
+                         // first one being where the cursor lands.
+    let snippet = ctx.config.snippet_cap.is_some();
     let mut new_arms = String::new();
-    for variant in &missing {
-        new_arms.push_str(&format!("{indent}{variant} => todo(\"implement {variant}\"),\n"));
+    for (i, variant) in missing.iter().enumerate() {
+        let body = if snippet {
+            format!("${{{}:todo(\"implement {variant}\")}}", i + 1)
+        } else {
+            format!("todo(\"implement {variant}\")")
+        };
+        new_arms.push_str(&format!("{indent}{variant} => {body},\n"));
     }
 
-    let edit =
-        TextEdit { range: base_db::text_range(insert_offset, insert_offset), new_text: new_arms };
+    // The arms go on their own lines, after a comma if the last existing
+    // arm does not already end with one. Without this they were spliced
+    // straight in front of the `}`: `match c { A => 1     B => todo(…),`,
+    // which does not parse. Nothing noticed, because the assist could not
+    // fire on a bar-separated enum at all.
+    let before = text.get(..insert_offset)?.trim_end();
+    let separator = if before.ends_with(['{', ',']) { "\n" } else { ",\n" };
+    let new_arms = format!("{separator}{new_arms}");
+    // Replacing the whitespace before the `}` rather than inserting at it,
+    // so the last arm does not end up with a space before its comma.
+    let range = base_db::text_range(before.len(), insert_offset);
 
     let label = format!("Fill {} missing match arms", missing.len());
-    acc.add_with_edits(
+    acc.add(
         AssistId("add_missing_match_arms", AssistKind::QuickFix),
         label,
         ctx.range,
-        vec![edit],
+        |builder| match ctx.config.snippet_cap {
+            Some(_) => builder.replace_snippet(range, new_arms),
+            None => builder.replace(range, new_arms),
+        },
     );
     Some(())
 }
@@ -146,12 +164,39 @@ pub(crate) fn add_missing_match_arms(acc: &mut Assists, ctx: &AssistContext<'_>)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::check_assist;
+    use crate::tests::{check_assist, check_assist_with_snippets};
+    use expect_test::expect;
 
     #[test]
-    fn smoke() {
-        let labels =
-            check_assist(add_missing_match_arms, "function foo() -> unit = match x { }\n", 0);
-        let _ = labels;
+    fn applies() {
+        check_assist(
+            add_missing_match_arms,
+            "enum C = A | B\nval f : C -> int\nfunction f(c) = mat$0ch c { A => 1 }\n",
+            expect![[r#"
+                enum C = A | B
+                val f : C -> int
+                function f(c) = match c { A => 1,
+                    B => todo("implement B"),
+                }
+            "#]],
+        );
+    }
+
+    /// A client that can expand snippets lands in the first arm it has to
+    /// write, and tabs to the next.
+    #[test]
+    fn leaves_the_cursor_in_the_first_new_arm() {
+        check_assist_with_snippets(
+            add_missing_match_arms,
+            "enum C = A | B | D\nval f : C -> int\nfunction f(c) = mat$0ch c { A => 1 }\n",
+            expect![[r#"
+                enum C = A | B | D
+                val f : C -> int
+                function f(c) = match c { A => 1,
+                    B => ${1:todo("implement B")},
+                    D => ${2:todo("implement D")},
+                }
+            "#]],
+        );
     }
 }

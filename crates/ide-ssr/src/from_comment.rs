@@ -34,10 +34,9 @@ pub fn ssr_from_comment(
     let trimmed = line.trim_start();
     let comment_content = if let Some(rest) = trimmed.strip_prefix("//") {
         rest.trim()
-    } else if let Some(rest) = trimmed.strip_prefix("/*") {
-        rest.trim_end_matches("*/").trim()
     } else {
-        return None;
+        let rest = trimmed.strip_prefix("/*")?;
+        rest.trim_end_matches("*/").trim()
     };
 
     // Must contain the SSR separator.

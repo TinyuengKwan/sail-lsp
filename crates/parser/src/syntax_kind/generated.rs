@@ -124,8 +124,11 @@ pub enum SyntaxKind {
     KW_MONADIC,      // GRAMMAR(sail): upstream token Monadic (lexer.mll)  Confidence: HIGH
     KW_MUTUAL,       // GRAMMAR(sail): upstream token Mutual (lexer.mll)  Confidence: HIGH
     KW_MWV,          // GRAMMAR(sail): CUSTOM(sail-lsp) — no dedicated upstream token  Confidence: HIGH
+    KW_IMPURE,       // GRAMMAR(sail): upstream token Impure (lexer.mll)  Confidence: HIGH
+    KW_NAT,          // GRAMMAR(sail): upstream token NAT (lexer.mll)  Confidence: HIGH
     KW_NEWTYPE,      // GRAMMAR(sail): upstream token Newtype (lexer.mll)  Confidence: HIGH
     KW_NONDET,       // GRAMMAR(sail): CUSTOM(sail-lsp) — no dedicated upstream token  Confidence: HIGH
+    KW_OPERATOR,     // GRAMMAR(sail): upstream token Op (lexer.mll)  Confidence: HIGH
     KW_ORDER,        // GRAMMAR(sail): upstream token ORDER (lexer.mll)  Confidence: HIGH
     KW_OUTCOME,      // GRAMMAR(sail): upstream token Outcome (lexer.mll)  Confidence: HIGH
     KW_OVERLOAD,     // GRAMMAR(sail): upstream token Overload (lexer.mll)  Confidence: HIGH
@@ -251,6 +254,7 @@ pub enum SyntaxKind {
     TYPE_EXISTENTIAL,
     TYPE_FORALL,
     TYPE_NAMED,
+    TYPE_PARAM,
     TYPE_PARAM_LIST,
     TYPE_TUPLE,
     TYPE_VAR,
@@ -261,6 +265,7 @@ pub enum SyntaxKind {
     BLOCK_ITEM,
     BODY,
     FIELD_INIT,
+    MAPPING_CLAUSE,
     MATCH_ARM,
     NAME,
     PARAM_LIST,
@@ -318,12 +323,15 @@ macro_rules! T_ {
     [infix] => { $crate::SyntaxKind::KW_INFIX };
     [infixl] => { $crate::SyntaxKind::KW_INFIXL };
     [infixr] => { $crate::SyntaxKind::KW_INFIXR };
+    [impure] => { $crate::SyntaxKind::KW_IMPURE };
     [int] => { $crate::SyntaxKind::KW_INT };
     [let] => { $crate::SyntaxKind::KW_LET };
     [mapping] => { $crate::SyntaxKind::KW_MAPPING };
     [match] => { $crate::SyntaxKind::KW_MATCH };
     [mutual] => { $crate::SyntaxKind::KW_MUTUAL };
+    [nat] => { $crate::SyntaxKind::KW_NAT };
     [newtype] => { $crate::SyntaxKind::KW_NEWTYPE };
+    [operator] => { $crate::SyntaxKind::KW_OPERATOR };
     [order] => { $crate::SyntaxKind::KW_ORDER };
     [outcome] => { $crate::SyntaxKind::KW_OUTCOME };
     [overload] => { $crate::SyntaxKind::KW_OVERLOAD };

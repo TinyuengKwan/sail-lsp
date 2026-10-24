@@ -30,21 +30,45 @@ pub(crate) enum BodyOrSig {
 /// Core analysis engine for a specific position in source code.
 #[derive(Clone)]
 pub struct SourceAnalyzer {
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub(crate) file_id: FileId,
     /// Use `make_resolver()` to derive a borrowing Resolver on demand.
     pub(crate) resolver: Arc<DefMap>,
     /// Body/sig data (None if at module level).
     pub(crate) body_or_sig: Option<BodyOrSig>,
-    /// Name of the containing callable, if inside a body.
-    /// Stored during construction for `Semantics::containing_function`.
-    pub(crate) containing_callable_name: Option<String>,
 }
 
 impl SourceAnalyzer {
+    pub(crate) fn local_at(
+        &self,
+        db: &dyn salsa::Database,
+        file: base_db::FileText,
+        offset: usize,
+        name: &str,
+    ) -> Option<crate::Local> {
+        let BodyOrSig::Body { body, source_map, .. } = self.body_or_sig.as_ref()?;
+        let scopes = hir_def::source_order::bindings::body_scopes(db, file, body, offset);
+        let key = hir_def::Name::new(name);
+        let pat = body.iter_exprs().find_map(|(id, expr)| {
+            if !matches!(expr, hir_def::Expr::Ident(n) if n == name) {
+                return None;
+            }
+            let span = source_map.expr_syntax(id)?;
+            if !(span.start <= offset && offset < span.end) {
+                return None;
+            }
+            Some(scopes.resolve_name_in_scope(scopes.scope_for(id)?, &key)?.pat())
+        })?;
+        let span = source_map.pat_syntax(pat)?;
+        let is_param = body.params.iter().any(|p| {
+            source_map.pat_syntax(*p).is_some_and(|s| s.start <= span.start && span.end <= s.end)
+        });
+        Some(crate::Local { name: key, span, is_param })
+    }
+
     /// Create a SourceAnalyzer for a position inside a callable body,
     /// with type inference results available.
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub(crate) fn new_for_body(
         file_id: FileId,
         callable: &CallableBody,
@@ -59,13 +83,12 @@ impl SourceAnalyzer {
                 source_map: (*callable.source_map).clone(),
                 infer,
             }),
-            containing_callable_name: Some(callable.name.clone()),
         }
     }
 
     /// Create a SourceAnalyzer for a position inside a callable body,
     /// WITHOUT type inference results (faster, for navigation-only queries).
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub(crate) fn new_for_body_no_infer(
         file_id: FileId,
         callable: &CallableBody,
@@ -76,9 +99,8 @@ impl SourceAnalyzer {
 
     /// Create a SourceAnalyzer at module level (no body context).
     /// Used when the cursor is outside any callable body.
-    #[allow(dead_code)]
     pub(crate) fn new_for_resolver(file_id: FileId, resolver: Arc<DefMap>) -> Self {
-        Self { file_id, resolver, body_or_sig: None, containing_callable_name: None }
+        Self { file_id, resolver, body_or_sig: None }
     }
 
     /// Construct a borrowing `Resolver` from the stored `Arc<DefMap>`.
@@ -88,6 +110,53 @@ impl SourceAnalyzer {
 }
 
 impl SourceAnalyzer {
+    /// Every local binding visible at `offset`, innermost first.
+    ///
+    /// `ExprScopes` — 466 lines with `scope_for`, `scope_chain` and
+    /// `entries` — was built for exactly this and had one caller,
+    /// hir-ty's unused-variable check. The resolver a `SemanticsScope`
+    /// hands out is `Resolver::for_file`, which has no expression scope
+    /// in it at all, so `names_in_scope` answered with the file's
+    /// top-level names and nothing else: completion inside a function
+    /// offered no local, no parameter and no `let`.
+    pub(crate) fn local_names_at(
+        &self,
+        db: &dyn salsa::Database,
+        file: base_db::FileText,
+        offset: usize,
+    ) -> Vec<hir_def::Name> {
+        let Some(BodyOrSig::Body { body, source_map, .. }) = &self.body_or_sig else {
+            return Vec::new();
+        };
+        let scopes = hir_def::source_order::bindings::body_scopes(db, file, body, offset);
+        // The scope of the expression *nearest before* the cursor, not the
+        // tightest one containing it. Half-typed text is often not an
+        // expression the lowering kept a span for, and the tightest
+        // container is then the whole block — whose scope is the root, so
+        // every `let` in it is invisible. rust-analyzer's
+        // `scope_for_offset` picks the closest preceding node for the same
+        // reason.
+        let mut best: Option<(usize, usize, hir_def::expr_store::scope::ScopeId)> = None;
+        for (expr, scope) in scopes.scope_by_expr().iter() {
+            let Some(span) = source_map.expr_syntax(expr) else { continue };
+            if span.start > offset {
+                continue;
+            }
+            let width = span.end.saturating_sub(span.start);
+            if best.is_none_or(|(bs, bw, _)| (span.start, width) > (bs, bw)) {
+                best = Some((span.start, width, *scope));
+            }
+        }
+        let Some((_, _, scope)) = best else { return Vec::new() };
+        let mut out = Vec::new();
+        for scope in scopes.scope_chain(Some(scope)) {
+            for entry in scopes.entries(scope) {
+                out.push(entry.name().clone());
+            }
+        }
+        out
+    }
+
     /// Access the inference result, if available.
     pub(crate) fn infer(&self) -> Option<&InferenceResult> {
         match &self.body_or_sig {
@@ -97,7 +166,7 @@ impl SourceAnalyzer {
     }
 
     /// Access the body (None if at module level).
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     pub(crate) fn body(&self) -> Option<&Body> {
         match &self.body_or_sig {
             Some(BodyOrSig::Body { body, .. }) => Some(body),
@@ -114,7 +183,7 @@ impl SourceAnalyzer {
     }
 }
 
-#[allow(dead_code)] // TODO: G-7 infrastructure, will be consumed by Semantics queries
+#[expect(dead_code)] // TODO: G-7 infrastructure, will be consumed by Semantics queries
 impl SourceAnalyzer {
     /// Map a byte offset to the nearest ExprId in the body.
     pub(crate) fn expr_id(&self, offset: usize) -> Option<ExprId> {
@@ -163,20 +232,21 @@ impl SourceAnalyzer {
     /// namespace first, then type namespace.
     pub(crate) fn resolve_path(
         &self,
-        db: &dyn hir_def::db::DefDatabase,
+        db: &dyn salsa::Database,
+        file_text: base_db::FileText,
         name: &str,
     ) -> Option<crate::PathResolution> {
         let resolver = self.make_resolver();
         // — try value namespace first, then type namespace.
         if let Some(value_ns) = resolver.resolve_path_in_value_ns(db, name) {
-            return Some(crate::PathResolution::from_value_ns(value_ns));
+            return Some(crate::PathResolution::from_value_ns(db, file_text, value_ns));
         }
         if let Some(type_ns) = resolver.resolve_path_in_type_ns(db, name) {
-            return Some(crate::PathResolution::from_type_ns(type_ns));
+            return Some(crate::PathResolution::from_type_ns(db, file_text, type_ns));
         }
         // Check if it's a type variable ('n, 'm, etc.)
         if name.starts_with('\'') {
-            return Some(crate::PathResolution::TypeParam(crate::GenericParam {
+            return Some(crate::PathResolution::TypeVar(crate::TypeVar {
                 name: hir_def::Name::new(name),
             }));
         }
@@ -186,7 +256,7 @@ impl SourceAnalyzer {
     /// Resolve a name in the type namespace only.
     pub(crate) fn resolve_path_in_type_ns(
         &self,
-        db: &dyn hir_def::db::DefDatabase,
+        db: &dyn salsa::Database,
         name: &str,
     ) -> Option<hir_def::resolver::TypeNs> {
         self.make_resolver().resolve_path_in_type_ns(db, name)
@@ -197,7 +267,7 @@ impl SourceAnalyzer {
     /// Takes `db` ().
     pub(crate) fn resolve_path_in_value_ns(
         &self,
-        db: &dyn hir_def::db::DefDatabase,
+        db: &dyn salsa::Database,
         name: &str,
     ) -> Option<hir_def::resolver::ValueNs> {
         self.make_resolver().resolve_path_in_value_ns(db, name)
@@ -209,8 +279,8 @@ impl SourceAnalyzer {
         self.make_resolver().resolve_name(name)
     }
 
-    /// Returns the DefId of the struct field definition.
-    pub(crate) fn resolve_field(&self, expr_id: ExprId) -> Option<hir_def::ModuleDefId> {
+    /// Returns the DefIdx of the struct field definition.
+    pub(crate) fn resolve_field(&self, expr_id: ExprId) -> Option<hir_def::DefId> {
         self.infer()?.field_resolutions.get(&expr_id).copied()
     }
 
@@ -226,7 +296,7 @@ impl SourceAnalyzer {
     pub(crate) fn resolve_field_or_method(
         &self,
         expr_id: ExprId,
-    ) -> Option<Either<hir_def::ModuleDefId, (hir_def::item_id::FunctionId, base_db::FileId)>> {
+    ) -> Option<Either<hir_def::DefId, (hir_def::item_id::FunctionId, base_db::FileId)>> {
         if let Some(field) = self.infer()?.field_resolutions.get(&expr_id) {
             return Some(Either::Left(*field));
         }

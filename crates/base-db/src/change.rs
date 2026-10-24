@@ -55,21 +55,32 @@ impl FileChange {
     /// All file text and source root changes are applied atomically
     /// within a single salsa revision bump.
     pub fn apply(self, db: &mut dyn crate::SourceDatabase) {
-        // Apply source root changes inline.
+        // Roots first: a file's text durability is read off the root it
+        // belongs to, so the classification has to be in the database before
+        // any text is written against it.
         if let Some(roots) = self.roots {
             for (idx, root) in roots.into_iter().enumerate() {
+                let root_id = crate::input::SourceRootId(idx as u32);
                 let durability = crate::input::source_root_durability(&root);
-                db.set_source_root_with_durability(
-                    crate::input::SourceRootId(idx as u32),
-                    Arc::new(root),
-                    durability,
-                );
+                for file_id in root.iter() {
+                    db.set_file_source_root_with_durability(file_id, root_id, durability);
+                }
+                db.set_source_root_with_durability(root_id, Arc::new(root), durability);
             }
         }
-        // Apply file text changes.
+        // Durability is a property of the file's source root and is decided
+        // here, once. It used to be decided by whichever code path produced
+        // the text — an editor buffer, a disk read, a CLI corpus loader —
+        // each naming a `Durability` constant of its own, and one of the
+        // three had it backwards for every workspace file.
         for (file_id, text) in self.files_changed {
             let text = text.unwrap_or_default();
-            db.set_file_text(file_id, &text);
+            let durability = db
+                .source_root_id_of(file_id)
+                .and_then(|id| db.source_root_data(id))
+                .map(|root| crate::input::file_text_durability(&root))
+                .unwrap_or(crate::Durability::LOW);
+            db.set_file_text_with_durability(file_id, &text, durability);
         }
     }
 

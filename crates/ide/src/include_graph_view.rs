@@ -5,7 +5,7 @@
 //! with transitive closure information.
 
 use base_db::FileId;
-use hir_def::include_graph::IncludeGraph;
+use hir::include_graph::IncludeGraph;
 use std::collections::HashMap;
 
 /// Render the include graph as readable text.

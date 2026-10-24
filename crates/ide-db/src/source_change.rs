@@ -11,19 +11,21 @@ use crate::text_edit::TextEdit;
 /// ```text
 /// pub struct SourceChange {
 ///     pub source_file_edits: IntMap<FileId, (TextEdit, Option<SnippetEdit>)>,
-///     pub file_system_edits: Vec<FileSystemEdit>,
 ///     pub is_snippet: bool,
 /// }
 /// ```
 ///
-/// Simplified for Sail (no snippet edits, no annotations).
+/// `file_system_edits` is not here: rust-analyzer produces one when a
+/// rename moves a file, which happens because a Rust module's name *is*
+/// its file's name. Sail has no definition whose rename moves a file, so
+/// the field had no producer and could not get one.
 #[derive(Clone, Debug, Default)]
 pub struct SourceChange {
     /// Per-file text edits.
     pub source_file_edits: HashMap<FileId, Vec<TextEdit>>,
-    /// File system operations (create, move, delete).
-    pub file_system_edits: Vec<FileSystemEdit>,
-    /// Whether the edits contain snippet placeholders.
+    /// Whether any edit's text is a snippet — `$0` where the cursor
+    /// should land, `${1:name}` for something to type over. A client that
+    /// cannot expand those gets them stripped.
     pub is_snippet: bool,
 }
 
@@ -38,12 +40,20 @@ impl SourceChange {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.source_file_edits.is_empty() && self.file_system_edits.is_empty()
+        self.source_file_edits.is_empty()
     }
 }
 
 impl SourceChange {
     /// Construct a `SourceChange` from a single-file edit.
+    /// No caller, and kept.
+    ///
+    /// Every quick fix today edits the file its diagnostic is in, so the
+    /// fourteen call sites use `from_text_edit` and let the conversion
+    /// supply the file. This is the constructor a fix that edits a
+    /// *different* file needs — `SourceChange` exists to carry several —
+    /// and deleting it would leave the wrong one as the only one. Wired
+    /// when the first such fix arrives, not before.
     pub fn from_file_edit(file_id: FileId, edit: TextEdit) -> Self {
         let mut change = Self::new();
         change.insert_source_edit(file_id, vec![edit]);
@@ -93,6 +103,28 @@ impl SourceChangeBuilder {
         self.edits.push(TextEdit { range, new_text: text.into() });
     }
 
+    /// Insert a snippet at an offset — text that may carry `$0` for
+    /// where the cursor should land, or `${1:name}` for something to type
+    /// over.
+    ///
+    /// This is rust-analyzer's `insert_snippet`, and the reason its
+    /// generate-* assists leave you where you have to type next. Nothing
+    /// here set `SourceChange::is_snippet`, so nothing could.
+    pub fn insert_snippet(&mut self, offset: usize, snippet: impl Into<String>) {
+        self.source_change.is_snippet = true;
+        self.insert(offset, snippet);
+    }
+
+    /// Replace a range with a snippet. RA's `replace_snippet`.
+    pub fn replace_snippet(
+        &mut self,
+        range: crate::line_index::TextRange,
+        snippet: impl Into<String>,
+    ) {
+        self.source_change.is_snippet = true;
+        self.replace(range, snippet);
+    }
+
     /// Finish building and produce the `SourceChange`.
     pub fn finish(mut self) -> SourceChange {
         if !self.edits.is_empty() {
@@ -102,16 +134,53 @@ impl SourceChangeBuilder {
     }
 }
 
-/// A file system operation.
-#[derive(Clone, Debug)]
-pub enum FileSystemEdit {
-    /// Create a new file.
-    CreateFile {
-        /// Anchor file (the new file is created relative to this).
-        anchor: FileId,
-        /// Destination path (relative to anchor).
-        dst: String,
-    },
-    /// Move/rename a file.
-    MoveFile { src: FileId, dst: String },
+impl SourceChangeBuilder {
+    /// An editor over the tree `node` belongs to.
+    ///
+    /// rust-analyzer's assists edit the tree and let this turn the result
+    /// into text; sixty-four handlers here formatted strings and computed
+    /// offsets by hand, while `SyntaxEditor`, `SyntaxFactory`, `ast::make`
+    /// and `ted` — 2,676 lines between them — had no caller outside the
+    /// `syntax` crate. This is the bridge that was missing.
+    pub fn make_editor(&self, node: &syntax::SyntaxNode) -> syntax::syntax_editor::SyntaxEditor {
+        syntax::syntax_editor::SyntaxEditor::new(
+            node.ancestors().last().unwrap_or_else(|| node.clone()),
+        )
+        .0
+    }
+
+    /// Apply an editor's changes as a text edit.
+    ///
+    /// The narrowest replacement that turns the old text into the new one:
+    /// the trees differ somewhere in the middle, and sending the whole file
+    /// back would move every cursor and fold in the editor.
+    pub fn add_file_edits(&mut self, editor: syntax::syntax_editor::SyntaxEditor) {
+        let edit = editor.finish();
+        let old = edit.old_root().to_string();
+        let new = edit.new_root().to_string();
+        if old == new {
+            return;
+        }
+        let prefix = old.bytes().zip(new.bytes()).take_while(|(a, b)| a == b).count();
+        let max_suffix = old.len().min(new.len()) - prefix;
+        let suffix = old
+            .bytes()
+            .rev()
+            .zip(new.bytes().rev())
+            .take_while(|(a, b)| a == b)
+            .count()
+            .min(max_suffix);
+        // Byte offsets have to land on character boundaries.
+        let mut start = prefix;
+        while !old.is_char_boundary(start) || !new.is_char_boundary(start) {
+            start -= 1;
+        }
+        let mut old_end = old.len() - suffix;
+        let mut new_end = new.len() - suffix;
+        while !old.is_char_boundary(old_end) || !new.is_char_boundary(new_end) {
+            old_end += 1;
+            new_end += 1;
+        }
+        self.replace(base_db::text_range(start, old_end), new[start..new_end].to_owned());
+    }
 }

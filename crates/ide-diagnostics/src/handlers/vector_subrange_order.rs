@@ -3,7 +3,7 @@
 //! Triggered when vector subrange indices violate the default bitvector order.
 
 use crate::Diagnostic;
-use hir_def::diagnostics::DiagnosticCode;
+use hir::diagnostics::DiagnosticCode;
 
 use crate::{DiagnosticsContext, VectorSubrangeOrder};
 
@@ -13,10 +13,17 @@ pub(crate) fn vector_subrange_order(
 ) -> Diagnostic {
     Diagnostic::new(
         DiagnosticCode::SailError("type-error"),
+        // Upstream's own words (`type_error.ml:301-315`): "First index 5
+        // must be greater than or equal to second index 7 (when default
+        // Order dec)".
         format!(
-            "first index {} must be {} second index {} ({})",
+            "First index {} must be {} second index {} (when {})",
             d.first,
-            if d.order_desc.contains("dec") { ">=" } else { "<=" },
+            if d.order_desc.contains("dec") {
+                "greater than or equal to"
+            } else {
+                "less than or equal to"
+            },
             d.second,
             d.order_desc,
         ),
@@ -39,6 +46,6 @@ mod tests {
         });
         let d = check_dispatch(&diag);
         assert!(d.is_some());
-        assert!(d.unwrap().message.contains("first index"));
+        assert!(d.unwrap().message.contains("First index"));
     }
 }

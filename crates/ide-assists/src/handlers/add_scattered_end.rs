@@ -25,7 +25,7 @@ pub(crate) fn add_scattered_end(acc: &mut Assists, ctx: &AssistContext<'_>) -> O
 
     // Find a ScatteredHead at cursor position
     for &id in item_tree.top_level_items() {
-        if id.item_kind(item_tree) != hir_def::item_tree::ItemKind::ScatteredHead {
+        if id.def_kind(item_tree) != hir::DefKind::ScatteredHead {
             continue;
         }
         let id_span = id.span(item_tree);
@@ -37,7 +37,7 @@ pub(crate) fn add_scattered_end(acc: &mut Assists, ctx: &AssistContext<'_>) -> O
 
         // Check if `end name` already exists in the file
         let has_end = item_tree.top_level_items().iter().any(|eid| {
-            eid.item_kind(item_tree) == hir_def::item_tree::ItemKind::EndMarker
+            eid.def_kind(item_tree) == hir::DefKind::EndMarker
                 && eid.name(item_tree).as_str() == name
         });
         if has_end {
@@ -79,10 +79,11 @@ mod tests {
     use expect_test::expect;
     use ide_db::test_utils::TestFile;
 
-    fn check_assist(before: &str, cursor: usize, expected: expect_test::Expect) {
+    fn check_assist_local(before: &str, cursor: usize, expected: expect_test::Expect) {
         let file = TestFile::new(before);
-        let ctx = AssistContext::new(&file, base_db::text_range(cursor, cursor));
-        let mut acc = Assists::new();
+        let cfg = crate::AssistConfig::default();
+        let ctx = AssistContext::new(&cfg, &file, base_db::text_range(cursor, cursor));
+        let mut acc = Assists::new(base_db::FileId::from_raw(0));
         add_scattered_end(&mut acc, &ctx);
         let assists = acc.finish();
         if assists.is_empty() {
@@ -96,11 +97,11 @@ mod tests {
     #[test]
     fn adds_end_for_scattered_without_end() {
         let src = "scattered function execute\nfunction clause execute(x) = x\n";
-        check_assist(src, 5, expect!["Add `end execute`"]);
+        check_assist_local(src, 5, expect!["Add `end execute`"]);
     }
 
     #[test]
     fn no_assist_for_non_scattered() {
-        check_assist("function foo(x) = x\n", 5, expect!["(no assist)"]);
+        check_assist_local("function foo(x) = x\n", 5, expect!["(no assist)"]);
     }
 }

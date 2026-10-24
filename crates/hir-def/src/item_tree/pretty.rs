@@ -2,7 +2,7 @@
 
 use std::fmt::Write;
 
-use super::{ItemTree, ModItem};
+use super::{DefItem, ItemTree};
 
 /// Render an ItemTree to a human-readable string for debugging.
 ///
@@ -15,8 +15,8 @@ pub fn print_item_tree(tree: &ItemTree) -> String {
     buf
 }
 
-fn print_mod_item(buf: &mut String, tree: &ItemTree, item: ModItem) {
-    let kind = item.item_kind(tree);
+fn print_mod_item(buf: &mut String, tree: &ItemTree, item: DefItem) {
+    let kind = item.def_kind(tree);
     let name = item.name(tree);
     let sig = item.signature(tree);
     writeln!(buf, "{kind:?} {name}: {sig}").unwrap();

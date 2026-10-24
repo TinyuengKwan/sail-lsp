@@ -2,31 +2,34 @@
 
 use crate::assist_context::{AssistContext, AssistId, AssistKind, Assists};
 use ide_db::text_edit::TextEdit;
+use parser::SyntaxKind as SK;
 
 pub(crate) fn convert_comment_block(acc: &mut Assists, ctx: &AssistContext<'_>) -> Option<()> {
     let text = ctx.source_text();
     let offset = ctx.offset();
 
-    // Determine what kind of comment the cursor is in.
-    if is_in_line_comment(text, offset) {
-        convert_line_to_block(acc, ctx, text, offset)
-    } else if is_in_block_comment(text, offset) {
-        convert_block_to_line(acc, ctx, text, offset)
-    } else {
-        None
+    // The comment token the cursor is in, if it is in one.
+    //
+    // This used to ask whether the cursor's line starts with `//` — true
+    // inside a multi-line string whose line does — and, for block
+    // comments, whether *any* `/*` appeared earlier in the file and *any*
+    // `*/` later, which is true of ordinary code sitting between two
+    // block comments. A comment is a token; the parser already found it.
+    let kind = ctx.source_file().and_then(|root| {
+        root.descendants_with_tokens()
+            .filter_map(|el| el.into_token())
+            .find(|t| {
+                matches!(t.kind(), SK::LINE_COMMENT | SK::BLOCK_COMMENT)
+                    && usize::from(t.text_range().start()) <= offset
+                    && offset < usize::from(t.text_range().end())
+            })
+            .map(|t| t.kind())
+    })?;
+
+    match kind {
+        SK::LINE_COMMENT => convert_line_to_block(acc, ctx, text, offset),
+        _ => convert_block_to_line(acc, ctx, text, offset),
     }
-}
-
-fn is_in_line_comment(text: &str, offset: usize) -> bool {
-    // Walk backward to start of line
-    let line_start = text[..offset].rfind('\n').map_or(0, |p| p + 1);
-    let line = text[line_start..].trim_start();
-    line.starts_with("//")
-}
-
-fn is_in_block_comment(text: &str, offset: usize) -> bool {
-    // Walk backward for "/*"
-    text[..offset].rfind("/*").is_some() && text[offset..].find("*/").is_some()
 }
 
 fn convert_line_to_block(
@@ -154,11 +157,43 @@ fn convert_block_to_line(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::check_assist;
+    use crate::tests::{check_assist, check_assist_not_applicable};
+    use expect_test::expect;
 
     #[test]
-    fn smoke() {
-        let labels = check_assist(convert_comment_block, "// hello\n", 0);
-        let _ = labels;
+    fn applies() {
+        check_assist(
+            convert_comment_block,
+            "// hel$0lo\nfunction f() = 1\n",
+            expect![[r#"
+            /* hello */
+            function f() = 1
+        "#]],
+        );
+    }
+
+    /// A line inside a *block* comment that happens to start with `//`
+    /// was taken for a line comment, and converted the wrong way.
+    #[test]
+    fn a_line_starting_with_slashes_inside_a_block_comment() {
+        check_assist(
+            convert_comment_block,
+            "/* one\n// t$0wo\n*/\nfunction f() = 1\n",
+            expect![[r#"
+            // one
+            // // two
+            function f() = 1
+        "#]],
+        );
+    }
+
+    /// Ordinary code between two block comments was reported as being
+    /// inside one, because a `/*` appeared earlier and a `*/` later.
+    #[test]
+    fn code_between_two_block_comments_is_not_in_one() {
+        check_assist_not_applicable(
+            convert_comment_block,
+            "/* a */\nfunction f$0() = 1\n/* b */\n",
+        );
     }
 }

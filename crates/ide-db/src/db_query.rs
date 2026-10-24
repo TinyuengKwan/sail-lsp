@@ -11,8 +11,32 @@ use std::sync::Arc;
 use base_db::FileText;
 use syntax::parse_query::parsed_file;
 
-use crate::symbol_index::build_signature_index_from_parsed;
+use crate::signatures::build_signature_index_from_parsed;
 use crate::CallableSignature;
+
+/// The file's `ParsedFile`, with the local bindings the CST lowering does not
+/// record.
+///
+/// `syntax::parse_query::parsed_file` sees only what the CST carries;
+/// let/var/parameter bindings live in the `Body` arenas. Hover and
+/// find-references resolve a local name through `ParsedFile::decls`, so
+/// without this step neither can say anything about a local.
+///
+/// The enrichment existed but had no caller outside a test helper, so the
+/// server never got it — only tests did, which made hover on a local look
+/// like it worked.
+#[salsa::tracked(returns(ref))]
+pub fn enriched_parsed_file(
+    db: &dyn salsa::Database,
+    input: FileText,
+) -> Option<Arc<syntax::parser_lower::ParsedFile>> {
+    let base = parsed_file(db, input).as_ref()?.0.as_ref().clone();
+    let mut parsed = base;
+    if let Some(bodies) = hir::def_query::callable_bodies(db, input).as_ref() {
+        crate::helpers::enrich_parsed_with_local_bindings(&mut parsed, &bodies.0);
+    }
+    Some(Arc::new(parsed))
+}
 
 /// Salsa tracked function: build the per-file signature index.
 ///
@@ -37,34 +61,37 @@ pub fn signature_index(
     }
 }
 
-/// Per-file reference counts via salsa.
-/// Counts symbol reference occurrences from ParsedFile.
+/// How many times each name is called in this file.
+///
+/// From the callgraph, which is built out of the lowered bodies. Counting
+/// every value-position name in the flat scrape instead meant a shadowing
+/// local and the top-level function it hides were one number.
 #[salsa::tracked(returns(ref))]
 pub fn ref_counts(db: &dyn salsa::Database, input: FileText) -> Arc<HashMap<String, usize>> {
-    let pf = parsed_file(db, input);
     let mut counts = HashMap::new();
-    if let Some(pf) = pf.as_ref() {
-        for occ in &pf.0.symbol_occurrences {
-            if occ.kind == syntax::parser_lower::SymbolOccurrenceKind::Value && occ.role.is_none()
-            // references only, not declarations
-            {
-                *counts.entry(occ.name.clone()).or_insert(0) += 1;
-            }
+    if let Some(bodies) = hir::def_query::callable_bodies(db, input).as_ref() {
+        let graph = hir::callgraph::CallGraph::from_callable_bodies(&bodies.0);
+        for site in graph.call_sites_in_file() {
+            *counts.entry(site.callee.clone()).or_insert(0) += 1;
         }
     }
     Arc::new(counts)
 }
 
-/// Per-file implementation counts via salsa.
-/// Counts function clause/implementation occurrences.
+/// How many definitions each name has in this file.
+///
+/// A `function clause` of a scattered definition counts: it is one of the
+/// implementations the code lens is reporting.
 #[salsa::tracked(returns(ref))]
 pub fn impl_counts(db: &dyn salsa::Database, input: FileText) -> Arc<HashMap<String, usize>> {
-    let pf = parsed_file(db, input);
     let mut counts = HashMap::new();
-    if let Some(pf) = pf.as_ref() {
-        for occ in &pf.0.symbol_occurrences {
-            if occ.role == Some(syntax::parser_lower::DeclRole::Definition) {
-                *counts.entry(occ.name.clone()).or_insert(0) += 1;
+    if let Some(tree) = hir::def_query::file_item_tree(db, input).as_ref() {
+        for &id in tree.top_level_items() {
+            if matches!(
+                id.def_kind(tree),
+                hir::DefKind::Function | hir::DefKind::Mapping | hir::DefKind::ScatteredClause
+            ) {
+                *counts.entry(id.name(tree).to_string()).or_insert(0) += 1;
             }
         }
     }
@@ -136,4 +163,94 @@ mod tests {
         let r2 = line_index(&db, input);
         assert!(Arc::ptr_eq(r1, r2), "should be memoized");
     }
+}
+
+/// The symbols one file declares, calls and implements.
+///
+/// rust-analyzer's symbol index is a salsa query — `file_symbols` per file,
+/// merged per source root. Ours was a `HashMap` in `GlobalState`, updated by
+/// hand from a dirty-file list and deep-cloned on every batch: 8.9 ms on
+/// sail-riscv, on the main loop's thread, after every settled edit.
+#[salsa::tracked(returns(ref))]
+pub fn file_symbols(
+    db: &dyn salsa::Database,
+    input: FileText,
+) -> Arc<crate::symbol_index::FileSymbols> {
+    let file_id = input.file_id(db);
+    Arc::new(crate::symbol_index::FileSymbols::of(db, file_id, input))
+}
+
+/// The workspace's symbol index, merged from every file's symbols.
+///
+/// Equality is a fingerprint over the per-file results' identities, not a
+/// comparison of the merged map: an unchanged file's `file_symbols` is
+/// verified rather than re-executed, so its `Arc` is the same one, and
+/// hashing 158 pointers is what tells the merge it can be reused.
+#[derive(Clone, Debug)]
+pub struct ArcSymbolIndex(pub Arc<crate::symbol_index::SymbolIndex>, u64);
+
+impl PartialEq for ArcSymbolIndex {
+    fn eq(&self, other: &Self) -> bool {
+        self.1 == other.1
+    }
+}
+impl Eq for ArcSymbolIndex {}
+impl std::hash::Hash for ArcSymbolIndex {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.1.hash(state);
+    }
+}
+
+#[salsa::tracked(returns(ref))]
+pub fn workspace_symbol_index(
+    db: &dyn salsa::Database,
+    ws: base_db::WorkspaceFiles,
+) -> ArcSymbolIndex {
+    use std::hash::{Hash, Hasher};
+
+    let mut index = crate::symbol_index::SymbolIndex::new();
+    let mut hasher = rustc_hash::FxHasher::default();
+    for &ft in ws.file_texts(db) {
+        let symbols = file_symbols(db, ft);
+        std::ptr::hash(Arc::as_ptr(symbols), &mut hasher);
+        ft.file_id(db).hash(&mut hasher);
+        index.insert_file(ft.file_id(db), symbols);
+    }
+    ArcSymbolIndex(Arc::new(index), hasher.finish())
+}
+
+#[salsa::tracked(returns(ref))]
+fn visible_file_symbols(
+    db: &dyn salsa::Database,
+    file: FileText,
+    from: base_db::FileId,
+) -> Arc<crate::symbol_index::FileSymbols> {
+    let mut symbols = (**file_symbols(db, file)).clone();
+    symbols
+        .entries
+        .retain(|entry| hir::visibility::symbol_visible_from(db, from, file, &entry.name));
+    Arc::new(symbols)
+}
+
+/// Position-based navigation sees the same module scope as inference.
+/// Workspace-wide symbol search intentionally retains its global index.
+#[salsa::tracked(returns(ref))]
+pub fn visible_symbol_index(
+    db: &dyn salsa::Database,
+    ws: base_db::WorkspaceFiles,
+    from: base_db::FileId,
+) -> ArcSymbolIndex {
+    use std::hash::{Hash, Hasher};
+    let mut index = crate::symbol_index::SymbolIndex::new();
+    let mut hasher = rustc_hash::FxHasher::default();
+    for &file in ws.file_texts(db) {
+        if !base_db::module_graph::can_reference_file(db, from, file.file_id(db)) {
+            continue;
+        }
+        let symbols = visible_file_symbols(db, file, from);
+        std::ptr::hash(Arc::as_ptr(symbols), &mut hasher);
+        file.file_id(db).hash(&mut hasher);
+        index.insert_file(file.file_id(db), symbols);
+    }
+    ArcSymbolIndex(Arc::new(index), hasher.finish())
 }

@@ -5,7 +5,7 @@
 //! Fix: add effect annotation to the function signature.
 
 use crate::Diagnostic;
-use hir_def::diagnostics::{DiagnosticCode, Severity};
+use hir::diagnostics::{DiagnosticCode, Severity};
 use ide_db::assists::Assist;
 
 use crate::{DiagnosticsContext, MissingEffectAnnotation};

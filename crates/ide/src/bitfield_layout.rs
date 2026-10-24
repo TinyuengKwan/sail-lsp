@@ -174,20 +174,11 @@ pub fn render_bitfield_layout(fields: &[BitfieldField]) -> String {
     lines.join("\n")
 }
 
-/// Get bitfield layout for a named bitfield from the ItemTree.
-pub fn bitfield_layout_for_name(file: &dyn ide_db::FileDb, name: &str) -> Option<String> {
-    let tree = file.item_tree()?;
-    let id = tree.top_level_items().iter().find(|id| {
-        id.item_kind(tree) == hir_def::item_tree::ItemKind::Bitfield
-            && id.name(tree).as_str() == name
-    })?;
-
-    let fields = parse_bitfield_fields(id.signature(tree));
-    if fields.is_empty() {
-        return None;
-    }
-    Some(render_bitfield_layout(&fields))
-}
+// There is no `bitfield_layout_for_name`. It looked a bitfield up by name
+// in the item tree and rendered it; hover reaches `parse_bitfield_fields`
+// and `render_bitfield_layout` directly, with the definition text it
+// already has. A by-name entry point with no caller is a third way to ask
+// the same question.
 
 #[cfg(test)]
 mod tests {

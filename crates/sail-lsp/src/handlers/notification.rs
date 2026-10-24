@@ -37,20 +37,11 @@ pub(crate) fn handle_did_change_text_document(
     let uri = params.text_document.uri;
 
     if let Some(doc) = state.mem_docs.get_mut(&uri) {
-        for change in &params.content_changes {
-            if let Some(range) = &change.range {
-                let start = line_col_to_offset(&doc.data, range.start);
-                let end = line_col_to_offset(&doc.data, range.end);
-                doc.data.replace_range(start..end, &change.text);
-            } else {
-                doc.data = change.text.clone();
-            }
-        }
+        doc.apply_changes(&params.content_changes);
         doc.version = params.text_document.version;
 
         let text = doc.data.clone();
         state.sync_to_salsa(&uri, &text);
-        state.index_dirty_files.push(uri);
     }
     Ok(())
 }
@@ -59,14 +50,51 @@ pub(crate) fn handle_did_close_text_document(
     state: &mut GlobalState,
     params: DidCloseTextDocumentParams,
 ) -> anyhow::Result<()> {
-    state.mem_docs.remove(&params.text_document.uri);
+    let uri = params.text_document.uri;
+    state.mem_docs.remove(&uri);
+
+    // The buffer stops being authoritative here, so what salsa holds goes
+    // back to the file's own text — rust-analyzer invalidates the path in
+    // its loader for exactly this (`notification.rs:148`). Without it the
+    // last unsaved edit stayed in the database for the rest of the session:
+    // a closed file kept reporting errors from text that exists nowhere,
+    // and every *other* file resolved against it too.
+    //
+    // After `mem_docs.remove`, so the open-document rule lets the write
+    // through.
+    state.restore_disk_text(&uri);
+
+    // A closed document's cached semantic tokens describe a buffer nobody
+    // is looking at. rust-analyzer removes them here (`notification.rs:145`).
+    state.semantic_tokens_cache.invalidate(&uri);
+
+    // A file the workspace does not contain has no reason to keep
+    // reporting once the editor stops showing it. `clear_native_for` says
+    // in its own doc that it is "used when a file is closed" and carried
+    // an `#[expect(dead_code)]`: nothing cleared anything, so a scratch
+    // file opened, diagnosed and closed left its errors in the problems
+    // panel for the rest of the session.
+    //
+    // A workspace file keeps them, which is rust-analyzer's rule and the
+    // useful one: errors in files you are not looking at are the reason
+    // that panel exists.
+    let in_workspace =
+        state.workspace_folders.iter().any(|folder| uri.as_str().starts_with(folder.as_str()));
+    if !in_workspace {
+        let file_id = state.vfs.file_id_for_url(&uri);
+        state.diagnostics.clear_native_for(file_id);
+    }
     Ok(())
 }
 
 pub(crate) fn handle_did_save_text_document(
-    _state: &mut GlobalState,
+    state: &mut GlobalState,
     _params: DidSaveTextDocumentParams,
 ) -> anyhow::Result<()> {
+    // On save, as rust-analyzer runs `cargo check` on save: upstream
+    // re-reads whole files from disk, so running it against a buffer the
+    // editor has not written would report the previous save.
+    state.request_flycheck();
     Ok(())
 }
 
@@ -87,9 +115,16 @@ pub(crate) fn handle_did_change_watched_files(
                 if is_sail || is_project_file {
                     needs_reload = true;
                 }
+                if !is_sail {
+                    continue;
+                }
                 if let Ok(path) = change.uri.to_file_path() {
                     if let Ok(text) = std::fs::read_to_string(&path) {
-                        state.sync_disk_file(uri, &text);
+                        // A path can be "created" while the editor already
+                        // holds it — `git checkout` of a deleted file, or a
+                        // watcher that reports the first write of a buffer
+                        // saved to a new name. The buffer still wins.
+                        state.sync_disk_text(uri, &text);
                     }
                 }
             }
@@ -97,6 +132,10 @@ pub(crate) fn handle_did_change_watched_files(
                 // .sail_project changes always trigger reload.
                 if is_project_file {
                     needs_reload = true;
+                    continue;
+                }
+                if !is_sail {
+                    continue;
                 }
                 // Skip excluded files.
                 if let Ok(path) = change.uri.to_file_path() {
@@ -105,20 +144,21 @@ pub(crate) fn handle_did_change_watched_files(
                         continue;
                     }
                 }
-                // (main_loop.rs:932): `if !self.mem_docs.contains(&path)`.
                 // Open files have authoritative in-memory content from
                 // didChange; disk changes would overwrite unsaved edits.
-                if !state.mem_docs.contains(uri) {
-                    if let Ok(path) = change.uri.to_file_path() {
-                        if let Ok(text) = std::fs::read_to_string(&path) {
-                            state.sync_disk_file(uri, &text);
-                            state.index_dirty_files.push(uri.clone());
-                        }
+                // The rule used to be written out here and nowhere else,
+                // which is how the other three disk paths came to break it.
+                if let Ok(path) = change.uri.to_file_path() {
+                    if let Ok(text) = std::fs::read_to_string(&path) {
+                        state.sync_disk_text(uri, &text);
                     }
                 }
             }
             FileChangeType::DELETED if (is_sail || is_project_file) => {
                 needs_reload = true;
+                if is_sail {
+                    state.sync_disk_text(uri, "");
+                }
             }
             _ => {}
         }
@@ -148,35 +188,69 @@ pub(crate) fn handle_did_change_configuration(
     state: &mut GlobalState,
     params: DidChangeConfigurationParams,
 ) -> anyhow::Result<()> {
-    let new_config = crate::config::SailLspConfig::from_json(&params.settings);
-    // Update_configuration handles diff detection and triggers
-    // workspace reload if necessary (reload.rs:92).
-    state.update_configuration(new_config);
-    state.log_message(
-        MessageType::INFO,
-        format!(
-            "Configuration updated: diagnostics={}, z3_timeout={}ms",
-            state.config.diagnostics.enable, state.config.z3.timeout_ms
-        ),
+    // A client that cannot answer `workspace/configuration` has nothing to
+    // pull from, and its `settings` are all there is.
+    // `workspace_configuration_support` is what says which — it had no
+    // caller, so the request went out either way and a client without the
+    // capability would answer with an error and keep its old settings.
+    if !state.client_caps.workspace_configuration_support() {
+        state.update_configuration(crate::config::SailLspConfig::from_json(&params.settings));
+        return Ok(());
+    }
+    // Otherwise the parameters are meaningless — the protocol says so
+    // (microsoft/language-server-protocol#676) and clients act on it: VS
+    // Code sends `null`. Reading them, which is what this did, meant a
+    // settings change reached the server as an empty config or not at all.
+    // Ask for the settings instead.
+    state.send_request::<lsp_types::request::WorkspaceConfiguration>(
+        lsp_types::ConfigurationParams {
+            items: vec![lsp_types::ConfigurationItem {
+                scope_uri: None,
+                section: Some("sail-lsp".to_owned()),
+            }],
+        },
+        |state, response| {
+            match (response.error, response.result) {
+                (Some(err), _) => {
+                    log::error!("failed to fetch the server settings: {}", err.message)
+                }
+                (None, Some(json)) => {
+                    // One item asked for, one item back.
+                    let settings = json.get(0).cloned().unwrap_or(json);
+                    let new_config = crate::config::SailLspConfig::from_json(&settings);
+                    state.update_configuration(new_config);
+                    state.log_message(
+                        MessageType::INFO,
+                        format!(
+                            "Configuration updated: diagnostics={}, z3_timeout={}ms",
+                            state.config.diagnostics.enable, state.config.z3.timeout_ms
+                        ),
+                    );
+                }
+                (None, None) => log::error!("empty response to workspace/configuration"),
+            }
+        },
     );
     Ok(())
 }
 
-/// Handle `$/cancelRequest` — cancel an in-flight request.
-///. The actual cancellation is handled by
-/// salsa's `Cancelled` mechanism — we mark the request as cancelled
-/// so the response can be sent with error code `ContentModified`.
+/// Handle `$/cancelRequest` — the client no longer wants an answer.
+///
+/// This used to do nothing, on the reasoning that salsa cancels in-flight
+/// queries. It does — when a new revision lands. A request that is merely
+/// slow is not interrupted by anything, and the client was left waiting
+/// for an answer it had already given up on. The request queue knows which
+/// ids are outstanding, so cancelling one answers it with
+/// `RequestCancelled` as the protocol asks.
 pub(crate) fn handle_cancel(
-    _state: &mut GlobalState,
-    _params: lsp_types::CancelParams,
+    state: &mut GlobalState,
+    params: lsp_types::CancelParams,
 ) -> anyhow::Result<()> {
-    // Cancellation is handled implicitly by salsa: when a new revision
-    // is applied (process_changes), in-flight queries are cancelled.
-    // The RequestDispatcher catches `salsa::Cancelled` and returns
-    // `ErrorCode::ContentModified`.
-    //
-    // `req_queue.incoming.cancel(id)` to mark pending
-    // requests as cancelled. We rely on salsa cancellation instead.
+    let id: lsp_server::RequestId = match params.id {
+        lsp_types::NumberOrString::Number(id) => id.into(),
+        lsp_types::NumberOrString::String(id) => id.into(),
+    };
+    state.cancel(id);
     Ok(())
 }
 
@@ -187,30 +261,26 @@ pub(crate) fn handle_reload_workspace(state: &mut GlobalState, _params: ()) -> a
     Ok(())
 }
 
-/// Type-safe notification check helper — used for early filtering.
-/// Wraps `crate::lsp::utils::notification_is`.
-#[allow(dead_code)]
-pub(crate) fn is_cancel_notification(notif: &lsp_server::Notification) -> bool {
-    crate::lsp::utils::notification_is::<crate::lsp_ext::CancelRequest>(notif)
-}
-
-/// Helper: convert LSP Position (line, character) to byte offset in text.
-fn line_col_to_offset(text: &str, pos: Position) -> usize {
-    let mut line = 0u32;
-    let mut offset = 0;
-    for (i, ch) in text.char_indices() {
-        if line == pos.line {
-            let col_offset = text[i..]
-                .char_indices()
-                .nth(pos.character as usize)
-                .map(|(o, _)| o)
-                .unwrap_or(text.len() - i);
-            return i + col_offset;
-        }
-        if ch == '\n' {
-            line += 1;
-        }
-        offset = i + ch.len_utf8();
+/// `window/workDoneProgress/cancel`: the user pressed the cancel button.
+///
+/// The server sends `window/workDoneProgress/create`, reports under the
+/// token, and — until now — dropped the client's answer when it came back.
+/// `$/cancelRequest` was wired for the same reason and this is its other
+/// half: a progress sequence the user can stop.
+///
+/// The token is checked, not assumed. A client may cancel a token this
+/// server no longer owns, and cancelling whatever happens to be running
+/// would stop the wrong work.
+pub(crate) fn handle_work_done_progress_cancel(
+    state: &mut GlobalState,
+    params: lsp_types::WorkDoneProgressCancelParams,
+) -> anyhow::Result<()> {
+    if state.cancellable_progress.as_ref() != Some(&params.token) {
+        log::debug!("progress cancel for an unknown token: {:?}", params.token);
+        return Ok(());
     }
-    offset
+    // `prime_caches` observes this and ends with `cancelled: true`, which
+    // clears the slot and requeues the work.
+    state.prime_caches_cancel.cancel();
+    Ok(())
 }

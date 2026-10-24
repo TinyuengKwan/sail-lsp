@@ -52,6 +52,7 @@ impl AssistKind {
 /// A single assist (code action).
 #[derive(Clone, Debug)]
 pub struct Assist {
+    pub import: Option<crate::imports::import_assets::ImportRequest>,
     pub id: AssistId,
     /// Short, human-readable label.
     pub label: Label,
@@ -59,13 +60,18 @@ pub struct Assist {
     pub group: Option<GroupLabel>,
     /// The range of source code this assist targets.
     pub target: TextRange,
-    /// The actual code change, if computed.
+    /// The code change this assist applies.
+    ///
+    /// rust-analyzer computes this lazily — the lightbulb only needs the
+    /// label — and leaves it `None` until the client resolves the action.
+    /// There used to be a second field beside it, `edits: Vec<TextEdit>`,
+    /// described as a bridge "until handlers adopt SourceChangeBuilder":
+    /// fifty-seven handlers used the bridge, one used this, and the IDE
+    /// layer read only the bridge. That one assist reached the menu with
+    /// nothing to apply.
     pub source_change: Option<SourceChange>,
     /// Optional command to run after applying (e.g., trigger rename).
     pub command: Option<Command>,
-    /// Direct text edits (Sail bridge — handlers produce these directly).
-    /// Will be migrated to `source_change` as handlers adopt SourceChangeBuilder.
-    pub edits: Vec<crate::text_edit::TextEdit>,
 }
 
 /// Label for an assist.

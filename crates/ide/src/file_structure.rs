@@ -1,92 +1,160 @@
-//! File structure — document outline / breadcrumbs.
-//! We use the same pattern for consistency.
+//! File structure — the document outline.
+//!
+//! rust-analyzer's placement: `ide/src/file_structure.rs` builds what
+//! `textDocument/documentSymbol` answers, and `ide-db/src/symbol_index.rs`
+//! is the *workspace* index. This module used to be 92 lines flattening
+//! `ide_db::signatures::document_symbols_ide` into a parent-indexed list
+//! that nothing consumed — a second representation of an outline the
+//! protocol wants as a tree — while the builder itself sat one crate down.
 
-use ide_db::ide_types::{NavigationTarget, SymbolKind};
-use ide_db::line_index::TextRange;
+use std::collections::HashMap;
+
+use crate::navigation_target::NavigationTarget;
 use ide_db::FileDb;
 
-/// A node in the file structure outline.
-#[derive(Debug, Clone)]
-pub struct StructureNode {
-    /// Index of the parent node in the flat list (None for top-level).
-    pub parent: Option<usize>,
-    /// Display label (symbol name).
-    pub label: String,
-    /// Range of the symbol name (for cursor placement).
-    pub navigation_range: TextRange,
-    /// Range of the entire definition (for highlighting).
-    pub node_range: TextRange,
-    /// Symbol kind.
-    pub kind: StructureNodeKind,
-    /// Optional detail text (e.g., type signature).
-    pub detail: Option<String>,
-    /// Whether the symbol is deprecated.
-    pub deprecated: bool,
-}
+/// The outline `textDocument/documentSymbol` answers with.
+///
+/// Enum members become children of their parent enum; every other
+/// top-level declaration is a root. Each symbol carries its precise
+/// signature text from the `ItemTree` as `detail`, rather than the bare
+/// category label.
+pub fn file_structure(file: &dyn FileDb) -> Vec<NavigationTarget> {
+    use ide_db::ide_types::SymbolKind as IdeSymbolKind;
 
-/// Kind of structure node.
-/// Wraps SymbolKind + special kinds (Region, ExternBlock).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum StructureNodeKind {
-    SymbolKind(SymbolKind),
-    Region,
-}
+    let Some(tree) = file.item_tree() else {
+        return Vec::new();
+    };
 
-/// Configuration for file structure computation.
-#[derive(Debug, Clone, Default)]
-pub struct FileStructureConfig {
-    /// Whether to include local bindings (let/var inside functions).
-    pub include_locals: bool,
-}
+    let placeholder = url::Url::parse("file:///").expect("a literal URL parses");
+    let target = |name: String,
+                  kind: IdeSymbolKind,
+                  detail: String,
+                  full: base_db::TextRange,
+                  focus: base_db::TextRange| {
+        // Single-file outline: the caller knows which file it asked about,
+        // so the URL is a placeholder.
+        NavigationTarget::new(placeholder.clone(), name, kind, full, focus).with_detail(detail)
+    };
 
-/// Compute the file structure (document outline).
-pub fn file_structure(file: &dyn FileDb) -> Vec<StructureNode> {
-    file_structure_with_config(file, &FileStructureConfig::default())
-}
+    let mut roots: Vec<NavigationTarget> = Vec::new();
+    for &id in tree.top_level_items() {
+        let kind = match id.def_kind(tree) {
+            hir::DefKind::Function
+            | hir::DefKind::ValSpec
+            | hir::DefKind::Mapping
+            | hir::DefKind::MappingSpec
+            | hir::DefKind::Overload
+            | hir::DefKind::Outcome
+            | hir::DefKind::ScatteredHead
+            | hir::DefKind::ScatteredClause => IdeSymbolKind::Function,
+            hir::DefKind::Register | hir::DefKind::Let | hir::DefKind::Var => {
+                IdeSymbolKind::Variable
+            }
+            hir::DefKind::TypeAlias
+            | hir::DefKind::Struct
+            | hir::DefKind::Union
+            | hir::DefKind::Bitfield
+            | hir::DefKind::Newtype => IdeSymbolKind::Struct,
+            hir::DefKind::Enum => IdeSymbolKind::Enum,
+            _ => continue,
+        };
+        let span = id.span(tree);
+        let name_span = id.name_span(tree);
+        let mut root = target(
+            id.name(tree).to_string(),
+            kind,
+            id.signature(tree).to_string(),
+            base_db::text_range(span.start, span.end),
+            base_db::text_range(name_span.start, name_span.end),
+        );
+        // Members belong to the definition that declares them. Parenting
+        // used to be decided by span containment, with "the most recently
+        // declared enum" as a fallback when that failed.
+        if matches!(id.def_kind(tree), hir::DefKind::Enum | hir::DefKind::Union) {
+            for field in id.fields(tree) {
+                let r = base_db::text_range(field.name_span.start, field.name_span.end);
+                root.children.push(target(
+                    field.name.to_string(),
+                    IdeSymbolKind::EnumMember,
+                    "enum member".to_string(),
+                    r,
+                    r,
+                ));
+            }
+        }
+        roots.push(root);
+    }
 
-/// Compute file structure with configuration.
-pub fn file_structure_with_config(
-    file: &dyn FileDb,
-    _config: &FileStructureConfig,
-) -> Vec<StructureNode> {
-    // Delegate to existing document_symbols_ide which builds NavigationTarget tree
-    let nav_targets = ide_db::symbol_index::document_symbols_ide(file);
-    let mut result = Vec::new();
-    flatten_nav_targets(&nav_targets, None, &mut result);
-    result
-}
-
-/// Convert NavigationTarget tree to flat StructureNode list with parent indices.
-fn flatten_nav_targets(
-    targets: &[NavigationTarget],
-    parent: Option<usize>,
-    result: &mut Vec<StructureNode>,
-) {
-    for target in targets {
-        let idx = result.len();
-        result.push(StructureNode {
-            parent,
-            label: target.name.clone(),
-            navigation_range: target.focus_range,
-            node_range: target.full_range,
-            kind: StructureNodeKind::SymbolKind(target.kind),
-            detail: target.detail.clone(),
-            deprecated: false,
-        });
-        // Recurse into children
-        if !target.children.is_empty() {
-            flatten_nav_targets(&target.children, Some(idx), result);
+    // Nest bitfield synthetic accessors under their parent bitfield.
+    // ItemTree generates _get_/update_/set_ entries for each bitfield field.
+    // Group them as children of the bitfield entry in the outline.
+    let mut bitfield_indices: HashMap<String, usize> = HashMap::new();
+    for (idx, target) in roots.iter().enumerate() {
+        if target.kind == IdeSymbolKind::Struct
+            && target.detail.as_deref().is_some_and(|d| d.starts_with("bitfield"))
+        {
+            bitfield_indices.insert(target.name.clone(), idx);
         }
     }
+    // Move synthetic bitfield accessors into their parent's children
+    let mut to_remove = Vec::new();
+    for (idx, target) in roots.iter().enumerate() {
+        for (bf_name, &parent_idx) in &bitfield_indices {
+            if target.name.contains(&format!("_{bf_name}_"))
+                && (target.name.starts_with("_get_")
+                    || target.name.starts_with("_update_")
+                    || target.name.starts_with("_set_")
+                    || target.name.starts_with("Mk_"))
+            {
+                to_remove.push((idx, parent_idx));
+                break;
+            }
+        }
+    }
+    // Apply nesting (reverse order to preserve indices)
+    for &(child_idx, parent_idx) in to_remove.iter().rev() {
+        if child_idx < roots.len() {
+            let child = roots.remove(child_idx);
+            // Adjust parent_idx if it was after the removed child
+            let adjusted_parent = if parent_idx > child_idx { parent_idx - 1 } else { parent_idx };
+            if let Some(parent) = roots.get_mut(adjusted_parent) {
+                parent.children.push(child);
+            }
+        }
+    }
+
+    roots
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::fixture;
 
+    /// Through `Analysis::document_symbols`, the one door.
+    ///
+    /// The builder used to live in `ide_db::symbol_index` — the *workspace*
+    /// index — with this module a flat adapter over it that nothing called.
     #[test]
-    fn structure_node_kind_symbol() {
-        let kind = StructureNodeKind::SymbolKind(SymbolKind::Function);
-        assert_eq!(kind, StructureNodeKind::SymbolKind(SymbolKind::Function));
+    fn the_outline_names_what_the_file_declares() {
+        let source = "\
+val add : (int, int) -> int
+function add(x, y) = x + y
+enum E = {A, B}
+";
+        let (analysis, files) = fixture::analysis(source);
+        let symbols = analysis.document_symbols(files[0].0).expect("no cancellation");
+
+        let names: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"add"), "missing `add`: {names:?}");
+        assert!(names.contains(&"E"), "missing `E`: {names:?}");
+
+        // A signature, not the bare category label.
+        let add = symbols.iter().find(|s| s.name == "add").expect("add");
+        assert!(add.detail.is_some(), "no detail on `add`: {add:?}");
+
+        // Enum members are children of their enum, not roots.
+        let e = symbols.iter().find(|s| s.name == "E").expect("E");
+        let members: Vec<&str> = e.children.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(members, vec!["A", "B"], "enum members are not its children");
     }
 }

@@ -20,31 +20,32 @@ pub enum MappingCheckResult {
     SymmetryViolation { missing_on_left: Vec<String>, missing_on_right: Vec<String> },
 }
 
-/// Try forwards then backwards unification to resolve a mapping call.
+/// Resolve a mapping call to a direction and a result type.
+/// Forwards is `lhs -> rhs`, backwards `rhs -> lhs`.
 pub fn resolve_mapping_call(
     table: &mut InferenceTable,
     lhs_ty: &Ty,
     rhs_ty: &Ty,
     arg_ty: &Ty,
 ) -> MappingCallResult {
-    // Try forwards: arg matches lhs → return rhs
-    let snap = table.snapshot();
-    if table.unify(lhs_ty, arg_ty) {
-        let result_ty = table.shallow_resolve(rhs_ty);
-        // Don't commit — rollback so caller can re-do cleanly
-        table.rollback_to(snap);
-        return MappingCallResult::Forwards(result_ty);
+    // Prefer proved directions, then retained constraints, then explicit
+    // recovery. Both directions use the same directional checking operation.
+    use super::unify::Compatibility;
+    for wanted in [Compatibility::Proven, Compatibility::Deferred, Compatibility::Recovery] {
+        for (input, output, forward) in [(lhs_ty, rhs_ty, true), (rhs_ty, lhs_ty, false)] {
+            let snap = table.snapshot();
+            let status = table.check_compatibility(input, arg_ty);
+            let result = (status == wanted).then(|| table.deep_resolve(output));
+            table.rollback_to(snap);
+            if let Some(result) = result {
+                return if forward {
+                    MappingCallResult::Forwards(result)
+                } else {
+                    MappingCallResult::Backwards(result)
+                };
+            }
+        }
     }
-    table.rollback_to(snap);
-
-    // Try backwards: arg matches rhs → return lhs
-    let snap = table.snapshot();
-    if table.unify(rhs_ty, arg_ty) {
-        let result_ty = table.shallow_resolve(lhs_ty);
-        table.rollback_to(snap);
-        return MappingCallResult::Backwards(result_ty);
-    }
-    table.rollback_to(snap);
 
     MappingCallResult::NoMatch
 }
@@ -69,9 +70,9 @@ pub fn check_bidir_consistency(
         };
     }
 
-    // Check backwards: rhs_actual should match lhs_ty (reversed), lhs_actual should match rhs_ty
+    // Reversing a mapping preserves which declared side each value belongs to.
     let snap = table.snapshot();
-    let backwards_ok = table.unify(rhs_ty, lhs_actual) && table.unify(lhs_ty, rhs_actual);
+    let backwards_ok = table.unify(rhs_ty, rhs_actual) && table.unify(lhs_ty, lhs_actual);
     table.rollback_to(snap);
 
     if !backwards_ok {

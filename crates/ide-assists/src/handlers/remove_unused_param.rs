@@ -18,161 +18,88 @@ use parser::{Span, Token};
 /// Detects when cursor is on a function parameter that is never referenced
 /// in the function body. Offers to remove the parameter from the signature.
 ///
-/// Note: call site update requires workspace-wide search (FindUsages).
-/// This implementation handles the signature edit only. Call site updates
-/// will be added when `Definition::usages()` is fully wired.
+/// rust-analyzer's version rewrites the call sites too, through
+/// `fn_def.usages(&ctx.sema)`. Ours edits the parameter list and the calls
+/// in the same file, and declines when the function has a `val` — Sail
+/// keeps the parameter *types* there, so removing one from the list alone
+/// leaves a file that does not type-check. Producing a broken file is
+/// worse than not firing; rewriting the `val`'s arrow type is what would
+/// let it fire.
 pub(crate) fn remove_unused_param(acc: &mut Assists, ctx: &AssistContext<'_>) -> Option<()> {
     let text = ctx.source_text();
-    let tokens = ctx.file.tokens()?;
     let offset = ctx.offset();
+    let bodies = ctx.file.bodies()?;
 
-    // Find the parameter name at cursor — must be inside a function signature
-    let (param_name, param_span) = find_param_at_offset(tokens, text, offset)?;
+    // The parameter under the cursor, from the body that declares it.
+    //
+    // This used to scan the token stream for "an identifier between `(` and
+    // `)`", which is also true of a parameter's *type*: on `function f(e : E)`
+    // with the cursor on `E`, it offered to delete the type. It decided
+    // "unused" by searching the body text for the name, so `bits` and `bool`
+    // were offered too.
+    let (param_name, param_span, body_span, fn_name, param_index) =
+        bodies.entries().iter().find_map(|entry| {
+            if offset < entry.def_span.start || offset > entry.def_span.end {
+                return None;
+            }
+            entry.body.params.iter().enumerate().find_map(|(param_index, &param)| {
+                // `x : T` wraps the binding; the name is the binding's.
+                let bind = match entry.body.pat(param) {
+                    Some(hir::Pat::Typed { inner, .. }) => *inner,
+                    Some(hir::Pat::Bind(_)) => param,
+                    _ => return None,
+                };
+                let hir::Pat::Bind(name) = entry.body.pat(bind)? else { return None };
+                let span = entry.source_map.pat_syntax(bind)?;
+                (span.start <= offset && offset <= span.end).then(|| {
+                    (name.to_string(), span, entry.body_span, entry.name.clone(), param_index)
+                })
+            })
+        })?;
 
-    // Find the enclosing function
-    let (_fn_name, fn_body_start, fn_body_end) = find_enclosing_function(tokens, text, offset)?;
-
-    // Check if the parameter name is used in the function body
-    let body_text = &text[fn_body_start..fn_body_end.min(text.len())];
-    if is_name_used_in_body(body_text, &param_name) {
-        return None; // Parameter is used
+    // Used anywhere in the body?
+    let used = bodies.entries().iter().any(|entry| {
+        entry.body_span == body_span
+            && entry
+                .body
+                .iter_exprs()
+                .any(|(_, e)| matches!(e, hir::Expr::Ident(n) if n.as_str() == param_name))
+    });
+    if used {
+        return None;
     }
 
-    // Find the parameter range including surrounding comma/whitespace
+    // A `val` carries the parameter types, and this cannot rewrite one:
+    // dropping the parameter from the list alone leaves a file that does
+    // not type-check, which is worse than not firing.
+    let has_val = ctx.file.item_tree().is_some_and(|tree| {
+        tree.top_level_items().iter().any(|id| {
+            matches!(id.def_kind(tree), hir::DefKind::ValSpec | hir::DefKind::MappingSpec)
+                && id.name(tree).as_str() == fn_name
+        })
+    });
+    if has_val {
+        return None;
+    }
+
+    let tokens = ctx.file.tokens()?;
     let param_range = find_param_range_with_separator(text, tokens, &param_span)?;
+
+    // The calls in this file lose the argument in that position too. Across
+    // files they do not: that needs the workspace, which an assist here
+    // does not have — rust-analyzer's version reaches them through
+    // `fn_def.usages(&ctx.sema)`.
+    let mut edits = vec![TextEdit { range: param_range, new_text: String::new() }];
+    edits.extend(call_argument_edits(ctx, &fn_name, param_index));
 
     let target = base_db::text_range(param_span.start, param_span.end);
     acc.add_with_edits(
         AssistId("remove_unused_param", AssistKind::RefactorRewrite),
         format!("Remove unused parameter `{param_name}`"),
         target,
-        vec![TextEdit { range: param_range, new_text: String::new() }],
+        edits,
     );
     Some(())
-}
-
-/// Find a parameter name (identifier) at the given offset that's
-/// inside a function parameter list (between `(` and `)`).
-fn find_param_at_offset(
-    tokens: &[(Token, Span)],
-    text: &str,
-    offset: usize,
-) -> Option<(String, Span)> {
-    // Find the Id token at offset
-    let (_, id_span) = tokens.iter().find(|(tok, span)| {
-        matches!(tok, Token::Id(_)) && span.start <= offset && offset <= span.end
-    })?;
-
-    // Verify it's inside a parameter list: scan backward for `(`
-    let mut paren_depth = 0i32;
-    let mut in_params = false;
-    for (tok, span) in tokens.iter().rev() {
-        if span.start > id_span.start {
-            continue;
-        }
-        match tok {
-            Token::RightBracket => paren_depth += 1,
-            Token::LeftBracket => {
-                if paren_depth == 0 {
-                    in_params = true;
-                    break;
-                }
-                paren_depth -= 1;
-            }
-            Token::KwFunction => break, // Went past function keyword
-            _ => {}
-        }
-    }
-
-    if !in_params {
-        return None;
-    }
-
-    let name = text[id_span.start..id_span.end].to_string();
-    Some((name, *id_span))
-}
-
-/// Find the enclosing function's name, body start, and body end.
-fn find_enclosing_function(
-    tokens: &[(Token, Span)],
-    text: &str,
-    offset: usize,
-) -> Option<(String, usize, usize)> {
-    // Scan backward for `function` keyword
-    let mut fn_span = None;
-    for (tok, span) in tokens.iter() {
-        if span.start > offset {
-            break;
-        }
-        if matches!(tok, Token::KwFunction) {
-            fn_span = Some(*span);
-        }
-    }
-    let fn_span = fn_span?;
-
-    // Get function name (next Id after `function`)
-    let fn_name = tokens
-        .iter()
-        .find(|(tok, span)| matches!(tok, Token::Id(_)) && span.start > fn_span.end)
-        .map(|(_, span)| text[span.start..span.end].to_string())?;
-
-    // Find function body: between `=` and end of function
-    let mut body_start = None;
-    let mut brace_depth = 0i32;
-    let mut body_end = text.len();
-
-    for (tok, span) in tokens.iter() {
-        if span.start < fn_span.start {
-            continue;
-        }
-        if body_start.is_none() {
-            if matches!(tok, Token::Equal) && span.start > fn_span.end {
-                body_start = Some(span.end);
-            }
-            continue;
-        }
-        match tok {
-            Token::LeftCurlyBracket => brace_depth += 1,
-            Token::RightCurlyBracket => {
-                brace_depth -= 1;
-                if brace_depth < 0 {
-                    body_end = span.end;
-                    break;
-                }
-            }
-            Token::KwFunction if brace_depth <= 0 => {
-                body_end = span.start;
-                break;
-            }
-            _ => {}
-        }
-    }
-
-    Some((fn_name, body_start?, body_end))
-}
-
-/// Check if a name appears as an identifier in body text.
-fn is_name_used_in_body(body_text: &str, name: &str) -> bool {
-    // Simple word-boundary check
-    let bytes = body_text.as_bytes();
-    let name_bytes = name.as_bytes();
-    let name_len = name_bytes.len();
-
-    for i in 0..body_text.len().saturating_sub(name_len - 1) {
-        if &bytes[i..i + name_len] == name_bytes {
-            // Check word boundaries
-            let before_ok = i == 0 || !is_ident_char(bytes[i - 1]);
-            let after_ok = i + name_len >= bytes.len() || !is_ident_char(bytes[i + name_len]);
-            if before_ok && after_ok {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-fn is_ident_char(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_' || b == b'\''
 }
 
 /// Find the full range of a parameter including its type annotation
@@ -247,14 +174,101 @@ fn find_param_range_with_separator(
     Some(base_db::text_range(prev.start, type_end))
 }
 
+/// Drop the argument in `param_index` from every call to `fn_name` in this
+/// file.
+///
+/// Which calls, from the callgraph — a name match would also hit a string
+/// or another definition's; where the arguments are, from the tree, which
+/// is the only thing that knows.
+fn call_argument_edits(
+    ctx: &AssistContext<'_>,
+    fn_name: &str,
+    param_index: usize,
+) -> Vec<TextEdit> {
+    use parser::SyntaxKind as SK;
+
+    let (Some(graph), Some(root)) = (ctx.file.callgraph(), ctx.source_file()) else {
+        return Vec::new();
+    };
+    let mut edits = Vec::new();
+    for site in graph.call_sites_in_file() {
+        if site.callee != fn_name {
+            continue;
+        }
+        let call = root
+            .descendants()
+            .filter(|n| {
+                n.kind() == SK::CALL_EXPR
+                    && usize::from(n.text_range().start()) <= site.callee_span.start
+                    && site.callee_span.end <= usize::from(n.text_range().end())
+            })
+            .last();
+        let Some(call) = call else { continue };
+        // `f(1, 2)` is `CALL_EXPR[callee, ARG_LIST[1, 2]]` — the arguments
+        // are that node's children, not the call's. A parenthesised
+        // expression in argument position is a `TUPLE_EXPR`, so both are
+        // unwrapped.
+        let after_callee: Vec<_> = call
+            .children()
+            .filter(|c| {
+                !c.kind().is_trivia() && usize::from(c.text_range().start()) >= site.callee_span.end
+            })
+            .collect();
+        let args: Vec<_> = match after_callee.as_slice() {
+            [only] if matches!(only.kind(), SK::ARG_LIST | SK::TUPLE_EXPR) => {
+                only.children().filter(|c| !c.kind().is_trivia()).collect()
+            }
+            rest => rest.to_vec(),
+        };
+        let Some(arg) = args.get(param_index) else { continue };
+        // With its separator: the comma before it, or the one after when it
+        // is the first argument.
+        let (from, to) =
+            match (param_index.checked_sub(1).and_then(|i| args.get(i)), args.get(param_index + 1))
+            {
+                (Some(prev), _) => {
+                    (usize::from(prev.text_range().end()), usize::from(arg.text_range().end()))
+                }
+                (None, Some(next)) => {
+                    (usize::from(arg.text_range().start()), usize::from(next.text_range().start()))
+                }
+                (None, None) => {
+                    (usize::from(arg.text_range().start()), usize::from(arg.text_range().end()))
+                }
+            };
+        if from < to {
+            edits.push(TextEdit { range: base_db::text_range(from, to), new_text: String::new() });
+        }
+    }
+    edits
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::check_assist;
+    use crate::tests::{check_assist, check_assist_not_applicable};
+    use expect_test::expect;
 
+    /// With a `val` above it the assist declines: the parameter's type
+    /// lives there, and this cannot rewrite the arrow.
     #[test]
-    fn smoke() {
-        let labels = check_assist(remove_unused_param, "source code\n", 0);
-        let _ = labels; // verify no panic
+    fn declines_when_a_val_would_be_left_stale() {
+        check_assist_not_applicable(
+            remove_unused_param,
+            "val f : (int, int) -> int\nfunction f(x, $0y) = x\n",
+        );
+    }
+
+    /// The call in the same file loses its argument too.
+    #[test]
+    fn applies() {
+        check_assist(
+            remove_unused_param,
+            "function f(x, $0y) = x\nfunction g() = f(1, 2)\n",
+            expect![[r#"
+                function f(x) = x
+                function g() = f(1)
+            "#]],
+        );
     }
 }

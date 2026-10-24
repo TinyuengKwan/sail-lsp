@@ -1,3 +1,5 @@
+mod types;
+pub use types::*;
 pub mod support;
 
 use self::support::{binding_type_hint, infer_call_arg_types_at_position};
@@ -5,16 +7,21 @@ use crate::markdown_remove::remove_markdown;
 
 /// Get plain-text version of a documentation string (for inlay hints etc).
 #[allow(unused)] // will be wired into inlay hints / plain-text hover fallback
-pub(crate) fn doc_to_plain_text(doc: &str) -> String {
+/// Documentation with its Markdown removed, for a client that takes no
+/// Markdown.
+///
+/// `to_proto` sent `MarkupKind::Markdown` unconditionally, so a client
+/// whose `contentFormat` omits it rendered `**bold**` and the backticks
+/// as themselves. This had no caller.
+pub fn doc_to_plain_text(doc: &str) -> String {
     remove_markdown(doc)
 }
-use crate::calls::find_call_at_position;
-use ide_db::ide_types::{HoverResult, SymbolKind};
+use crate::signature_help::find_call_at_position;
+use hir::DefKind;
+use ide_db::ide_types::SymbolKind;
 use ide_db::line_index::TextRange;
 use ide_db::token_classify::{token_is_close_bracket, token_is_open_bracket};
-use ide_db::{
-    builtin_docs, extract_comments, find_callable_signature, instantiate_signature, FileDb, LineCol,
-};
+use ide_db::{builtin_docs, find_callable_signature, instantiate_signature, FileDb, LineCol};
 use parser::Token;
 use syntax::parser_lower::{Decl, DeclKind, DeclRole, Scope};
 use url::Url;
@@ -27,6 +34,7 @@ pub fn hover_for_symbol<'a, F, I>(
     position: LineCol,
     hover_range: TextRange,
     symbol_key: &str,
+    config: &crate::hover::HoverConfig,
 ) -> Option<HoverResult>
 where
     F: FileDb + 'a,
@@ -44,16 +52,30 @@ where
         files.into_iter().map(|(u, f)| (u, f as &dyn FileDb)).collect();
     let current_offset = current_file.offset_at(&position);
 
-    // Builtin docs
+    // Builtin docs. `config.documentation` is the client's setting, which
+    // used to be parsed and converted by the server and then dropped.
     if let Some(doc) = builtin_docs(symbol_key) {
         let mut markdown = vec![format!("**builtin** **{symbol_key}**")];
-        markdown.push("___".to_string());
-        markdown.push(doc.to_string());
+        if config.documentation {
+            markdown.push("___".to_string());
+            markdown.push(doc.to_string());
+        }
         return Some(markdown_hover(markdown.join("\n\n"), hover_range));
     }
 
-    let decl_ref =
-        resolve_decl(files.iter().copied(), current_uri, symbol_key, Some(current_offset));
+    let ordered_def = if current_file
+        .file_text()
+        .is_some_and(|(db, ft)| hir::source_order::declarations_for(db, ft).is_some())
+    {
+        Some(ide_db::defs::Definition::classify_at(current_file, position)?)
+    } else {
+        None
+    };
+    let decl_ref = if let Some(ref def) = ordered_def {
+        resolve_ordered_decl(&files, current_uri, current_file, def)
+    } else {
+        resolve_decl(files.iter().copied(), current_uri, symbol_key, Some(current_offset))
+    };
 
     let mut markdown = Vec::new();
 
@@ -63,11 +85,67 @@ where
 
         // Hover shows kind + name + type signature + docs.
         // Reference/implementation counts belong in code lenses, not hover.
-        let header = format!("**{label}** **{name}**");
+        //
+        // The head line is what the HIR says this definition is:
+        // `Definition::classify_at` resolves the cursor and `display(db)`
+        // renders it, which is how rust-analyzer's `ide` renders a
+        // definition. Every line of this markup used to come from the
+        // per-file scrape's `Decl`, so `HirDisplay` had one impl per
+        // definition form and no caller anywhere. Getting here took three
+        // fixes on the resolution side, not the rendering side:
+        // `Local::is_param`, containment rather than id equality for an
+        // annotated parameter, and the value namespace preferring a
+        // `function` over its `val`.
+        //
+        // `Unresolved` *is* "the resolver could not place this", and it
+        // renders as the bare name — less than the scrape's label says.
+        // That is the case the fallback exists for.
+        let hir_rendered = current_file.file_text().and_then(|(db, _)| {
+            use hir::HirDisplay;
+            let def = ide_db::defs::Definition::classify_at(current_file, position)?;
+            // `Unresolved` *is* "the resolver could not place this",
+            // and a `ValSpec` names the declaration where the cursor
+            // may be on the definition — `function add` with a
+            // `val add` above it still resolves to the spec through
+            // the workspace scope. Both fall back.
+            if matches!(
+                def,
+                ide_db::defs::Definition::Unresolved(_) | ide_db::defs::Definition::ValSpec(_)
+            ) {
+                return None;
+            }
+            let rendered = def.display(db).to_string();
+            (!rendered.trim().is_empty()).then_some(rendered)
+        });
+        let header = hir_rendered
+            .as_deref()
+            .map(|rendered| format!("**{rendered}**"))
+            .unwrap_or_else(|| format!("**{label}** **{name}**"));
         markdown.push(header);
 
-        let mut headline =
-            render_signature(decl_ref, files.iter().copied(), current_uri, symbol_key);
+        // The signature line, from the HIR when it renders one.
+        //
+        // `render_signature` falls through to `decl_headline`, which walks
+        // the token stream back from the declaration's span and slices the
+        // source text — the per-file scrape answering a question the item
+        // tree already holds. A rendering that carries a `:` or a `=` is a
+        // signature; a bare keyword and name is not more than the scrape
+        // recovers, so that still wins.
+        //
+        // This could not fire until `Semantics::analyze` stopped giving up
+        // where no *body* contains the offset, which is every top-level
+        // declaration site — so the definitions that have signatures never
+        // reached the HIR at all.
+        let selected_signature = ordered_def.as_ref().and_then(|def| {
+            let (db, _) = current_file.file_text()?;
+            def.def_location()?.lookup_signature(db)
+        });
+        let mut headline = selected_signature
+            .or(hir_rendered
+                .filter(|rendered| rendered.contains(" : ") || rendered.contains(" = ")))
+            .unwrap_or_else(|| {
+                render_signature(decl_ref, files.iter().copied(), current_uri, symbol_key)
+            });
 
         // Item 2: Generic Substitution / Instantiation
         if symbol_kind_for_decl(decl_ref.decl.kind) == SymbolKind::Function {
@@ -80,8 +158,20 @@ where
                 let lc_pos = position;
                 if let Some((callee, _)) = find_call_at_position(current_file, lc_pos) {
                     if callee == *name {
-                        if let Some(sig) =
-                            find_callable_signature(files.iter().copied(), current_uri, name)
+                        if let Some(sig) = current_file
+                            .file_text()
+                            .and_then(|(db, ft)| {
+                                ide_db::signatures::callable_signatures_at(
+                                    db,
+                                    ft,
+                                    current_offset,
+                                    name,
+                                )
+                            })
+                            .map(|sigs| sigs.into_iter().next())
+                            .unwrap_or_else(|| {
+                                find_callable_signature(files.iter().copied(), current_uri, name)
+                            })
                         {
                             if let Some(arg_types) = infer_call_arg_types_at_position(
                                 &files,
@@ -153,7 +243,7 @@ where
 
         // Show all workspace signatures for functions with multiple val specs
         if matches!(decl_ref.decl.kind, DeclKind::Function | DeclKind::Value | DeclKind::Mapping) {
-            let all_sigs = ide_db::symbol_index::find_all_callable_signatures(
+            let all_sigs = ide_db::signatures::find_all_callable_signatures(
                 files.iter().copied(),
                 &decl_ref.decl.name,
             );
@@ -277,16 +367,12 @@ where
 
         // Show doc comments. Primary path: ItemTree.doc field
         // (extracted from CST during parse → Docs).
-        // Fallback: runtime text scan for files without ItemTree.
-        let doc_text = decl_ref
-            .file
-            .item_tree()
-            .and_then(|tree| {
-                tree.find_by_name(&decl_ref.decl.name)
-                    .and_then(|id| id.doc(tree).map(|d| d.to_string()))
-            })
-            .or_else(|| extract_comments(decl_ref.file.text(), decl_ref.decl.span.start));
-        if let Some(comments) = doc_text {
+        // The doc the item tree recorded. The fallback that stood here
+        // scanned backwards through the source for `///` lines above the
+        // definition — a second doc-comment parser, for the case where the
+        // item tree is absent, which is no longer a case any caller has.
+        let doc_text = decl_ref.decl.doc.clone();
+        if let Some(comments) = doc_text.filter(|_| config.documentation) {
             markdown.push("___".to_string());
             markdown.push(comments);
         }
@@ -316,6 +402,22 @@ where
 
         markdown.push("___".to_string());
         markdown.push(format!("[Go to Definition]({}) • *in {}*", link, filename));
+    } else if let Some(rendered) = current_file.file_text().and_then(|(db, _)| {
+        // The scrape has no `Decl` for a struct field — it records
+        // top-level declarations — so hovering the `variety` of
+        // `struct { variety = .. }` fell through to the item-tree search
+        // below, which looks for a *top-level* name and finds none, and
+        // said the bare word. Ask the HIR first: `classify_at` knows what
+        // a name in a field list is, and `HirDisplay` renders it.
+        use hir::HirDisplay;
+        let def = ide_db::defs::Definition::classify_at(current_file, position)?;
+        if matches!(def, ide_db::defs::Definition::Unresolved(_)) {
+            return None;
+        }
+        let rendered = def.display(db).to_string();
+        (!rendered.trim().is_empty() && rendered.trim() != symbol_key).then_some(rendered)
+    }) {
+        markdown.push(format!("**{rendered}**"));
     } else {
         // when the structural decl resolver returned nothing
         // (cross-file symbols, half-parsed files, etc.) fall back
@@ -333,7 +435,7 @@ where
             .iter()
             .filter_map(|(_, file)| file.item_tree())
             .filter_map(|tree| {
-                let mut best: Option<hir_def::item_tree::ModItem> = None;
+                let mut best: Option<hir::DefItem> = None;
                 for &id in tree.top_level_items() {
                     if id.name(tree).as_str() != symbol_key {
                         continue;
@@ -342,12 +444,12 @@ where
                         None => true,
                         Some(existing) => {
                             let new_is_spec = matches!(
-                                id.item_kind(tree),
-                                hir_def::ItemKind::ValSpec | hir_def::ItemKind::MappingSpec
+                                id.def_kind(tree),
+                                DefKind::ValSpec | DefKind::MappingSpec
                             );
                             let existing_is_spec = matches!(
-                                existing.item_kind(tree),
-                                hir_def::ItemKind::ValSpec | hir_def::ItemKind::MappingSpec
+                                existing.def_kind(tree),
+                                DefKind::ValSpec | DefKind::MappingSpec
                             );
                             new_is_spec && !existing_is_spec
                         }
@@ -369,21 +471,21 @@ where
                 markdown.push(doc_text);
             }
             // Annotate synthesized bitfield accessors.
-            if let Some(accessor) = hir_def::bitfield::parse_accessor_name(symbol_key) {
+            if let Some(accessor) = hir::bitfield::parse_accessor_name(symbol_key) {
                 let desc = match accessor.kind {
-                    hir_def::bitfield::BitfieldAccessorKind::Constructor => format!(
+                    hir::bitfield::BitfieldAccessorKind::Constructor => format!(
                         "*(generated constructor for bitfield `{}`)*",
                         accessor.bitfield_name
                     ),
-                    hir_def::bitfield::BitfieldAccessorKind::Getter => format!(
+                    hir::bitfield::BitfieldAccessorKind::Getter => format!(
                         "*(generated getter for `{}.{}`)*",
                         accessor.bitfield_name, accessor.field_name
                     ),
-                    hir_def::bitfield::BitfieldAccessorKind::Updater => format!(
+                    hir::bitfield::BitfieldAccessorKind::Updater => format!(
                         "*(generated updater for `{}.{}`)*",
                         accessor.bitfield_name, accessor.field_name
                     ),
-                    hir_def::bitfield::BitfieldAccessorKind::Setter => format!(
+                    hir::bitfield::BitfieldAccessorKind::Setter => format!(
                         "*(generated setter for `{}.{}`)*",
                         accessor.bitfield_name, accessor.field_name
                     ),
@@ -420,8 +522,8 @@ where
         match decl.kind {
             // Val spec → "Go to implementations"
             DeclKind::Value => {
-                actions.push(ide_db::ide_types::HoverAction::Implementation(
-                    ide_db::ide_types::HoverFilePosition {
+                actions.push(crate::hover::HoverAction::Implementation(
+                    crate::hover::HoverFilePosition {
                         file_id: base_db::FileId::from_raw(0), // placeholder
                         offset: decl.span.start,
                     },
@@ -429,8 +531,8 @@ where
             }
             // Function/Mapping → "Go to references"
             DeclKind::Function | DeclKind::Mapping => {
-                actions.push(ide_db::ide_types::HoverAction::Reference(
-                    ide_db::ide_types::HoverFilePosition {
+                actions.push(crate::hover::HoverAction::Reference(
+                    crate::hover::HoverFilePosition {
                         file_id: base_db::FileId::from_raw(0), // placeholder
                         offset: decl.span.start,
                     },
@@ -487,6 +589,8 @@ fn fenced_sail(text: &str) -> String {
     format!("```sail\n{text}\n```")
 }
 
+/// The fallback for a cursor the resolver cannot place. The header comes
+/// from `HirDisplay` when it can — see `hover_for_symbol`.
 fn decl_kind_label(kind: DeclKind) -> &'static str {
     match kind {
         DeclKind::Function => "function",
@@ -678,6 +782,62 @@ struct DeclRef<'a> {
     decl: Decl,
 }
 
+fn resolve_ordered_decl<'a>(
+    files: &[(&'a Url, &'a dyn FileDb)],
+    current_uri: &'a Url,
+    current_file: &'a dyn FileDb,
+    def: &ide_db::defs::Definition,
+) -> Option<DeclRef<'a>> {
+    let (db, _) = current_file.file_text()?;
+    if let ide_db::defs::Definition::Local(local) = def {
+        return Some(DeclRef {
+            uri: current_uri,
+            file: current_file,
+            decl: Decl {
+                name: local.name.to_string(),
+                kind: if local.is_param { DeclKind::Parameter } else { DeclKind::Let },
+                role: DeclRole::Definition,
+                scope: Scope::Local,
+                span: local.span,
+                name_span: Some(local.span),
+                is_scattered: false,
+                doc: None,
+            },
+        });
+    }
+    let loc = def.def_location()?;
+    let (tree, item) = loc.item(db)?;
+    let (uri, file) = files
+        .iter()
+        .copied()
+        .find(|(_, f)| f.file_text().is_some_and(|(_, ft)| ft == loc.file_text))?;
+    Some(DeclRef {
+        uri,
+        file,
+        decl: Decl {
+            name: item.name(tree).to_string(),
+            kind: decl_kind_of(item.def_kind(tree))?,
+            role: if declares_only(item.def_kind(tree)) {
+                DeclRole::Declaration
+            } else {
+                DeclRole::Definition
+            },
+            scope: Scope::TopLevel,
+            span: item.span(tree),
+            name_span: Some(item.name_span(tree)),
+            is_scattered: item.is_clause(tree),
+            doc: item.doc(tree).map(str::to_owned),
+        },
+    })
+}
+
+/// The declaration `symbol_key` names, ranked by how likely it is the one
+/// the cursor meant.
+///
+/// The `Decl` it returns is built from the item tree and the bodies, not
+/// read out of the flat scrape: `parser_lower::Decl` is the record hover's
+/// markup switches on, and this fills it from the layer that lowered the
+/// definitions.
 fn resolve_decl<'a, I>(
     files: I,
     current_uri: &Url,
@@ -689,38 +849,102 @@ where
 {
     let files = files.into_iter().collect::<Vec<_>>();
 
+    // A local binding under the cursor wins over anything at top level: it
+    // is what the cursor is on.
     if let Some(offset) = current_offset {
         for (uri, file) in files.iter().copied() {
             if uri != current_uri {
                 continue;
             }
-            let Some(parsed) = file.parsed() else {
-                continue;
-            };
-            if let Some(decl) = parsed
-                .decls
-                .iter()
-                .filter(|decl| {
-                    decl.name == symbol_key
-                        && decl.scope == Scope::Local
-                        && decl.span.start <= offset
-                })
-                .max_by_key(|decl| decl.span.start)
-            {
-                return Some(DeclRef { uri, file, decl: decl.clone() });
+            let Some(bodies) = file.bodies() else { continue };
+            let mut best: Option<Decl> = None;
+            for entry in bodies.entries() {
+                if entry.def_span.start > offset || offset > entry.def_span.end {
+                    continue;
+                }
+                for (pat_id, pat) in entry.body.iter_pats() {
+                    let hir::Pat::Bind(name) = pat else { continue };
+                    if name.as_str() != symbol_key {
+                        continue;
+                    }
+                    let Some(span) = entry.source_map.pat_syntax(pat_id) else { continue };
+                    if span.start > offset {
+                        continue;
+                    }
+                    // A parameter is a binding the body lists as one; hover
+                    // says so, and a `let` inside the body is a `let`.
+                    let is_param = entry.body.params.iter().any(|&p| {
+                        p == pat_id
+                            || matches!(
+                                entry.body.pat(p),
+                                Some(hir::Pat::Typed { inner, .. }) if *inner == pat_id
+                            )
+                    });
+                    if best.as_ref().is_none_or(|b| b.span.start < span.start) {
+                        best = Some(Decl {
+                            name: symbol_key.to_string(),
+                            kind: if is_param { DeclKind::Parameter } else { DeclKind::Let },
+                            role: DeclRole::Definition,
+                            scope: Scope::Local,
+                            span,
+                            name_span: Some(span),
+                            is_scattered: false,
+                            doc: None,
+                        });
+                    }
+                }
+            }
+            if let Some(decl) = best {
+                return Some(DeclRef { uri, file, decl });
             }
         }
     }
 
     let mut best: Option<(usize, DeclRef<'a>)> = None;
     for (uri, file) in files {
-        let Some(parsed) = file.parsed() else {
+        let Some(tree) = file.item_tree() else {
             continue;
         };
-        for decl in parsed.decls.iter().filter(|decl| {
-            decl.name == symbol_key
-                && (decl.scope == Scope::TopLevel || decl.kind == DeclKind::EnumMember)
-        }) {
+        // Every definition with this name, plus the `enum`/`union` members
+        // that carry it — the item tree records members on the definition.
+        let mut found: Vec<Decl> = Vec::new();
+        for &id in tree.top_level_items() {
+            if id.name(tree).as_str() == symbol_key {
+                if let Some(kind) = decl_kind_of(id.def_kind(tree)) {
+                    found.push(Decl {
+                        name: symbol_key.to_string(),
+                        kind,
+                        role: if declares_only(id.def_kind(tree)) {
+                            DeclRole::Declaration
+                        } else {
+                            DeclRole::Definition
+                        },
+                        scope: Scope::TopLevel,
+                        span: id.span(tree),
+                        name_span: Some(id.name_span(tree)),
+                        is_scattered: id.is_clause(tree),
+                        doc: id.doc(tree).map(str::to_string),
+                    });
+                }
+            }
+            if matches!(id.def_kind(tree), hir::DefKind::Enum | hir::DefKind::Union) {
+                for field in id.fields(tree) {
+                    if field.name.as_str() == symbol_key {
+                        found.push(Decl {
+                            name: symbol_key.to_string(),
+                            kind: DeclKind::EnumMember,
+                            role: DeclRole::Definition,
+                            scope: Scope::TopLevel,
+                            span: field.name_span,
+                            name_span: Some(field.name_span),
+                            is_scattered: false,
+                            doc: None,
+                        });
+                    }
+                }
+            }
+        }
+        for decl in found {
             let mut score = uri_prefix_score(current_uri, uri) * 16;
             if uri == current_uri {
                 score += 8;
@@ -735,11 +959,42 @@ where
             };
             match &best {
                 Some((best_score, _)) if *best_score > score => {}
-                _ => best = Some((score, DeclRef { uri, file, decl: decl.clone() })),
+                _ => best = Some((score, DeclRef { uri, file, decl })),
             }
         }
     }
     best.map(|(_, decl_ref)| decl_ref)
+}
+
+/// A `val` or a bare `mapping` signature declares without defining.
+fn declares_only(kind: hir::DefKind) -> bool {
+    matches!(kind, hir::DefKind::ValSpec | hir::DefKind::MappingSpec | hir::DefKind::ScatteredHead)
+}
+
+/// The `DeclKind` hover's markup switches on, for a definition of this kind.
+fn decl_kind_of(kind: hir::DefKind) -> Option<DeclKind> {
+    use hir::DefKind as D;
+    Some(match kind {
+        D::Function | D::ScatteredHead | D::ScatteredClause => DeclKind::Function,
+        D::ValSpec | D::Outcome => DeclKind::Value,
+        D::Mapping | D::MappingSpec => DeclKind::Mapping,
+        D::Overload => DeclKind::Overload,
+        D::TypeAlias => DeclKind::Type,
+        D::Struct => DeclKind::Struct,
+        D::Union => DeclKind::Union,
+        D::Enum => DeclKind::Enum,
+        D::Bitfield => DeclKind::Bitfield,
+        D::Newtype => DeclKind::Newtype,
+        D::Register => DeclKind::Register,
+        D::Let => DeclKind::Let,
+        D::Var => DeclKind::Var,
+        D::EndMarker
+        | D::Constraint
+        | D::TerminationMeasure
+        | D::Instantiation
+        | D::Field
+        | D::Variant => return None,
+    })
 }
 
 fn uri_prefix_score(lhs: &Url, rhs: &Url) -> usize {
@@ -754,20 +1009,17 @@ enum EnumInfo {
 }
 
 fn enum_info_for_symbol(file: &dyn FileDb, symbol: &str) -> Option<EnumInfo> {
-    // Use ParsedFile decls: find the enum that contains this member
-    if let Some(parsed) = file.parsed() {
-        let mut current_enum: Option<String> = None;
-        for decl in &parsed.decls {
-            if decl.kind == syntax::parser_lower::DeclKind::Enum {
-                current_enum = Some(decl.name.clone());
-            } else if decl.kind == syntax::parser_lower::DeclKind::EnumMember {
-                if decl.name == symbol {
-                    if let Some(ref enum_name) = current_enum {
-                        return Some(EnumInfo::Member { enum_name: enum_name.clone() });
-                    }
-                }
-            } else {
-                current_enum = None;
+    // The enum that declares this member. The item tree records members on
+    // the definition, so there is no need for the positional walk this used
+    // to do — track the last enum seen, and give up on the first
+    // declaration that is not a member of it.
+    if let Some(tree) = file.item_tree() {
+        for &id in tree.top_level_items() {
+            if id.def_kind(tree) != hir::DefKind::Enum {
+                continue;
+            }
+            if id.fields(tree).iter().any(|f| f.name.as_str() == symbol) {
+                return Some(EnumInfo::Member { enum_name: id.name(tree).to_string() });
             }
         }
     }
@@ -826,8 +1078,8 @@ fn infer_effects_for_def_with_workspace_cst(
     name: &str,
     all_files: &[(&url::Url, &dyn ide_db::FileDb)],
 ) -> Vec<String> {
-    use hir_def::bodies::{CallableBodies, EffectTag};
-    use hir_def::callgraph::{CallGraph, WorkspaceCallGraph};
+    use hir::callgraph::{CallGraph, WorkspaceCallGraph};
+    use hir::{CallableBodies, EffectTag};
 
     let bodies = CallableBodies::from_cst(cst_root);
     let local_callgraph = CallGraph::from_callable_bodies(&bodies);
@@ -876,7 +1128,7 @@ fn infer_effects_for_def_with_workspace_cst(
 }
 
 pub fn collect_effects_from_body(file: &dyn ide_db::FileDb, name: &str) -> Vec<String> {
-    use hir_def::bodies::CallableBodies;
+    use hir::CallableBodies;
 
     let (cst_root, _) = syntax::parse_text(file.text());
     let bodies = CallableBodies::from_cst(&cst_root);
@@ -968,8 +1220,8 @@ pub fn hover_resolve_field_or_method(
     if let Some((_func_id, _target_file_id)) = sema.resolve_method_call(file_text, offset) {
         // Try to get the return type from type inference
         if let Some(ty) = sema.type_of_expr(file_text, offset) {
-            use hir_ty::display::HirDisplay;
-            return Some(format!("```sail\n{} : {}\n```", token_name, ty.display()));
+            use hir::HirDisplay;
+            return Some(format!("```sail\n{} : {}\n```", token_name, ty.display(db)));
         }
         return Some(format!("function `{}`", token_name));
     }
@@ -1056,6 +1308,7 @@ mod tests {
             pos,
             base_db::text_range(off, off + 6),
             "helper",
+            &crate::hover::HoverConfig::default(),
         )
         .expect("hover");
         let markdown = hover_markdown(hover);
@@ -1084,6 +1337,7 @@ mod tests {
             pos,
             base_db::text_range(off, off + 3),
             "add",
+            &crate::hover::HoverConfig::default(),
         )
         .expect("hover");
         let markdown = hover_markdown(hover);
@@ -1107,15 +1361,15 @@ mod tests {
             pos,
             base_db::text_range(off, off + 1),
             "x",
+            &crate::hover::HoverConfig::default(),
         )
         .expect("hover");
         let markdown = hover_markdown(hover);
-        assert!(markdown.contains("**let binding** **x**"));
+        assert!(markdown.contains("**let x**"));
         assert!(markdown.contains("```sail\nlet x : bits(32)\n```"));
     }
 
     #[test]
-    #[ignore = "C-7: requires SalsaFile for salsa-cached binding_type_text; TestFile returns None"]
     fn shows_inferred_local_binding_type_hint() {
         let source = "function foo() = {\n  let x = 1;\n  x\n}\n".to_string();
         let file = TestFile::new(&source);
@@ -1130,15 +1384,15 @@ mod tests {
             pos,
             base_db::text_range(off, off + 1),
             "x",
+            &crate::hover::HoverConfig::default(),
         )
         .expect("hover");
         let markdown = hover_markdown(hover);
-        assert!(markdown.contains("**let binding** **x**"));
-        assert!(markdown.contains("```sail\nlet x : int\n```"));
+        assert!(markdown.contains("**let x**"));
+        assert!(markdown.contains("```sail\nlet x : atom(1)\n```"));
     }
 
     #[test]
-    #[ignore = "debug-mode stack overflow: hover→binding_type_hint→infer_expr_type_text_in_files chain uses ~8KB/frame in debug; needs salsa-cached type queries"]
     fn shows_parameter_type_hint() {
         // Run in a thread with larger stack — the hover path has deep
         // call chains that exceed the default 2MB test thread stack
@@ -1159,13 +1413,14 @@ mod tests {
                     pos,
                     base_db::text_range(off, off + 1),
                     "x",
+                    &crate::hover::HoverConfig::default(),
                 )
                 .expect("hover");
                 let markdown = hover_markdown(hover);
-                assert!(markdown.contains("**parameter** **x**"));
+                assert!(markdown.contains("**parameter x**"));
                 assert!(
                     markdown.contains("parameter x : bits(32)")
-                        || markdown.contains("**parameter** **x**"),
+                        || markdown.contains("**parameter x**"),
                     "expected parameter hover, got: {markdown}"
                 );
             })
@@ -1189,11 +1444,15 @@ mod tests {
             pos,
             base_db::text_range(off, off + 3),
             "Red",
+            &crate::hover::HoverConfig::default(),
         )
         .expect("hover");
         let markdown = hover_markdown(hover);
-        assert!(markdown.contains("**enum member** **Red**"));
-        assert!(markdown.contains("```sail\ncolor::Red\n```"));
+        // The header is what the HIR says the name is, not the scrape's
+        // category label: `Definition::EnumVariant` renders the enum it
+        // belongs to, which the label could not.
+        assert!(markdown.contains("**color::Red**"), "{markdown}");
+        assert!(markdown.contains("```sail\ncolor::Red\n```"), "{markdown}");
     }
 
     #[test]
@@ -1218,10 +1477,11 @@ overload op = {add, sub}
             pos,
             base_db::text_range(start, start + 2),
             "op",
+            &crate::hover::HoverConfig::default(),
         )
         .expect("hover");
         let markdown = hover_markdown(hover);
-        assert!(markdown.contains("**overload** **op**"));
+        assert!(markdown.contains("**overload op"));
         assert!(markdown.contains("**members:**"));
         assert!(markdown.contains("```sail\nval add : int -> int\n```"));
         assert!(markdown.contains("```sail\nval sub : int -> int\n```"));
@@ -1239,6 +1499,7 @@ overload op = {add, sub}
             pos,
             base_db::text_range(0, 2),
             "'n",
+            &crate::hover::HoverConfig::default(),
         )
         .expect("hover");
         let markdown = hover_markdown(hover);
@@ -1247,8 +1508,11 @@ overload op = {add, sub}
 
     #[test]
     fn shows_comments_in_hover() {
+        // `///`, not `//`: upstream lexes the first as a doc comment and
+        // discards the second. This used to pass with `//` because hover
+        // found comments by scanning backwards through the source.
         let source =
-            "// This is a comment\n// for the add function\nfunction add(x) = x\n".to_string();
+            "/// This is a comment\n/// for the add function\nfunction add(x) = x\n".to_string();
         let file = TestFile::new(&source);
         let uri = Url::parse("file:///tmp/main.sail").unwrap();
         let off = source.find("add(x)").unwrap();
@@ -1261,6 +1525,7 @@ overload op = {add, sub}
             pos,
             base_db::text_range(off, off + 3),
             "add",
+            &crate::hover::HoverConfig::default(),
         )
         .expect("hover");
         let markdown = hover_markdown(hover);
@@ -1276,9 +1541,16 @@ overload op = {add, sub}
         let pos = file.position_at(name_offset + 1);
         let hover_range = base_db::text_range(name_offset, name_offset + 3);
 
-        let hover =
-            hover_for_symbol(std::iter::once((&uri, &file)), &uri, &file, pos, hover_range, "add")
-                .expect("hover");
+        let hover = hover_for_symbol(
+            std::iter::once((&uri, &file)),
+            &uri,
+            &file,
+            pos,
+            hover_range,
+            "add",
+            &crate::hover::HoverConfig::default(),
+        )
+        .expect("hover");
 
         assert_eq!(hover.range, hover_range);
     }
@@ -1299,6 +1571,7 @@ overload op = {add, sub}
             pos,
             base_db::text_range(off, off + 1),
             "f",
+            &crate::hover::HoverConfig::default(),
         )
         .expect("hover");
         let markdown = hover_markdown(hover);
@@ -1328,10 +1601,11 @@ overload op = {add, sub}
             pos,
             base_db::text_range(off, off + 5),
             "Flags",
+            &crate::hover::HoverConfig::default(),
         );
         let hover = hover.expect("bitfield hover should produce result");
         let md = hover_markdown(hover);
-        assert!(md.contains("**bitfield** **Flags**"), "should have bitfield label: {md}");
+        assert!(md.contains("**bitfield Flags"), "should have bitfield label: {md}");
         assert!(md.contains("layout"), "should contain layout table: {md}");
         assert!(md.contains("carry"), "should list carry field: {md}");
         assert!(md.contains("zero"), "should list zero field: {md}");
@@ -1352,10 +1626,11 @@ overload op = {add, sub}
             pos,
             base_db::text_range(off, off + 5),
             "Color",
+            &crate::hover::HoverConfig::default(),
         );
         let hover = hover.expect("enum hover should produce result");
         let md = hover_markdown(hover);
-        assert!(md.contains("**enum** **Color**"), "should have enum label: {md}");
+        assert!(md.contains("**enum Color"), "should have enum label: {md}");
         assert!(md.contains("variants"), "should mention variants: {md}");
         assert!(md.contains("Red"), "should list Red variant: {md}");
         assert!(md.contains("Green"), "should list Green variant: {md}");
@@ -1381,6 +1656,7 @@ overload op = {add, sub}
             pos,
             base_db::text_range(off, off + 9),
             "extension",
+            &crate::hover::HoverConfig::default(),
         );
         // May or may not produce hover depending on structural resolution,
         // but if it does it should list variants
@@ -1391,5 +1667,123 @@ overload op = {add, sub}
                 assert!(md.contains("Ext_A"), "should list Ext_A: {md}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod field_hover_tests {
+    use crate::fixture;
+
+    fn hover_at(source: &str, needle: &str) -> Option<String> {
+        let (analysis, files) = fixture::analysis(source);
+        let at = source.find(needle).expect("fixture");
+        let li = ide_db::line_index::LineIndex::new(source);
+        analysis
+            .hover(files[0].0, li.line_col(at), &crate::hover::HoverConfig::default())
+            .expect("no cancellation")
+            .map(|r| r.markup)
+    }
+
+    /// A field name in a struct literal says which struct and which type.
+    ///
+    /// The per-file scrape records *top-level* declarations, so it has no
+    /// `Decl` for a field — and hover's whole HIR path sat inside the
+    /// `if let Some(decl_ref)` branch. Every `struct { variety = .. }` in
+    /// the corpus hovered as the bare word. `Definition::Field` was a
+    /// classification nothing built and nothing dispatched on.
+    #[test]
+    fn a_struct_field_hovers_with_its_type() {
+        let markup = hover_at(
+            "\
+default Order dec
+struct S = { variety : int, strength : bool }
+function mk() -> S = struct { variety = 1, strength = true }
+",
+            "variety = 1",
+        )
+        .expect("no hover");
+        assert!(markup.contains("S.variety"), "{markup}");
+        assert!(markup.contains("int"), "{markup}");
+    }
+
+    /// With no annotation to read — a literal handed straight to a call —
+    /// a field name that exactly one declaration in the file uses decides
+    /// it. Two declarations sharing the name say nothing rather than
+    /// guessing.
+    #[test]
+    fn an_unannotated_literal_resolves_a_unique_field_name() {
+        let source = "\
+default Order dec
+struct S = { variety : int }
+val take : S -> unit
+function mk() -> unit = take(struct { variety = 1 })
+";
+        let markup = hover_at(source, "variety = 1").expect("no hover");
+        assert!(markup.contains("S.variety"), "{markup}");
+
+        let ambiguous = "\
+default Order dec
+struct S = { variety : int }
+struct T = { variety : bool }
+val take : S -> unit
+function mk() -> unit = take(struct { variety = 1 })
+";
+        let markup = hover_at(ambiguous, "variety = 1").unwrap_or_default();
+        assert!(!markup.contains("S.variety"), "guessed between two structs: {markup}");
+        assert!(!markup.contains("T.variety"), "guessed between two structs: {markup}");
+    }
+}
+
+#[cfg(test)]
+mod constructor_hover_tests {
+    use crate::fixture;
+
+    /// A constructor hovers as the type that declares it.
+    ///
+    /// The *type* carries the constructor's name, not the item, so the
+    /// resolver had nothing to answer with and every use came back
+    /// `Unresolved`. `Definition::EnumVariant` was a classification nothing
+    /// built — the same shape as `Definition::Field`.
+    #[test]
+    fn a_constructor_hovers_as_its_type() {
+        let source = "\
+default Order dec
+newtype regno = Regno : int
+val g : regno -> int
+function g(Regno(n)) = n
+";
+        let (analysis, files) = fixture::analysis(source);
+        let li = ide_db::line_index::LineIndex::new(source);
+        let at = source.find("Regno(n)").expect("fixture");
+        let markup = analysis
+            .hover(files[0].0, li.line_col(at), &crate::hover::HoverConfig::default())
+            .expect("no cancellation")
+            .expect("no hover")
+            .markup;
+        assert!(markup.contains("regno::Regno"), "{markup}");
+        assert!(markup.contains("int"), "{markup}");
+    }
+
+    /// Two declarations sharing a member name say nothing rather than
+    /// guessing.
+    #[test]
+    fn an_ambiguous_constructor_is_not_guessed() {
+        let source = "\
+default Order dec
+enum A = {Shared, OnlyA}
+enum B = {Shared, OnlyB}
+val f : A -> unit
+function f(x) = match x { Shared => (), OnlyA => () }
+";
+        let (analysis, files) = fixture::analysis(source);
+        let li = ide_db::line_index::LineIndex::new(source);
+        let at = source.find("Shared => ()").expect("fixture");
+        let markup = analysis
+            .hover(files[0].0, li.line_col(at), &crate::hover::HoverConfig::default())
+            .expect("no cancellation")
+            .map(|r| r.markup)
+            .unwrap_or_default();
+        assert!(!markup.contains("A::Shared"), "guessed: {markup}");
+        assert!(!markup.contains("B::Shared"), "guessed: {markup}");
     }
 }

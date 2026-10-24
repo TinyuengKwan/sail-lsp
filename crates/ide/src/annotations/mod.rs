@@ -74,6 +74,19 @@ pub enum AnnotationLocation {
     AboveWholeItem,
 }
 
+fn declaration_range(file: &dyn FileDb, decl: &ide_db::SymbolDecl) -> TextRange {
+    file.item_tree()
+        .and_then(|tree| {
+            tree.top_level_items()
+                .iter()
+                .find(|item| {
+                    item.span(tree).start == decl.offset && item.name(tree).as_str() == decl.name
+                })
+                .map(|item| base_db::span_to_text_range(&item.name_span(tree)))
+        })
+        .unwrap_or_else(|| base_db::text_range(decl.offset, decl.offset + decl.name.len()))
+}
+
 /// Collect annotations for a file (first phase — data is `None`).
 /// Callers should subsequently call `resolve_annotation()` to fill
 /// in the data lazily (e.g., when the client requests code lens
@@ -87,7 +100,7 @@ pub fn annotations(file: &dyn FileDb, config: &AnnotationConfig) -> Vec<Annotati
             continue;
         }
 
-        let range = base_db::text_range(decl.offset, decl.offset + decl.name.len());
+        let range = declaration_range(file, &decl);
 
         // HasReferences annotation
         if config.annotate_references {
@@ -161,13 +174,13 @@ pub fn collect_reference_counts<F: FileDb + ?Sized>(
             }
             continue;
         }
-        if let Some(parsed) = file.parsed() {
-            for occ in &parsed.symbol_occurrences {
-                if occ.kind == syntax::parser_lower::SymbolOccurrenceKind::Value
-                    && occ.role.is_none()
-                {
-                    *counts.entry(occ.name.clone()).or_insert(0) += 1;
-                }
+        // From the callgraph, which is built from the lowered bodies. The
+        // flat `symbol_occurrences` scrape counted every value-position name
+        // whether or not it resolved, so a shadowing local and the top-level
+        // function it hides were one number.
+        if let Some(graph) = file.callgraph() {
+            for site in graph.call_sites_in_file() {
+                *counts.entry(site.callee.clone()).or_insert(0) += 1;
             }
         }
     }
@@ -187,16 +200,17 @@ pub fn collect_implementation_counts<F: FileDb + ?Sized>(
             }
             continue;
         }
-        if let Some(parsed) = file.parsed() {
-            for decl in &parsed.decls {
-                if decl.role == syntax::parser_lower::DeclRole::Definition
-                    && matches!(
-                        decl.kind,
-                        syntax::parser_lower::DeclKind::Function
-                            | syntax::parser_lower::DeclKind::Mapping
-                    )
-                {
-                    *counts.entry(decl.name.clone()).or_insert(0) += 1;
+        // From the item tree, which already classified every definition —
+        // including the `function clause`es of a scattered function, which
+        // it calls `ScatteredClause` and which are exactly what "N
+        // implementations" counts.
+        if let Some(tree) = file.item_tree() {
+            for &id in tree.top_level_items() {
+                if matches!(
+                    id.def_kind(tree),
+                    hir::DefKind::Function | hir::DefKind::Mapping | hir::DefKind::ScatteredClause
+                ) {
+                    *counts.entry(id.name(tree).to_string()).or_insert(0) += 1;
                 }
             }
         }
@@ -242,7 +256,7 @@ pub fn code_lenses_ide(
         if decl.detail == "binding" || decl.kind == SymbolKind::EnumMember {
             continue;
         }
-        let range = base_db::text_range(decl.offset, decl.offset + decl.name.len());
+        let range = declaration_range(file, &decl);
         let refs = ref_counts.get(&decl.name).copied().unwrap_or(0);
 
         out.push(ide_db::ide_types::Annotation {

@@ -38,6 +38,9 @@ pub struct ExpressionStore {
     pub pats: Arena<Pat>,
     /// Bindings introduced by patterns.
     pub bindings: Arena<Binding>,
+    /// Potential implicit declarations, keyed by the identifier l-expression.
+    /// Lexical scopes activate these only for new names in block statements.
+    pub assignment_bindings: ArenaMap<ExprId, PatId>,
 }
 
 impl ExpressionStore {
@@ -256,8 +259,42 @@ impl ExpressionStoreBuilder {
     }
 
     /// Consume the builder and produce the store + source map.
-    pub fn finish(self) -> (ExpressionStore, ExpressionStoreSourceMap) {
-        let store = ExpressionStore { exprs: self.exprs, pats: self.pats, bindings: self.bindings };
+    pub fn finish(mut self) -> (ExpressionStore, ExpressionStoreSourceMap) {
+        fn targets(exprs: &Arena<Expr>, id: ExprId, out: &mut Vec<ExprId>) {
+            match &exprs[id] {
+                Expr::Ident(_) => out.push(id),
+                Expr::Cast { expr, .. } => targets(exprs, *expr, out),
+                Expr::Tuple(items) => {
+                    for &item in items {
+                        targets(exprs, item, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut candidates = Vec::new();
+        for (_, expr) in self.exprs.iter() {
+            if let Expr::Assign { target, .. } = expr {
+                targets(&self.exprs, *target, &mut candidates);
+            }
+        }
+        let mut assignment_bindings = ArenaMap::default();
+        for id in candidates {
+            let Expr::Ident(name) = &self.exprs[id] else { continue };
+            let name = name.clone();
+            let Some(ptr) = self.expr_map_back.get(id).copied() else { continue };
+            let pat = self.pats.alloc(Pat::Bind(name.clone()));
+            self.pat_map.insert(ptr, pat);
+            self.pat_map_back.insert(pat, ptr);
+            self.alloc_binding(Name::new(&name), pat);
+            assignment_bindings.insert(id, pat);
+        }
+        let store = ExpressionStore {
+            exprs: self.exprs,
+            pats: self.pats,
+            bindings: self.bindings,
+            assignment_bindings,
+        };
         let source_map = ExpressionStoreSourceMap {
             expr_map: self.expr_map,
             pat_map: self.pat_map,

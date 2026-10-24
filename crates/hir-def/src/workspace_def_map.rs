@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::item_tree::{ItemKind, ItemTree};
+use crate::item_tree::{DefKind, ItemTree};
 use crate::name::Name;
 use parser::Span;
 
@@ -12,7 +12,7 @@ use parser::Span;
 #[derive(Debug, Clone)]
 pub struct GlobalDef {
     pub file_index: usize,
-    pub kind: ItemKind,
+    pub kind: DefKind,
     pub signature_text: String,
     pub span: Span,
     pub is_clause: bool,
@@ -33,7 +33,7 @@ impl WorkspaceDefMap {
             for &id in tree.top_level_items() {
                 defs.entry(id.name(tree).clone()).or_default().push(GlobalDef {
                     file_index,
-                    kind: id.item_kind(tree),
+                    kind: id.def_kind(tree),
                     signature_text: id.signature(tree).to_owned(),
                     span: id.span(tree),
                     is_clause: id.is_clause(tree),
@@ -89,7 +89,7 @@ impl WorkspaceDefMap {
             return None;
         }
         // Prefer val spec (has type signature)
-        if let Some(val) = defs.iter().find(|d| d.kind == ItemKind::ValSpec) {
+        if let Some(val) = defs.iter().find(|d| d.kind == DefKind::ValSpec) {
             return Some(val);
         }
         // Prefer non-clause definitions
@@ -107,19 +107,6 @@ impl WorkspaceDefMap {
     /// Total number of definitions across all files.
     pub fn total_defs(&self) -> usize {
         self.defs.values().map(|v| v.len()).sum()
-    }
-
-    /// Build filtered by `AnalysisScope`.
-    pub fn build_for_scope(
-        scope: &crate::analysis_scope::AnalysisScope,
-        all_trees: &[(base_db::FileId, usize, &ItemTree)],
-    ) -> Self {
-        let filtered: Vec<(usize, &ItemTree)> = all_trees
-            .iter()
-            .filter(|(fid, _, _)| scope.contains(*fid))
-            .map(|(_, idx, tree)| (*idx, *tree))
-            .collect();
-        Self::build(&filtered)
     }
 
     /// Build filtered by `.sail_project` boundary.
@@ -156,7 +143,7 @@ mod tests {
         assert_eq!(wdm.total_defs(), 1);
         assert_eq!(wdm.lookup("f").len(), 1);
         assert_eq!(wdm.lookup("f")[0].file_index, 0);
-        assert_eq!(wdm.lookup("f")[0].kind, ItemKind::Function);
+        assert_eq!(wdm.lookup("f")[0].kind, DefKind::Function);
     }
 
     #[test]
@@ -168,7 +155,7 @@ mod tests {
         assert_eq!(defs.len(), 2);
         // best_definition prefers val spec
         let best = wdm.best_definition("add").unwrap();
-        assert_eq!(best.kind, ItemKind::ValSpec);
+        assert_eq!(best.kind, DefKind::ValSpec);
         assert_eq!(best.file_index, 0);
     }
 
@@ -214,7 +201,7 @@ mod tests {
 
         // best_definition prefers val spec
         let best = wdm.best_definition("pc_read").unwrap();
-        assert_eq!(best.kind, ItemKind::ValSpec);
+        assert_eq!(best.kind, DefKind::ValSpec);
         assert_eq!(best.file_index, 0); // prelude file
     }
 }

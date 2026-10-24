@@ -55,7 +55,15 @@ fn lower_definition(node: &SyntaxNode, parsed: &mut ParsedFile, text: &str) {
         SK::NAMED_DEF => lower_named_def(node, parsed, text),
         SK::SCATTERED_DEF => {
             if let Some(name) = first_ident(node) {
-                push_decl(parsed, DeclKind::Function, DeclRole::Declaration, &name, span, true);
+                push_decl(
+                    parsed,
+                    DeclKind::Function,
+                    DeclRole::Declaration,
+                    &name,
+                    span,
+                    first_ident_span(node),
+                    true,
+                );
                 // E4: Push SymbolOccurrence for scattered head so rename finds it.
                 if let Some(ns) = first_ident_span(node) {
                     parsed.symbol_occurrences.push(SymbolOccurrence {
@@ -71,7 +79,15 @@ fn lower_definition(node: &SyntaxNode, parsed: &mut ParsedFile, text: &str) {
         }
         SK::SCATTERED_CLAUSE_DEF => {
             if let Some(name) = first_ident(node) {
-                push_decl(parsed, DeclKind::Function, DeclRole::Definition, &name, span, true);
+                push_decl(
+                    parsed,
+                    DeclKind::Function,
+                    DeclRole::Definition,
+                    &name,
+                    span,
+                    first_ident_span(node),
+                    true,
+                );
                 // E4: Also push SymbolOccurrence so rename finds scattered clauses.
                 // Without this, rename_edits misses clause names in other files.
                 if let Some(ns) = first_ident_span(node) {
@@ -122,7 +138,7 @@ fn lower_callable_def(node: &SyntaxNode, parsed: &mut ParsedFile, _text: &str) {
         _ => DeclKind::Function,
     };
 
-    push_decl(parsed, decl_kind, DeclRole::Definition, &name, span, false);
+    push_decl(parsed, decl_kind, DeclRole::Definition, &name, span, first_ident_span(node), false);
 
     // Record function name as top-level symbol occurrence for resolve_symbol_at.
     if let Some(ns) = first_ident_span(node) {
@@ -180,7 +196,7 @@ fn lower_callable_spec(node: &SyntaxNode, parsed: &mut ParsedFile, _text: &str) 
         _ => DeclKind::Value,
     };
 
-    push_decl(parsed, decl_kind, DeclRole::Declaration, &name, span, false);
+    push_decl(parsed, decl_kind, DeclRole::Declaration, &name, span, first_ident_span(node), false);
 
     let name_span = first_ident_span(node).unwrap_or(span);
     // Record val name as top-level symbol occurrence for resolve_symbol_at.
@@ -215,7 +231,15 @@ fn lower_type_alias(node: &SyntaxNode, parsed: &mut ParsedFile) {
     let Some(name) = first_ident(node) else {
         return;
     };
-    push_decl(parsed, DeclKind::Type, DeclRole::Definition, &name, span, false);
+    push_decl(
+        parsed,
+        DeclKind::Type,
+        DeclRole::Definition,
+        &name,
+        span,
+        first_ident_span(node),
+        false,
+    );
 
     // Extract the type alias target: `type child = parent`
     // The target type is the first TYPE_* child node after the EQ token.
@@ -275,7 +299,15 @@ fn lower_named_def(node: &SyntaxNode, parsed: &mut ParsedFile, _text: &str) {
     if let Some(ns) = ns {
         push_decl_with_name_span(parsed, decl_kind, DeclRole::Definition, &name, span, ns, false);
     } else {
-        push_decl(parsed, decl_kind, DeclRole::Definition, &name, span, false);
+        push_decl(
+            parsed,
+            decl_kind,
+            DeclRole::Definition,
+            &name,
+            span,
+            first_ident_span(node),
+            false,
+        );
     }
 
     // For enums, extract enum members
@@ -817,6 +849,7 @@ fn push_decl(
     role: DeclRole,
     name: &str,
     span: Span,
+    name_span: Option<Span>,
     is_scattered: bool,
 ) {
     parsed.decls.push(Decl {
@@ -825,7 +858,7 @@ fn push_decl(
         role,
         scope: Scope::TopLevel,
         span,
-        name_span: None,
+        name_span,
         is_scattered,
         doc: None,
     });

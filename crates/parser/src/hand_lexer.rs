@@ -207,9 +207,16 @@ pub fn tokenize(input: &str) -> Vec<(Token, Span)> {
             }
             let name = input[name_start..pos].to_owned();
 
-            // Structured directive: $ident{
-            if pos < len && bytes[pos] == b'{' {
-                pos += 1; // consume the {
+            // Structured directive: `"$" (ident+ as i) wsc* "{"`
+            // (lexer.mll:246). The brace may be separated from the name by
+            // spaces or tabs — but not a newline, which would make a plain
+            // pragma followed by a block indistinguishable.
+            let mut brace = pos;
+            while brace < len && (bytes[brace] == b' ' || bytes[brace] == b'\t') {
+                brace += 1;
+            }
+            if brace < len && bytes[brace] == b'{' {
+                pos = brace + 1; // consume the {
                 tokens.push((Token::StructuredDirectiveStart(name), Span::new(start, pos)));
                 continue;
             }
@@ -297,6 +304,25 @@ pub fn tokenize(input: &str) -> Vec<(Token, Span)> {
             }
             let text = &input[start..pos];
             let tok = keyword_or_id(text);
+
+            // `operator <op>` names an operator: the `id` rule `Op OpId` builds
+            // `Id_aux (Operator "+")` (parser.mly:269-273), and at a use site
+            // `a + b` the infix application resolves to that same
+            // `Operator "+"` (initial_check.ml:306, :1439). Emitting the symbol
+            // as an ordinary `Id` token makes `overload operator + = {...}`
+            // register an overload named `+` rather than one named `operator`.
+            if matches!(tok, Token::KwOperator) {
+                if let Some((op_start, op_end)) = scan_operator_name(bytes, pos, len) {
+                    tokens.push((tok, Span::new(start, pos)));
+                    tokens.push((
+                        Token::Id(input[op_start..op_end].to_owned()),
+                        Span::new(op_start, op_end),
+                    ));
+                    pos = op_end;
+                    continue;
+                }
+            }
+
             tokens.push((tok, Span::new(start, pos)));
             continue;
         }
@@ -308,11 +334,36 @@ pub fn tokenize(input: &str) -> Vec<(Token, Span)> {
             continue;
         }
 
-        // Unknown character — skip (chumsky would error-recover)
-        pos += 1;
+        // Unknown character — skip it whole.
+        //
+        // `pos += 1` skipped one *byte*, so a character outside ASCII was
+        // entered rather than passed over, and a token span could start or
+        // end inside it. `LexedStr::text` then slices `&self.text[..]` at
+        // that offset and panics: upstream's own `test/lexing/extended_ascii.sail`
+        // — `let _ = ™;` — crashed the parser, where `sail` reports
+        // "Unexpected character: \226" and carries on.
+        pos += utf8_len(bytes[pos]);
     }
 
     tokens
+}
+
+/// Bytes in the UTF-8 character starting with `b`.
+///
+/// A continuation byte answers 1 so a malformed sequence still advances.
+///
+/// Shared with `lex_full`: both lexers had a "skip the character I do not
+/// know" branch and both advanced one *byte*, so a span could start or end
+/// inside a character and `LexedStr::text` panicked slicing at it.
+#[inline]
+pub(crate) fn utf8_len(b: u8) -> usize {
+    match b {
+        0x00..=0x7F => 1,
+        0xC0..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        0xF0..=0xF7 => 4,
+        _ => 1,
+    }
 }
 
 #[inline]
@@ -327,18 +378,43 @@ fn is_ident_start_or_tilde(b: u8) -> bool {
 
 #[inline]
 fn is_ident_continue(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_' || b == b'?' || b == b'\''
+    // Upstream `ident = alphanum | ['_' '\'' '#']` (lexer.mll:180). `#` is a
+    // legal identifier character; upstream restricts its *use* to files marked
+    // `$sail_internal` at the AST level, not in the lexer.
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'?' || b == b'\'' || b == b'#'
 }
 
 /// Try to match a multi-character operator at `pos`.
 /// Returns `(Token, bytes_consumed)` or `None`.
-/// Operator characters that form multi-char operators.
-/// Excludes characters with dedicated grammar roles:
-/// - `.` excluded: used as two separate DOT tokens for `x[31..0]` subranges.
-/// - `:` excluded: used as COLON for type annotations `x : bits(32)`.
-/// - `!` excluded: only valid in `!=` (handled as specific 2-char token).
+/// Operator characters that can form multi-char operators.
+///
+/// Upstream `oper_char = ['!' '%' '&' '*' '+' '-' '.' '/' ':' '<' '=' '>' '@'
+/// '^' '|']` (lexer.mll:183). We match it except for `.`, which sail-lsp's
+/// grammar consumes as two separate DOT tokens for `x[31..0]` subranges.
+///
+/// `:` and `!` are included so that user-defined operators containing them
+/// (`:+:`, `!^`) lex as a single `InfixOp` instead of being split or — in the
+/// case of a lone `!` — silently dropped. Single-character `:` still falls
+/// through to `Token::Colon` because [`try_multi_char_op`] only returns for
+/// runs of length >= 2, and `::`/`:=`/`!=` are matched by the dedicated
+/// two-character pre-check in [`tokenize`].
 fn is_oper_char(b: u8) -> bool {
-    matches!(b, b'%' | b'&' | b'*' | b'+' | b'-' | b'/' | b'<' | b'=' | b'>' | b'@' | b'^' | b'|')
+    matches!(
+        b,
+        b'!' | b'%'
+            | b'&'
+            | b'*'
+            | b'+'
+            | b'-'
+            | b'/'
+            | b':'
+            | b'<'
+            | b'='
+            | b'>'
+            | b'@'
+            | b'^'
+            | b'|'
+    )
 }
 
 /// Try to lex a multi-character operator using longest-match.
@@ -424,6 +500,40 @@ fn try_multi_char_op(bytes: &[u8], pos: usize, len: usize) -> Option<(Token, usi
     Some((Token::InfixOp(op_str), op_len))
 }
 
+/// Scan the operator symbol that follows the `operator` keyword.
+///
+/// Returns the `(start, end)` byte range of the symbol, or `None` when
+/// `operator` is not followed by one (in which case it stays a bare keyword
+/// token and the grammar reports the error). Mirrors upstream `id: Op OpId |
+/// Op Minus | Op Bar | Op Caret | Op Star` (parser.mly:269-273), where the
+/// symbol is any `oper_char` run, optionally with an `_ident` suffix.
+fn scan_operator_name(bytes: &[u8], after_keyword: usize, len: usize) -> Option<(usize, usize)> {
+    let mut p = after_keyword;
+    // Only plain inline whitespace may separate the keyword from the symbol;
+    // a newline means this `operator` was not a name prefix.
+    while p < len && (bytes[p] == b' ' || bytes[p] == b'\t') {
+        p += 1;
+    }
+    let op_start = p;
+    while p < len && is_oper_char(bytes[p]) {
+        p += 1;
+    }
+    if p == op_start {
+        return None;
+    }
+    // Optional `_ident` suffix, e.g. `operator <=_u`.
+    if p < len && bytes[p] == b'_' {
+        let mut ext = p + 1;
+        while ext < len && is_ident_continue(bytes[ext]) {
+            ext += 1;
+        }
+        if ext > p + 1 {
+            p = ext;
+        }
+    }
+    Some((op_start, p))
+}
+
 /// Match a single-character operator.
 fn single_char_op(b: u8) -> Option<Token> {
     match b {
@@ -452,7 +562,10 @@ fn single_char_op(b: u8) -> Option<Token> {
         b',' => Some(Token::Comma),
         b'-' => Some(Token::Minus),
         b'_' => Some(Token::Underscore),
-        b'!' => None, // ! alone is not a token (only != is)
+        // Upstream lexes a lone `!` as `OpId "!"` (lexer.mll:259). Emitting a
+        // token rather than `None` is what stops the character being silently
+        // dropped, which used to turn `1 !^ 1` into `1 ^ 1`.
+        b'!' => Some(Token::InfixOp("!".to_owned())),
         _ => None,
     }
 }
@@ -465,7 +578,6 @@ fn keyword_or_id(text: &str) -> Token {
         "as" => Token::KwAs,
         "assert" => Token::KwAssert,
         "backwards" => Token::KwBackwards,
-        "barr" => Token::KwBarr,
         "bitfield" => Token::KwBitfield,
         "bitone" => Token::KwBitone,
         "bitzero" => Token::KwBitzero,
@@ -473,7 +585,6 @@ fn keyword_or_id(text: &str) -> Token {
         "by" => Token::KwBy,
         "cast" => Token::KwCast,
         "catch" => Token::KwCatch,
-        "case" => Token::KwCase,
         "clause" => Token::KwClause,
         "config" => Token::KwConfig,
         "configuration" => Token::KwConfiguration,
@@ -481,17 +592,13 @@ fn keyword_or_id(text: &str) -> Token {
         "constraint" => Token::KwConstraint,
         "dec" => Token::KwDec,
         "default" => Token::KwDefault,
-        "depend" => Token::KwDepend,
         "do" => Token::KwDo,
         "downto" => Token::KwDownto,
-        "eamem" => Token::KwEamem,
         "effect" => Token::KwEffect,
         "else" => Token::KwElse,
         "end" => Token::KwEnd,
         "enum" => Token::KwEnum,
-        "escape" => Token::KwEscape,
         "exit" => Token::KwExit,
-        "exmem" => Token::KwExmem,
         "false" => Token::KwFalse,
         "forall" => Token::KwForall,
         "foreach" => Token::KwForeach,
@@ -500,6 +607,7 @@ fn keyword_or_id(text: &str) -> Token {
         "function" => Token::KwFunction,
         "if" => Token::KwIf,
         "impl" => Token::KwImpl,
+        "impure" => Token::KwImpure,
         "in" => Token::KwIn,
         "inc" => Token::KwInc,
         "infix" => Token::KwInfix,
@@ -512,9 +620,9 @@ fn keyword_or_id(text: &str) -> Token {
         "match" => Token::KwMatch,
         "monadic" => Token::KwMonadic,
         "mutual" => Token::KwMutual,
-        "mwv" => Token::KwMwv,
+        "Nat" => Token::KwNat,
         "newtype" => Token::KwNewtype,
-        "nondet" => Token::KwNondet,
+        "operator" => Token::KwOperator,
         "Order" => Token::KwOrder,
         "outcome" => Token::KwOutcome,
         "overload" => Token::KwOverload,
@@ -524,12 +632,9 @@ fn keyword_or_id(text: &str) -> Token {
         "register" => Token::KwRegister,
         "repeat" => Token::KwRepeat,
         "return" => Token::KwReturn,
-        "rmem" => Token::KwRmem,
-        "rreg" => Token::KwRreg,
         "scattered" => Token::KwScattered,
         "sizeof" => Token::KwSizeof,
         "struct" => Token::KwStruct,
-        "switch" => Token::KwSwitch,
         "termination_measure" => Token::KwTerminationMeasure,
         "then" => Token::KwThen,
         "throw" => Token::KwThrow,
@@ -538,18 +643,14 @@ fn keyword_or_id(text: &str) -> Token {
         "try" => Token::KwTry,
         "type" => Token::KwType,
         "Type" => Token::KwTypeUpper,
-        "undef" => Token::KwUndef,
         "undefined" => Token::KwUndefined,
         "union" => Token::KwUnion,
-        "unspec" => Token::KwUnspec,
         "until" => Token::KwUntil,
         "val" => Token::KwVal,
         "var" => Token::KwVar,
         "when" => Token::KwWhen,
         "while" => Token::KwWhile,
         "with" => Token::KwWith,
-        "wmem" => Token::KwWmem,
-        "wreg" => Token::KwWreg,
         _ => Token::Id(text.to_owned()),
     }
 }

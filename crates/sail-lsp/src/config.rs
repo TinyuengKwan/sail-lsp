@@ -34,6 +34,29 @@ pub struct SailLspConfig {
     pub z3: Z3Config,
     /// Workspace configuration.
     pub workspace: WorkspaceConfig,
+    /// Running upstream Sail beside the server's own analysis.
+    pub flycheck: FlycheckConfig,
+}
+
+/// `sail --just-check`, as rust-analyzer runs `cargo check`.
+///
+/// Off by default: it shells out to a binary that may not be installed, and
+/// a language server that spawns processes nobody asked for is a surprise.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct FlycheckConfig {
+    /// Whether to run it at all.
+    pub enable: bool,
+    /// The binary. `sail` on `PATH` unless the user says otherwise.
+    pub command: String,
+    /// Arguments before the file list — `--config`, `-D`, an `$include` path.
+    pub extra_args: Vec<String>,
+}
+
+impl Default for FlycheckConfig {
+    fn default() -> Self {
+        Self { enable: false, command: "sail".to_string(), extra_args: Vec::new() }
+    }
 }
 
 /// Diagnostics-related settings.
@@ -139,16 +162,61 @@ pub struct Z3Config {
     pub timeout_ms: u32,
 }
 
+/// Project variables have the same boolean/string values as Sail assignments.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum ProjectVariableValue {
+    Bool(bool),
+    String(String),
+}
+
 /// Workspace settings.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct WorkspaceConfig {
+    /// Manifest relative to each workspace root; discovery is used when absent.
+    pub project_file: Option<String>,
+    /// Overrides for declarations in the Sail project file.
+    pub project_variables: std::collections::BTreeMap<String, ProjectVariableValue>,
+    /// Selected root modules; empty selects all modules.
+    pub project_modules: Vec<String>,
     /// Maximum number of files to scan.
     pub max_files: usize,
     /// Compilation target for `$iftarget` directives.
     pub target: Option<String>,
     /// Additional include paths for `$include` resolution.
     pub include_paths: Vec<String>,
+    /// How many threads may pre-warm the caches.
+    ///
+    /// `0` means "half this machine's cores, at least one" — the
+    /// rust-analyzer default. A literal `2` used to be passed at the call
+    /// site, so the setting could not exist.
+    pub prime_caches_num_threads: usize,
+}
+
+impl WorkspaceConfig {
+    pub(crate) fn project_options(&self) -> project_model::ProjectOptions {
+        project_model::ProjectOptions {
+            variables: self
+                .project_variables
+                .iter()
+                .map(|(name, value)| {
+                    (
+                        name.clone(),
+                        match value {
+                            ProjectVariableValue::Bool(value) => {
+                                project_model::ProjectValue::Bool(*value)
+                            }
+                            ProjectVariableValue::String(value) => {
+                                project_model::ProjectValue::String(value.clone())
+                            }
+                        },
+                    )
+                })
+                .collect(),
+            roots: self.project_modules.clone(),
+        }
+    }
 }
 
 impl Default for DiagnosticsConfig {
@@ -187,7 +255,6 @@ impl DiagnosticsConfig {
     }
 }
 
-#[allow(dead_code)]
 impl CompletionConfig {
     /// Convert LSP-level config to ide-completion config.
     pub fn to_ide_config(&self) -> ide::completion::CompletionConfig {
@@ -219,7 +286,6 @@ impl Default for InlayHintsConfig {
     }
 }
 
-#[allow(dead_code)]
 impl InlayHintsConfig {
     /// Convert LSP-level config to ide inlay hints config.
     pub fn to_ide_config(&self) -> ide::inlay_hints::InlayHintsConfig {
@@ -262,11 +328,10 @@ impl Default for HoverConfig {
     }
 }
 
-#[allow(dead_code)]
 impl HoverConfig {
     /// Convert LSP-level config to ide hover config.
-    pub fn to_ide_config(&self) -> ide_db::ide_types::HoverConfig {
-        ide_db::ide_types::HoverConfig {
+    pub fn to_ide_config(&self) -> ide::hover::HoverConfig {
+        ide::hover::HoverConfig {
             documentation: self.docs,
             keywords: self.keywords,
             ..Default::default()
@@ -288,12 +353,27 @@ impl Default for Z3Config {
 
 impl Default for WorkspaceConfig {
     fn default() -> Self {
-        Self { max_files: 10000, target: None, include_paths: Vec::new() }
+        Self {
+            project_file: None,
+            project_variables: Default::default(),
+            project_modules: Vec::new(),
+            max_files: 10000,
+            target: None,
+            include_paths: Vec::new(),
+            prime_caches_num_threads: 0,
+        }
     }
 }
 
-#[allow(dead_code)]
 impl SailLspConfig {
+    /// The worker count for cache priming, resolved against the machine.
+    pub fn prime_caches_num_threads(&self) -> usize {
+        match self.workspace.prime_caches_num_threads {
+            0 => (std::thread::available_parallelism().map_or(1, usize::from) / 2).max(1),
+            n => n,
+        }
+    }
+
     pub fn diagnostics_enable(&self) -> bool {
         self.diagnostics.enable
     }

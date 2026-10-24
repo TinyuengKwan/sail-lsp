@@ -1,13 +1,9 @@
 //! LSP utility functions.
 
-use lsp_server::Notification;
-
-/// Check if a notification is of a specific type.
-pub(crate) fn notification_is<N: lsp_types::notification::Notification>(
-    notification: &Notification,
-) -> bool {
-    notification.method == N::METHOD
-}
+// There is no `notification_is`. Its one caller was
+// `is_cancel_notification`, an early filter that did not exist either —
+// `$/cancelRequest` is dispatched by `on_sync_mut` like every other
+// notification.
 
 /// Create an LSP invalid-params error.
 pub(crate) fn invalid_params_error(message: String) -> lsp_server::ResponseError {

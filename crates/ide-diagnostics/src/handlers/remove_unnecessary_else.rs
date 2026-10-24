@@ -6,7 +6,7 @@
 //! Fix: remove the `else` block (unresolved — resolved via codeAction/resolve).
 
 use crate::Diagnostic;
-use hir_def::diagnostics::{DiagnosticCode, Severity};
+use hir::diagnostics::{DiagnosticCode, Severity};
 use ide_db::assists::Assist;
 
 use crate::{DiagnosticsContext, RemoveUnnecessaryElse};
@@ -17,7 +17,7 @@ pub(crate) fn remove_unnecessary_else(
     d: &RemoveUnnecessaryElse,
 ) -> Diagnostic {
     Diagnostic::new(
-        DiagnosticCode::SailLint("redundant-type-annotation", Severity::Warning),
+        DiagnosticCode::SailLint("remove-unnecessary-else", Severity::Warning),
         "unnecessary `else` because `then` branch diverges".to_string(),
         crate::node_file_range(&d.node),
     )

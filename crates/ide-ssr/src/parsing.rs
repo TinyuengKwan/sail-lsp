@@ -22,11 +22,11 @@ pub(crate) struct ParsedRule {
 
 /// A placeholder in an SSR pattern.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Placeholder {
     /// The user-visible variable (e.g., `Var("a")` for `$a`).
     pub(crate) ident: Var,
     /// The stand-in identifier used in the parsed tree (e.g., `__ssr_0_a`).
+    #[expect(dead_code)]
     pub(crate) stand_in_name: String,
     /// Optional constraints on what the placeholder can match.
     pub(crate) constraints: Vec<Constraint>,

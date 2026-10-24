@@ -1,0 +1,36 @@
+SOURCE_FILE@0..36
+  CALLABLE_DEF@0..35
+    KW_FUNCTION@0..8 "function"
+    WHITESPACE@8..9 " "
+    IDENT@9..10 "t"
+    UNIT@10..12 "()"
+    WHITESPACE@12..13 " "
+    EQ@13..14 "="
+    WHITESPACE@14..15 " "
+    BLOCK_EXPR@15..35
+      L_CURLY@15..16 "{"
+      WHITESPACE@16..17 " "
+      BLOCK_ITEM@17..33
+        WHILE_EXPR@17..33
+          KW_WHILE@17..22 "while"
+          WHITESPACE@22..23 " "
+          IDENT_EXPR@23..24
+            IDENT@23..24 "c"
+          WHITESPACE@24..25 " "
+          BLOCK_EXPR@25..33
+            L_CURLY@25..26 "{"
+            WHITESPACE@26..27 " "
+            BLOCK_ITEM@27..31
+              CALL_EXPR@27..31
+                IDENT_EXPR@27..28
+                  IDENT@27..28 "g"
+                ARG_LIST@28..31
+                  L_PAREN@28..29 "("
+                  LITERAL_EXPR@29..30
+                    NUM_LIT@29..30 "1"
+                  R_PAREN@30..31 ")"
+            WHITESPACE@31..32 " "
+            R_CURLY@32..33 "}"
+      WHITESPACE@33..34 " "
+      R_CURLY@34..35 "}"
+  WHITESPACE@35..36 "\n"

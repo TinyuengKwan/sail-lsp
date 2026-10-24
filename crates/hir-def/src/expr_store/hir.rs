@@ -11,7 +11,6 @@ use std::fmt;
 
 use la_arena::Idx;
 
-use crate::Span;
 pub use parser::Literal;
 pub use syntax::ast::operators::{ArithOp, BinaryOp, CmpOp, LogicOp, Ordering, UnaryOp};
 
@@ -215,10 +214,10 @@ pub enum Expr {
     /// `sizeof('n)` — type-level numeric expression used as runtime value.
     /// Stores the nexp text (e.g., "'n", "'n + 1") for type inference.
     SizeOf {
-        span: Span,
         nexp: String,
     },
-    Constraint(Span),
+    /// `constraint(...)`, holding the constraint as written.
+    Constraint(String),
 
     Return(ExprId),
     Throw(ExprId),
@@ -229,13 +228,19 @@ pub enum Expr {
     },
     Cast {
         expr: ExprId,
-        ty_span: Span,
+        /// The ascribed type, as written. A body that held the type's
+        /// *offsets* changed whenever anything above it did, so nothing
+        /// downstream could be reused across an edit — and every reader
+        /// sliced the file text with them to get back to exactly this.
+        ty: String,
     },
     Field {
         expr: ExprId,
         field: String,
     },
     Attribute {
+        /// The attribute's own name, so a checker can honour it.
+        name: String,
         expr: ExprId,
     },
 
@@ -255,7 +260,7 @@ pub enum Expr {
         body: ExprId,
     },
     Var {
-        target: ExprId,
+        pat: PatId,
         value: ExprId,
         body: ExprId,
     },
@@ -284,6 +289,8 @@ pub enum Expr {
     },
     /// `pat` is the iterator binding (was `iterator: String`).
     Foreach {
+        /// None when an explicit order cannot be resolved during lowering.
+        descending: Option<bool>,
         pat: PatId,
         start: ExprId,
         end: ExprId,
@@ -352,6 +359,9 @@ pub struct MappingArm {
     pub rhs_expr: ExprId,
     pub guard: Option<ExprId>,
     pub span: crate::Span,
+    /// Each side's expression was built from that side's pattern, so the
+    /// two are the same syntax and must be checked once, not twice.
+    pub mirrored: bool,
 }
 
 /// A block statement.
@@ -382,7 +392,8 @@ pub enum Pat {
     TypeVar(String),
     Typed {
         inner: PatId,
-        ty_span: Span,
+        /// The annotation, as written. See `Expr::Cast::ty`.
+        ty: String,
     },
     Tuple(Vec<PatId>),
     List(Vec<PatId>),
@@ -406,15 +417,18 @@ pub enum Pat {
     },
     AsType {
         pat: PatId,
-        ty_span: Span,
+        /// The annotation, as written. See `Expr::Cast::ty`.
+        ty: String,
     },
     Index {
         name: String,
-        index_span: Span,
+        /// The index, as written. See `Expr::Cast::ty`.
+        index: String,
     },
     RangeIndex {
         name: String,
-        start_span: Span,
-        end_span: Span,
+        /// The bounds, as written. See `Expr::Cast::ty`.
+        start: String,
+        end: String,
     },
 }

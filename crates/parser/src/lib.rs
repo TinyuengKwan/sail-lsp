@@ -26,7 +26,7 @@ pub use event::ParseError;
 pub use grammar::FixityContext;
 pub use hand_lexer::tokenize;
 pub use input::Input;
-pub use lex_full::single_token;
+pub use lex_full::{single_token, LexError};
 pub use lexer::{Span, Token};
 pub use output::{Output, Step};
 pub use shortcuts::{LexedStr, StrStep};

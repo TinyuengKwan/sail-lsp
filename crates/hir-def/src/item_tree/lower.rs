@@ -50,58 +50,18 @@ impl ItemTree {
                 tree.top_level.push(mod_item);
             }
         }
+        generated::expand(root, &mut tree, false);
         tree.compute_per_item_hashes();
         tree.fixities = fixities;
-        // Populate legacy `entries` from typed arenas.
-        #[allow(deprecated)]
-        {
-            tree.entries = build_legacy_entries(&tree);
-        }
         tree
     }
 
-    /// Build from CST with preprocessing and bitfield expansion.
-    /// Combines `$ifdef/$ifndef` filtering  with bitfield
-    /// accessor synthesis .
+    /// Build the preprocessed declaration surface, including generated names.
     pub fn build_from_cst_full(
         root: &syntax::SyntaxNode,
         symbols: &mut std::collections::HashSet<String>,
     ) -> Self {
-        let mut tree = Self::build_from_cst_with_preprocess(root, symbols);
-
-        // Bitfield expansion: walk CST nodes again to extract field names
-        // (signature_text doesn't contain fields because extract_signature
-        // strips everything after `=`)
-        let mut bf_fields: Vec<(String, Vec<String>)> = Vec::new();
-        for child in root.children() {
-            // Use typed cast instead of raw kind check
-            let Some(named_def) = syntax::ast::NamedDef::cast(child) else {
-                continue;
-            };
-            let full_text = named_def.syntax().text().to_string();
-            if !full_text.trim_start().starts_with("bitfield") {
-                continue;
-            }
-            // Use name_ident() (raw IDENT token) since the Name child node
-            // may not be present for all CST shapes.
-            if let Some(name_tok) = named_def.name_ident() {
-                let name = name_tok.text().to_string();
-                let fields = extract_bitfield_fields(&full_text);
-                if !fields.is_empty() {
-                    bf_fields.push((name, fields));
-                }
-            }
-        }
-        for (bf_name, fields) in &bf_fields {
-            expand_bitfield_for(bf_name, fields, &mut tree);
-        }
-
-        // Recompute hash after expansion.
-        if !bf_fields.is_empty() {
-            tree.compute_per_item_hashes();
-        }
-
-        tree
+        Self::build_from_cst_with_preprocess(root, symbols)
     }
 
     /// Build from CST with `$ifdef/$ifndef/$define/$iftarget` preprocessing.
@@ -132,52 +92,9 @@ impl ItemTree {
         target: Option<&str>,
     ) -> Self {
         let mut tree = Self::empty();
-        // Conditional stack: each entry is (taking_branch, has_else)
-        let mut cond_stack: Vec<bool> = Vec::new();
-
+        let mut conditions = syntax::preprocess::CondFilter::new();
         for child in root.children() {
-            if syntax::ast::DirectiveDef::can_cast(child.kind()) {
-                let text = child.text().to_string();
-                let text = text.trim();
-
-                if let Some(sym) =
-                    text.strip_prefix("$define ").or_else(|| text.strip_prefix("$define\t"))
-                {
-                    let sym = sym.trim();
-                    if cond_stack.iter().all(|&taking| taking) {
-                        symbols.insert(sym.to_string());
-                    }
-                } else if let Some(sym) =
-                    text.strip_prefix("$ifdef ").or_else(|| text.strip_prefix("$ifdef\t"))
-                {
-                    let sym = sym.trim();
-                    let taking = symbols.contains(sym);
-                    cond_stack.push(taking);
-                } else if let Some(sym) =
-                    text.strip_prefix("$ifndef ").or_else(|| text.strip_prefix("$ifndef\t"))
-                {
-                    let sym = sym.trim();
-                    let taking = !symbols.contains(sym);
-                    cond_stack.push(taking);
-                } else if text.starts_with("$iftarget") {
-                    let target_set = text.strip_prefix("$iftarget").unwrap_or("").trim();
-                    let taking = match target {
-                        Some(t) => target_set.split_whitespace().any(|s| s == t),
-                        None => false,
-                    };
-                    cond_stack.push(taking);
-                } else if text == "$else" {
-                    if let Some(last) = cond_stack.last_mut() {
-                        *last = !*last;
-                    }
-                } else if text == "$endif" {
-                    cond_stack.pop();
-                }
-                continue;
-            }
-
-            // If inside a non-taken branch, skip this definition
-            if cond_stack.iter().any(|&taking| !taking) {
+            if !conditions.accept(&child, symbols, target) {
                 continue;
             }
 
@@ -197,78 +114,31 @@ impl ItemTree {
             }
         }
 
+        generated::expand(root, &mut tree, true);
         tree.compute_per_item_hashes();
         tree.fixities = fixities;
-        #[allow(deprecated)]
-        {
-            tree.entries = build_legacy_entries(&tree);
-        }
         tree
     }
 }
 
-/// Build legacy `ItemTreeEntry` vec from the typed arenas.
-/// Used to keep backward compatibility during migration.
-#[allow(deprecated)]
-fn build_legacy_entries(tree: &ItemTree) -> Vec<ItemTreeEntry> {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    tree.top_level_items()
-        .iter()
-        .map(|id| {
-            let name = id.name(tree).clone();
-            let kind = id.item_kind(tree);
-            let sig = id.signature(tree).to_string();
-            let span = id.span(tree);
-            let is_clause = match id {
-                ModItem::Function(fid) => tree.functions[*fid].is_clause,
-                ModItem::TypeDef(tid) => tree.type_defs[*tid].is_clause,
-                ModItem::Mapping(mid) => tree.mappings[*mid].is_clause,
-                ModItem::Scattered(sid) => !tree.scattered[*sid].is_head,
-                _ => false,
-            };
-            let member_name = id.member_name(tree).map(|s| s.to_string());
-            let doc = id.doc(tree).map(|s| s.to_string());
-            let visibility = id.visibility(tree);
-            let mut hasher = DefaultHasher::new();
-            format!("{:?}", kind).hash(&mut hasher);
-            name.as_str().hash(&mut hasher);
-            sig.hash(&mut hasher);
-            let sig_hash = hasher.finish();
-            ItemTreeEntry {
-                name,
-                kind,
-                signature_text: sig,
-                signature_hash: sig_hash,
-                span,
-                is_clause,
-                member_name,
-                doc,
-                visibility,
-            }
-        })
-        .collect()
-}
-
 /// Allocate a top-level item directly into `tree`'s typed arenas from
-/// a CST definition node. Returns the `ModItem` on success.
-fn lower_cst_node(tree: &mut ItemTree, node: &syntax::SyntaxNode) -> Option<ModItem> {
+/// a CST definition node. Returns the `DefItem` on success.
+fn lower_cst_node(tree: &mut ItemTree, node: &syntax::SyntaxNode) -> Option<DefItem> {
     use parser::SyntaxKind as SK;
 
     let kind = match node.kind() {
         SK::CALLABLE_DEF => None,
         SK::CALLABLE_SPEC => None,
-        SK::TYPE_ALIAS_DEF => Some(ItemKind::TypeAlias),
+        SK::TYPE_ALIAS_DEF => Some(DefKind::TypeAlias),
         SK::NAMED_DEF => None,
-        SK::SCATTERED_DEF => Some(ItemKind::ScatteredHead),
-        SK::SCATTERED_CLAUSE_DEF => Some(ItemKind::ScatteredClause),
-        SK::CONSTRAINT_DEF => Some(ItemKind::Constraint),
-        SK::TERMINATION_MEASURE_DEF => Some(ItemKind::TerminationMeasure),
-        SK::END_DEF => Some(ItemKind::EndMarker),
-        SK::INSTANTIATION_DEF => Some(ItemKind::Instantiation),
-        SK::OUTCOME_DEF | SK::DEFAULT_DEF | SK::FIXITY_DEF | SK::DIRECTIVE_DEF | SK::DEFINITION => {
-            return None
-        }
+        SK::SCATTERED_DEF => Some(DefKind::ScatteredHead),
+        SK::SCATTERED_CLAUSE_DEF => Some(DefKind::ScatteredClause),
+        SK::CONSTRAINT_DEF => Some(DefKind::Constraint),
+        SK::TERMINATION_MEASURE_DEF => Some(DefKind::TerminationMeasure),
+        SK::END_DEF => Some(DefKind::EndMarker),
+        SK::INSTANTIATION_DEF => Some(DefKind::Instantiation),
+        SK::OUTCOME_DEF => Some(DefKind::Outcome),
+        SK::DEFAULT_DEF | SK::FIXITY_DEF | SK::DIRECTIVE_DEF | SK::DEFINITION => return None,
         _ => return None,
     };
 
@@ -277,6 +147,9 @@ fn lower_cst_node(tree: &mut ItemTree, node: &syntax::SyntaxNode) -> Option<ModI
     let mut has_clause_kw = false;
     let mut first_ident: Option<String> = None;
     let mut second_ident: Option<String> = None;
+    // Where that second identifier is. `enum clause extension = Ext_S`
+    // declares `Ext_S`, and navigation has to be able to land on it.
+    let mut second_ident_span: Option<crate::Span> = None;
 
     for el in node.descendants_with_tokens() {
         // Skip ATTRIBUTE subtrees entirely — they contain $[private]
@@ -308,11 +181,26 @@ fn lower_cst_node(tree: &mut ItemTree, node: &syntax::SyntaxNode) -> Option<ModI
             has_clause_kw = true;
             continue;
         }
-        if tk == SK::IDENT {
+        // `let 'cap_size = 32` names a value. `atomic_pat: | kid` is
+        // `P_var (P_id (id_of_kid kid), ATyp_var kid)` (parser.mly:541-543)
+        // and `id_of_kid` drops the leading `'` (ast_util.ml:983), so the
+        // definition binds `cap_size` — and constrains it to `atom('cap_size)`.
+        // Only `SK::IDENT` counted as a name here, so the whole definition was
+        // dropped from the item tree and every mention of it was unresolved.
+        let names_a_value = tk == SK::IDENT
+            || (tk == SK::TY_VAR
+                && matches!(
+                    first_keyword.as_ref().map(|(k, _)| *k),
+                    Some(SK::KW_LET) | Some(SK::KW_VAR)
+                ));
+        if names_a_value {
             if first_ident.is_none() {
-                first_ident = Some(tok.text().to_string());
+                first_ident = Some(tok.text().trim_start_matches('\'').to_string());
             } else if second_ident.is_none() {
                 second_ident = Some(tok.text().to_string());
+                let r = tok.text_range();
+                second_ident_span =
+                    Some(crate::Span::new(usize::from(r.start()), usize::from(r.end())));
                 break;
             }
         }
@@ -322,35 +210,44 @@ fn lower_cst_node(tree: &mut ItemTree, node: &syntax::SyntaxNode) -> Option<ModI
     }
 
     let name_str = first_ident.unwrap_or_default();
-    if name_str.is_empty()
-        && kind != Some(ItemKind::Constraint)
-        && kind != Some(ItemKind::EndMarker)
+    if name_str.is_empty() && kind != Some(DefKind::Constraint) && kind != Some(DefKind::EndMarker)
     {
         return None;
     }
 
-    let item_kind = kind.unwrap_or_else(|| match first_keyword.as_ref().map(|(k, _)| *k) {
-        Some(SK::KW_FUNCTION) => ItemKind::Function,
-        Some(SK::KW_VAL) => ItemKind::ValSpec,
-        Some(SK::KW_MAPPING) => ItemKind::Mapping,
-        Some(SK::KW_TYPE) => ItemKind::TypeAlias,
-        Some(SK::KW_STRUCT) => ItemKind::Struct,
-        Some(SK::KW_ENUM) => ItemKind::Enum,
-        Some(SK::KW_UNION) => ItemKind::Union,
-        Some(SK::KW_BITFIELD) => ItemKind::Bitfield,
-        Some(SK::KW_NEWTYPE) => ItemKind::Newtype,
-        Some(SK::KW_REGISTER) => ItemKind::Register,
-        Some(SK::KW_LET) => ItemKind::Let,
-        Some(SK::KW_VAR) => ItemKind::Var,
-        Some(SK::KW_OVERLOAD) => ItemKind::Overload,
-        Some(SK::KW_SCATTERED) => ItemKind::ScatteredHead,
-        Some(SK::KW_CONSTRAINT) => ItemKind::Constraint,
-        Some(SK::KW_TERMINATION_MEASURE) => ItemKind::TerminationMeasure,
-        _ => ItemKind::Function,
+    let def_kind = kind.unwrap_or_else(|| match first_keyword.as_ref().map(|(k, _)| *k) {
+        Some(SK::KW_FUNCTION) => DefKind::Function,
+        Some(SK::KW_VAL) => DefKind::ValSpec,
+        Some(SK::KW_MAPPING) => DefKind::Mapping,
+        Some(SK::KW_TYPE) => DefKind::TypeAlias,
+        Some(SK::KW_STRUCT) => DefKind::Struct,
+        Some(SK::KW_ENUM) => DefKind::Enum,
+        Some(SK::KW_UNION) => DefKind::Union,
+        Some(SK::KW_BITFIELD) => DefKind::Bitfield,
+        Some(SK::KW_NEWTYPE) => DefKind::Newtype,
+        Some(SK::KW_REGISTER) => DefKind::Register,
+        Some(SK::KW_LET) => DefKind::Let,
+        Some(SK::KW_VAR) => DefKind::Var,
+        Some(SK::KW_OVERLOAD) => DefKind::Overload,
+        Some(SK::KW_SCATTERED) => DefKind::ScatteredHead,
+        Some(SK::KW_CONSTRAINT) => DefKind::Constraint,
+        Some(SK::KW_TERMINATION_MEASURE) => DefKind::TerminationMeasure,
+        _ => DefKind::Function,
     });
 
+    // The member a clause contributes, and only for the clause forms that
+    // contribute one. `enum clause E = M` and `union clause U = C : T` name a
+    // member; `function clause f(a, b)` and `mapping clause m = ..` name a
+    // parameter, and treating that as a member registers it as an enum
+    // member, a constructor and a pattern constant across the whole
+    // workspace — which is how `priv` in
+    // `function clause is_CSR_accessible(0x180, priv, _)` stopped being a
+    // binding everywhere.
+    let clause_declares_member =
+        matches!(first_keyword.as_ref().map(|(k, _)| *k), Some(SK::KW_ENUM) | Some(SK::KW_UNION));
     let member_name = if has_clause_kw
-        && matches!(item_kind, ItemKind::Union | ItemKind::Enum | ItemKind::ScatteredClause)
+        && clause_declares_member
+        && matches!(def_kind, DefKind::Union | DefKind::Enum | DefKind::ScatteredClause)
     {
         second_ident
     } else {
@@ -361,36 +258,43 @@ fn lower_cst_node(tree: &mut ItemTree, node: &syntax::SyntaxNode) -> Option<ModI
     let signature_text = extract_signature(&full_text);
     // For types with braced member lists (enum/union/struct/bitfield),
     // use the full text so extract_braced_idents_from_sig can find members.
-    let body_sig = match item_kind {
-        ItemKind::Enum | ItemKind::Union | ItemKind::Struct | ItemKind::Bitfield => {
-            full_text.clone()
-        }
+    let body_sig = match def_kind {
+        DefKind::Enum | DefKind::Union | DefKind::Struct | DefKind::Bitfield => full_text.clone(),
+        // A `type X = Y` or `newtype X = Y` is *only* interesting for what
+        // is right of the `=`, and `extract_signature` cuts exactly there —
+        // so the item tree recorded `type X` and nothing knew what X aliased.
+        DefKind::TypeAlias | DefKind::Newtype => full_text.clone(),
         _ => signature_text.clone(),
     };
     let range = node.text_range();
     let span = crate::Span::new(usize::from(range.start()), usize::from(range.end()));
+    // Where a cursor should land when navigating here. Falls back to the
+    // whole definition when the name is not a plain identifier — `val
+    // "shift_bits_right"` and `overload operator +` both reach this.
+    let name_span = syntax::definition_name_span(node).unwrap_or(span);
     let doc = extract_doc_comment(node);
     let visibility = extract_visibility(node);
     let name = Name::from(name_str.as_str());
 
     // Allocate directly into the typed arena.
-    let mod_item = match item_kind {
-        ItemKind::Function => {
+    let mod_item = match def_kind {
+        DefKind::Function => {
             let type_ref = Some(type_ref_from_text(&signature_text));
             let id = tree.functions.alloc(Function {
                 name,
                 signature: signature_text,
                 type_ref,
                 span,
+                name_span,
                 is_clause: has_clause_kw,
                 member_name,
                 doc,
                 visibility,
                 signature_hash: 0,
             });
-            ModItem::Function(id)
+            DefItem::Function(id)
         }
-        ItemKind::Struct => {
+        DefKind::Struct => {
             let type_ref = Some(type_ref_from_text(&signature_text));
             let id = tree.type_defs.alloc(TypeDef {
                 name,
@@ -398,15 +302,17 @@ fn lower_cst_node(tree: &mut ItemTree, node: &syntax::SyntaxNode) -> Option<ModI
                 signature: body_sig,
                 type_ref,
                 span,
+                name_span,
+                fields: extract_field_decls(node),
                 is_clause: has_clause_kw,
                 member_name,
                 doc,
                 visibility,
                 signature_hash: 0,
             });
-            ModItem::TypeDef(id)
+            DefItem::TypeDef(id)
         }
-        ItemKind::Union => {
+        DefKind::Union => {
             let type_ref = Some(type_ref_from_text(&signature_text));
             let id = tree.type_defs.alloc(TypeDef {
                 name,
@@ -414,15 +320,17 @@ fn lower_cst_node(tree: &mut ItemTree, node: &syntax::SyntaxNode) -> Option<ModI
                 signature: body_sig,
                 type_ref,
                 span,
+                name_span,
+                fields: extract_field_decls(node),
                 is_clause: has_clause_kw,
                 member_name,
                 doc,
                 visibility,
                 signature_hash: 0,
             });
-            ModItem::TypeDef(id)
+            DefItem::TypeDef(id)
         }
-        ItemKind::Enum => {
+        DefKind::Enum => {
             let type_ref = Some(type_ref_from_text(&signature_text));
             let id = tree.type_defs.alloc(TypeDef {
                 name,
@@ -430,15 +338,17 @@ fn lower_cst_node(tree: &mut ItemTree, node: &syntax::SyntaxNode) -> Option<ModI
                 signature: body_sig,
                 type_ref,
                 span,
+                name_span,
+                fields: extract_field_decls(node),
                 is_clause: has_clause_kw,
                 member_name,
                 doc,
                 visibility,
                 signature_hash: 0,
             });
-            ModItem::TypeDef(id)
+            DefItem::TypeDef(id)
         }
-        ItemKind::Bitfield => {
+        DefKind::Bitfield => {
             let type_ref = Some(type_ref_from_text(&signature_text));
             let id = tree.type_defs.alloc(TypeDef {
                 name,
@@ -446,135 +356,164 @@ fn lower_cst_node(tree: &mut ItemTree, node: &syntax::SyntaxNode) -> Option<ModI
                 signature: body_sig,
                 type_ref,
                 span,
+                name_span,
+                fields: extract_field_decls(node),
                 is_clause: has_clause_kw,
                 member_name,
                 doc,
                 visibility,
                 signature_hash: 0,
             });
-            ModItem::TypeDef(id)
+            DefItem::TypeDef(id)
         }
-        ItemKind::Newtype => {
-            let type_ref = Some(type_ref_from_text(&signature_text));
+        DefKind::Newtype => {
+            let type_ref = Some(type_ref_from_text(&body_sig));
             let id = tree.type_defs.alloc(TypeDef {
                 name,
                 kind: TypeDefKind::Newtype,
-                signature: signature_text,
+                signature: body_sig,
                 type_ref,
                 span,
+                name_span,
+                // `newtype virtaddr = Virtaddr : xlenbits` declares *two*
+                // names — the type and its constructor — the same way
+                // `union virtaddr = { Virtaddr : xlenbits }` does, which is
+                // what upstream desugars it to. Only the type was recorded,
+                // so `Virtaddr`, `Physaddr`, `Regno` and `Regidx` — the
+                // wrappers sail-riscv puts on every address and register
+                // number — had no definition to navigate to and no member
+                // for any feature to ask about.
+                fields: extract_field_decls(node),
                 is_clause: has_clause_kw,
                 member_name,
                 doc,
                 visibility,
                 signature_hash: 0,
             });
-            ModItem::TypeDef(id)
+            DefItem::TypeDef(id)
         }
-        ItemKind::TypeAlias => {
-            let type_ref = Some(type_ref_from_text(&signature_text));
+        DefKind::TypeAlias => {
+            let type_ref = Some(type_ref_from_text(&body_sig));
             let id = tree.type_defs.alloc(TypeDef {
                 name,
                 kind: TypeDefKind::TypeAlias,
-                signature: signature_text,
+                signature: body_sig,
                 type_ref,
                 span,
+                name_span,
+                fields: Vec::new(),
                 is_clause: has_clause_kw,
                 member_name,
                 doc,
                 visibility,
                 signature_hash: 0,
             });
-            ModItem::TypeDef(id)
+            DefItem::TypeDef(id)
         }
-        ItemKind::Register => {
+        DefKind::Register => {
             let type_ref = Some(type_ref_from_text(&signature_text));
             let id = tree.registers.alloc(Register {
                 name,
                 signature: signature_text,
                 type_ref,
                 span,
+                name_span,
                 doc,
                 visibility,
             });
-            ModItem::Register(id)
+            DefItem::Register(id)
         }
-        ItemKind::ValSpec => {
+        // An `outcome` declares a callable exactly as a `val` does — the
+        // implementation comes from an `instantiation` — so it is stored
+        // the same way and merges across files the same way. It used to
+        // return `None` here, which kept it out of the item tree, out of
+        // the workspace merge, and so out of every calling file's scope.
+        DefKind::ValSpec | DefKind::Outcome => {
             let type_ref = Some(type_ref_from_text(&signature_text));
             let id = tree.val_specs.alloc(ValSpec {
                 name,
                 signature: signature_text,
                 type_ref,
                 span,
+                name_span,
                 doc,
                 visibility,
                 signature_hash: 0,
             });
-            ModItem::ValSpec(id)
+            DefItem::ValSpec(id)
         }
-        ItemKind::Mapping | ItemKind::MappingSpec => {
+        DefKind::Mapping | DefKind::MappingSpec => {
             let type_ref = Some(type_ref_from_text(&signature_text));
             let id = tree.mappings.alloc(Mapping {
                 name,
                 signature: signature_text,
                 type_ref,
                 span,
+                name_span,
                 is_clause: has_clause_kw,
                 doc,
                 visibility,
                 signature_hash: 0,
             });
-            ModItem::Mapping(id)
+            DefItem::Mapping(id)
         }
-        ItemKind::Let => {
+        DefKind::Let => {
             let type_ref = Some(type_ref_from_text(&signature_text));
             let id = tree.lets.alloc(LetDef {
                 name,
                 signature: signature_text,
                 type_ref,
                 span,
+                name_span,
                 is_var: false,
                 doc,
                 visibility,
             });
-            ModItem::Let(id)
+            DefItem::Let(id)
         }
-        ItemKind::Var => {
+        DefKind::Var => {
             let type_ref = Some(type_ref_from_text(&signature_text));
             let id = tree.lets.alloc(LetDef {
                 name,
                 signature: signature_text,
                 type_ref,
                 span,
+                name_span,
                 is_var: true,
                 doc,
                 visibility,
             });
-            ModItem::Let(id)
+            DefItem::Let(id)
         }
-        ItemKind::Overload => {
+        DefKind::Overload => {
             let id = tree.overloads.alloc(Overload {
                 name,
                 signature: signature_text,
                 type_ref: None,
                 span,
+                name_span,
                 visibility,
             });
-            ModItem::Overload(id)
+            DefItem::Overload(id)
         }
-        ItemKind::ScatteredHead => {
+        DefKind::ScatteredHead => {
             let id = tree.scattered.alloc(ScatteredDef {
+                fields: Vec::new(),
+                type_kind: scattered_type_kind(node),
+                member_span: second_ident_span,
                 name,
                 signature: signature_text,
                 type_ref: None,
                 span,
+                name_span,
                 is_head: true,
                 member_name: None,
                 doc,
                 visibility,
             });
-            ModItem::Scattered(id)
+            DefItem::Scattered(id)
         }
-        ItemKind::ScatteredClause => {
+        DefKind::ScatteredClause => {
             // Extract payload type from the FULL text (after `=`) for union clauses.
             // signature_text only has the part BEFORE `=` (e.g., "union clause instruction").
             // The constructor and type are AFTER `=`:
@@ -588,59 +527,79 @@ fn lower_cst_node(tree: &mut ItemTree, node: &syntax::SyntaxNode) -> Option<ModI
                     crate::hir::type_ref::type_ref_from_text(type_text)
                 });
             let id = tree.scattered.alloc(ScatteredDef {
+                fields: extract_field_decls(node),
+                type_kind: scattered_type_kind(node),
+                member_span: second_ident_span,
                 name,
                 signature: signature_text,
                 type_ref,
                 span,
+                name_span,
                 is_head: false,
                 member_name,
                 doc,
                 visibility,
             });
-            ModItem::Scattered(id)
+            DefItem::Scattered(id)
         }
-        ItemKind::Constraint => {
+        DefKind::Constraint => {
             let id = tree.constraints.alloc(Constraint {
                 name,
                 signature: signature_text,
                 type_ref: None,
                 span,
+                name_span,
                 visibility,
             });
-            ModItem::Constraint(id)
+            DefItem::Constraint(id)
         }
-        ItemKind::TerminationMeasure => {
+        DefKind::TerminationMeasure => {
             let id = tree.pragmas.alloc(Pragma {
                 name,
                 text: signature_text,
                 span,
+                name_span,
                 pragma_kind: PragmaKind::TerminationMeasure,
                 visibility,
             });
-            ModItem::Pragma(id)
+            DefItem::Pragma(id)
         }
-        ItemKind::EndMarker => {
+        DefKind::EndMarker => {
             let id = tree.pragmas.alloc(Pragma {
                 name,
                 text: signature_text,
                 span,
+                name_span,
                 pragma_kind: PragmaKind::EndMarker,
                 visibility,
             });
-            ModItem::Pragma(id)
+            DefItem::Pragma(id)
         }
-        ItemKind::Instantiation => {
+        DefKind::Instantiation => {
             let id = tree.pragmas.alloc(Pragma {
                 name,
                 text: signature_text,
                 span,
+                name_span,
                 pragma_kind: PragmaKind::Instantiation,
                 visibility,
             });
-            ModItem::Pragma(id)
+            DefItem::Pragma(id)
         }
+        // A field or variant is a member of a type definition, not something
+        // the top-level walk can arrive at. Both reach the symbol index
+        // through `DefItem::fields`.
+        DefKind::Field | DefKind::Variant => return None,
     };
     Some(mod_item)
+}
+
+fn scattered_type_kind(node: &syntax::SyntaxNode) -> Option<TypeDefKind> {
+    node.children_with_tokens().find_map(|token| match token.kind() {
+        parser::SyntaxKind::KW_UNION => Some(TypeDefKind::Union),
+        parser::SyntaxKind::KW_ENUM => Some(TypeDefKind::Enum),
+        _ => None,
+    })
 }
 
 /// Extract visibility from `@private` attribute on a CST node.
@@ -737,7 +696,7 @@ fn extract_doc_comment(node: &syntax::SyntaxNode) -> Option<String> {
     use parser::SyntaxKind as SK;
 
     let mut doc_lines: Vec<String> = Vec::new();
-    let mut sibling = node.prev_sibling_or_token();
+    let mut sibling = node.first_token().and_then(|token| token.prev_token());
 
     while let Some(el) = sibling {
         match el.kind() {
@@ -745,15 +704,20 @@ fn extract_doc_comment(node: &syntax::SyntaxNode) -> Option<String> {
                 // Skip whitespace between doc comment lines
             }
             SK::DOC_COMMENT => {
-                let text = el.as_token().map(|t| t.text().to_string()).unwrap_or_default();
+                let text = el.text().to_string();
                 // Strip `/// ` or `///` prefix
                 let stripped =
                     text.strip_prefix("/// ").or_else(|| text.strip_prefix("///")).unwrap_or(&text);
                 doc_lines.push(stripped.to_string());
             }
-            _ => break, // Stop at any non-trivia, non-doc token
+            // `//` is not documentation. Upstream's lexer lexes `///` as
+            // `DocLine` and `/*!` as `DocBlock`, and throws `//` into a
+            // comment list the AST never sees (lexer.mll:228-239). Hover
+            // used to show plain `//` above a definition, because the text
+            // scanner it used could not tell them apart.
+            _ => break,
         }
-        sibling = el.prev_sibling_or_token();
+        sibling = el.prev_token();
     }
 
     if doc_lines.is_empty() {
@@ -762,72 +726,6 @@ fn extract_doc_comment(node: &syntax::SyntaxNode) -> Option<String> {
     // Reverse because we collected backward
     doc_lines.reverse();
     Some(doc_lines.join("\n"))
-}
-
-/// Append synthetic accessor entries for a single bitfield.
-///
-/// Allocates directly into typed arenas.
-fn expand_bitfield_for(bf_name: &str, fields: &[String], tree: &mut ItemTree) {
-    let span = crate::Span::new(0, 0);
-    let vis = crate::visibility::RawVisibility::Public;
-
-    let mk_name = format!("Mk_{bf_name}");
-    let mk_sig = format!("val {mk_name} : bits(_) -> {bf_name}");
-    let mk_type_ref = Some(type_ref_from_text(&mk_sig));
-    let id = tree.val_specs.alloc(ValSpec {
-        name: Name::from(mk_name.as_str()),
-        signature: mk_sig,
-        type_ref: mk_type_ref,
-        span,
-        doc: None,
-        visibility: vis,
-        signature_hash: 0,
-    });
-    tree.top_level.push(ModItem::ValSpec(id));
-
-    for field in fields {
-        let get_name = format!("_get_{bf_name}_{field}");
-        let get_sig = format!("val {get_name} : {bf_name} -> bits(_)");
-        let get_type_ref = Some(type_ref_from_text(&get_sig));
-        let id = tree.val_specs.alloc(ValSpec {
-            name: Name::from(get_name.as_str()),
-            signature: get_sig,
-            type_ref: get_type_ref,
-            span,
-            doc: None,
-            visibility: vis,
-            signature_hash: 0,
-        });
-        tree.top_level.push(ModItem::ValSpec(id));
-
-        let upd_name = format!("_update_{bf_name}_{field}");
-        let upd_sig = format!("val {upd_name} : ({bf_name}, bits(_)) -> {bf_name}");
-        let upd_type_ref = Some(type_ref_from_text(&upd_sig));
-        let id = tree.val_specs.alloc(ValSpec {
-            name: Name::from(upd_name.as_str()),
-            signature: upd_sig,
-            type_ref: upd_type_ref,
-            span,
-            doc: None,
-            visibility: vis,
-            signature_hash: 0,
-        });
-        tree.top_level.push(ModItem::ValSpec(id));
-
-        let set_name = format!("_set_{bf_name}_{field}");
-        let set_sig = format!("val {set_name} : (register({bf_name}), bits(_)) -> unit");
-        let set_type_ref = Some(type_ref_from_text(&set_sig));
-        let id = tree.val_specs.alloc(ValSpec {
-            name: Name::from(set_name.as_str()),
-            signature: set_sig,
-            type_ref: set_type_ref,
-            span,
-            doc: None,
-            visibility: vis,
-            signature_hash: 0,
-        });
-        tree.top_level.push(ModItem::ValSpec(id));
-    }
 }
 
 /// Extract a fixity declaration from a FIXITY_DEF CST node.
@@ -873,31 +771,124 @@ fn extract_fixity_decl(node: &syntax::SyntaxNode) -> Option<FixityDecl> {
 /// Extract field names from a bitfield node's full text.
 /// Input format: "bitfield Name : bits(N) = { field1 : hi .. lo, field2 : ... }"
 /// Returns: ["field1", "field2"]
-fn extract_bitfield_fields(sig: &str) -> Vec<String> {
-    let mut fields = Vec::new();
-    // Find text between { and }
-    let Some(brace_start) = sig.find('{') else {
-        return fields;
-    };
-    let Some(brace_end) = sig.rfind('}') else {
-        return fields;
-    };
-    if brace_start >= brace_end {
-        return fields;
-    }
-    let inner = &sig[brace_start + 1..brace_end];
+/// Field declarations of a `struct` or `bitfield`, with the span of each name.
+///
+/// The grammar does not give a struct body its own nodes — the whole
+/// definition is one `NAMED_DEF` — so this reads the token stream. At brace
+/// depth 1 a field name is the first `IDENT` after the opening `{` or after a
+/// `,`; everything up to the next `,` at that depth is its type, which covers
+/// a struct's `variety : Access_variety` and a bitfield's `SSI : 1` and
+/// `X : 0 .. 3` alike.
+///
+/// Generated bitfield bindings and type inference share these field declarations.
+pub fn extract_field_decls(node: &syntax::SyntaxNode) -> Vec<crate::item_tree::FieldDecl> {
+    use crate::visibility::RawVisibility;
+    use parser::SyntaxKind as SK;
+    let mut out: Vec<crate::item_tree::FieldDecl> = Vec::new();
+    let mut depth = 0usize;
+    // A comma only separates members at the top of the braces. `A : (int,
+    // int)` has one inside its type, and treating that as a separator makes
+    // the next token — `int` — look like the next member's name.
+    let mut group = 0usize;
+    let mut expect_name = false;
+    let mut type_start: Option<usize> = None;
+    let mut visibility = RawVisibility::Public;
 
-    // Split by comma, extract field name (before `:`)
-    for part in inner.split(',') {
-        let part = part.trim();
-        if let Some(colon_pos) = part.find(':') {
-            let name = part[..colon_pos].trim();
-            if !name.is_empty() {
-                fields.push(name.to_string());
+    let finish_type = |out: &mut Vec<crate::item_tree::FieldDecl>,
+                       type_start: &mut Option<usize>,
+                       end: usize,
+                       text: &str| {
+        if let (Some(start), Some(last)) = (type_start.take(), out.last_mut()) {
+            if start <= end && end <= text.len() {
+                last.type_text = text[start..end].trim().to_string();
             }
         }
+    };
+
+    let source = node.text().to_string();
+    let base = usize::from(node.text_range().start());
+    // `enum E = A | B` — Sail's bar-separated form, with no braces at all.
+    // The loop below opens on `{`, so it returned nothing for these, and
+    // every feature that asks an enum for its members got an empty list.
+    if !source.contains('{') {
+        let mut expect = false;
+        // `newtype regno = Regno : int` — the constructor carries a payload
+        // where an `enum E = A | B` member does not. Recording it empty made
+        // hover say `regno::Regno` and stop.
+        let mut payload_start: Option<usize> = None;
+        for tok in node.descendants_with_tokens().filter_map(|el| el.into_token()) {
+            let (start, end) =
+                (usize::from(tok.text_range().start()), usize::from(tok.text_range().end()));
+            match tok.kind() {
+                SK::EQ | SK::PIPE => {
+                    finish_type(&mut out, &mut payload_start, start - base, &source);
+                    expect = true;
+                    visibility = RawVisibility::Public;
+                }
+                SK::KW_PRIVATE if expect => visibility = RawVisibility::Private,
+                SK::IDENT if expect => {
+                    out.push(crate::item_tree::FieldDecl {
+                        name: Name::from(tok.text()),
+                        visibility,
+                        name_span: crate::Span::new(start, end),
+                        type_text: String::new(),
+                    });
+                    expect = false;
+                }
+                SK::COLON if !out.is_empty() && payload_start.is_none() => {
+                    payload_start = Some(end - base);
+                }
+                k if k.is_trivia() => {}
+                _ => expect = false,
+            }
+        }
+        finish_type(&mut out, &mut payload_start, source.len(), &source);
+        return out;
     }
-    fields
+    for tok in node.descendants_with_tokens().filter_map(|el| el.into_token()) {
+        let start = usize::from(tok.text_range().start());
+        let end = usize::from(tok.text_range().end());
+        match tok.kind() {
+            SK::L_CURLY => {
+                depth += 1;
+                if depth == 1 {
+                    expect_name = true;
+                    visibility = RawVisibility::Public;
+                }
+            }
+            SK::R_CURLY => {
+                if depth == 1 {
+                    finish_type(&mut out, &mut type_start, start - base, &source);
+                    expect_name = false;
+                }
+                depth = depth.saturating_sub(1);
+            }
+            SK::L_PAREN | SK::L_BRACK => group += 1,
+            SK::R_PAREN | SK::R_BRACK => group = group.saturating_sub(1),
+            SK::COMMA if depth == 1 && group == 0 => {
+                finish_type(&mut out, &mut type_start, start - base, &source);
+                expect_name = true;
+                visibility = RawVisibility::Public;
+            }
+            SK::KW_PRIVATE if depth == 1 && group == 0 && expect_name => {
+                visibility = RawVisibility::Private;
+            }
+            SK::COLON if depth == 1 && group == 0 && !out.is_empty() && type_start.is_none() => {
+                type_start = Some(end - base);
+            }
+            SK::IDENT if depth == 1 && group == 0 && expect_name => {
+                out.push(crate::item_tree::FieldDecl {
+                    name: Name::from(tok.text()),
+                    visibility,
+                    name_span: crate::Span::new(start, end),
+                    type_text: String::new(),
+                });
+                expect_name = false;
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 fn extract_signature(text: &str) -> String {
@@ -942,7 +933,7 @@ mod tests {
         assert_eq!(tree.len(), 1);
         let items = tree.top_level_items();
         assert_eq!(items[0].name(&tree).as_str(), "add");
-        assert_eq!(items[0].item_kind(&tree), ItemKind::ValSpec);
+        assert_eq!(items[0].def_kind(&tree), DefKind::ValSpec);
     }
 
     #[test]
@@ -951,7 +942,7 @@ mod tests {
         assert_eq!(tree.len(), 1);
         let items = tree.top_level_items();
         assert_eq!(items[0].name(&tree).as_str(), "foo");
-        assert_eq!(items[0].item_kind(&tree), ItemKind::Function);
+        assert_eq!(items[0].def_kind(&tree), DefKind::Function);
     }
 
     #[test]
@@ -965,10 +956,13 @@ mod tests {
     #[test]
     fn cst_enum_is_named_def() {
         let tree = cst_tree("enum color = { Red, Green, Blue }\n");
-        assert_eq!(tree.len(), 1);
+        assert_eq!(tree.len(), 3);
         let items = tree.top_level_items();
         assert_eq!(items[0].name(&tree).as_str(), "color");
-        assert_eq!(items[0].item_kind(&tree), ItemKind::Enum);
+        assert_eq!(items[0].def_kind(&tree), DefKind::Enum);
+        assert_eq!(items[1].name(&tree).as_str(), "color_of_num");
+        assert_eq!(items[2].name(&tree).as_str(), "num_of_color");
+        assert!(items[1..].iter().all(|item| tree.generated[item].owner == items[0]));
     }
 
     #[test]
@@ -977,7 +971,7 @@ mod tests {
         assert_eq!(tree.len(), 1);
         let items = tree.top_level_items();
         assert_eq!(items[0].name(&tree).as_str(), "S");
-        assert_eq!(items[0].item_kind(&tree), ItemKind::Struct);
+        assert_eq!(items[0].def_kind(&tree), DefKind::Struct);
     }
 
     #[test]
@@ -986,7 +980,7 @@ mod tests {
         assert_eq!(tree.len(), 1);
         let items = tree.top_level_items();
         assert_eq!(items[0].name(&tree).as_str(), "myint");
-        assert_eq!(items[0].item_kind(&tree), ItemKind::TypeAlias);
+        assert_eq!(items[0].def_kind(&tree), DefKind::TypeAlias);
     }
 
     #[test]
@@ -1024,7 +1018,7 @@ mod tests {
         assert_eq!(tree.len(), 1);
         let items = tree.top_level_items();
         assert_eq!(items[0].name(&tree).as_str(), "foo");
-        assert_eq!(items[0].item_kind(&tree), ItemKind::ScatteredHead);
+        assert_eq!(items[0].def_kind(&tree), DefKind::ScatteredHead);
     }
 
     #[test]
@@ -1033,7 +1027,7 @@ mod tests {
         assert_eq!(tree.len(), 1);
         let items = tree.top_level_items();
         assert_eq!(items[0].name(&tree).as_str(), "PC");
-        assert_eq!(items[0].item_kind(&tree), ItemKind::Register);
+        assert_eq!(items[0].def_kind(&tree), DefKind::Register);
     }
 
     #[test]
@@ -1084,6 +1078,67 @@ val visible : bool
         // hidden should be filtered out, visible should remain
         assert!(tree.find_by_name("hidden").is_none(), "hidden should be filtered by ifdef");
         assert!(tree.find_by_name("visible").is_some());
+    }
+
+    /// `default Order dec` must define `_DEFAULT_ORDER_SET` and `_DEFAULT_DEC`
+    /// (upstream preprocess.ml:292-301). Without them the bundled prelude's
+    /// `$ifdef _DEFAULT_DEC` blocks silently take the inc-order branch, giving
+    /// `subrange_bits`, `bitvector_access` and friends the wrong signatures.
+    #[test]
+    fn default_order_defines_preprocessor_symbols() {
+        use syntax::preprocess::{default_order_of_file, DefaultOrder};
+
+        let source = "\
+default Order dec
+$ifdef _DEFAULT_DEC
+val dec_variant : int
+$else
+val inc_variant : int
+$endif
+";
+        let (root, _) = syntax::parse_text(source);
+        assert_eq!(default_order_of_file(&root), Some(DefaultOrder::Dec));
+
+        let mut symbols = syntax::preprocess::default_symbols();
+        DefaultOrder::Dec.apply(&mut symbols);
+        assert!(symbols.contains("_DEFAULT_ORDER_SET"));
+
+        let tree = ItemTree::build_from_cst_with_preprocess(&root, &mut symbols);
+        assert!(tree.find_by_name("dec_variant").is_some(), "dec branch must be taken");
+        assert!(tree.find_by_name("inc_variant").is_none(), "inc branch must be dropped");
+    }
+
+    #[test]
+    fn default_order_inc_takes_else_branch() {
+        use syntax::preprocess::{default_order_of_file, DefaultOrder};
+
+        let source = "\
+default Order inc
+$ifdef _DEFAULT_DEC
+val dec_variant : int
+$else
+val inc_variant : int
+$endif
+";
+        let (root, _) = syntax::parse_text(source);
+        assert_eq!(default_order_of_file(&root), Some(DefaultOrder::Inc));
+
+        let mut symbols = syntax::preprocess::default_symbols();
+        DefaultOrder::Inc.apply(&mut symbols);
+        let tree = ItemTree::build_from_cst_with_preprocess(&root, &mut symbols);
+        assert!(tree.find_by_name("inc_variant").is_some());
+        assert!(tree.find_by_name("dec_variant").is_none());
+    }
+
+    /// With no `default Order` anywhere, neither symbol is defined — which is
+    /// what lets `lib/vector.sail`'s `$ifndef _DEFAULT_ORDER_SET` fire.
+    #[test]
+    fn no_default_order_leaves_symbols_unset() {
+        let (root, _) = syntax::parse_text("val f : int\n");
+        assert_eq!(syntax::preprocess::default_order_of_file(&root), None);
+        let symbols = syntax::preprocess::default_symbols();
+        assert!(!symbols.contains("_DEFAULT_ORDER_SET"));
+        assert!(!symbols.contains("_DEFAULT_DEC"));
     }
 
     #[test]
@@ -1255,6 +1310,31 @@ $endif
     }
 
     #[test]
+    fn generated_bitfields_keep_each_conditional_declarations_owner() {
+        let source = "$ifdef OFF\nbitfield B : bits(8) = { first : 3 .. 0 }\n$else\n/// active docs\nbitfield B : bits(16) = { second : 7 .. 0 }\n$endif\n";
+        let raw = cst_tree(source);
+        let constructors: Vec<_> = raw
+            .top_level_items()
+            .iter()
+            .filter(|item| item.name(&raw).as_str() == "Mk_B")
+            .collect();
+        assert_eq!(constructors.len(), 2);
+        assert_ne!(constructors[0].name_span(&raw), constructors[1].name_span(&raw));
+        for item in constructors {
+            let origin = raw.generated[item];
+            assert_eq!(item.name_span(&raw), origin.owner.name_span(&raw));
+            assert_eq!(item.doc(&raw), origin.owner.doc(&raw));
+        }
+        let active = cst_tree_full(source);
+        assert!(active.find_by_name("_get_B_first").is_none());
+        assert!(active.find_by_name("_get_B_second").is_some());
+        let constructor = active.find_by_name("Mk_B").unwrap();
+        assert!(constructor.signature(&active).contains("bits(16)"));
+        assert_eq!(constructor.name_span(&active).start, source.rfind("B :").unwrap());
+        assert_eq!(constructor.doc(&active), Some("active docs"));
+    }
+
+    #[test]
     fn parses_sail_riscv_prelude_snippet() {
         // Real sail-riscv code with forall constraints, extern bindings,
         // existential type alias, and overload declarations.
@@ -1314,17 +1394,17 @@ end execute
 
         // Overloads
         let overloads: Vec<&str> =
-            tree.items_of_kind(ItemKind::Overload).map(|id| id.name(&tree).as_str()).collect();
+            tree.items_of_kind(DefKind::Overload).map(|id| id.name(&tree).as_str()).collect();
         assert!(!overloads.is_empty(), "should find overloads");
 
         // Scattered
         let scattered: Vec<&str> =
-            tree.items_of_kind(ItemKind::ScatteredHead).map(|id| id.name(&tree).as_str()).collect();
+            tree.items_of_kind(DefKind::ScatteredHead).map(|id| id.name(&tree).as_str()).collect();
         assert!(scattered.contains(&"execute"), "should find scattered execute");
 
         // End marker
         let ends: Vec<&str> =
-            tree.items_of_kind(ItemKind::EndMarker).map(|id| id.name(&tree).as_str()).collect();
+            tree.items_of_kind(DefKind::EndMarker).map(|id| id.name(&tree).as_str()).collect();
         assert!(ends.contains(&"execute"), "should find end execute");
     }
 
@@ -1397,7 +1477,7 @@ end execute
                 format!(
                     "{} {:?}: {} [doc: {}]",
                     id.name(&tree).as_str(),
-                    id.item_kind(&tree),
+                    id.def_kind(&tree),
                     id.signature(&tree),
                     doc
                 )
@@ -1423,7 +1503,9 @@ end execute
         use expect_test::expect;
         let display = display_item_tree("enum color = { Red, Green, Blue }\n");
         expect![[r#"
-            color Enum: enum color = { Red, Green, Blue } [doc: (no doc)]"#]]
+            color Enum: enum color = { Red, Green, Blue } [doc: (no doc)]
+            color_of_num ValSpec: val color_of_num : forall ('e : Int), 0 <= 'e & 'e <= 2. int('e) -> color [doc: (no doc)]
+            num_of_color ValSpec: val num_of_color : color -> range(0, 2) [doc: (no doc)]"#]]
         .assert_eq(&display);
     }
 

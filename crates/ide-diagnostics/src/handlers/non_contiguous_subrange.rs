@@ -6,7 +6,7 @@
 //! between their bit ranges.
 
 use crate::Diagnostic;
-use hir_def::diagnostics::DiagnosticCode;
+use hir::diagnostics::DiagnosticCode;
 
 use crate::{DiagnosticsContext, NonContiguousSubrange};
 
@@ -16,7 +16,17 @@ pub(crate) fn non_contiguous_subrange(
 ) -> Diagnostic {
     Diagnostic::new(
         DiagnosticCode::SailError("type-error"),
-        "pattern subranges are non-contiguous".to_string(),
+        // Upstream's own two messages (`type_check.ml:1791-1803`).
+        match &d.problem {
+            hir::SubrangeProblem::NotFromZero { lowest } => format!(
+                "Cannot bind {} as pattern subranges do not start at bit 0 (lowest bit is {lowest}).",
+                d.name
+            ),
+            hir::SubrangeProblem::Gap { missing } => format!(
+                "Cannot bind {} as pattern subranges are non-contiguous. {}[{missing}] is not defined.",
+                d.name, d.name
+            ),
+        },
         crate::node_file_range(&d.node),
     )
 }
@@ -28,10 +38,13 @@ mod tests {
 
     #[test]
     fn smoke() {
-        let diag =
-            AnyDiagnostic::NonContiguousSubrange(NonContiguousSubrange { node: test_node(0, 5) });
+        let diag = AnyDiagnostic::NonContiguousSubrange(NonContiguousSubrange {
+            name: "imm".to_string(),
+            problem: hir::SubrangeProblem::NotFromZero { lowest: 5 },
+            node: test_node(0, 5),
+        });
         let d = check_dispatch(&diag);
         assert!(d.is_some());
-        assert!(d.unwrap().message.contains("non-contiguous"));
+        assert!(d.unwrap().message.contains("do not start at bit 0"));
     }
 }

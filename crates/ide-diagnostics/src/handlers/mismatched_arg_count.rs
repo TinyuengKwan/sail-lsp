@@ -2,7 +2,7 @@
 //! Fix : unresolved fix to adjust argument count.
 
 use crate::Diagnostic;
-use hir_def::diagnostics::DiagnosticCode;
+use hir::diagnostics::DiagnosticCode;
 use ide_db::assists::Assist;
 
 use crate::{DiagnosticsContext, MismatchedArgCount};

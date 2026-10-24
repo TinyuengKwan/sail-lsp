@@ -1,15 +1,15 @@
 //! Handler for `AnyDiagnostic::ExpectedFunction`.
 
 use crate::Diagnostic;
-use hir_def::diagnostics::DiagnosticCode;
-use hir_ty::display::HirDisplay;
+use hir::diagnostics::DiagnosticCode;
+use hir::display::HirDisplay;
 
 use crate::{DiagnosticsContext, ExpectedFunction};
 
-pub(crate) fn expected_function(_ctx: &DiagnosticsContext<'_>, d: &ExpectedFunction) -> Diagnostic {
+pub(crate) fn expected_function(ctx: &DiagnosticsContext<'_>, d: &ExpectedFunction) -> Diagnostic {
     Diagnostic::new(
         DiagnosticCode::SailError("expected-function"),
-        format!("expected function, found `{}`", d.found.display_to_string()),
+        format!("expected function, found `{}`", d.found.display_to_string(ctx.db())),
         crate::node_file_range(&d.node),
     )
 }
@@ -22,7 +22,7 @@ mod tests {
     #[test]
     fn smoke() {
         let diag = AnyDiagnostic::ExpectedFunction(ExpectedFunction {
-            found: hir_ty::infer::Ty::error(),
+            found: hir::Ty::error(),
             node: test_node(0, 5),
         });
         let d = check_dispatch(&diag);

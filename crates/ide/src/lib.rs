@@ -37,6 +37,8 @@ pub mod effect_annotations;
 pub mod expand_include;
 pub mod extend_selection;
 pub mod file_structure;
+#[cfg(any(test, feature = "test-utils"))]
+pub mod fixture;
 pub mod folding_ranges;
 pub mod formatting;
 pub mod goto_declaration;
@@ -58,10 +60,11 @@ pub mod navigation;
 /// Unified navigation target type.
 pub mod navigation_target;
 pub mod references;
+#[cfg(test)]
+mod regression_tests;
 pub mod rename;
 pub mod runnables;
 pub mod signature_help;
-pub mod ssr;
 pub mod static_index;
 pub mod syntax_highlighting;
 pub mod typing;
@@ -69,9 +72,17 @@ pub mod view_hir;
 pub mod view_item_tree;
 pub mod view_syntax_tree;
 
+// The completion crate's types, re-exported here — rust-analyzer's `ide`
+// does the same, so the server depends on one IDE crate rather than on
+// each feature's.
+pub use ide_completion::{
+    item::{CompletionItem, CompletionOrigin, CompletionRelevance},
+    CompletionConfig,
+};
+
 pub use analysis::{Analysis, AnalysisHost};
 pub use markup::Markup;
-pub use navigation_target::{NavigationTarget, ToNav, TryToNav};
+pub use navigation_target::NavigationTarget;
 
 /// A position in a file: file + byte offset.
 ///
@@ -112,12 +123,9 @@ impl<T> RangeInfo<T> {
 pub type Cancellable<T> = ide_db::ide_types::Cancellable<T>;
 
 pub use formatting::{
-    document_links_for_file, format_document_edits, join_lines_edits,
-    linked_editing_ranges_for_position, make_selection_range, matching_brace_offset,
+    document_links_for_file, format_document_edits, linked_editing_ranges_for_position,
     on_enter_edits, range_format_document_edits,
 };
 // Move item (replaces legacy move_item_edits/MoveDirection)
 pub use move_item::{move_item, Direction as MoveDirection};
-pub use syntax_highlighting::{
-    compute_semantic_tokens, compute_semantic_tokens_delta, compute_semantic_tokens_range,
-};
+pub use syntax_highlighting::{compute_semantic_tokens, compute_semantic_tokens_range};

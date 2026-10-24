@@ -158,5 +158,11 @@ pub const SAIL_BUILTINS: &[&str] = &[
 
 /// Check if a name is a Sail keyword.
 pub fn is_keyword(name: &str) -> bool {
-    SAIL_KEYWORDS.contains(&name)
+    // `import` and `module` are in upstream's keyword table and *raise*
+    // there — `("import", fun p -> raise (err_lex p "import is a reserved
+    // keyword"))` (`lexer.mll:119-120`) — so they are not in
+    // `SAIL_KEYWORDS`, which lists the words the lexer turns into tokens.
+    // They still may not be used as a name, which is the question this
+    // function answers.
+    SAIL_KEYWORDS.contains(&name) || matches!(name, "import" | "module")
 }

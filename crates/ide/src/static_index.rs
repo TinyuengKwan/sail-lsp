@@ -108,8 +108,7 @@ impl StaticIndex {
 
     /// Index a single file.
     fn add_file(&mut self, url: &url::Url, file: &dyn FileDb, project_name: &str) {
-        let Some(parsed) = file.parsed() else { return };
-        let _text = file.text();
+        let Some(tree) = file.item_tree() else { return };
 
         let file_stem = url
             .path_segments()
@@ -120,14 +119,14 @@ impl StaticIndex {
 
         let mut file_tokens: Vec<(TextRange, TokenId)> = Vec::new();
 
-        // Walk all top-level declarations
-        for decl in &parsed.decls {
-            if decl.scope != syntax::parser_lower::Scope::TopLevel {
-                continue;
-            }
-
-            let def_key = (decl.name.clone(), file_stem.to_string());
-            let range = base_db::text_range(decl.span.start, decl.span.end);
+        // Every definition in the file, from the item tree. `top_level_items`
+        // is top level by construction, so the scope filter is gone with the
+        // scrape.
+        for &id in tree.top_level_items() {
+            let decl_name = id.name(tree).to_string();
+            let decl_span = id.span(tree);
+            let def_key = (decl_name.clone(), file_stem.to_string());
+            let range = base_db::text_range(decl_span.start, decl_span.end);
 
             // Dedup: reuse existing TokenId if we've seen this def before
             if let Some(&existing_id) = self.def_map.get(&def_key) {
@@ -144,15 +143,13 @@ impl StaticIndex {
             }
 
             // Resolve moniker for this definition
-            let moniker_result = moniker::moniker(file, url, decl.span.start, project_name);
-
-            // Determine symbol kind
-            let kind = decl_kind_to_symbol_kind(decl.kind);
+            let moniker_result = moniker::moniker(file, url, decl_span.start, project_name);
+            let kind = def_kind_to_symbol_kind(id.def_kind(tree));
 
             // Build hover text from signature index
             let hover = file
                 .signature_index()
-                .and_then(|idx| idx.get(&decl.name))
+                .and_then(|idx| idx.get(&decl_name))
                 .map(|sig| sig.label.clone());
 
             let token_id = self.tokens.insert(TokenStaticData {
@@ -160,7 +157,7 @@ impl StaticIndex {
                 definition: Some((url.clone(), range)),
                 references: vec![ReferenceData { url: url.clone(), range, is_definition: true }],
                 moniker: moniker_result,
-                display_name: Some(decl.name.clone()),
+                display_name: Some(decl_name.clone()),
                 kind,
             });
 
@@ -168,17 +165,25 @@ impl StaticIndex {
             file_tokens.push((range, token_id));
         }
 
-        // Walk symbol occurrences (references) and link to definitions
-        for occ in &parsed.symbol_occurrences {
-            let ref_range = base_db::text_range(occ.span.start, occ.span.end);
-            let is_def = occ
-                .role
-                .as_ref()
-                .is_some_and(|r| matches!(r, syntax::parser_lower::DeclRole::Definition));
-
-            // Try to find the definition in def_map by name
-            // (simplified: search across all file stems)
-            let token_id = self.find_def_token(&occ.name);
+        // Every call site, from the callgraph built out of the lowered
+        // bodies. The scrape offered every name-shaped occurrence in the
+        // file, resolved or not.
+        let sites: Vec<(String, base_db::TextRange)> = file
+            .callgraph()
+            .map(|g| {
+                g.call_sites_in_file()
+                    .map(|s| {
+                        (
+                            s.callee.clone(),
+                            base_db::text_range(s.callee_span.start, s.callee_span.end),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        for (name, ref_range) in sites {
+            let is_def = false;
+            let token_id = self.find_def_token(&name);
             if let Some(tid) = token_id {
                 if let Some(data) = self.tokens.get_mut(tid) {
                     data.references.push(ReferenceData {
@@ -200,19 +205,26 @@ impl StaticIndex {
     }
 }
 
-/// Map parser DeclKind to SymbolKind.
-fn decl_kind_to_symbol_kind(kind: syntax::parser_lower::DeclKind) -> SymbolKind {
-    use syntax::parser_lower::DeclKind;
+/// How a definition of this kind appears in a static index.
+fn def_kind_to_symbol_kind(kind: hir::DefKind) -> SymbolKind {
+    use hir::DefKind as D;
     match kind {
-        DeclKind::Function | DeclKind::Value | DeclKind::Mapping | DeclKind::Overload => {
-            SymbolKind::Function
+        D::Function
+        | D::ValSpec
+        | D::Mapping
+        | D::MappingSpec
+        | D::Overload
+        | D::Outcome
+        | D::ScatteredHead
+        | D::ScatteredClause => SymbolKind::Function,
+        D::Struct | D::Bitfield | D::Newtype => SymbolKind::Struct,
+        D::Union | D::TypeAlias => SymbolKind::TypeAlias,
+        D::Enum => SymbolKind::Enum,
+        D::Variant => SymbolKind::EnumMember,
+        D::Field => SymbolKind::Field,
+        D::Register | D::Let | D::Var => SymbolKind::Variable,
+        D::EndMarker | D::Constraint | D::TerminationMeasure | D::Instantiation => {
+            SymbolKind::Other
         }
-        DeclKind::Struct | DeclKind::Bitfield | DeclKind::Newtype => SymbolKind::Struct,
-        DeclKind::Union | DeclKind::Type => SymbolKind::TypeAlias,
-        DeclKind::Enum => SymbolKind::Enum,
-        DeclKind::EnumMember => SymbolKind::EnumMember,
-        DeclKind::Register => SymbolKind::Variable,
-        DeclKind::Let | DeclKind::Var => SymbolKind::Variable,
-        DeclKind::Parameter => SymbolKind::Variable,
     }
 }

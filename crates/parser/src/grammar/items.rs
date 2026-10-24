@@ -1,7 +1,56 @@
 use super::*;
 
 impl<'t> Parser<'t> {
+    /// Whether the cursor is at something that can name a definition.
+    ///
+    /// Upstream's `id` rule admits both a plain identifier and
+    /// `operator <symbol>` (parser.mly:267-273); the lexer emits the latter as
+    /// `KW_OPERATOR` followed by an `IDENT` holding just the symbol.
+    pub(crate) fn at_def_name(&self) -> bool {
+        self.at(SK::IDENT) || (self.at(T![operator]) && self.nth_at(1, SK::IDENT))
+    }
+
+    /// Consume a definition name, including a leading `operator` keyword.
+    /// The caller is responsible for the surrounding `NAME` marker.
+    pub(crate) fn bump_def_name(&mut self) {
+        if self.at(T![operator]) {
+            self.bump_any();
+        }
+        self.bump_any();
+    }
+    /// `impl f(x) = e` — an outcome implementation.
+    ///
+    /// `Impl funcl` is a top-level definition upstream (`def_aux`,
+    /// parser.mly:1401), *and* it appears inside an `outcome .. = { .. }`
+    /// body. Only the second position knew it here, so a top-level `impl`
+    /// was not classified at all and error recovery reported seven syntax
+    /// errors on a definition upstream merely type-checks.
+    pub(crate) fn parse_impl_def(&mut self, end_pos: usize) {
+        let m = self.start();
+        self.bump_any(); // impl
+        while self.at_attribute() {
+            self.error("Attributes or documentation comment not permitted here");
+            self.bump_attribute();
+        }
+        if self.at_def_name() {
+            let nm = self.start();
+            self.bump_def_name();
+            nm.complete(self, SK::NAME);
+        }
+        self.parse_param_list(end_pos);
+        if self.at(T![=]) {
+            self.bump_any();
+            self.parse_expr();
+        }
+        m.complete(self, SK::CALLABLE_DEF);
+    }
+
     pub(crate) fn parse_definition(&mut self) {
+        if self.at(SK::KW_IMPL) {
+            let end_pos = self.next_def_start_pos(self.pos());
+            self.parse_impl_def(end_pos);
+            return;
+        }
         let def_kind = self.classify_definition();
         let m = self.start();
         // Wrap `private` in a VISIBILITY child node.
@@ -10,22 +59,73 @@ impl<'t> Parser<'t> {
             self.bump_any(); // private
             vm.complete(self, SK::VISIBILITY);
         }
-        let end_pos = self.next_def_start_pos(self.pos());
+        let mut end_pos = self.next_def_start_pos(self.pos());
+        // An `outcome`'s body is a *list of definitions*, so the scan above
+        // ends it at the first `val` inside its own braces: the block spilt
+        // out into the file, its `impl`s came apart into ERROR tokens, and
+        // nothing in them was ever lowered. Where the header is followed by
+        // `= {`, the definition ends at that block's `}`.
+        if def_kind == SK::OUTCOME_DEF {
+            if let Some(brace) = self.eq_brace_pos_before(self.outcome_header_limit()) {
+                end_pos = self.matching_close_brace_pos_from(brace + 1) + 1;
+            }
+        }
 
         match def_kind {
             SK::CALLABLE_DEF => {
+                // A mapping's body is a list of clauses, not a block of
+                // expressions; remember which keyword opened this def.
+                let is_mapping = self.current() == T![mapping]
+                    || (self.current() == T![private] && self.nth(1) == T![mapping]);
                 // Bump keywords + name until structural delimiter.
                 let mut bumped_name = false;
                 while self.pos() < end_pos && !self.at_end() {
                     let k = self.current();
-                    // Skip forall quantifier: bump everything until `.`
+                    if self.at_attribute() {
+                        self.bump_attribute();
+                        continue;
+                    }
+                    // An inline termination measure precedes the name. Its
+                    // identifiers belong to the measure, not the function head.
+                    if !bumped_name && self.at(T!['{']) {
+                        let measure = self.start();
+                        let close = self.matching_close_brace_pos_from(self.pos() + 1);
+                        self.bump_until_pos((close + 1).min(end_pos));
+                        measure.complete(self, SK::TERMINATION_MEASURE_DEF);
+                        continue;
+                    }
+                    // `function f forall 'n, C . (args) -> ret = body` —
+                    // upstream's `typquant := kopt_list [',' typ]`, the same
+                    // one a `val` spec carries, written on the definition.
+                    //
+                    // This used to bump every token up to the `.`, so the
+                    // quantifiers and the constraint were loose tokens under
+                    // `CALLABLE_DEF` and the scheme built from it had
+                    // neither. A body was then checked without its own
+                    // constraints — `function mmio_read forall 'n, 0 < 'n <=
+                    // max_mem_access` could not discharge `'n > 0` at a call
+                    // inside it, because the fact was written on the
+                    // definition and nothing read it. 33 definitions in
+                    // sail-riscv are written this way.
                     if k == T![forall] {
                         self.bump_any(); // forall
-                        while self.pos() < end_pos && !self.at_end() && !self.at(T![.]) {
+                        self.parse_type_param_list();
+                        if self.at(T![,]) {
                             self.bump_any();
+                            self.parse_type_expr(TokenSet::new(&[SK::DOT]));
                         }
                         if self.at(T![.]) {
                             self.bump_any(); // .
+                        } else {
+                            // Not the shape this expects. Fall back to what
+                            // stood here, so a definition it cannot read is
+                            // no worse off than before.
+                            while self.pos() < end_pos && !self.at_end() && !self.at(T![.]) {
+                                self.bump_any();
+                            }
+                            if self.at(T![.]) {
+                                self.bump_any();
+                            }
                         }
                         continue;
                     }
@@ -45,7 +145,10 @@ impl<'t> Parser<'t> {
                     // so Phase 2 can handle it as a PARAM_LIST.
                     // e.g., `function set_FPEXC value_name = { ... }`
                     //        `function test flag = if flag then 0 else 1`
-                    if bumped_name && k == SK::IDENT {
+                    // `function a 'n = ..` — a type-variable pattern is an
+                    // unparenthesised parameter too (`atomic_pat: | kid`,
+                    // parser.mly:541).
+                    if bumped_name && (k == SK::IDENT || k == SK::TY_VAR) {
                         break;
                     }
                     if self.pos() >= end_pos {
@@ -77,9 +180,20 @@ impl<'t> Parser<'t> {
                     && self.nth(1) != T![>]
                 {
                     found_eq = true;
-                    let assign_m = self.start();
                     self.bump_any(); // =
-                    self.parse_expr();
+                                     // The marker opens *after* the definition's `=`. Opening
+                                     // it first made the `ASSIGN_EXPR` swallow the token that
+                                     // separates a head from its body, so the `CALLABLE_DEF`
+                                     // had no `=` of its own and the body lookup found
+                                     // nothing: `function f(r) = R0 = r.x` was lowered with an
+                                     // *empty body*, and every check over it — field, type,
+                                     // unused — said nothing at all.
+                    let assign_m = self.start();
+                    if is_mapping && self.at(T!['{']) {
+                        self.parse_mapping_body();
+                    } else {
+                        self.parse_expr();
+                    }
                     // Handle `target = value` assignment in non-block body.
                     // Without this, `function f() -> unit = reg = expr`
                     // parses body as just `reg` (Ident), losing the assignment.
@@ -112,9 +226,9 @@ impl<'t> Parser<'t> {
             SK::CALLABLE_SPEC => {
                 self.bump_any(); // val/mapping
                                  // val can also take a STRING_LIT as the name (val "add_bits" : ...)
-                if self.at(SK::IDENT) || self.at(SK::STRING_LIT) || self.at(T![cast]) {
+                if self.at_def_name() || self.at(SK::STRING_LIT) || self.at(T![cast]) {
                     let nm = self.start();
-                    self.bump_any();
+                    self.bump_def_name();
                     nm.complete(self, SK::NAME);
                     // After `cast`, there may be an IDENT name
                     if self.at(SK::IDENT) {
@@ -153,12 +267,26 @@ impl<'t> Parser<'t> {
             }
             SK::TYPE_ALIAS_DEF => {
                 self.bump_any(); // type
-                if self.at(SK::IDENT) {
+                if self.at_def_name() {
                     let nm = self.start();
-                    self.bump_any();
+                    self.bump_def_name();
                     nm.complete(self, SK::NAME);
                 }
-                if self.at(T![=]) {
+                // `type ds('n: Int, 'm: Int) -> Bool = ..`. A synonym's
+                // parameters are `kopt`s like a `forall`'s, but written as
+                // one comma-separated group, and nothing built them: the
+                // kinds they declare are what says `ds(bool)` is wrong.
+                //
+                // Only the parameters. The body of a *parameterised* alias
+                // stays a raw token run for the generic loop below to
+                // consume, which is what it was: parsing it as a type here
+                // makes `type bits('n) = bitvector('n)` reach the alias
+                // scheme through `type_from_cst_node` instead of the text
+                // path, and the two disagree about `'n` — every `bits(2) @
+                // bits(3)` came out `bits('n + 'n)`.
+                if self.at(T!['(']) {
+                    self.parse_type_synonym_params();
+                } else if self.at(T![=]) {
                     self.bump_any();
                     self.parse_type_expr(TYPE_RECOVERY);
                 }
@@ -167,9 +295,21 @@ impl<'t> Parser<'t> {
                 let item_keyword = self.current();
                 self.bump_any(); // keyword (struct/enum/union/register/let/var/bitfield/...)
                                  // Name: IDENT or UNDERSCORE (`let _ = expr` is valid Sail)
-                if self.at(SK::IDENT) || self.at(T![_]) {
+                                 //
+                                 // A `let` may name a type variable instead:
+                                 // `atomic_pat: | kid` binds the value
+                                 // `id_of_kid kid` (parser.mly:541-543,
+                                 // ast_util.ml:983), so `let 'cap_size = 32`
+                                 // declares `cap_size`. Without this the
+                                 // `'cap_size` was not a name, so nothing
+                                 // below consumed it, the `= expr` branch was
+                                 // never reached, and the initialiser arrived
+                                 // as loose tokens rather than an expression.
+                let names_a_type_var =
+                    matches!(item_keyword, T![let] | T![var]) && self.at(SK::TY_VAR);
+                if self.at_def_name() || self.at(T![_]) || names_a_type_var {
                     let nm = self.start();
-                    self.bump_any();
+                    self.bump_def_name();
                     nm.complete(self, SK::NAME);
                 }
                 // Type parameter list: `('a, 'b)` or `('n : Int)`
@@ -194,7 +334,23 @@ impl<'t> Parser<'t> {
                 }
                 if self.at(T![=]) {
                     self.bump_any();
-                    if item_keyword == T![bitfield] && self.at(T!['{']) {
+                    // `newtype pa = Pa : bits(16)` — the payload after the
+                    // constructor is a *type*, and running the expression
+                    // parser over it left the definition with no type node
+                    // at all: the constructor was registered with an
+                    // `error()` payload, so `Pa(q)` bound `q` to nothing and
+                    // every use of what a newtype pattern opens was untyped.
+                    if item_keyword == T![newtype] {
+                        if self.at_def_name() {
+                            let cm = self.start();
+                            self.bump_def_name();
+                            cm.complete(self, SK::NAME);
+                        }
+                        if self.at(T![:]) {
+                            self.bump_any();
+                            self.parse_type_expr(TYPE_RECOVERY);
+                        }
+                    } else if item_keyword == T![bitfield] && self.at(T!['{']) {
                         // Bitfield body: `{ field : index_range, ... }`.
                         self.parse_bitfield_body();
                     } else if (item_keyword == T![union]
@@ -209,12 +365,13 @@ impl<'t> Parser<'t> {
                 }
             }
             SK::SCATTERED_CLAUSE_DEF => {
+                let type_clause = matches!(self.current(), T![enum] | T![union]);
                 self.bump_any(); // enum/function/mapping/union
                 self.bump_any(); // clause
                                  // Name: the scattered definition name
-                if self.at(SK::IDENT) {
+                if self.at_def_name() {
                     let nm = self.start();
-                    self.bump_any();
+                    self.bump_def_name();
                     nm.complete(self, SK::NAME);
                 }
 
@@ -234,7 +391,29 @@ impl<'t> Parser<'t> {
                 // Parse body after `=` or `{`
                 if self.at(T![=]) && self.pos() < end_pos {
                     self.bump_any(); // =
-                    self.parse_expr();
+                    if type_clause && self.at(T!['{']) {
+                        self.parse_variant_list();
+                    } else if type_clause {
+                        let member = self.start();
+                        while self.at_attribute() {
+                            self.bump_attribute();
+                        }
+                        if self.at(T![private]) {
+                            let visibility = self.start();
+                            self.bump_any();
+                            visibility.complete(self, SK::VISIBILITY);
+                        }
+                        if self.at_def_name() {
+                            self.bump_def_name();
+                        }
+                        if self.at(T![:]) {
+                            self.bump_any();
+                            self.parse_type_expr(TYPE_RECOVERY);
+                        }
+                        member.complete(self, SK::FIELD_INIT);
+                    } else {
+                        self.parse_expr();
+                    }
                 }
             }
             SK::SCATTERED_DEF => {
@@ -242,9 +421,9 @@ impl<'t> Parser<'t> {
                 if !self.at_end() {
                     self.bump_any();
                 } // inner keyword
-                if self.at(SK::IDENT) {
+                if self.at_def_name() {
                     let nm = self.start();
-                    self.bump_any();
+                    self.bump_def_name();
                     nm.complete(self, SK::NAME);
                 }
                 if self.at(T![:]) {
@@ -255,9 +434,9 @@ impl<'t> Parser<'t> {
             SK::OUTCOME_DEF => {
                 // outcome id : typschm [with typaram] [= { defs }]
                 self.bump_any(); // outcome
-                if self.at(SK::IDENT) {
+                if self.at_def_name() {
                     let nm = self.start();
-                    self.bump_any();
+                    self.bump_def_name();
                     nm.complete(self, SK::NAME);
                 }
                 if self.at(T![:]) {
@@ -281,9 +460,16 @@ impl<'t> Parser<'t> {
                     self.bump_any(); // =
                     if self.at(T!['{']) {
                         self.bump_any(); // {
-                                         // Parse nested definitions until `}`
+                        let saved_block_end = self.enclosing_block_end;
+                        self.enclosing_block_end = Some(self.matching_close_brace_pos());
                         while !self.at_end() && !self.at(T!['}']) {
-                            if self.at_set(&DEF_START) {
+                            // `impl emulator(bv) = { .. }` is an outcome
+                            // implementation — `Impl funcl` upstream
+                            // (parser.mly:1401). Without it the `{` of the
+                            // body was reported as "expected definition".
+                            if self.at(SK::KW_IMPL) {
+                                self.parse_impl_def(end_pos);
+                            } else if self.at_set(&DEF_START) {
                                 self.parse_definition();
                             } else if self.at(T!['{']) {
                                 self.error_block("expected definition");
@@ -291,6 +477,7 @@ impl<'t> Parser<'t> {
                                 self.bump_any();
                             }
                         }
+                        self.enclosing_block_end = saved_block_end;
                         if self.at(T!['}']) {
                             self.bump_any();
                         }
@@ -300,9 +487,9 @@ impl<'t> Parser<'t> {
             SK::INSTANTIATION_DEF => {
                 // instantiation id [with subst, ...]
                 self.bump_any(); // instantiation
-                if self.at(SK::IDENT) {
+                if self.at_def_name() {
                     let nm = self.start();
-                    self.bump_any();
+                    self.bump_def_name();
                     nm.complete(self, SK::NAME);
                 }
                 // Optional `with` substitutions: type = type, ...
@@ -345,9 +532,9 @@ impl<'t> Parser<'t> {
                 // termination_measure id loop_measures
                 // or: termination_measure id pat = exp
                 self.bump_any(); // termination_measure
-                if self.at(SK::IDENT) {
+                if self.at_def_name() {
                     let nm = self.start();
-                    self.bump_any();
+                    self.bump_def_name();
                     nm.complete(self, SK::NAME);
                 }
                 // Parse remaining content: either `pat = exp` or `loop_measures`
@@ -370,12 +557,29 @@ impl<'t> Parser<'t> {
                     }
                 }
             }
+            SK::DIRECTIVE_DEF if self.at(SK::STRUCTURED_DIRECTIVE_START) => {
+                // `$name { .. }` — the introducer token already carries the
+                // opening brace, so consume through the matching close.
+                self.bump_any();
+                let mut depth = 1u32;
+                while !self.at_end() && depth > 0 {
+                    if self.at(T!['{']) {
+                        depth += 1;
+                    }
+                    if self.at(T!['}']) {
+                        depth -= 1;
+                        self.bump_any();
+                        continue;
+                    }
+                    self.bump_any();
+                }
+            }
             _ => {
                 // Default/fixity/end/constraint/directive:
                 self.bump_any();
-                if self.at(SK::IDENT) {
+                if self.at_def_name() {
                     let nm = self.start();
-                    self.bump_any();
+                    self.bump_def_name();
                     nm.complete(self, SK::NAME);
                 }
             }
@@ -394,6 +598,9 @@ impl<'t> Parser<'t> {
                     SK::CALLABLE_DEF
                 }
             }
+            // `and f(..) = ..` continues the preceding function definition
+            // with another clause.
+            T![and] => SK::CALLABLE_DEF,
             T![enum] | T![union] => {
                 if self.followed_by_clause() {
                     SK::SCATTERED_CLAUSE_DEF
@@ -414,6 +621,7 @@ impl<'t> Parser<'t> {
             T![default] => SK::DEFAULT_DEF,
             T![infix] | T![infixl] | T![infixr] => SK::FIXITY_DEF,
             SK::KW_INSTANTIATION => SK::INSTANTIATION_DEF,
+            SK::STRUCTURED_DIRECTIVE_START => SK::DIRECTIVE_DEF,
             T![end] => SK::END_DEF,
             T![constraint] => SK::CONSTRAINT_DEF,
             SK::KW_TERMINATION_MEASURE => SK::TERMINATION_MEASURE_DEF,
@@ -421,6 +629,11 @@ impl<'t> Parser<'t> {
             T![private] => {
                 let next = self.nth(1);
                 match next {
+                    T![function] | T![mapping] | T![enum] | T![union]
+                        if self.nth(2) == T![clause] =>
+                    {
+                        SK::SCATTERED_CLAUSE_DEF
+                    }
                     T![function] | T![mapping] => SK::CALLABLE_DEF,
                     T![val] => SK::CALLABLE_SPEC,
                     T![type] => SK::TYPE_ALIAS_DEF,
@@ -452,6 +665,14 @@ impl<'t> Parser<'t> {
             }
             let checkpoint = self.pos();
             let fm = self.start();
+            // `$[attr]` before a member. Upstream allows it, and
+            // `at_attribute`/`bump_attribute` were here to consume it with
+            // no field list calling them — so each of the attribute's four
+            // tokens fell through this loop's safety valve and left an
+            // empty `FIELD_INIT` standing beside it.
+            while self.at_attribute() {
+                self.bump_attribute();
+            }
             // Variant name
             if self.at(SK::IDENT) {
                 self.bump_any();
@@ -505,6 +726,9 @@ impl<'t> Parser<'t> {
         while !self.at_end() && !self.at(T!['}']) {
             let checkpoint = self.pos();
             let fm = self.start();
+            while self.at_attribute() {
+                self.bump_attribute();
+            }
             if self.at(SK::IDENT) {
                 self.bump_any();
             }
@@ -557,8 +781,14 @@ impl<'t> Parser<'t> {
     /// Parse extern bindings: `STRING` or `pure/monadic/impure STRING`
     /// or `{ id : STRING, ... }` or `pure/monadic/impure { id : STRING, ... }`
     fn parse_externs(&mut self, end_pos: usize) {
-        // Optional purity annotation: pure / monadic / impure
-        if self.at(T![pure]) || self.at(SK::KW_MONADIC) {
+        // Optional purity annotation: pure / monadic / impure.
+        //
+        // `impure` was in the comment and not in the code, so `val
+        // cancel_reservation = impure {interpreter: ".."} : unit -> unit`
+        // parsed as neither form: the extern block was not recognised, the
+        // signature after it was never read as a type, and the `val`
+        // contributed no scheme at all — every call to one was untyped.
+        if self.at(T![pure]) || self.at(SK::KW_MONADIC) || self.at(SK::KW_IMPURE) {
             self.bump_any();
         }
         if self.at(SK::STRING_LIT) {
@@ -592,16 +822,27 @@ impl<'t> Parser<'t> {
 
     pub(crate) fn parse_field_inits(&mut self) {
         while !self.at_end() && !self.at(T!['}']) {
-            if self.at(T!['}']) || self.at_end() {
-                break;
-            }
+            // The safety valve its two sibling loops have and this one did
+            // not. Three near-copies of the same loop; the one without it
+            // can only terminate on the parser's global step limit, which
+            // spends the budget the rest of the file needs.
+            let checkpoint = self.pos();
             let fm = self.start();
+            while self.at_attribute() {
+                self.bump_attribute();
+            }
             if self.at(SK::IDENT) {
                 self.bump_any();
             }
             if self.at(T![=]) {
                 self.bump_any();
                 self.parse_expr();
+            }
+            if self.pos() == checkpoint && !self.at(T![,]) {
+                // Nothing matched. Take the token into this field rather
+                // than beside it, so the tree carries no empty node
+                // standing for text.
+                self.bump_any();
             }
             fm.complete(self, SK::FIELD_INIT);
             if self.at(T![,]) {

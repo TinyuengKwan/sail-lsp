@@ -1,88 +1,95 @@
-//! Representation of a navigation result (go-to-definition, find references, etc.)
-//! `NavigationTarget` is the central type for "jump to definition"-style features.
-//! Each IDE feature that produces a clickable location returns one or more of these.
+//! Where the user can jump to.
+//!
+//! `NavigationTarget` is the result type of every feature that produces a
+//! clickable location — goto-definition, goto-declaration, references,
+//! call hierarchy, the document outline. rust-analyzer keeps it here, in
+//! `ide`, for the reason this workspace already records about `HoverResult`
+//! and `InlayHint`: a feature's result type lives with the feature.
+//!
+//! There were **two** of these. This module held rust-analyzer's shape —
+//! `full_range`, an optional `focus_range`, three builder methods — used by
+//! nothing but its own re-export, while every feature built a flat one in
+//! `ide_db::ide_types` that `ide-db` itself only mentioned in a test. One
+//! fact, two types, and the builders had no callers because the type they
+//! built was not the type anything returned.
+//!
+//! The surviving fields are the ones the features fill in. `url` is the
+//! Sail extension: the server addresses files by URL at its boundary and
+//! `FileId` is what salsa knows, so a target carries both until the last
+//! caller stops needing the first.
 
-use base_db::FileId;
+use base_db::TextRange;
 use ide_db::defs::SymbolKind;
 
 /// A "where to go" result for navigation features.
-/// Used by goto-definition, goto-declaration, goto-implementation,
-/// find-references, rename, call-hierarchy, etc.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug)]
 pub struct NavigationTarget {
-    /// File containing the target.
-    pub file_id: FileId,
-    /// Full syntactic range of the definition (including body, attrs, docs).
-    pub full_range: rowan::TextRange,
-    /// Range of the identifier (where the cursor should land).
-    /// `None` for synthetic targets.
-    pub focus_range: Option<rowan::TextRange>,
+    /// File containing this target.
+    ///
+    /// Optional for backward compat — will become required.
+    pub file_id: Option<base_db::FileId>,
+    /// URL of the file (backward compat, will be derived from file_id).
+    pub url: url::Url,
     /// Name of the symbol.
     pub name: String,
-    /// Kind of symbol (function, struct, enum, etc.).
-    pub kind: Option<SymbolKind>,
-    /// Name of the containing entity (parent module/struct).
-    pub container_name: Option<String>,
-    /// Human-readable description (signature, type info).
-    pub description: Option<String>,
-    /// Documentation text.
+    /// Symbol kind.
+    pub kind: SymbolKind,
+    /// Full range of the entire definition.
+    pub full_range: TextRange,
+    /// Range of just the name, where the cursor should land.
+    pub focus_range: TextRange,
+    /// Additional detail (type signature, etc.).
+    pub detail: Option<String>,
+    /// Documentation string.
     pub docs: Option<String>,
+    /// Nested targets (e.g. a struct's fields inside the struct).
+    pub children: Vec<NavigationTarget>,
 }
 
 impl NavigationTarget {
-    /// Create a minimal navigation target.
-    pub fn new(file_id: FileId, name: impl Into<String>, full_range: rowan::TextRange) -> Self {
+    /// A target with the two ranges every navigation answer needs.
+    pub fn new(
+        url: url::Url,
+        name: impl Into<String>,
+        kind: SymbolKind,
+        full_range: TextRange,
+        focus_range: TextRange,
+    ) -> Self {
         Self {
-            file_id,
-            full_range,
-            focus_range: None,
+            file_id: None,
+            url,
             name: name.into(),
-            kind: None,
-            container_name: None,
-            description: None,
+            kind,
+            full_range,
+            focus_range,
+            detail: None,
             docs: None,
+            children: Vec::new(),
         }
     }
 
-    /// Builder: set focus range.
-    pub fn with_focus_range(mut self, range: rowan::TextRange) -> Self {
-        self.focus_range = Some(range);
+    /// Builder: the file salsa knows this target by.
+    pub fn with_file_id(mut self, file_id: base_db::FileId) -> Self {
+        self.file_id = Some(file_id);
         self
     }
 
-    /// Builder: set symbol kind.
-    pub fn with_kind(mut self, kind: SymbolKind) -> Self {
-        self.kind = Some(kind);
+    /// Builder: the signature or type shown beside the name.
+    pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(detail.into());
         self
     }
 
-    /// Builder: set description.
-    pub fn with_description(mut self, desc: impl Into<String>) -> Self {
-        self.description = Some(desc.into());
-        self
-    }
-
-    /// Builder: set documentation.
+    /// Builder: the documentation comment attached to the definition.
     pub fn with_docs(mut self, docs: impl Into<String>) -> Self {
         self.docs = Some(docs.into());
         self
     }
 
-    /// Builder: set container name.
-    pub fn with_container_name(mut self, name: impl Into<String>) -> Self {
-        self.container_name = Some(name.into());
-        self
-    }
-}
-
-/// Trait for HIR types that can be converted to a `NavigationTarget`.
-pub trait ToNav {
-    fn to_nav(&self, file_id: FileId) -> NavigationTarget;
-}
-
-/// Trait for HIR types that can provide a `NavigationTarget` from database queries.
-pub trait TryToNav {
-    fn try_to_nav(&self, file_id: FileId) -> Option<NavigationTarget>;
+    // There is no `with_children`. The outline builds a parent and then
+    // pushes into `children` as it finds them, which a consuming builder
+    // cannot express — and a builder with no caller is what this module
+    // was made of.
 }
 
 #[cfg(test)]
@@ -92,15 +99,18 @@ mod tests {
     #[test]
     fn navigation_target_builder() {
         let nav = NavigationTarget::new(
-            FileId::from_raw(0),
+            url::Url::parse("file:///test.sail").expect("a url"),
             "foo",
-            rowan::TextRange::new(0.into(), 10.into()),
+            SymbolKind::Function,
+            base_db::text_range(0, 20),
+            base_db::text_range(9, 12),
         )
-        .with_kind(SymbolKind::Function)
-        .with_description("val foo : int -> bool");
+        .with_detail("val foo : int -> bool")
+        .with_file_id(base_db::FileId::from_raw(0));
 
         assert_eq!(nav.name, "foo");
-        assert_eq!(nav.kind, Some(SymbolKind::Function));
-        assert_eq!(nav.description.as_deref(), Some("val foo : int -> bool"));
+        assert_eq!(nav.kind, SymbolKind::Function);
+        assert_eq!(nav.detail.as_deref(), Some("val foo : int -> bool"));
+        assert_eq!(nav.file_id, Some(base_db::FileId::from_raw(0)));
     }
 }

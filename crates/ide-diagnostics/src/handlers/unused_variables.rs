@@ -3,7 +3,7 @@
 //! referenced in its scope. Offers a quick-fix to prefix with `_`.
 
 use crate::Diagnostic;
-use hir_def::diagnostics::{DiagnosticCode, Severity};
+use hir::diagnostics::{DiagnosticCode, Severity};
 use ide_db::source_change::SourceChange;
 use ide_db::text_edit::TextEdit;
 

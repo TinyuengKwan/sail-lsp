@@ -31,7 +31,8 @@ pub enum FoldKind {
     Region,
 }
 
-// FoldKind → LSP conversion done in to_proto.rs (lsp_types confined to binary crate)
+// FoldKind → LSP conversion is `to_proto::folding_range` (lsp_types is
+// confined to the binary crate).
 
 /// A single fold range.
 pub struct Fold {

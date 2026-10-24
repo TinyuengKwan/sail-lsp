@@ -9,10 +9,8 @@ use base_db::FileId;
 use rustc_hash::FxHashMap;
 
 use crate::line_index::TextRange;
-use crate::workspace_index::SymbolIndex;
+use crate::symbol_index::SymbolIndex;
 use crate::FileDb;
-use parser::Span;
-use url::Url;
 
 /// How a symbol is used at a reference site.
 /// ```text
@@ -220,19 +218,23 @@ impl SearchScope {
 /// Search is filtered by `SearchScope`; the scope can be set via
 /// `in_scope()`.
 pub struct FindUsages<'a> {
-    index: &'a SymbolIndex,
-    /// The name being searched for.
+    /// What is being searched for. rust-analyzer's field, and for its
+    /// reason: a search keyed by a name finds every other definition that
+    /// spells the same, and a local's binding site is what tells them
+    /// apart.
+    def: crate::defs::Definition,
+    /// The definition's name, resolved once against the database that
+    /// holds it — the text the index and the per-file scan match on.
     pub(crate) name: String,
     /// Optional scope restriction. `None` = workspace-wide.
     scope: Option<SearchScope>,
-    /// If set, only match occurrences with this target_span.
-    target_span: Option<Span>,
+    _marker: std::marker::PhantomData<&'a ()>,
 }
 
 impl<'a> FindUsages<'a> {
     /// Create a new find-usages search (workspace-wide by default).
-    pub fn new(index: &'a SymbolIndex, name: &str) -> Self {
-        Self { index, name: name.to_string(), scope: None, target_span: None }
+    pub fn new(def: crate::defs::Definition, name: impl Into<String>) -> Self {
+        Self { def, name: name.into(), scope: None, _marker: std::marker::PhantomData }
     }
 
     /// Limit the search to a given `SearchScope`.
@@ -241,15 +243,9 @@ impl<'a> FindUsages<'a> {
         self
     }
 
-    /// Restrict to occurrences pointing to a specific definition span.
-    pub fn with_target_span(mut self, span: Span) -> Self {
-        self.target_span = Some(span);
-        self
-    }
-
-    /// Stage 1: Get candidate file URLs from the index.
-    pub fn candidate_files(&self) -> Vec<Url> {
-        self.index.find(&self.name).iter().map(|e| e.url.clone()).collect()
+    /// What this search is for.
+    pub fn definition(&self) -> &crate::defs::Definition {
+        &self.def
     }
 
     /// Run the full search.
@@ -271,83 +267,188 @@ impl<'a> FindUsages<'a> {
         result
     }
 
-    /// Run the full search via Url-keyed file list (legacy API).
-    ///
-    /// Wraps `all()` for callers that have `(&Url, FileId, &F)` triples.
-    pub fn all_with_urls<F: FileDb>(&self, files: &[(&Url, FileId, &F)]) -> UsageSearchResult {
-        let pairs: Vec<(FileId, &dyn FileDb)> =
-            files.iter().map(|(_url, fid, file)| (*fid, *file as &dyn FileDb)).collect();
-        self.all(&pairs)
-    }
+    // There is no `all_with_urls`. It wrapped `all()` for "callers that
+    // have `(&Url, FileId, &F)` triples", of which there were none: a
+    // search is keyed by `FileId`, and the URL is the server's word for a
+    // file, converted at its boundary.
 
-    /// Stage 2: Search for occurrences in a single file via FileDb.
-    ///
-    /// Classifies occurrences into WRITE/READ/IMPORT categories
-    /// based on the `DeclRole` from the parser.
-    pub fn search_in_file(&self, _url: &Url, file: &dyn FileDb) -> Vec<FileReference> {
-        self.search_in_file_db(file)
-    }
+    // There is no `search_in_file(&self, url, file)` either. It took a
+    // `_url` it ignored and forwarded to `search_in_file_db`, which is
+    // the one every caller reaches.
 
-    /// Stage 2 internal: search via FileDb trait.
+    /// Stage 2 internal: every mention of this definition in one file.
+    ///
+    /// Definitions come from the item tree and the bodies, uses from the
+    /// callgraph — the three places that know what a name *is*.
+    ///
+    /// `ide` had a second copy of this walk, reached through
+    /// `Semantics::name_mentions`, and this one had no caller at all. They
+    /// disagreed about locals: this one matched every `Pat::Bind` that
+    /// spelled the name, in every body in the file, so a search for one
+    /// `let x` found every other `x` too.
     fn search_in_file_db(&self, file: &dyn FileDb) -> Vec<FileReference> {
-        let parsed = match file.parsed() {
-            Some(p) => p,
-            None => return Vec::new(),
-        };
-
-        let mut results = Vec::new();
-        for occ in &parsed.symbol_occurrences {
-            if occ.name != self.name {
-                continue;
-            }
-            if let Some(target) = &self.target_span {
-                if let Some(occ_target) = &occ.target_span {
-                    if occ_target.start != target.start || occ_target.end != target.end {
-                        continue;
-                    }
-                }
-            }
-            // Classify the reference category.
-            let category = classify_occurrence(occ);
-            results.push(FileReference {
-                range: base_db::text_range(occ.span.start, occ.span.end),
+        let mut results: Vec<FileReference> = self
+            .spans_in_file(file)
+            .into_iter()
+            .map(|(span, is_decl)| FileReference {
+                range: base_db::text_range(span.start, span.end),
                 name: None,
-                category,
-            });
-        }
+                category: if is_decl { ReferenceCategory::WRITE } else { ReferenceCategory::READ },
+            })
+            .collect();
+        results.sort_by_key(|r| (base_db::range_start(r.range), base_db::range_end(r.range)));
+        results.dedup_by_key(|r| r.range);
         results
     }
 
-    /// Check if at least one usage exists.
-    pub fn at_least_one(&self, files: &[(FileId, &dyn FileDb)]) -> bool {
-        for &(file_id, file) in files {
-            if let Some(ref scope) = self.scope {
-                if !scope.contains(file_id) {
-                    continue;
+    /// Every mention of this definition in `file`, and whether each one
+    /// declares it.
+    pub fn spans_in_file(&self, file: &dyn FileDb) -> Vec<(parser::Span, bool)> {
+        if !self.def.is_local() {
+            if let Some((db, ft)) = file.file_text() {
+                if hir::source_order::declarations_for(db, ft).is_none()
+                    && base_db::module_graph::file_scope(db, ft.file_id(db)).is_some()
+                {
+                    let Some(mut origin) = self.def.file_id(db) else { return Vec::new() };
+                    let Some(ws) = base_db::WorkspaceFiles::try_get(db) else { return Vec::new() };
+                    // A signature/head owns a callable even when its clauses
+                    // are defined by a dependent module.
+                    if matches!(
+                        self.def,
+                        crate::defs::Definition::Function(_)
+                            | crate::defs::Definition::ValSpec(_)
+                            | crate::defs::Definition::ScatteredHead(_)
+                            | crate::defs::Definition::ScatteredClause(_)
+                            | crate::defs::Definition::EndMarker(_)
+                    ) {
+                        for &target in hir::visibility::visible_files_for_name(
+                            db,
+                            ws,
+                            origin,
+                            hir::Name::new(&self.name),
+                        ) {
+                            if hir::def_query::file_item_tree(db, target).as_ref().is_some_and(
+                                |tree| {
+                                    tree.top_level_items().iter().any(|id| {
+                                        id.name(tree).as_str() == self.name
+                                            && matches!(
+                                                id.def_kind(tree),
+                                                hir::DefKind::ValSpec | hir::DefKind::ScatteredHead
+                                            )
+                                    })
+                                },
+                            ) {
+                                origin = target.file_id(db);
+                                break;
+                            }
+                        }
+                    }
+                    let candidates = hir::visibility::visible_files_for_name(
+                        db,
+                        ws,
+                        ft.file_id(db),
+                        hir::Name::new(&self.name),
+                    );
+                    if !candidates.iter().any(|&target| target.file_id(db) == origin) {
+                        return Vec::new();
+                    }
                 }
             }
-            if !self.search_in_file_db(file).is_empty() {
-                return true;
+        }
+        let mut spans = file
+            .file_text()
+            .map(|(db, ft)| {
+                hir::Semantics::new(db).name_mentions(
+                    db,
+                    ft,
+                    &self.name,
+                    self.def.binding_span(),
+                    !self.def.is_local(),
+                )
+            })
+            .unwrap_or_default();
+
+        // HIR bodies omit declaration type syntax. Include lexical candidates
+        // there too, then let the shared identity classifier below decide
+        // whether each occurrence denotes this definition. This also covers
+        // scattered clause/end references without treating them as new names.
+        if !self.def.is_local() {
+            if let Some((db, ft)) = file
+                .file_text()
+                .filter(|(db, ft)| hir::source_order::declarations_for(*db, *ft).is_some())
+            {
+                if let Some(root) = syntax::parse_query::semantic_parse_file(db, ft).syntax_node() {
+                    spans.extend(
+                        root.descendants_with_tokens()
+                            .filter_map(|t| t.into_token())
+                            .filter(|t| {
+                                t.kind() == syntax::SyntaxKind::IDENT
+                                    && t.text() == self.name
+                                    && !t.parent_ancestors().any(|n| {
+                                        matches!(
+                                            n.kind(),
+                                            syntax::SyntaxKind::ATTRIBUTE
+                                                | syntax::SyntaxKind::DIRECTIVE_DEF
+                                        )
+                                    })
+                            })
+                            .map(|t| {
+                                (
+                                    parser::Span::new(
+                                        usize::from(t.text_range().start()),
+                                        usize::from(t.text_range().end()),
+                                    ),
+                                    false,
+                                )
+                            }),
+                    );
+                }
             }
         }
-        false
-    }
-}
 
-/// Classify a symbol occurrence into a ReferenceCategory.
-///
-/// which checks the AST context (assignment lhs, import, etc.).
-///
-/// Sail's parser provides `DeclRole` on each `SymbolOccurrence`:
-/// - Definition/Declaration → WRITE (definition site)
-/// - None (usage) → READ (reference site)
-fn classify_occurrence(occ: &syntax::parser_lower::SymbolOccurrence) -> ReferenceCategory {
-    use syntax::parser_lower::DeclRole;
+        // A name is never empty, so a zero-width span is a missing one —
+        // some expressions still lower with no recorded position, and
+        // reporting them puts a reference at the top of the file.
+        spans.retain(|(span, _)| span.start < span.end);
 
-    match occ.role {
-        Some(DeclRole::Definition) | Some(DeclRole::Declaration) => ReferenceCategory::WRITE,
-        None => ReferenceCategory::READ,
+        // Locals need the same identity check: their lexical scope also covers
+        // callable names and bitfield labels, which are separate namespaces.
+        if let Some((db, _)) = file
+            .file_text()
+            .filter(|(db, ft)| hir::source_order::declarations_for(*db, *ft).is_some())
+        {
+            let expected = self.def.canonical(db);
+            spans.retain(|(span, _)| {
+                crate::defs::Definition::classify_at(file, file.position_at(span.start))
+                    .is_some_and(|actual| actual.canonical(db) == expected)
+            });
+        }
+
+        // A type variable in a signature — `val f : forall ('n). bits('n)`
+        // — has no HIR representation at all: the item tree records the
+        // signature's text, not the variables in it, so the occurrence
+        // scrape is the only thing that knows where they are.
+        //
+        // Only for those. Firing whenever the HIR found nothing made a file
+        // that genuinely has no mention of the name answer with every token
+        // that spells it — which is how a top-level `foo` picked up an
+        // unrelated `let foo` in another file.
+        if spans.is_empty() && self.name.starts_with('\'') {
+            if let Some(parsed) = file.parsed() {
+                for occ in &parsed.symbol_occurrences {
+                    if occ.name == self.name {
+                        spans.push((occ.span, occ.role.is_some()));
+                    }
+                }
+            }
+        }
+        spans
     }
+
+    // And no `at_least_one`. It short-circuits "is this used anywhere",
+    // which is what an unused-definition lint would want — and there is
+    // no such lint here. Adding one is a feature, not a repair; it can
+    // come back with its caller.
 }
 
 impl crate::defs::Definition {
@@ -360,13 +461,10 @@ impl crate::defs::Definition {
     ///
     /// Returns a `FindUsages` builder with the definition's name set.
     /// Callers chain `.in_scope()` and `.all()` to run the search.
-    pub fn usages<'a>(
-        &self,
-        db: &dyn hir_def::db::DefDatabase,
-        index: &'a SymbolIndex,
-    ) -> FindUsages<'a> {
+    pub fn usages<'a>(&self, db: &dyn salsa::Database, index: &'a SymbolIndex) -> FindUsages<'a> {
         let name = self.name(db).map(|n| n.to_string()).unwrap_or_default();
-        FindUsages::new(index, &name)
+        let _ = index;
+        FindUsages::new(self.clone(), name)
     }
 }
 

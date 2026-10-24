@@ -1,0 +1,1 @@
+newtype n = N : int

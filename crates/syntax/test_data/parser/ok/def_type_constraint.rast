@@ -1,0 +1,13 @@
+SOURCE_FILE@0..23
+  TYPE_ALIAS_DEF@0..4
+    KW_TYPE@0..4 "type"
+  WHITESPACE@4..5 " "
+  CONSTRAINT_DEF@5..22
+    KW_CONSTRAINT@5..15 "constraint"
+    WHITESPACE@15..16 " "
+    TY_VAR@16..18 "'n"
+    WHITESPACE@18..19 " "
+    R_ANGLE@19..20 ">"
+    WHITESPACE@20..21 " "
+    NUM_LIT@21..22 "0"
+  WHITESPACE@22..23 "\n"

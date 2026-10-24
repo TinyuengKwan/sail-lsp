@@ -48,6 +48,7 @@ impl FlowEnvironment {
 
     /// Record a type narrowing for `name`.
     pub fn narrow(&mut self, name: Name, ty: Ty) {
+        let ty = self.narrowed.get(&name).and_then(|old| intersect(old, &ty)).unwrap_or(ty);
         self.narrowed.insert(name, ty);
     }
 
@@ -65,7 +66,7 @@ impl FlowEnvironment {
     /// Later narrowings override earlier ones.
     pub fn merge_and(&mut self, other: &FlowEnvironment) {
         for (name, ty) in &other.narrowed {
-            self.narrowed.insert(name.clone(), ty.clone());
+            self.narrow(name.clone(), ty.clone());
         }
     }
 
@@ -101,6 +102,52 @@ impl FlowEnvironment {
 ///
 /// Returns a `FlowEnvironment` with the extracted narrowings.
 /// Empty environment means no narrowings could be extracted.
+/// The narrowings that hold when `guard_expr` is *false*.
+///
+/// An `if` tells its else branch as much as its then branch: `if x > 31`
+/// leaves `x <= 31` on the other side. Nothing produced that, so the else
+/// branch kept the binding's declared range and any arithmetic on it came
+/// out wider than it is.
+///
+/// Only the comparisons negate cleanly. `x == c` gives "not c", which is not
+/// a range, and `&`/`|` negate into each other's dual — neither is handled.
+pub fn narrow_from_guard_negated(body: &Body, guard_expr: ExprId) -> FlowEnvironment {
+    let mut env = FlowEnvironment::new();
+    match &body.store[guard_expr] {
+        Expr::BinaryOp { lhs, op, rhs } => match op.as_str() {
+            "&" | "&&" | "and" | "|" | "||" | "or" => {
+                let mut left = narrow_from_guard_negated(body, *lhs);
+                let right = narrow_from_guard_negated(body, *rhs);
+                if matches!(op.as_str(), "&" | "&&" | "and") {
+                    left.merge_or(&right);
+                } else {
+                    left.merge_and(&right);
+                }
+                return left;
+            }
+            "!=" => try_extract_eq_narrowing(body, *lhs, *rhs, &mut env),
+            ">" | ">=" | "<" | "<=" => try_extract_comparison_narrowing(
+                body,
+                *lhs,
+                match op.as_str() {
+                    ">" => "<=",
+                    ">=" => "<",
+                    "<" => ">=",
+                    _ => ">",
+                },
+                *rhs,
+                &mut env,
+            ),
+            _ => {}
+        },
+        Expr::UnaryOp { op, expr } if matches!(op.as_str(), "~" | "!" | "not") => {
+            return narrow_from_guard(body, *expr)
+        }
+        _ => {}
+    }
+    env
+}
+
 pub fn narrow_from_guard(body: &Body, guard_expr: ExprId) -> FlowEnvironment {
     let mut env = FlowEnvironment::new();
     extract_narrowings(body, guard_expr, &mut env);
@@ -169,9 +216,7 @@ fn extract_narrowings(body: &Body, expr_id: ExprId, env: &mut FlowEnvironment) {
 
         // Pattern: `not(cond)` / `~(cond)` — negation (limited narrowing)
         Expr::UnaryOp { op: HirUnaryOp::Known(UnaryOp::Not), expr: inner } => {
-            // Negation doesn't produce useful narrowings in most cases.
-            // Future: for `not(x == 0)` we could narrow x to non-zero.
-            let _ = inner;
+            env.merge_and(&narrow_from_guard_negated(body, *inner));
         }
 
         // Pattern: function call `is_zero(x)`, `unsigned(x)` etc.
@@ -210,27 +255,14 @@ fn ident_neq_literal(body: &Body, ident_side: ExprId, lit_side: ExprId) -> Optio
         _ => return None,
     };
     match &body.store[lit_side] {
-        Expr::Literal(parser::Literal::Number(n)) => {
-            if let Ok(val) = n.parse::<i64>() {
-                if val == 0 {
-                    // x != 0 → range(1, max_int) (non-zero positive, or int minus 0)
-                    // Common pattern in Sail: `if x != 0 then ...`
-                    return Some((
-                        name,
-                        Ty::app(
-                            "range",
-                            vec![TyArg::numeric("1"), TyArg::numeric("max_int")],
-                            "range(1, max_int)".to_string(),
-                        ),
-                    ));
-                }
-                // For other constants (x != 5), no useful single-type narrowing
-            }
-            None
-        }
+        // Nonzero includes negative integers; it cannot be narrowed to nat.
+        Expr::Literal(parser::Literal::Number(_)) => None,
         Expr::Literal(parser::Literal::Bool(b)) => {
             // x != true → narrows to false, x != false → narrows to true
-            Some((name, Ty::named(if *b { "false" } else { "true" })))
+            Some((
+                name,
+                Ty::app("atom_bool", vec![TyArg::Bool(crate::ty::ConstraintExpr::Bool(!*b))], ""),
+            ))
         }
         _ => None,
     }
@@ -263,7 +295,7 @@ fn ident_eq_literal(body: &Body, ident_side: ExprId, lit_side: ExprId) -> Option
         }
         Expr::Literal(parser::Literal::Bool(b)) => {
             // Narrow to atom_bool(true/false)
-            Ty::named(if *b { "true" } else { "false" })
+            Ty::app("atom_bool", vec![TyArg::Bool(crate::ty::ConstraintExpr::Bool(*b))], "")
         }
         _ => return None,
     };
@@ -278,43 +310,34 @@ fn try_extract_comparison_narrowing(
     rhs: ExprId,
     env: &mut FlowEnvironment,
 ) {
-    // Pattern: `x > 0` or `x >= 0` → narrow x to nat
-    if let Expr::Ident(name) = &body.store[lhs] {
-        if let Expr::Literal(parser::Literal::Number(n)) = &body.store[rhs] {
-            if let Ok(val) = n.parse::<i64>() {
-                let narrowed = match op {
-                    ">=" if val == 0 => Some(Ty::named("nat")),
-                    ">" if val == 0 => {
-                        // x > 0 → range(1, max_int) ≈ nat (close enough)
-                        Some(Ty::app(
-                            "range",
-                            vec![TyArg::numeric("1"), TyArg::numeric("max_int")],
-                            "range(1, max_int)".to_string(),
-                        ))
-                    }
-                    ">=" => Some(Ty::app(
-                        "range",
-                        vec![TyArg::numeric(val.to_string()), TyArg::numeric("max_int")],
-                        format!("range({}, max_int)", val),
-                    )),
-                    "<" => Some(Ty::app(
-                        "range",
-                        vec![TyArg::numeric("min_int"), TyArg::numeric((val - 1).to_string())],
-                        format!("range(min_int, {})", val - 1),
-                    )),
-                    "<=" => Some(Ty::app(
-                        "range",
-                        vec![TyArg::numeric("min_int"), TyArg::numeric(val.to_string())],
-                        format!("range(min_int, {})", val),
-                    )),
-                    _ => None,
-                };
-                if let Some(ty) = narrowed {
-                    env.narrow(Name::new(name), ty);
-                }
-            }
-        }
+    let (name, text, op) = match (&body.store[lhs], &body.store[rhs]) {
+        (Expr::Ident(n), Expr::Literal(parser::Literal::Number(v))) => (n, v, op),
+        (Expr::Literal(parser::Literal::Number(v)), Expr::Ident(n)) => (
+            n,
+            v,
+            match op {
+                ">" => "<",
+                ">=" => "<=",
+                "<" => ">",
+                "<=" => ">=",
+                _ => return,
+            },
+        ),
+        _ => return,
+    };
+    let Ok(value) = text.replace('_', "").parse::<num_bigint::BigInt>() else { return };
+    if op == ">=" && value == num_bigint::BigInt::from(0) {
+        env.narrow(Name::new(name), Ty::named("nat"));
+        return;
     }
+    let (lo, hi) = match op {
+        ">" => ((value + num_bigint::BigInt::from(1)).to_string(), "max_int".into()),
+        ">=" => (value.to_string(), "max_int".into()),
+        "<" => ("min_int".into(), (value - num_bigint::BigInt::from(1)).to_string()),
+        "<=" => ("min_int".into(), value.to_string()),
+        _ => return,
+    };
+    env.narrow(Name::new(name), Ty::app("range", vec![TyArg::numeric(lo), TyArg::numeric(hi)], ""));
 }
 
 /// Try to extract narrowing from predicate function calls.
@@ -546,4 +569,39 @@ mod tests {
             other => panic!("expected App(atom, ...), got {:?}", other),
         }
     }
+}
+
+fn intersect(a: &Ty, b: &Ty) -> Option<Ty> {
+    use crate::ty::TyKind;
+    use num_bigint::BigInt;
+    fn bounds(t: &Ty) -> Option<(Option<BigInt>, Option<BigInt>)> {
+        let TyKind::App { name, args, .. } = t.kind() else { return None };
+        if name != "range" || args.len() != 2 {
+            return None;
+        }
+        let lo = args[0].as_value_str()?;
+        let hi = args[1].as_value_str()?;
+        Some((
+            if lo == "min_int" { None } else { Some(lo.parse().ok()?) },
+            if hi == "max_int" { None } else { Some(hi.parse().ok()?) },
+        ))
+    }
+    let (a, b1) = bounds(a)?;
+    let (c, d) = bounds(b)?;
+    let lo = match (a, c) {
+        (Some(a), Some(c)) => Some(a.max(c)),
+        (a, c) => a.or(c),
+    };
+    let hi = match (b1, d) {
+        (Some(a), Some(c)) => Some(a.min(c)),
+        (a, c) => a.or(c),
+    };
+    Some(Ty::app(
+        "range",
+        vec![
+            TyArg::numeric(lo.map_or("min_int".into(), |v| v.to_string())),
+            TyArg::numeric(hi.map_or("max_int".into(), |v| v.to_string())),
+        ],
+        "",
+    ))
 }

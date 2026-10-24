@@ -63,7 +63,7 @@
     "build-base": "esbuild ./src/main.ts --bundle --outfile=out/main.js --external:vscode --format=cjs --platform=node --target=node20",
     "watch": "npm run build-base -- --sourcemap --watch",
     "package": "npx @vscode/vsce package -o sail-lsp.vsix",
-    "package:local": "cargo build --release -p sail-lsp --target x86_64-unknown-linux-gnu --target-dir ../../target/vscode/linux-x64 && npm run package:server:linux-x64 && npm run package:vsix:linux-x64",
+    "package:local": "cargo build --release -p sail-lsp --features vendored --target x86_64-unknown-linux-gnu --target-dir ../../target/vscode/linux-x64 && npm run package:server:linux-x64 && npm run package:vsix:linux-x64",
     "package:vsix:linux-x64": "npx @vscode/vsce package -o sail-lsp-linux-x64.vsix --target linux-x64",
     "package:vsix:linux-arm64": "npx @vscode/vsce package -o sail-lsp-linux-arm64.vsix --target linux-arm64",
     "package:vsix:win32-x64": "npx @vscode/vsce package -o sail-lsp-win32-x64.vsix --target win32-x64",
@@ -294,6 +294,23 @@
           "minimum": 100,
           "maximum": 30000,
           "description": "Z3 solver timeout in milliseconds for constraint checking."
+        },
+        "sail-lsp.workspace.projectFile": {
+          "type": ["null", "string"],
+          "default": null,
+          "description": "Project manifest path, relative to each workspace folder or absolute. Auto-detection prefers sail.proj, otherwise requires a single *.sail_project."
+        },
+        "sail-lsp.workspace.projectVariables": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": { "type": ["boolean", "string"] },
+          "description": "Override variables in the Sail project manifest (for example RMEM: true)."
+        },
+        "sail-lsp.workspace.projectModules": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Root modules to load with their children and required modules. Empty selects all modules."
         },
         "sail-lsp.workspace.maxFiles": {
           "type": "integer",

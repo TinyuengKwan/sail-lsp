@@ -26,6 +26,8 @@ la-arena.workspace = true
 rustc-hash.workspace = true
 smallvec.workspace = true
 tracing.workspace = true
+num-bigint = "0.4"
+num-traits = "0.2"
 z3 = { workspace = true, optional = true }
 
 [dev-dependencies]

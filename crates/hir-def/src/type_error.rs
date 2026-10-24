@@ -15,15 +15,43 @@ pub enum VectorOrder {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum TypeError {
-    NoOverloading { id: String, errors: Vec<(String, Span, Box<TypeError>)> },
-    UnresolvedQuants { id: String, quants: Vec<String>, signature: Option<String> },
-    FailedConstraint { constraint: String, derived_from: Vec<Span> },
-    Subtype { lhs: String, rhs: String, constraint: Option<String> },
+    NoOverloading {
+        id: String,
+        errors: Vec<(String, Span, Box<TypeError>)>,
+    },
+    UnresolvedQuants {
+        id: String,
+        quants: Vec<String>,
+        signature: Option<String>,
+    },
+    FailedConstraint {
+        constraint: String,
+        derived_from: Vec<Span>,
+        /// The constraint was shown to have no solution, not merely left
+        /// undecided. Only the first is an error.
+        proved_false: bool,
+    },
+    Subtype {
+        lhs: String,
+        rhs: String,
+        constraint: Option<String>,
+    },
     Other(String),
-    FunctionArg { span: Span, ty: String, error: Box<TypeError> },
-    VectorSubrange { first: String, second: String, order: VectorOrder },
+    FunctionArg {
+        span: Span,
+        ty: String,
+        error: Box<TypeError>,
+    },
+    VectorSubrange {
+        first: String,
+        second: String,
+        order: VectorOrder,
+    },
     Hint(String),
-    Alternate { primary: Box<TypeError>, reasons: Vec<(String, Span, Box<TypeError>)> },
+    Alternate {
+        primary: Box<TypeError>,
+        reasons: Vec<(String, Span, Box<TypeError>)>,
+    },
 }
 
 impl TypeError {
@@ -58,7 +86,7 @@ impl TypeError {
                 lines.push(Message::line(format!("* {}", quants.join("\n* "))));
                 (Message::Seq(lines), None)
             }
-            TypeError::FailedConstraint { constraint, derived_from } => {
+            TypeError::FailedConstraint { constraint, derived_from, .. } => {
                 let mut messages =
                     vec![Message::line(format!("Failed to prove constraint: {constraint}"))];
                 for span in derived_from {

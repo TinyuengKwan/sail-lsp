@@ -55,7 +55,9 @@ impl<'a> MethodResolutionContext<'a> {
                 break;
             }
         }
-        if !ok {
+        if ok {
+            self.table.commit(snap);
+        } else {
             self.table.rollback_to(snap);
         }
         ok

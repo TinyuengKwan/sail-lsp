@@ -10,6 +10,122 @@
 //! in the ItemTree so they participate in name resolution, completion,
 //! and hover without generating actual source code.
 
+/// Field widths before name resolution. Preserve numeric expressions and
+/// range grouping so the item tree and inference read the same declaration.
+pub fn field_widths(node: &syntax::SyntaxNode) -> Vec<(String, String)> {
+    crate::item_tree::extract_field_decls(node)
+        .into_iter()
+        .map(|field| {
+            let width = range_indices(&field.type_text).map(|ranges| {
+                let widths: Vec<_> = ranges
+                    .into_iter()
+                    .map(|(hi, lo)| {
+                        if hi == lo {
+                            return "1".to_owned();
+                        }
+                        hi.parse::<i128>()
+                            .ok()
+                            .zip(lo.parse::<i128>().ok())
+                            .and_then(|(hi, lo)| hi.checked_sub(lo)?.checked_add(1))
+                            .map(|n| n.to_string())
+                            .unwrap_or_else(|| format!("({hi}) - ({lo}) + 1"))
+                    })
+                    .collect();
+                if widths.len() == 1 {
+                    return widths[0].clone();
+                }
+                if let Some(total) = widths
+                    .iter()
+                    .try_fold(0i128, |sum, width| sum.checked_add(width.parse::<i128>().ok()?))
+                {
+                    return total.to_string();
+                }
+                widths.iter().map(|w| format!("({w})")).collect::<Vec<_>>().join(" + ")
+            });
+            (field.name.to_string(), width.unwrap_or_else(|| "_".into()))
+        })
+        .collect()
+}
+
+/// Ordered endpoints of every segment, retaining grouping and arithmetic.
+/// Declaration validation must check each segment before widths are summed:
+/// a reversed segment cannot be cancelled by another concatenated range.
+pub fn range_indices(text: &str) -> Option<Vec<(String, String)>> {
+    let tokens: Vec<_> =
+        parser::tokenize(text).into_iter().map(|(_, span)| &text[span.start..span.end]).collect();
+    parse_ranges(&tokens)
+}
+
+fn parse_ranges(mut tokens: &[&str]) -> Option<Vec<(String, String)>> {
+    // Parentheses can enclose a complete concatenation or just an endpoint.
+    // Strip only parentheses enclosing the whole range, then split at depth 0.
+    loop {
+        let mut depth = 0usize;
+        let mut closing = None;
+        if tokens.first() != Some(&"(") {
+            break;
+        }
+        for (i, token) in tokens.iter().enumerate() {
+            match *token {
+                "(" => depth += 1,
+                ")" => {
+                    depth = depth.checked_sub(1)?;
+                    if depth == 0 {
+                        closing = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if closing != Some(tokens.len() - 1) {
+            break;
+        }
+        tokens = &tokens[1..tokens.len() - 1];
+    }
+    if tokens.is_empty() {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut cuts = Vec::new();
+    let mut range = None;
+    for (i, token) in tokens.iter().enumerate() {
+        match *token {
+            "(" => depth += 1,
+            ")" => depth = depth.checked_sub(1)?,
+            "@" if depth == 0 => cuts.push(i),
+            "." if depth == 0 && tokens.get(i + 1) == Some(&".") => range = Some((i, 2)),
+            ".." if depth == 0 => range = Some((i, 1)),
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        return None;
+    }
+    if !cuts.is_empty() {
+        let mut ranges = Vec::new();
+        let mut start = 0;
+        for end in cuts.into_iter().chain(std::iter::once(tokens.len())) {
+            ranges.extend(parse_ranges(&tokens[start..end])?);
+            start = end + 1;
+        }
+        return Some(ranges);
+    }
+    if let Some((at, dots)) = range {
+        let hi = &tokens[..at];
+        let lo = &tokens[at + dots..];
+        if hi.is_empty() || lo.is_empty() {
+            return None;
+        }
+        let hi = hi.join(" ");
+        let lo = lo.join(" ");
+        Some(vec![(hi, lo)])
+    } else {
+        let index = tokens.join(" ");
+        Some(vec![(index.clone(), index)])
+    }
+}
+
 /// A parsed bitfield field: name + bit range.
 #[derive(Debug, Clone)]
 pub struct BitfieldField {

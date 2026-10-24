@@ -14,7 +14,6 @@
 //! ```
 
 use crate::assist_context::{AssistContext, AssistId, AssistKind, Assists};
-use ide_db::text_edit::TextEdit;
 
 /// Convert a two-arm match (pattern + wildcard) to if-then-else.
 pub(crate) fn convert_match_to_if(acc: &mut Assists, ctx: &AssistContext<'_>) -> Option<()> {
@@ -23,7 +22,9 @@ pub(crate) fn convert_match_to_if(acc: &mut Assists, ctx: &AssistContext<'_>) ->
     let text = ctx.file.text();
     let offset = ctx.offset();
 
-    let (cst_root, _) = syntax::parse_text(text);
+    // The file's own tree. Parsing the text a second time here built a
+    // tree with no relation to the one the rest of the assist layer holds.
+    let cst_root = ctx.source_file()?.clone();
 
     // Find MATCH_EXPR at cursor.
     let match_node = cst_root.descendants().find(|node| {
@@ -34,13 +35,13 @@ pub(crate) fn convert_match_to_if(acc: &mut Assists, ctx: &AssistContext<'_>) ->
     })?;
 
     // Parse the match via HIR to get structured arms.
-    let bodies = hir_def::bodies::CallableBodies::from_cst(&cst_root);
+    let bodies = hir::CallableBodies::from_cst(&cst_root);
     let entry = bodies.entry_at_offset(offset)?;
     let body = &entry.body;
     let source_map = &entry.source_map;
     let expr_id = source_map.expr_at_offset(offset)?;
 
-    let hir_def::hir::Expr::Match { scrutinee, arms } = body.expr(expr_id)? else {
+    let hir::Expr::Match { scrutinee, arms } = body.expr(expr_id)? else {
         return None;
     };
 
@@ -52,10 +53,10 @@ pub(crate) fn convert_match_to_if(acc: &mut Assists, ctx: &AssistContext<'_>) ->
     let (pattern_arm, wildcard_arm) = {
         let arm0_pat = body.pat(arms[0].pat)?;
         let arm1_pat = body.pat(arms[1].pat)?;
-        let arm0_is_wild = matches!(arm0_pat, hir_def::hir::Pat::Wild)
-            || matches!(arm0_pat, hir_def::hir::Pat::Bind(name) if name == "_");
-        let arm1_is_wild = matches!(arm1_pat, hir_def::hir::Pat::Wild)
-            || matches!(arm1_pat, hir_def::hir::Pat::Bind(name) if name == "_");
+        let arm0_is_wild = matches!(arm0_pat, hir::Pat::Wild)
+            || matches!(arm0_pat, hir::Pat::Bind(name) if name == "_");
+        let arm1_is_wild = matches!(arm1_pat, hir::Pat::Wild)
+            || matches!(arm1_pat, hir::Pat::Bind(name) if name == "_");
 
         if arm0_is_wild && !arm1_is_wild {
             (&arms[1], &arms[0])
@@ -94,26 +95,47 @@ pub(crate) fn convert_match_to_if(acc: &mut Assists, ctx: &AssistContext<'_>) ->
     // Build replacement: `if <cond> then <then> else <else>`
     let replacement = format!("if {condition} then {then_text} else {else_text}");
 
-    // Replace the entire match expression.
-    let match_range = match_node.text_range();
-    let edit = TextEdit {
-        range: base_db::text_range(
-            usize::from(match_range.start()),
-            usize::from(match_range.end()),
-        ),
-        new_text: replacement,
-    };
-
-    acc.add_with_edits(
+    // Replace the whole match expression, through the tree.
+    acc.add(
         AssistId("convert_match_to_if", AssistKind::RefactorRewrite),
         "Convert match to if-then-else",
         ctx.range,
-        vec![edit],
+        |builder| {
+            let mut editor = builder.make_editor(&match_node);
+            editor.replace(match_node.clone(), syntax::ast::make::expr_from_text(&replacement));
+            builder.add_file_edits(editor);
+        },
     );
     Some(())
 }
 
 #[cfg(test)]
 mod tests {
-    // Tests require a FileDb implementation — integration tests in sail-lsp/tests.rs
+    use super::*;
+    use crate::tests::check_assist;
+    use expect_test::expect;
+
+    #[test]
+    fn applies() {
+        check_assist(
+            convert_match_to_if,
+            "val f : bool -> int\nfunction f(b) = mat$0ch b { true => 1, _ => 2 }\n",
+            expect![[r#"
+            val f : bool -> int
+            function f(b) = if b then 1 else 2
+        "#]],
+        );
+    }
+
+    #[test]
+    fn a_false_arm_negates_the_scrutinee() {
+        check_assist(
+            convert_match_to_if,
+            "val f : bool -> int\nfunction f(b) = mat$0ch b { false => 1, _ => 2 }\n",
+            expect![[r#"
+            val f : bool -> int
+            function f(b) = if not(b) then 1 else 2
+        "#]],
+        );
+    }
 }

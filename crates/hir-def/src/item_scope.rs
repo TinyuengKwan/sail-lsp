@@ -4,7 +4,7 @@
 
 use rustc_hash::FxHashMap;
 
-use crate::item_id::ModuleDefId;
+use crate::item_id::DefId;
 use crate::name::Name;
 use crate::nameres::FxIndexMap;
 use crate::per_ns::{ItemInNs, Namespace, PerNs};
@@ -13,9 +13,9 @@ use crate::visibility::Visibility;
 /// Namespace-aware container of definitions visible in a scope.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ItemScope {
-    types: FxIndexMap<Name, ModuleDefId>,
-    values: FxIndexMap<Name, Vec<ModuleDefId>>,
-    declarations: Vec<ModuleDefId>,
+    types: FxIndexMap<Name, DefId>,
+    values: FxIndexMap<Name, Vec<DefId>>,
+    declarations: Vec<DefId>,
     import_origins: FxHashMap<Name, vfs::FileId>,
 }
 
@@ -57,12 +57,12 @@ impl ItemScope {
     }
 
     /// Get all value definitions for an overloaded name.
-    pub fn get_values(&self, name: &Name) -> &[ModuleDefId] {
+    pub fn get_values(&self, name: &Name) -> &[DefId] {
         self.values.get(name).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
     /// All declarations in source order.
-    pub fn declarations(&self) -> &[ModuleDefId] {
+    pub fn declarations(&self) -> &[DefId] {
         &self.declarations
     }
 
@@ -75,12 +75,12 @@ impl ItemScope {
     }
 
     /// Record that `def` is declared in this scope.
-    pub(crate) fn declare(&mut self, def: ModuleDefId) {
+    pub(crate) fn declare(&mut self, def: DefId) {
         self.declarations.push(def);
     }
 
     /// Push a resolution into the namespace maps.
-    pub(crate) fn push_res(&mut self, name: Name, def_id: ModuleDefId, ns: Namespace) {
+    pub(crate) fn push_res(&mut self, name: Name, def_id: DefId, ns: Namespace) {
         match ns {
             Namespace::Types => {
                 self.types.insert(name, def_id);

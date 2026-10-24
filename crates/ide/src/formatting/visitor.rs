@@ -237,6 +237,12 @@ impl<'a> FmtVisitor<'a> {
 
         match rewritten {
             Some(formatted) => {
+                // A definition whose signature was rewritten still needs its
+                // expressions formatted. This used to push `formatted`
+                // untouched, so the expression pass only ran on definitions
+                // nothing else changed — and on a file where it did change
+                // one, formatting again produced different text.
+                let formatted = self.rewrite_exprs_of(&formatted);
                 self.push_str(&formatted);
                 self.emit_trailing_content(node);
             }
@@ -250,65 +256,121 @@ impl<'a> FmtVisitor<'a> {
         }
     }
 
-    /// Apply expression-level rewrites (match arm alignment, operator spacing)
-    /// within a definition's source text.
+    /// Normalise operator spacing inside a definition's source text.
     ///
-    /// Scans the definition's CST descendants for MATCH_EXPR, IF_EXPR, and
-    /// BIN_EXPR nodes and replaces them in the source string.
+    /// `BIN_EXPR` only. This used to claim it scanned for `MATCH_EXPR` and
+    /// `IF_EXPR` too, which is why `expr::rewrite_match_expr` and
+    /// `expr::rewrite_if_expr` have no caller — the comment described an
+    /// intent, and the loop below never had those arms. Wiring
+    /// `rewrite_match_expr` as it stands would break every single-line match
+    /// onto several lines; it needs `rewrite_if_expr`'s "only when already
+    /// multi-line" guard and a measurement first.
     fn apply_expr_rewrites(&self, node: &SyntaxNode, source: &str) -> String {
-        let node_start: usize = node.text_range().start().into();
+        apply_expr_rewrites_with(node, source, self.snippet_provider)
+    }
 
-        // Collect replacements (offset_in_source, len, new_text).
-        // Process in reverse order to preserve offsets.
-        let mut replacements: Vec<(usize, usize, String)> = Vec::new();
-
-        for descendant in node.descendants() {
-            let kind = descendant.kind();
-            let desc_range = descendant.text_range();
-            let rel_start: usize = usize::from(desc_range.start()) - node_start;
-            let rel_end: usize = usize::from(desc_range.end()) - node_start;
-
-            if rel_end > source.len() {
+    /// Format the expressions of a definition this visitor has already
+    /// rewritten.
+    ///
+    /// `apply_expr_rewrites` maps offsets taken from a CST onto the string it
+    /// is handed, so it can only run against the text that CST was parsed
+    /// from. The `Some(formatted)` arm above produces *new* text, and used to
+    /// return it untouched — so a definition whose signature needed rewriting
+    /// never had its expressions formatted, and the expression pass landed on
+    /// the *second* format instead. Re-parsing the definition is what makes
+    /// both happen in one pass.
+    fn rewrite_exprs_of(&self, text: &str) -> String {
+        let (root, errors) = syntax::parse_text(text);
+        if !errors.is_empty() {
+            return text.to_string();
+        }
+        let snippet = super::snippet::SnippetProvider::new(text.to_string());
+        let mut out = text.to_string();
+        // Definitions are disjoint, so applying them last-first keeps the
+        // earlier offsets valid.
+        let defs: Vec<SyntaxNode> = root.children().collect();
+        for def in defs.into_iter().rev() {
+            let range = def.text_range();
+            let (start, end) = (usize::from(range.start()), usize::from(range.end()));
+            if end > out.len() {
                 continue;
             }
-
-            if kind == SK::BIN_EXPR {
-                // Only normalize single-line binary expressions.
-                // Multi-line BIN_EXPR have intentional line breaks
-                // (e.g., `<->` continuation) that must be preserved.
-                let original = &source[rel_start..rel_end];
-                if original.contains('\n') {
-                    continue;
-                }
-                if let Some(formatted) =
-                    super::expr::normalize_binexpr_spacing(&descendant, self.snippet_provider)
-                {
-                    if formatted.trim() != original.trim() {
-                        replacements.push((rel_start, rel_end - rel_start, formatted));
-                    }
-                }
-            }
+            let rewritten = apply_expr_rewrites_with(&def, &out[start..end], &snippet);
+            out.replace_range(start..end, &rewritten);
         }
-
-        if replacements.is_empty() {
-            return source.to_string();
-        }
-
-        // Apply replacements in reverse order.
-        replacements.sort_by_key(|b| std::cmp::Reverse(b.0));
-        let mut result = source.to_string();
-        for (offset, len, new_text) in replacements {
-            if offset + len <= result.len() {
-                result.replace_range(offset..offset + len, &new_text);
-            }
-        }
-        result
+        out
     }
 
     /// Create a RewriteContext for use by Rewrite implementations.
     pub(crate) fn rewrite_context(&self) -> RewriteContext<'a> {
         RewriteContext::new(self.config, self.snippet_provider)
     }
+}
+
+/// Replace each expression this formatter normalises inside `source`.
+///
+/// `source` must be the text `node` was parsed from: every offset is taken
+/// from the CST and applied to the string.
+fn apply_expr_rewrites_with(node: &SyntaxNode, source: &str, snippet: &SnippetProvider) -> String {
+    let node_start: usize = node.text_range().start().into();
+
+    // Collect replacements (offset_in_source, len, new_text).
+    // Process in reverse order to preserve offsets.
+    let mut replacements: Vec<(usize, usize, String)> = Vec::new();
+
+    for descendant in node.descendants() {
+        let kind = descendant.kind();
+        let desc_range = descendant.text_range();
+        let rel_start: usize = usize::from(desc_range.start()) - node_start;
+        let rel_end: usize = usize::from(desc_range.end()) - node_start;
+
+        if rel_end > source.len() {
+            continue;
+        }
+
+        if kind == SK::BIN_EXPR {
+            // Only normalize single-line binary expressions.
+            // Multi-line BIN_EXPR have intentional line breaks
+            // (e.g., `<->` continuation) that must be preserved.
+            let original = &source[rel_start..rel_end];
+            if original.contains('\n') {
+                continue;
+            }
+            if let Some(formatted) = super::expr::normalize_binexpr_spacing(&descendant, snippet) {
+                if formatted.trim() != original.trim() {
+                    replacements.push((rel_start, rel_end - rel_start, formatted));
+                }
+            }
+        }
+    }
+
+    if replacements.is_empty() {
+        return source.to_string();
+    }
+
+    // One replacement per region. An outer `BIN_EXPR` covers its inner
+    // ones and already carries their normalisation (`normalized_child`),
+    // so splicing the inner one first would shift the outer's recorded
+    // length and the outer splice would then cut the wrong range.
+    replacements.sort_by_key(|r| (r.0, std::cmp::Reverse(r.1)));
+    let mut kept: Vec<(usize, usize, String)> = Vec::new();
+    for r in replacements {
+        if kept.last().is_some_and(|(o, l, _)| r.0 >= *o && r.0 + r.1 <= o + l) {
+            continue;
+        }
+        kept.push(r);
+    }
+    let mut replacements = kept;
+
+    // Apply replacements in reverse order.
+    replacements.sort_by_key(|b| std::cmp::Reverse(b.0));
+    let mut result = source.to_string();
+    for (offset, len, new_text) in replacements {
+        if offset + len <= result.len() {
+            result.replace_range(offset..offset + len, &new_text);
+        }
+    }
+    result
 }
 
 #[cfg(test)]

@@ -3,7 +3,7 @@
 //! Error: function uses an effect not declared in its signature.
 
 use crate::Diagnostic;
-use hir_def::diagnostics::DiagnosticCode;
+use hir::diagnostics::DiagnosticCode;
 
 use crate::{DiagnosticsContext, UndeclaredEffect};
 

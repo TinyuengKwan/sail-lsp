@@ -2,6 +2,7 @@
 
 use super::tags::token_type_index;
 use super::*;
+use hir::DefKind;
 
 /// Build a name → token type index map from ItemTree for type-driven classification.
 ///
@@ -18,20 +19,17 @@ pub(super) fn build_name_classification(
         return map;
     };
     for &id in item_tree.top_level_items() {
-        let kind = id.item_kind(item_tree);
+        let kind = id.def_kind(item_tree);
         let idx = match kind {
-            hir_def::ItemKind::Function
-            | hir_def::ItemKind::Mapping
-            | hir_def::ItemKind::ValSpec
-            | hir_def::ItemKind::MappingSpec => 1, // function
-            hir_def::ItemKind::TypeAlias | hir_def::ItemKind::Newtype => 2, // type
-            hir_def::ItemKind::Struct => 9,                                 // struct (new)
-            hir_def::ItemKind::Union => 2,                                  // union → type
-            hir_def::ItemKind::Bitfield => 9, // bitfield → struct (visually similar)
-            hir_def::ItemKind::Enum => 3,     // enum type name
-            hir_def::ItemKind::Register => 13, // register → macro (distinct color)
-            hir_def::ItemKind::Let => 4,      // let → variable
-            hir_def::ItemKind::Var => 4,      // var → variable
+            DefKind::Function | DefKind::Mapping | DefKind::ValSpec | DefKind::MappingSpec => 1, // function
+            DefKind::TypeAlias | DefKind::Newtype => 2, // type
+            DefKind::Struct => 9,                       // struct (new)
+            DefKind::Union => 2,                        // union → type
+            DefKind::Bitfield => 9,                     // bitfield → struct (visually similar)
+            DefKind::Enum => 3,                         // enum type name
+            DefKind::Register => 13,                    // register → macro (distinct color)
+            DefKind::Let => 4,                          // let → variable
+            DefKind::Var => 4,                          // var → variable
             _ => continue,
         };
         map.insert(id.name(item_tree).as_str().to_string(), idx);
@@ -40,7 +38,7 @@ pub(super) fn build_name_classification(
     // ItemTree entries record enum type names; we need to look at
     // the signature text for member names.
     for &id in item_tree.top_level_items() {
-        if id.item_kind(item_tree) == hir_def::ItemKind::Enum {
+        if id.def_kind(item_tree) == DefKind::Enum {
             // Parse enum members from signature: "enum Foo = { A, B, C }"
             let sig = id.signature(item_tree);
             if let Some(brace_start) = sig.find('{') {
@@ -68,25 +66,45 @@ pub(super) fn compute_semantic_tokens_filtered(
     let mut prev_start = 0_u32;
     let mut first = true;
 
-    let Some(tokens) = file.tokens() else {
-        return HlRanges { result_id: None, data: result };
+    // The lexer is shared by all include instances, but inactive regions must
+    // not contribute semantic classifications to the displayed document.
+    let tokens = file
+        .file_text()
+        .map(|(db, input)| syntax::parse_query::semantic_parse_file(db, input).tokens.as_slice())
+        .or_else(|| file.tokens());
+    let Some(tokens) = tokens else {
+        return HlRanges { data: result };
     };
 
     // Build name classification from ItemTree for type-driven semantic tokens
     let name_classes = build_name_classification(file);
 
-    // Build span→role map from ParsedFile.symbol_occurrences for
-    // accurate definition/reference modifier bits.
-    let occurrence_roles: std::collections::HashMap<usize, syntax::parser_lower::DeclRole> = file
-        .parsed()
-        .map(|parsed| {
-            parsed
-                .symbol_occurrences
-                .iter()
-                .filter_map(|occ| occ.role.map(|role| (occ.span.start, role)))
-                .collect()
-        })
-        .unwrap_or_default();
+    // Which name spans declare something, and which of those define it.
+    //
+    // From the item tree, which lowered the definitions and recorded each
+    // one's `name_span`. It used to come from the flat `symbol_occurrences`
+    // scrape, which is the same fact derived a second time — and derived
+    // only for the constructs the scrape happens to walk.
+    let (declaring_spans, defining_spans) = {
+        let mut declaring: std::collections::HashSet<usize> = Default::default();
+        let mut defining: std::collections::HashSet<usize> = Default::default();
+        if let Some(tree) = file.item_tree() {
+            for &id in tree.top_level_items() {
+                let start = id.name_span(tree).start;
+                declaring.insert(start);
+                // A `val` or a bare `mapping` signature declares without
+                // defining; a scattered head opens a definition its clauses
+                // complete. Everything else with a name defines it.
+                if !matches!(
+                    id.def_kind(tree),
+                    DefKind::ValSpec | DefKind::MappingSpec | DefKind::ScatteredHead
+                ) {
+                    defining.insert(start);
+                }
+            }
+        }
+        (declaring, defining)
+    };
 
     let mut prev_token: Option<&parser::Token> = None;
     for (token, span) in tokens {
@@ -139,14 +157,10 @@ pub(super) fn compute_semantic_tokens_filtered(
         };
 
         // Use ParsedFile occurrence roles for accurate modifiers.
-        // Fallback to prev_token heuristic if no occurrence data.
-        let occ_role = if matches!(token, parser::Token::Id(_)) {
-            occurrence_roles.get(&span.start).copied()
-        } else {
-            None
-        };
-        let is_decl = occ_role == Some(syntax::parser_lower::DeclRole::Declaration)
-            || occ_role == Some(syntax::parser_lower::DeclRole::Definition)
+        // Falls back to the preceding keyword for names the item tree has
+        // no entry for — a local binding, a parameter.
+        let is_ident = matches!(token, parser::Token::Id(_));
+        let is_decl = (is_ident && declaring_spans.contains(&span.start))
             || matches!(
                 prev_token,
                 Some(parser::Token::KwFunction)
@@ -164,7 +178,7 @@ pub(super) fn compute_semantic_tokens_filtered(
                     | Some(parser::Token::KwNewtype)
                     | Some(parser::Token::KwScattered)
             );
-        let is_definition = occ_role == Some(syntax::parser_lower::DeclRole::Definition);
+        let is_definition = is_ident && defining_spans.contains(&span.start);
         let is_mutable = matches!(prev_token, Some(parser::Token::KwVar));
         let is_readonly = matches!(prev_token, Some(parser::Token::KwLet));
         let is_register = tt == 13; // register type index
@@ -216,5 +230,5 @@ pub(super) fn compute_semantic_tokens_filtered(
         prev_token = Some(token);
     }
 
-    HlRanges { result_id: Some(super::semantic_tokens_result_id(file, result.len())), data: result }
+    HlRanges { data: result }
 }

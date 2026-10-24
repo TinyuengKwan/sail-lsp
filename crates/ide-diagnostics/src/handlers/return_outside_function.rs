@@ -1,7 +1,7 @@
 //! Handler for `AnyDiagnostic::ReturnOutsideFunction`.
 
 use crate::Diagnostic;
-use hir_def::diagnostics::DiagnosticCode;
+use hir::diagnostics::DiagnosticCode;
 
 use crate::{DiagnosticsContext, ReturnOutsideFunction};
 

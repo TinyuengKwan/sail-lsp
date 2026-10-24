@@ -408,6 +408,12 @@ TypeEffect =
 MatchArm =
   pat:Pat ('if' guard:Expr)? '=>' body:Expr
 
+// A clause of a mapping body. `forwards`/`backwards` give one direction;
+// `<->` gives both, and then each side is a pattern *and* an expression.
+MappingClause =
+  ('forwards' | 'backwards')? pat:Pat ('if' guard:Expr)?
+  ('=>' body:Expr | '<->' rhs:Pat) ('when' when_guard:Expr)?
+
 BlockItem =
   LetExpr | VarExpr | Expr
 

@@ -20,7 +20,7 @@ pub use hir_def::def_query::{callgraph, ArcCallGraph};
 /// dynamic set of FileText inputs. The binary crate calls this when
 /// it needs a workspace callgraph and manages its own caching.
 pub fn build_workspace_callgraph(
-    db: &dyn hir_def::db::DefDatabase,
+    db: &dyn salsa::Database,
     file_texts: &[FileText],
 ) -> Arc<WorkspaceCallGraph> {
     let graphs: Vec<&hir_def::callgraph::CallGraph> = file_texts
@@ -32,13 +32,13 @@ pub fn build_workspace_callgraph(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use base_db::FileId;
 
     #[salsa::db]
     #[derive(Default, Clone)]
-    struct TestDb {
+    pub(crate) struct TestDb {
         storage: salsa::Storage<Self>,
     }
 
@@ -84,42 +84,6 @@ mod tests {
             _: base_db::Durability,
         ) {
             unimplemented!()
-        }
-    }
-
-    impl hir_expand::db::ExpandDatabase for TestDb {
-        fn include_paths(&self, input: FileText) -> &[String] {
-            hir_expand::include_paths(self, input)
-        }
-    }
-
-    impl hir_def::db::DefDatabase for TestDb {
-        fn file_item_tree(
-            &self,
-            input: FileText,
-        ) -> Option<&std::sync::Arc<hir_def::item_tree::ItemTree>> {
-            hir_def::def_query::file_item_tree(self, input).as_ref()
-        }
-        fn callable_bodies(&self, input: FileText) -> Option<&hir_def::bodies::CallableBodies> {
-            hir_def::def_query::callable_bodies(self, input).as_ref().map(|b| b.0.as_ref())
-        }
-        fn def_map(&self, input: FileText) -> Option<&hir_def::nameres::DefMap> {
-            hir_def::def_query::crate_def_map(self, input).as_ref().map(|d| d.0.as_ref())
-        }
-        fn callgraph(&self, input: FileText) -> Option<&hir_def::callgraph::CallGraph> {
-            hir_def::def_query::callgraph(self, input).as_ref().map(|cg| cg.0.as_ref())
-        }
-        fn file_def_with_body_ids<'db>(
-            &'db self,
-            input: FileText,
-        ) -> &'db [hir_def::def_query::DefWithBodyId<'db>] {
-            hir_def::def_query::file_def_with_body_ids(self, input)
-        }
-        fn body_with_source_map<'db>(
-            &'db self,
-            id: hir_def::def_query::DefWithBodyId<'db>,
-        ) -> &'db hir_def::def_query::ArcBodyWithSourceMap {
-            hir_def::def_query::body_with_source_map(self, id)
         }
     }
 

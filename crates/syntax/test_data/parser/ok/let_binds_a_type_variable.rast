@@ -1,0 +1,12 @@
+SOURCE_FILE@0..19
+  NAMED_DEF@0..18
+    KW_LET@0..3 "let"
+    WHITESPACE@3..4 " "
+    NAME@4..13
+      TY_VAR@4..13 "'cap_size"
+    WHITESPACE@13..14 " "
+    EQ@14..15 "="
+    WHITESPACE@15..16 " "
+    LITERAL_EXPR@16..18
+      NUM_LIT@16..18 "32"
+  WHITESPACE@18..19 "\n"

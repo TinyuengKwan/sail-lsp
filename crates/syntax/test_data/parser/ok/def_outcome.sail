@@ -1,0 +1,1 @@
+outcome o : unit -> unit

@@ -6,7 +6,7 @@ use syntax::SyntaxNodePtr;
 
 use crate::in_file::InFile;
 use crate::item_tree::ItemTree;
-use crate::nameres::{DefData, DefId, DefMap};
+use crate::nameres::{DefData, DefIdx, DefMap};
 
 /// HIR objects that have a source location.
 pub trait HasSource {
@@ -14,7 +14,7 @@ pub trait HasSource {
     fn source(&self, item_tree: &ItemTree) -> Option<InFile<SyntaxNodePtr>>;
 }
 
-/// Resolve a `DefId` to its source `SyntaxNodePtr`.
+/// Resolve a `DefIdx` to its source `SyntaxNodePtr`.
 pub fn def_source(
     file_id: base_db::FileId,
     def_data: &DefData,
@@ -31,12 +31,12 @@ pub fn def_source(
     InFile::new(file_id, ptr)
 }
 
-/// Look up the source for a `DefId` given a DefMap and ItemTree.
+/// Look up the source for a `DefIdx` given a DefMap and ItemTree.
 ///
 /// Convenience function combining `DefMap::get` + `def_source`.
 pub fn def_id_source(
     file_id: base_db::FileId,
-    def_id: DefId,
+    def_id: DefIdx,
     def_map: &DefMap,
     item_tree: &ItemTree,
 ) -> Option<InFile<SyntaxNodePtr>> {
@@ -61,7 +61,7 @@ mod tests {
         // Should have at least one definition
         assert!(!def_map.is_empty());
 
-        let def_data = def_map.get(DefId(0)).unwrap();
+        let def_data = def_map.get(DefIdx(0)).unwrap();
         let result = def_source(FileId::from_raw(1), def_data, &tree);
 
         assert_eq!(result.file_id, FileId::from_raw(1));
@@ -76,8 +76,8 @@ mod tests {
         let tree = ItemTree::build_from_cst(&root);
         let def_map = DefMap::build(&Arc::new(tree.clone()));
 
-        // DefId(999) doesn't exist
-        let result = def_id_source(FileId::from_raw(1), DefId(999), &def_map, &tree);
+        // DefIdx(999) doesn't exist
+        let result = def_id_source(FileId::from_raw(1), DefIdx(999), &def_map, &tree);
         assert!(result.is_none());
     }
 
@@ -90,8 +90,8 @@ mod tests {
 
         assert!(def_map.len() >= 2);
 
-        let src0 = def_source(FileId::from_raw(1), def_map.get(DefId(0)).unwrap(), &tree);
-        let src1 = def_source(FileId::from_raw(1), def_map.get(DefId(1)).unwrap(), &tree);
+        let src0 = def_source(FileId::from_raw(1), def_map.get(DefIdx(0)).unwrap(), &tree);
+        let src1 = def_source(FileId::from_raw(1), def_map.get(DefIdx(1)).unwrap(), &tree);
 
         // Different definitions should have different ranges
         assert_ne!(src0.value.text_range(), src1.value.text_range());

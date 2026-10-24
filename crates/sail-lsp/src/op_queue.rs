@@ -14,11 +14,12 @@ pub(crate) struct OpQueue<Args = (), Output = ()> {
     op_requested: Option<(Cause, Args)>,
     op_in_progress: bool,
     last_op_result: Option<Output>,
+    revision: u64,
 }
 
 impl<Args, Output> Default for OpQueue<Args, Output> {
     fn default() -> Self {
-        Self { op_requested: None, op_in_progress: false, last_op_result: None }
+        Self { op_requested: None, op_in_progress: false, last_op_result: None, revision: 0 }
     }
 }
 
@@ -26,7 +27,14 @@ impl<Args, Output> OpQueue<Args, Output> {
     /// Request a new operation with a given cause and arguments.
     /// If there's already a pending request, it is overwritten (last-writer-wins).
     pub(crate) fn request_op(&mut self, reason: Cause, args: Args) {
+        self.revision += 1;
         self.op_requested = Some((reason, args));
+    }
+
+    /// Changes even if a request is coalesced with another pending request.
+    /// A worker must not publish a result superseded while it was running.
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Check if an operation should be started.
@@ -49,7 +57,7 @@ impl<Args, Output> OpQueue<Args, Output> {
     }
 
     /// Get the result of the last completed operation.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // used only by tests
     pub(crate) fn last_op_result(&self) -> Option<&Output> {
         self.last_op_result.as_ref()
     }
@@ -60,7 +68,7 @@ impl<Args, Output> OpQueue<Args, Output> {
     }
 
     /// Whether a new operation has been requested (but not yet started).
-    #[allow(dead_code)]
+    #[allow(dead_code)] // used only by tests
     pub(crate) fn op_requested(&self) -> bool {
         self.op_requested.is_some()
     }

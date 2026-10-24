@@ -17,8 +17,8 @@
 //! ```
 
 use base_db::FileId;
-use hir_def::include_graph::IncludeGraph;
-use hir_expand::in_file::{FilePosition, FileRange};
+use hir::include_graph::IncludeGraph;
+use hir::FilePosition;
 use std::collections::HashMap;
 
 /// Cursor marker used in test fixtures.
@@ -202,11 +202,9 @@ impl MultiFileFixture {
         self.cursor
     }
 
-    /// Get the cursor position as a `FileRange` (zero-width range at offset).
-    pub fn cursor_range(&self) -> FileRange {
-        let pos = self.cursor_position();
-        FileRange { file_id: pos.file_id, range: base_db::TextRange::empty(pos.offset) }
-    }
+    // There is no `cursor_range`. An empty range at the cursor is what
+    // `cursor_position` already gives, and no fixture asked for it
+    // wrapped.
 }
 
 #[cfg(test)]

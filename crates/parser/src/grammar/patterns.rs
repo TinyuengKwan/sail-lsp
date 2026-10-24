@@ -81,6 +81,12 @@ impl<'t> Parser<'t> {
                 self.expect(T![')']);
                 Some(m.complete(self, SK::TUPLE_PAT))
             }
+            // `[a, b]` is a vector and `[|a, b|]` is a list, not the other
+            // way round — upstream's `Lsquare pat_list Rsquare` builds
+            // `P_vector` and `LsquareBar .. RsquareBar` builds `P_list`
+            // (parser.mly:558). Swapped, every vector-literal pattern was
+            // modelled as a cons-list, which is why nothing checked its
+            // length against the bitvector width it matches.
             T!['['] => {
                 let m = self.start();
                 self.bump_any();
@@ -88,7 +94,7 @@ impl<'t> Parser<'t> {
                     p.parse_pattern(recovery);
                 });
                 self.expect(T![']']);
-                Some(m.complete(self, SK::LIST_PAT))
+                Some(m.complete(self, SK::VECTOR_PAT))
             }
             SK::L_BRACKET_BAR => {
                 let m = self.start();
@@ -97,7 +103,7 @@ impl<'t> Parser<'t> {
                     p.parse_pattern(recovery);
                 });
                 self.expect(SK::R_BRACKET_BAR);
-                Some(m.complete(self, SK::VECTOR_PAT))
+                Some(m.complete(self, SK::LIST_PAT))
             }
             T![struct] => {
                 let m = self.start();

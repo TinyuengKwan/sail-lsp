@@ -1,5 +1,5 @@
 //! `HirDisplay` implementations for hir-level public types.
-//! Each public HIR type (Function, Adt, Register, Mapping,
+//! Each public HIR type (Function, TypeDef, Register, Mapping,
 //! etc.) implements `HirDisplay` so IDE features can render them
 //! without reaching into lower layers.
 //!
@@ -9,32 +9,29 @@
 
 use std::fmt::Write as _;
 
-use hir_ty::display::{HirDisplay, HirDisplayError, HirFormatter};
+pub use hir_ty::display::{HirDisplay, HirDisplayError, HirFormatter};
 
 use crate::{
-    Adt, AdtId, Enum, Function, GenericParam, Local, Mapping, Module, ModuleDef, PathResolution,
-    Register, Struct, TypeDefKind, Union,
+    Def, Enum, File, Function, Local, Mapping, PathResolution, Register, Struct, TypeDef,
+    TypeDefKind, TypeVar, Union,
 };
 
 /// RA renders: `pub fn name(params) -> ret_ty`.
 /// Sail renders: `val name : signature` (or `function name` as fallback).
 impl HirDisplay for Function {
     fn hir_fmt(&self, f: &mut HirFormatter<'_>) -> Result<(), HirDisplayError> {
-        if let Some(db) = f.db {
-            let name = self.name(db);
-            if let Some(sig) = self.id.lookup_signature(db) {
-                write!(f, "val {name} : {sig}")?;
-            } else {
-                write!(f, "function {name}")?;
-            }
+        let db = f.db;
+        let name = self.name(db);
+        if let Some(sig) = self.id.lookup_signature(db) {
+            write!(f, "val {name} : {sig}")?;
         } else {
-            write!(f, "function")?;
+            write!(f, "function {name}")?;
         }
         Ok(())
     }
 }
 
-impl HirDisplay for Adt {
+impl HirDisplay for TypeDef {
     fn hir_fmt(&self, f: &mut HirFormatter<'_>) -> Result<(), HirDisplayError> {
         let keyword = match self.kind {
             TypeDefKind::Struct => "struct",
@@ -44,15 +41,16 @@ impl HirDisplay for Adt {
             TypeDefKind::Newtype => "newtype",
             TypeDefKind::TypeAlias => "type",
         };
-        if let Some(db) = f.db {
-            let name = self.name(db);
-            if let Some(sig) = self.id.lookup_signature(db) {
-                write!(f, "{keyword} {name} = {sig}")?;
-            } else {
-                write!(f, "{keyword} {name}")?;
-            }
+        let db = f.db;
+        let name = self.name(db);
+        if let Some(sig) = self.id.lookup_signature(db) {
+            // A type definition's signature is its whole declaration —
+            // `enum Color = { Red, .. }` — where a `val`'s is only the
+            // type. Prepending the keyword and name to the first gave
+            // `enum Color = enum Color = { .. }`.
+            write!(f, "{}", with_head(&sig, keyword, &name.to_string()))?;
         } else {
-            write!(f, "{keyword}")?;
+            write!(f, "{keyword} {name}")?;
         }
         Ok(())
     }
@@ -60,15 +58,12 @@ impl HirDisplay for Adt {
 
 impl HirDisplay for Struct {
     fn hir_fmt(&self, f: &mut HirFormatter<'_>) -> Result<(), HirDisplayError> {
-        if let Some(db) = f.db {
-            let name = self.name(db);
-            if let Some(sig) = self.id.lookup_signature(db) {
-                write!(f, "struct {name} = {sig}")?;
-            } else {
-                write!(f, "struct {name}")?;
-            }
+        let db = f.db;
+        let name = self.name(db);
+        if let Some(sig) = self.id.lookup_signature(db) {
+            write!(f, "{}", with_head(&sig, "struct", &name.to_string()))?;
         } else {
-            write!(f, "struct")?;
+            write!(f, "struct {name}")?;
         }
         Ok(())
     }
@@ -76,15 +71,12 @@ impl HirDisplay for Struct {
 
 impl HirDisplay for Union {
     fn hir_fmt(&self, f: &mut HirFormatter<'_>) -> Result<(), HirDisplayError> {
-        if let Some(db) = f.db {
-            let name = self.name(db);
-            if let Some(sig) = self.id.lookup_signature(db) {
-                write!(f, "union {name} = {sig}")?;
-            } else {
-                write!(f, "union {name}")?;
-            }
+        let db = f.db;
+        let name = self.name(db);
+        if let Some(sig) = self.id.lookup_signature(db) {
+            write!(f, "{}", with_head(&sig, "union", &name.to_string()))?;
         } else {
-            write!(f, "union")?;
+            write!(f, "union {name}")?;
         }
         Ok(())
     }
@@ -92,41 +84,25 @@ impl HirDisplay for Union {
 
 impl HirDisplay for Enum {
     fn hir_fmt(&self, f: &mut HirFormatter<'_>) -> Result<(), HirDisplayError> {
-        if let Some(db) = f.db {
-            let name = self.name(db);
-            if let Some(sig) = self.id.lookup_signature(db) {
-                write!(f, "enum {name} = {sig}")?;
-            } else {
-                write!(f, "enum {name}")?;
-            }
+        let db = f.db;
+        let name = self.name(db);
+        if let Some(sig) = self.id.lookup_signature(db) {
+            write!(f, "{}", with_head(&sig, "enum", &name.to_string()))?;
         } else {
-            write!(f, "enum")?;
+            write!(f, "enum {name}")?;
         }
         Ok(())
     }
 }
 
-impl HirDisplay for AdtId {
-    fn hir_fmt(&self, f: &mut HirFormatter<'_>) -> Result<(), HirDisplayError> {
-        match self {
-            AdtId::Struct(s) => s.hir_fmt(f),
-            AdtId::Union(u) => u.hir_fmt(f),
-            AdtId::Enum(e) => e.hir_fmt(f),
-        }
-    }
-}
-
 impl HirDisplay for Register {
     fn hir_fmt(&self, f: &mut HirFormatter<'_>) -> Result<(), HirDisplayError> {
-        if let Some(db) = f.db {
-            let name = self.name(db);
-            if let Some(sig) = self.id.lookup_signature(db) {
-                write!(f, "register {name} : {sig}")?;
-            } else {
-                write!(f, "register {name}")?;
-            }
+        let db = f.db;
+        let name = self.name(db);
+        if let Some(sig) = self.id.lookup_signature(db) {
+            write!(f, "register {name} : {sig}")?;
         } else {
-            write!(f, "register")?;
+            write!(f, "register {name}")?;
         }
         Ok(())
     }
@@ -134,57 +110,61 @@ impl HirDisplay for Register {
 
 impl HirDisplay for Mapping {
     fn hir_fmt(&self, f: &mut HirFormatter<'_>) -> Result<(), HirDisplayError> {
-        if let Some(db) = f.db {
-            let name = self.name(db);
-            if let Some(sig) = self.id.lookup_signature(db) {
-                write!(f, "mapping {name} : {sig}")?;
-            } else {
-                write!(f, "mapping {name}")?;
-            }
+        let db = f.db;
+        let name = self.name(db);
+        if let Some(sig) = self.id.lookup_signature(db) {
+            write!(f, "mapping {name} : {sig}")?;
         } else {
-            write!(f, "mapping")?;
+            write!(f, "mapping {name}")?;
         }
         Ok(())
     }
 }
 
-impl HirDisplay for ModuleDef {
+impl HirDisplay for Def {
     fn hir_fmt(&self, f: &mut HirFormatter<'_>) -> Result<(), HirDisplayError> {
         match self {
-            ModuleDef::Function(it) => it.hir_fmt(f),
-            ModuleDef::TypeDef(it) => it.hir_fmt(f),
-            ModuleDef::Register(it) => it.hir_fmt(f),
-            ModuleDef::Mapping(it) => it.hir_fmt(f),
-            ModuleDef::Let(loc) => {
-                if let Some(db) = f.db {
-                    let name = loc.lookup_name(db);
-                    write!(f, "let {name}")?;
-                } else {
-                    write!(f, "let")?;
-                }
-                Ok(())
-            }
-            ModuleDef::Overload(loc) => {
-                if let Some(db) = f.db {
-                    let name = loc.lookup_name(db);
-                    write!(f, "overload {name}")?;
-                } else {
-                    write!(f, "overload")?;
-                }
-                Ok(())
-            }
+            Def::Function(it) => return it.hir_fmt(f),
+            Def::TypeDef(it) => return it.hir_fmt(f),
+            Def::Register(it) => return it.hir_fmt(f),
+            Def::Mapping(it) => return it.hir_fmt(f),
+            _ => {}
         }
+        // Every other form is written as `<keyword> <name>`, so that is
+        // how it reads back.
+        let name = self.location().lookup_name(f.db);
+        match self.kind().keyword() {
+            Some(kw) => write!(f, "{kw} {name}")?,
+            None => write!(f, "{name}")?,
+        }
+        Ok(())
+    }
+}
+
+/// `parameter x` or `let x`, as the thing reads in Sail.
+///
+/// This rendered the bare name, which is less than the per-file scrape's
+/// label said — and that is what stopped `ide/src/hover` from building
+/// its header through `HirDisplay`.
+/// A signature that already opens with its own keyword is the whole
+/// declaration; anything else needs the head put back in front of it.
+fn with_head(sig: &str, keyword: &str, name: &str) -> String {
+    if sig.trim_start().starts_with(keyword) {
+        sig.trim().to_owned()
+    } else {
+        format!("{keyword} {name} = {sig}")
     }
 }
 
 impl HirDisplay for Local {
     fn hir_fmt(&self, f: &mut HirFormatter<'_>) -> Result<(), HirDisplayError> {
-        write!(f, "{}", self.name)?;
+        let keyword = if self.is_param { "parameter" } else { "let" };
+        write!(f, "{keyword} {}", self.name)?;
         Ok(())
     }
 }
 
-impl HirDisplay for GenericParam {
+impl HirDisplay for TypeVar {
     fn hir_fmt(&self, f: &mut HirFormatter<'_>) -> Result<(), HirDisplayError> {
         write!(f, "'{}", self.name)?;
         Ok(())
@@ -196,13 +176,13 @@ impl HirDisplay for PathResolution {
         match self {
             PathResolution::Def(d) => d.hir_fmt(f),
             PathResolution::Local(l) => l.hir_fmt(f),
-            PathResolution::TypeParam(tp) => tp.hir_fmt(f),
+            PathResolution::TypeVar(tp) => tp.hir_fmt(f),
         }
     }
 }
 
 /// In Sail, each file is one module. Render as `module`.
-impl HirDisplay for Module {
+impl HirDisplay for File {
     fn hir_fmt(&self, f: &mut HirFormatter<'_>) -> Result<(), HirDisplayError> {
         write!(f, "module")?;
         Ok(())

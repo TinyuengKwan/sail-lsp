@@ -6,7 +6,7 @@
 //! Used as a custom LSP command `sail-lsp/expandInclude`.
 
 use base_db::FileId;
-use hir_def::include_graph::IncludeGraph;
+use hir::include_graph::IncludeGraph;
 
 /// Result of expanding includes for a file.
 #[derive(Debug, Clone)]

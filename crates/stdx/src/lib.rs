@@ -9,14 +9,10 @@ mod macros;
 
 pub mod diff;
 
-pub mod anymap;
 pub mod assert;
-pub mod non_empty_vec;
 pub mod panic_context;
 pub mod process;
-pub mod rand;
 pub mod thread;
-pub mod variance;
 
 pub use itertools;
 

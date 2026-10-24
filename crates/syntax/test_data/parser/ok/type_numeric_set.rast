@@ -1,0 +1,20 @@
+SOURCE_FILE@0..20
+  CALLABLE_SPEC@0..19
+    KW_VAL@0..3 "val"
+    WHITESPACE@3..4 " "
+    NAME@4..5
+      IDENT@4..5 "v"
+    WHITESPACE@5..6 " "
+    COLON@6..7 ":"
+    WHITESPACE@7..8 " "
+    TYPE_EXISTENTIAL@8..19
+      L_CURLY_BAR@8..10 "{|"
+      NUM_LIT@10..11 "0"
+      COMMA@11..12 ","
+      WHITESPACE@12..13 " "
+      NUM_LIT@13..14 "1"
+      COMMA@14..15 ","
+      WHITESPACE@15..16 " "
+      NUM_LIT@16..17 "2"
+      R_CURLY_BAR@17..19 "|}"
+  WHITESPACE@19..20 "\n"

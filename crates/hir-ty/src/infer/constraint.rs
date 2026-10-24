@@ -25,22 +25,27 @@ impl Polynomial {
         Self { terms }
     }
 
-    fn add(&self, other: &Self) -> Self {
+    fn add(&self, other: &Self) -> Option<Self> {
         let mut result = self.terms.clone();
         for (k, v) in &other.terms {
-            *result.entry(k.clone()).or_insert(0) += v;
+            let coefficient = result.entry(k.clone()).or_insert(0);
+            *coefficient = coefficient.checked_add(*v)?;
         }
         result.retain(|_, v| *v != 0);
-        Self { terms: result }
+        Some(Self { terms: result })
     }
 
-    fn neg(&self) -> Self {
-        let terms = self.terms.iter().map(|(k, v)| (k.clone(), -v)).collect();
-        Self { terms }
+    fn neg(&self) -> Option<Self> {
+        let terms = self
+            .terms
+            .iter()
+            .map(|(k, v)| Some((k.clone(), v.checked_neg()?)))
+            .collect::<Option<_>>()?;
+        Some(Self { terms })
     }
 
-    pub(super) fn sub(&self, other: &Self) -> Self {
-        self.add(&other.neg())
+    pub(super) fn sub(&self, other: &Self) -> Option<Self> {
+        self.add(&other.neg()?)
     }
 
     /// Extract as a constant if this polynomial has no variable terms.
@@ -66,10 +71,10 @@ impl Polynomial {
         }
         let mut result = std::collections::BTreeMap::new();
         for (k, v) in &self.terms {
-            if v % divisor != 0 {
+            if v.checked_rem(divisor)? != 0 {
                 return None; // Not evenly divisible — give up
             }
-            let quotient = v / divisor;
+            let quotient = v.checked_div(divisor)?;
             if quotient != 0 {
                 result.insert(k.clone(), quotient);
             }
@@ -89,7 +94,8 @@ impl Polynomial {
                 if combined.len() > 4 {
                     return None;
                 }
-                *result.entry(combined).or_insert(0) += lv * rv;
+                let coefficient = result.entry(combined).or_insert(0);
+                *coefficient = coefficient.checked_add(lv.checked_mul(*rv)?)?;
             }
         }
         result.retain(|_, v| *v != 0);
@@ -100,19 +106,20 @@ impl Polynomial {
 pub(super) fn polynomial_from_numeric_expr(expr: &NumericExpr) -> Option<Polynomial> {
     match expr {
         NumericExpr::Const(c) => Some(Polynomial::constant(*c)),
+        NumericExpr::BigConst(_) => None,
         NumericExpr::Var(name) | NumericExpr::Symbol(name) => {
             Some(Polynomial::variable(name.clone()))
         }
-        NumericExpr::Neg(inner) => Some(polynomial_from_numeric_expr(inner)?.neg()),
+        NumericExpr::Neg(inner) => polynomial_from_numeric_expr(inner)?.neg(),
         NumericExpr::Add(lhs, rhs) => {
             let l = polynomial_from_numeric_expr(lhs)?;
             let r = polynomial_from_numeric_expr(rhs)?;
-            Some(l.add(&r))
+            l.add(&r)
         }
         NumericExpr::Sub(lhs, rhs) => {
             let l = polynomial_from_numeric_expr(lhs)?;
             let r = polynomial_from_numeric_expr(rhs)?;
-            Some(l.sub(&r))
+            l.sub(&r)
         }
         NumericExpr::Mul(lhs, rhs) => {
             let l = polynomial_from_numeric_expr(lhs)?;
@@ -133,7 +140,7 @@ pub(super) fn polynomial_from_numeric_expr(expr: &NumericExpr) -> Option<Polynom
                 if rc == 0 {
                     return None;
                 }
-                return Some(Polynomial::constant(lc / rc));
+                return Some(Polynomial::constant(lc.checked_div_euclid(rc)?));
             }
             // Case 2: Divisor is constant — try exact per-term division.
             if let Some(divisor) = r.as_constant() {
@@ -153,7 +160,7 @@ pub(super) fn polynomial_from_numeric_expr(expr: &NumericExpr) -> Option<Polynom
                 if rc == 0 {
                     return None;
                 }
-                return Some(Polynomial::constant(lc % rc));
+                return Some(Polynomial::constant(lc.checked_rem_euclid(rc)?));
             }
             // Case 2: Numerator is constant, divisor is constant.
             // (Mod of symbolic by constant is not polynomial — delegate to Z3.)
@@ -162,7 +169,7 @@ pub(super) fn polynomial_from_numeric_expr(expr: &NumericExpr) -> Option<Polynom
                     return None;
                 }
                 if let Some(lc) = l.as_constant() {
-                    return Some(Polynomial::constant(lc % rc));
+                    return Some(Polynomial::constant(lc.checked_rem_euclid(rc)?));
                 }
             }
             // Case 3: Not polynomial-representable.
@@ -174,14 +181,14 @@ pub(super) fn polynomial_from_numeric_expr(expr: &NumericExpr) -> Option<Polynom
             //
             // Case 1: inner is a literal constant.
             if let NumericExpr::Const(n) = inner.as_ref() {
-                if *n >= 0 && *n <= 63 {
+                if *n >= 0 && *n < 63 {
                     return Some(Polynomial::constant(1i64 << n));
                 }
             }
             // Case 2: inner evaluates to a constant via polynomial algebra.
             let inner_poly = polynomial_from_numeric_expr(inner)?;
             let n = inner_poly.as_constant()?;
-            if (0..=63).contains(&n) {
+            if (0..63).contains(&n) {
                 Some(Polynomial::constant(1i64 << n))
             } else {
                 None // Overflow or negative exponent — delegate to Z3
@@ -207,6 +214,7 @@ pub(super) fn swapped_compare_op(op: CompareOp) -> CompareOp {
 fn numeric_expr_key(expr: &NumericExpr) -> String {
     match expr {
         NumericExpr::Const(value) => value.to_string(),
+        NumericExpr::BigConst(value) => value.to_string(),
         NumericExpr::Var(name) | NumericExpr::Symbol(name) => name.clone(),
         NumericExpr::Neg(inner) => format!("(-{})", numeric_expr_key(inner)),
         NumericExpr::Add(lhs, rhs) => {
@@ -243,9 +251,20 @@ fn numeric_expr_key(expr: &NumericExpr) -> String {
 }
 
 pub(super) fn subst_numeric_expr(expr: &NumericExpr, subst: &Subst) -> NumericExpr {
+    subst_numeric_expr_inner(expr, subst, &mut HashSet::new())
+}
+fn subst_numeric_expr_inner(
+    expr: &NumericExpr,
+    subst: &Subst,
+    visiting: &mut HashSet<String>,
+) -> NumericExpr {
     match expr {
         NumericExpr::Const(value) => NumericExpr::Const(*value),
+        NumericExpr::BigConst(_) => expr.clone(),
         NumericExpr::Var(name) => {
+            if !visiting.insert(name.clone()) {
+                return expr.clone();
+            }
             let resolved =
                 subst.values.get(name).and_then(|value| parse_numeric_expr_text(value)).or_else(
                     || {
@@ -255,43 +274,49 @@ pub(super) fn subst_numeric_expr(expr: &NumericExpr, subst: &Subst) -> NumericEx
                         })
                     },
                 );
-            match resolved {
+            let result = match resolved {
                 Some(NumericExpr::Var(bound)) if &bound == name => NumericExpr::Var(name.clone()),
-                Some(expr) => subst_numeric_expr(&expr, subst),
+                Some(expr) => subst_numeric_expr_inner(&expr, subst, visiting),
                 None => NumericExpr::Var(name.clone()),
-            }
+            };
+            visiting.remove(name);
+            result
         }
         NumericExpr::Symbol(name) => NumericExpr::Symbol(name.clone()),
-        NumericExpr::Neg(inner) => NumericExpr::Neg(Box::new(subst_numeric_expr(inner, subst))),
+        NumericExpr::Neg(inner) => {
+            NumericExpr::Neg(Box::new(subst_numeric_expr_inner(inner, subst, visiting)))
+        }
         NumericExpr::Add(lhs, rhs) => NumericExpr::Add(
-            Box::new(subst_numeric_expr(lhs, subst)),
-            Box::new(subst_numeric_expr(rhs, subst)),
+            Box::new(subst_numeric_expr_inner(lhs, subst, visiting)),
+            Box::new(subst_numeric_expr_inner(rhs, subst, visiting)),
         ),
         NumericExpr::Sub(lhs, rhs) => NumericExpr::Sub(
-            Box::new(subst_numeric_expr(lhs, subst)),
-            Box::new(subst_numeric_expr(rhs, subst)),
+            Box::new(subst_numeric_expr_inner(lhs, subst, visiting)),
+            Box::new(subst_numeric_expr_inner(rhs, subst, visiting)),
         ),
         NumericExpr::Mul(lhs, rhs) => NumericExpr::Mul(
-            Box::new(subst_numeric_expr(lhs, subst)),
-            Box::new(subst_numeric_expr(rhs, subst)),
+            Box::new(subst_numeric_expr_inner(lhs, subst, visiting)),
+            Box::new(subst_numeric_expr_inner(rhs, subst, visiting)),
         ),
         NumericExpr::Div(lhs, rhs) => NumericExpr::Div(
-            Box::new(subst_numeric_expr(lhs, subst)),
-            Box::new(subst_numeric_expr(rhs, subst)),
+            Box::new(subst_numeric_expr_inner(lhs, subst, visiting)),
+            Box::new(subst_numeric_expr_inner(rhs, subst, visiting)),
         ),
         NumericExpr::Mod(lhs, rhs) => NumericExpr::Mod(
-            Box::new(subst_numeric_expr(lhs, subst)),
-            Box::new(subst_numeric_expr(rhs, subst)),
+            Box::new(subst_numeric_expr_inner(lhs, subst, visiting)),
+            Box::new(subst_numeric_expr_inner(rhs, subst, visiting)),
         ),
-        NumericExpr::Exp(inner) => NumericExpr::Exp(Box::new(subst_numeric_expr(inner, subst))),
+        NumericExpr::Exp(inner) => {
+            NumericExpr::Exp(Box::new(subst_numeric_expr_inner(inner, subst, visiting)))
+        }
         NumericExpr::App { name, args } => NumericExpr::App {
             name: name.clone(),
-            args: args.iter().map(|a| subst_numeric_expr(a, subst)).collect(),
+            args: args.iter().map(|a| subst_numeric_expr_inner(a, subst, visiting)).collect(),
         },
         NumericExpr::If { cond, then_expr, else_expr } => NumericExpr::If {
             cond: Box::new(apply_subst_constraint_expr(cond, subst)),
-            then_expr: Box::new(subst_numeric_expr(then_expr, subst)),
-            else_expr: Box::new(subst_numeric_expr(else_expr, subst)),
+            then_expr: Box::new(subst_numeric_expr_inner(then_expr, subst, visiting)),
+            else_expr: Box::new(subst_numeric_expr_inner(else_expr, subst, visiting)),
         },
     }
 }
@@ -378,19 +403,19 @@ fn constraint_facts_add_set(facts: &mut ConstraintFacts, values: HashSet<i64>) {
     });
 }
 
-fn bound_min(bound: NumericBound) -> i64 {
+fn bound_min(bound: NumericBound) -> i128 {
     if bound.inclusive {
-        bound.value
+        i128::from(bound.value)
     } else {
-        bound.value.saturating_add(1)
+        i128::from(bound.value) + 1
     }
 }
 
-fn bound_max(bound: NumericBound) -> i64 {
+fn bound_max(bound: NumericBound) -> i128 {
     if bound.inclusive {
-        bound.value
+        i128::from(bound.value)
     } else {
-        bound.value.saturating_sub(1)
+        i128::from(bound.value) - 1
     }
 }
 
@@ -398,11 +423,11 @@ fn facts_possible_values(facts: &ConstraintFacts) -> Option<HashSet<i64>> {
     let mut values = facts.exact_values.clone()?;
     if let Some(lower) = facts.lower {
         let lower = bound_min(lower);
-        values.retain(|value| *value >= lower);
+        values.retain(|value| i128::from(*value) >= lower);
     }
     if let Some(upper) = facts.upper {
         let upper = bound_max(upper);
-        values.retain(|value| *value <= upper);
+        values.retain(|value| i128::from(*value) <= upper);
     }
     values.retain(|value| !facts.excluded_values.contains(value));
     Some(values)
@@ -419,7 +444,9 @@ fn facts_are_contradictory(facts: &ConstraintFacts) -> bool {
         if lower > upper {
             return true;
         }
-        if lower == upper && facts.excluded_values.contains(&lower) {
+        if lower == upper
+            && i64::try_from(lower).is_ok_and(|value| facts.excluded_values.contains(&value))
+        {
             return true;
         }
     }
@@ -443,12 +470,15 @@ fn facts_imply_compare(facts: &ConstraintFacts, op: CompareOp, target: i64) -> b
         return !values.is_empty() && values.iter().all(|value| compare_holds(*value, op, target));
     }
 
+    let wide_target = i128::from(target);
     match op {
         CompareOp::Eq => {
             if let (Some(lower), Some(upper)) = (facts.lower, facts.upper) {
                 let lower = bound_min(lower);
                 let upper = bound_max(upper);
-                lower == target && upper == target && !facts.excluded_values.contains(&target)
+                lower == wide_target
+                    && upper == wide_target
+                    && !facts.excluded_values.contains(&target)
             } else {
                 false
             }
@@ -457,12 +487,12 @@ fn facts_imply_compare(facts: &ConstraintFacts, op: CompareOp, target: i64) -> b
             .lower
             .map(bound_min)
             .zip(facts.upper.map(bound_max))
-            .map(|(lower, upper)| target < lower || target > upper)
+            .map(|(lower, upper)| wide_target < lower || wide_target > upper)
             .unwrap_or_else(|| facts.excluded_values.contains(&target)),
-        CompareOp::Gt => facts.lower.map(bound_min).is_some_and(|lower| lower > target),
-        CompareOp::Gte => facts.lower.map(bound_min).is_some_and(|lower| lower >= target),
-        CompareOp::Lt => facts.upper.map(bound_max).is_some_and(|upper| upper < target),
-        CompareOp::Lte => facts.upper.map(bound_max).is_some_and(|upper| upper <= target),
+        CompareOp::Gt => facts.lower.map(bound_min).is_some_and(|lower| lower > wide_target),
+        CompareOp::Gte => facts.lower.map(bound_min).is_some_and(|lower| lower >= wide_target),
+        CompareOp::Lt => facts.upper.map(bound_max).is_some_and(|upper| upper < wide_target),
+        CompareOp::Lte => facts.upper.map(bound_max).is_some_and(|upper| upper <= wide_target),
     }
 }
 
@@ -490,6 +520,10 @@ fn direct_constraint_match(
     }
 
     match (assumption, target) {
+        (ConstraintExpr::And(a), ConstraintExpr::And(b))
+        | (ConstraintExpr::Or(a), ConstraintExpr::Or(b)) => {
+            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| direct_constraint_match(a, b, subst))
+        }
         (ConstraintExpr::Bool(lhs), ConstraintExpr::Bool(rhs)) => lhs == rhs,
         (
             ConstraintExpr::Compare { lhs, op, rhs },
@@ -638,12 +672,124 @@ fn constraint_implied_by_facts(
     }
 }
 
+/// The closed interval a constraint pins one variable to, when it pins one.
+///
+/// `0 <= 'n < 32` gives `(0, 31)`. `'n in {8, 16, 32}` gives nothing — a set
+/// is not an interval, and answering with its extremes would accept values
+/// it excludes.
+pub(super) fn interval_for_var(constraint: &ConstraintExpr, var: &str) -> Option<(i128, i128)> {
+    fn walk(c: &ConstraintExpr, var: &str, lo: &mut Option<i128>, hi: &mut Option<i128>) -> bool {
+        match c {
+            ConstraintExpr::Bool(true) => true,
+            ConstraintExpr::And(items) => items.iter().all(|i| walk(i, var, lo, hi)),
+            ConstraintExpr::Compare { lhs, op, rhs } => {
+                let l = lhs.to_string_repr();
+                let r = rhs.to_string_repr();
+                // `'n op k` or `k op 'n`, and nothing else.
+                let (value, op) = if l == var {
+                    let Ok(v) = r.parse::<i128>() else { return false };
+                    (v, *op)
+                } else if r == var {
+                    let Ok(v) = l.parse::<i128>() else { return false };
+                    (v, swapped_compare_op(*op))
+                } else {
+                    // A comparison about some other variable constrains
+                    // nothing here, and pretending otherwise would widen the
+                    // interval silently.
+                    return false;
+                };
+                let (bound_lo, bound_hi) = match op {
+                    CompareOp::Lt => {
+                        let Some(bound) = value.checked_sub(1) else { return false };
+                        (None, Some(bound))
+                    }
+                    CompareOp::Lte => (None, Some(value)),
+                    CompareOp::Gt => {
+                        let Some(bound) = value.checked_add(1) else { return false };
+                        (Some(bound), None)
+                    }
+                    CompareOp::Gte => (Some(value), None),
+                    CompareOp::Eq => (Some(value), Some(value)),
+                    CompareOp::Neq => return false,
+                };
+                if let Some(b) = bound_lo {
+                    *lo = Some(lo.map_or(b, |cur: i128| cur.max(b)));
+                }
+                if let Some(b) = bound_hi {
+                    *hi = Some(hi.map_or(b, |cur: i128| cur.min(b)));
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+    // `?` inside a closure needs a function; do it by hand.
+    fn try_walk(c: &ConstraintExpr, var: &str) -> Option<(i128, i128)> {
+        let (mut lo, mut hi) = (None, None);
+        if !walk(c, var, &mut lo, &mut hi) {
+            return None;
+        }
+        Some((lo?, hi?))
+    }
+    try_walk(constraint, var)
+}
+
+/// Replace `is_mem_width('w)` by `'w in {1, 2, 4, 8}`, everywhere.
+///
+/// A constraint synonym is a type alias whose body is a constraint. Upstream
+/// expands them before proving anything (`Env.expand_constraint_synonyms`,
+/// from `prove`); folded up, an assumption that carries the only fact about
+/// a quantifier says nothing at all.
+pub(super) fn expand_constraint_synonyms(
+    expr: &ConstraintExpr,
+    synonyms: &HashMap<String, (Vec<String>, ConstraintExpr)>,
+    depth: usize,
+) -> ConstraintExpr {
+    if depth > 4 || synonyms.is_empty() {
+        return expr.clone();
+    }
+    let recur = |e: &ConstraintExpr| expand_constraint_synonyms(e, synonyms, depth + 1);
+    match expr {
+        ConstraintExpr::BoolVar(name)
+            if synonyms.get(name).is_some_and(|(params, _)| params.is_empty()) =>
+        {
+            recur(&synonyms[name].1)
+        }
+        ConstraintExpr::App { name, args } => {
+            let Some((params, body)) = synonyms.get(name) else { return expr.clone() };
+            if params.len() != args.len() {
+                return expr.clone();
+            }
+            let mut subst = Subst::default();
+            for (p, a) in params.iter().zip(args.iter()) {
+                match a {
+                    TyArg::Type(t) => {
+                        subst.types.insert(p.clone(), t.clone());
+                    }
+                    _ => {
+                        subst.values.insert(p.clone(), a.as_value_str().unwrap_or_default());
+                    }
+                }
+            }
+            recur(&apply_subst_constraint_expr(body, &subst))
+        }
+        ConstraintExpr::And(items) => ConstraintExpr::And(items.iter().map(recur).collect()),
+        ConstraintExpr::Or(items) => ConstraintExpr::Or(items.iter().map(recur).collect()),
+        ConstraintExpr::Not(inner) => ConstraintExpr::Not(Box::new(recur(inner))),
+        _ => expr.clone(),
+    }
+}
+
 pub(super) fn constraint_implied_by_assumptions(
     assumptions: &[ConstraintExpr],
     target: &ConstraintExpr,
     subst: &Subst,
 ) -> bool {
-    if assumptions.iter().any(|assumption| direct_constraint_match(assumption, target, subst)) {
+    fn contains_fact(assumption: &ConstraintExpr, target: &ConstraintExpr, subst: &Subst) -> bool {
+        direct_constraint_match(assumption, target, subst)
+            || matches!(assumption, ConstraintExpr::And(xs) if xs.iter().any(|x| contains_fact(x, target, subst)))
+    }
+    if assumptions.iter().any(|assumption| contains_fact(assumption, target, subst)) {
         return true;
     }
 
@@ -654,184 +800,33 @@ pub(super) fn constraint_implied_by_assumptions(
     constraint_implied_by_facts(target, subst, &facts)
 }
 
+/// Match a numeric parameter, or prove equality after applying prior bindings.
+/// Only a whole expected variable may bind; compound expressions and actual
+/// rigid variables are never substituted as if they were inference parameters.
 pub(super) fn unify_value(expected: &str, actual: &str, subst: &mut Subst) -> bool {
     if normalized_value_text(expected) == normalized_value_text(actual) {
         return true;
     }
-
-    if expected.starts_with('\'') {
-        match subst.values.get(expected) {
-            Some(bound) => {
-                let bound = bound.clone();
-                bound == actual || unify_value(&bound, actual, subst)
-            }
-            None => {
-                subst.values.insert(expected.to_string(), actual.to_string());
-                true
-            }
-        }
-    } else if actual.starts_with('\'') {
-        // Symmetric: if actual is a type variable, try to bind it.
-        match subst.values.get(actual) {
-            Some(bound) => {
-                let bound = bound.clone();
-                bound == expected || unify_value(expected, &bound, subst)
-            }
-            None => {
-                subst.values.insert(actual.to_string(), expected.to_string());
-                true
-            }
-        }
-    } else if let (Some(expected), Some(actual)) =
-        (parse_numeric_expr_text(expected), parse_numeric_expr_text(actual))
-    {
-        unify_numeric_expr(&expected, &actual, subst)
-    } else {
-        normalized_value_text(expected) == normalized_value_text(actual)
-    }
+    let (Some(expected), Some(actual)) = (NumericExpr::parse(expected), NumericExpr::parse(actual))
+    else {
+        return false;
+    };
+    let expected = subst_numeric_expr(&expected, subst);
+    let actual = subst_numeric_expr(&actual, subst);
+    super::numeric::unify_numeric_expr(&expected, &actual, subst)
 }
 
 pub(super) fn apply_subst(ty: &Ty, subst: &Subst) -> Ty {
-    match ty.kind() {
-        TyKind::Error | TyKind::Infer(crate::ty::InferTy(_)) => ty.clone(),
-        TyKind::Scalar(_) | TyKind::Adt(_, _) => ty.clone(),
-        TyKind::Param(name) => subst.types.get(name).cloned().unwrap_or_else(|| ty.clone()),
-        TyKind::Tuple(items) => {
-            Ty::tuple(items.iter().map(|item| apply_subst(item, subst)).collect())
-        }
-        TyKind::FnPtr(crate::ty::FnSig { params, ret }) => Ty::function(
-            params.iter().map(|param| apply_subst(param, subst)).collect(),
-            apply_subst(ret, subst),
-        ),
-        TyKind::App { name, args, .. } => {
-            let args = args
-                .iter()
-                .map(|arg| match arg {
-                    TyArg::Type(t) => TyArg::Type(apply_subst(t, subst)),
-                    TyArg::Nexp(nexp) => {
-                        // Convert to string, substitute, then re-parse
-                        let value = nexp.to_string_repr();
-                        let substituted = if let Some(v) = subst.values.get(&value) {
-                            v.clone()
-                        } else {
-                            let mut result = value.clone();
-                            for (from, to) in subst.values.entries.iter() {
-                                if result.contains(from.as_str()) {
-                                    result = result.replace(from.as_str(), to);
-                                }
-                            }
-                            result
-                        };
-                        TyArg::numeric(substituted)
-                    }
-                    TyArg::Value(value) => {
-                        // First try exact match, then substring replacement
-                        // for expressions like "2 * 'n" → "2 * 'n#0".
-                        // Fresh vars replace occurrences within numeric expressions.
-                        let substituted = if let Some(v) = subst.values.get(value) {
-                            v.clone()
-                        } else {
-                            let mut result = value.clone();
-                            for (from, to) in subst.values.entries.iter() {
-                                if result.contains(from.as_str()) {
-                                    result = result.replace(from.as_str(), to);
-                                }
-                            }
-                            result
-                        };
-                        TyArg::Value(substituted)
-                    }
-                })
-                .collect::<Vec<_>>();
-            let text = app_text(name, &args);
-            Ty::app(name.clone(), args, text)
-        }
-        TyKind::Exist { vars, constraint, inner } => {
-            Ty::exist(vars.clone(), constraint.clone(), apply_subst(inner, subst))
-        }
-        TyKind::Bidir { lhs, rhs } => Ty::bidir(apply_subst(lhs, subst), apply_subst(rhs, subst)),
-        TyKind::Abstract { .. } => ty.clone(), // opaque — no substitution
-    }
+    super::substitution::apply(ty, subst)
 }
 
-/// Apply a `Subst`'s value mapping to a `NumericExpr`, renaming `Var` nodes.
+#[cfg(test)]
 pub(super) fn apply_subst_numeric(expr: &NumericExpr, subst: &Subst) -> NumericExpr {
-    match expr {
-        NumericExpr::Const(c) => NumericExpr::Const(*c),
-        NumericExpr::Var(name) => {
-            if let Some(replacement) = subst.values.get(name) {
-                NumericExpr::Var(replacement.clone())
-            } else {
-                NumericExpr::Var(name.clone())
-            }
-        }
-        NumericExpr::Symbol(s) => NumericExpr::Symbol(s.clone()),
-        NumericExpr::Neg(inner) => NumericExpr::Neg(Box::new(apply_subst_numeric(inner, subst))),
-        NumericExpr::Add(l, r) => NumericExpr::Add(
-            Box::new(apply_subst_numeric(l, subst)),
-            Box::new(apply_subst_numeric(r, subst)),
-        ),
-        NumericExpr::Sub(l, r) => NumericExpr::Sub(
-            Box::new(apply_subst_numeric(l, subst)),
-            Box::new(apply_subst_numeric(r, subst)),
-        ),
-        NumericExpr::Mul(l, r) => NumericExpr::Mul(
-            Box::new(apply_subst_numeric(l, subst)),
-            Box::new(apply_subst_numeric(r, subst)),
-        ),
-        NumericExpr::Div(l, r) => NumericExpr::Div(
-            Box::new(apply_subst_numeric(l, subst)),
-            Box::new(apply_subst_numeric(r, subst)),
-        ),
-        NumericExpr::Mod(l, r) => NumericExpr::Mod(
-            Box::new(apply_subst_numeric(l, subst)),
-            Box::new(apply_subst_numeric(r, subst)),
-        ),
-        NumericExpr::Exp(inner) => NumericExpr::Exp(Box::new(apply_subst_numeric(inner, subst))),
-        NumericExpr::App { name, args } => NumericExpr::App {
-            name: name.clone(),
-            args: args.iter().map(|a| apply_subst_numeric(a, subst)).collect(),
-        },
-        NumericExpr::If { cond, then_expr, else_expr } => NumericExpr::If {
-            cond: Box::new(apply_subst_constraint_expr(cond, subst)),
-            then_expr: Box::new(apply_subst_numeric(then_expr, subst)),
-            else_expr: Box::new(apply_subst_numeric(else_expr, subst)),
-        },
-    }
+    super::substitution::numeric(expr, subst)
 }
 
-/// Apply a `Subst`'s value mapping to a `ConstraintExpr`, renaming variables.
 pub(super) fn apply_subst_constraint_expr(expr: &ConstraintExpr, subst: &Subst) -> ConstraintExpr {
-    match expr {
-        ConstraintExpr::Bool(b) => ConstraintExpr::Bool(*b),
-        ConstraintExpr::Compare { lhs, op, rhs } => ConstraintExpr::Compare {
-            lhs: apply_subst_numeric(lhs, subst),
-            op: *op,
-            rhs: apply_subst_numeric(rhs, subst),
-        },
-        ConstraintExpr::InSet { value, items } => ConstraintExpr::InSet {
-            value: apply_subst_numeric(value, subst),
-            items: items.iter().map(|i| apply_subst_numeric(i, subst)).collect(),
-        },
-        ConstraintExpr::And(parts) => ConstraintExpr::And(
-            parts.iter().map(|p| apply_subst_constraint_expr(p, subst)).collect(),
-        ),
-        ConstraintExpr::Or(parts) => ConstraintExpr::Or(
-            parts.iter().map(|p| apply_subst_constraint_expr(p, subst)).collect(),
-        ),
-        ConstraintExpr::Not(inner) => {
-            ConstraintExpr::Not(Box::new(apply_subst_constraint_expr(inner, subst)))
-        }
-        ConstraintExpr::Unsupported => ConstraintExpr::Unsupported,
-        ConstraintExpr::App { name, args } => ConstraintExpr::App {
-            name: name.clone(),
-            args: args.iter().map(|a| apply_subst_constraint_expr(a, subst)).collect(),
-        },
-        ConstraintExpr::BoolVar(v) => {
-            // Check if there's a substitution for this boolean variable
-            ConstraintExpr::BoolVar(v.clone())
-        }
-    }
+    super::substitution::constraint(expr, subst)
 }
 
 /// Whether a textual type name is a Sail numeric scalar type.
@@ -848,7 +843,7 @@ pub(super) fn is_numeric_text(t: &str) -> bool {
 pub(super) fn is_numeric_scalar_ty(ty: &Ty) -> bool {
     match ty.kind() {
         TyKind::Scalar(s) => matches!(s, crate::ty::Scalar::Int | crate::ty::Scalar::Nat),
-        TyKind::Adt(t, _) => t == "int" || t == "nat",
+        TyKind::Named(t, _) => t == "int" || t == "nat",
         TyKind::App { name, .. } => {
             matches!(name.as_str(), "range" | "atom" | "int" | "nat")
         }
@@ -859,7 +854,7 @@ pub(super) fn is_numeric_scalar_ty(ty: &Ty) -> bool {
 /// Whether `ty` is a primitive scalar or bits type.
 pub(super) fn is_primitive_or_bits_ty(ty: &Ty) -> bool {
     match ty.kind() {
-        TyKind::Adt(t, _) => {
+        TyKind::Named(t, _) => {
             matches!(t.as_str(), "int" | "nat" | "bool" | "string" | "unit" | "real" | "bit" | "_")
         }
         TyKind::App { name, .. } => {
@@ -873,7 +868,11 @@ pub(super) fn is_primitive_or_bits_ty(ty: &Ty) -> bool {
 pub(super) fn bits_width(ty: &Ty) -> Option<String> {
     match ty.kind() {
         TyKind::Scalar(crate::ty::Scalar::Bit) => Some("1".to_string()),
-        TyKind::App { name, args, .. } if name == "bits" => {
+        // `bits('n)` is the prelude's alias for the builtin `bitvector('n)`
+        // (`type bits('n) = bitvector('n)`, lib/vector.sail); both spellings
+        // reach here depending on whether the type was written by the user or
+        // taken from a builtin signature.
+        TyKind::App { name, args, .. } if name == "bits" || name == "bitvector" => {
             args.first().and_then(|a| a.as_value_str())
         }
         _ => None,
@@ -882,8 +881,16 @@ pub(super) fn bits_width(ty: &Ty) -> Option<String> {
 
 const UNIFY_DEPTH_LIMIT: usize = 96;
 
-pub(super) fn unify(expected: &Ty, actual: &Ty, subst: &mut Subst) -> bool {
-    unify_inner(expected, actual, subst, 0)
+/// Collect candidate substitutions from matching shapes. Success is not a
+/// compatibility proof; production callers validate the instantiated relation
+/// through InferenceTable. Failed attempts leave the substitution unchanged.
+pub(super) fn collect_type_bindings(expected: &Ty, actual: &Ty, subst: &mut Subst) -> bool {
+    let mut candidate = subst.clone();
+    let ok = unify_inner(expected, actual, &mut candidate, 0);
+    if ok {
+        *subst = candidate;
+    }
+    ok
 }
 
 fn unify_inner(expected: &Ty, actual: &Ty, subst: &mut Subst, depth: usize) -> bool {
@@ -898,31 +905,9 @@ fn unify_inner(expected: &Ty, actual: &Ty, subst: &mut Subst, depth: usize) -> b
     if actual.is_error() {
         return true;
     }
-    // + Existential on actual side — unwrap with witness extraction.
-    //
-    // When `actual` is `{'n, constraint. inner}`, we unify `expected` with
-    // `inner` and verify the constraint holds with extracted witnesses.
-    // If witness extraction fails (symbolic vars remain), fall back to
-    // simple unwrap (optimistic: LSP shouldn't produce false positives).
-    if let TyKind::Exist { vars, constraint, inner } = actual.kind() {
-        // First: try to unify structurally (the inner type must match expected)
-        let ok = unify_inner(expected, inner, subst, depth + 1);
-        if ok && !vars.is_empty() {
-            // Attempt witness extraction and constraint verification
-            // using 's existential module.
-            use super::existential;
-            let mut table = super::InferenceTable::default();
-            match existential::extract_witnesses(vars, constraint, inner, expected, &mut table) {
-                existential::WitnessResult::ConstraintViolation { .. } => {
-                    // The constraint is provably violated — unification fails
-                    return false;
-                }
-                _ => {
-                    // Ok or Deferred — accept the unification
-                }
-            }
-        }
-        return ok;
+    // Quantifier scopes belong to the inference table, never this collector.
+    if matches!(actual.kind(), TyKind::Exist { .. }) {
+        return false;
     }
     match expected.kind() {
         TyKind::Error | TyKind::Infer(crate::ty::InferTy(_)) => true,
@@ -955,23 +940,23 @@ fn unify_inner(expected: &Ty, actual: &Ty, subst: &mut Subst, depth: usize) -> b
                     }
                 }
             }
-            // Scalar-to-Adt: check textual match (e.g., "int" from type alias).
+            // Scalar-to-Named: check textual match (e.g., "int" from type alias).
             if let Some(actual_name) = actual.as_name() {
                 return expected_scalar.name() == actual_name;
             }
             false
         }
-        TyKind::Adt(expected, _) => {
+        TyKind::Named(expected, _) => {
             if matches!(actual.kind(), TyKind::Tuple(_) | TyKind::FnPtr(..)) {
                 return false;
             }
-            // Direct match: Adt-to-Adt, or Adt-to-Scalar.
+            // Direct match: Named-to-Named, or Named-to-Scalar.
             if let Some(actual_name) = actual.as_name() {
                 if expected == actual_name {
                     return true;
                 }
             }
-            if let TyKind::Adt(actual_text, _) = actual.kind() {
+            if let TyKind::Named(actual_text, _) = actual.kind() {
                 if expected == actual_text {
                     return true;
                 }
@@ -1143,24 +1128,7 @@ fn unify_inner(expected: &Ty, actual: &Ty, subst: &mut Subst, depth: usize) -> b
                 _ => false,
             }
         }
-        // + Existential in expected position — check with witness extraction.
-        //
-        // `exist 'n, constraint. T` in expected position means `actual` must
-        // satisfy the inner type `T` for some valid witness values of the
-        // quantified variables that satisfy `constraint`.
-        TyKind::Exist { vars, constraint, inner } => {
-            let ok = unify_inner(inner, actual, subst, depth + 1);
-            if ok && !vars.is_empty() {
-                use super::existential;
-                let mut table = super::InferenceTable::default();
-                if let existential::WitnessResult::ConstraintViolation { .. } =
-                    existential::extract_witnesses(vars, constraint, inner, actual, &mut table)
-                {
-                    return false;
-                }
-            }
-            ok
-        }
+        TyKind::Exist { .. } => false,
         // Bidirectional type — unify structurally.
         TyKind::Bidir { lhs, rhs } => match actual.kind() {
             TyKind::Bidir { lhs: a_lhs, rhs: a_rhs } => {
@@ -1203,7 +1171,6 @@ pub(super) fn format_scheme_signature(scheme: &TypeScheme) -> String {
 
 /// Result of attempting to normalize a constraint.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // infrastructure — wired in A-3.4
 pub(super) enum NormalizationResult {
     Decided(ConstraintStatus),
     Deferred,
@@ -1211,64 +1178,7 @@ pub(super) enum NormalizationResult {
 
 /// Algebraic simplification of numeric expressions.
 pub(super) fn simplify_numeric_expr(expr: &NumericExpr) -> NumericExpr {
-    use NumericExpr::*;
-    match expr {
-        // x + 0 → x, 0 + x → x
-        Add(a, b) => {
-            let a = simplify_numeric_expr(a);
-            let b = simplify_numeric_expr(b);
-            match (&a, &b) {
-                (Const(0), _) => b,
-                (_, Const(0)) => a,
-                (Const(x), Const(y)) => Const(x + y),
-                _ => Add(Box::new(a), Box::new(b)),
-            }
-        }
-        // x - 0 → x, x - x → 0
-        Sub(a, b) => {
-            let a = simplify_numeric_expr(a);
-            let b = simplify_numeric_expr(b);
-            match (&a, &b) {
-                (_, Const(0)) => a,
-                (Const(x), Const(y)) => Const(x - y),
-                _ if a == b => Const(0),
-                _ => Sub(Box::new(a), Box::new(b)),
-            }
-        }
-        // x * 1 → x, 1 * x → x, x * 0 → 0
-        Mul(a, b) => {
-            let a = simplify_numeric_expr(a);
-            let b = simplify_numeric_expr(b);
-            match (&a, &b) {
-                (Const(0), _) | (_, Const(0)) => Const(0),
-                (Const(1), _) => b,
-                (_, Const(1)) => a,
-                (Const(x), Const(y)) => Const(x * y),
-                _ => Mul(Box::new(a), Box::new(b)),
-            }
-        }
-        // 2^const folding
-        Exp(inner) => {
-            let inner = simplify_numeric_expr(inner);
-            if let Const(n) = &inner {
-                if *n >= 0 && *n <= 63 {
-                    return Const(1i64 << n);
-                }
-            }
-            Exp(Box::new(inner))
-        }
-        // -0 → 0, -(const) → const
-        Neg(inner) => {
-            let inner = simplify_numeric_expr(inner);
-            match &inner {
-                Const(0) => Const(0),
-                Const(n) => Const(-n),
-                _ => Neg(Box::new(inner)),
-            }
-        }
-        // Leaves
-        other => other.clone(),
-    }
+    super::nexp_simplify::simplify(expr)
 }
 
 /// Simplify a constraint expression by simplifying its numeric sub-expressions.
@@ -1293,7 +1203,6 @@ fn simplify_constraint_expr(expr: &ConstraintExpr) -> ConstraintExpr {
 }
 
 /// Unified constraint normalization entry point.
-#[allow(dead_code)] // infrastructure — wired in A-3.4
 pub(super) fn try_normalize_constraint(
     constraint: &ConstraintExpr,
     subst: &Subst,
@@ -1331,22 +1240,8 @@ pub(super) fn try_normalize_constraint(
         }
     }
 
-    // Z3 fallback for constraints that polynomial/fact-based
-    // strategies can't resolve.
-    #[cfg(feature = "z3-solver")]
-    {
-        let status = z3_solver::try_solve(constraint, subst, assumptions);
-        match status {
-            ConstraintStatus::Satisfied => {
-                return NormalizationResult::Decided(ConstraintStatus::Satisfied)
-            }
-            ConstraintStatus::Failed => {
-                return NormalizationResult::Decided(ConstraintStatus::Failed)
-            }
-            ConstraintStatus::Unknown => {} // fall through to Deferred
-        }
-    }
-
+    // Leave SMT to the final solver stage, after normalization and the
+    // inexpensive solver have both had a chance to decide the goal.
     // Deferred: cannot resolve with current strategies
     NormalizationResult::Deferred
 }
@@ -1354,6 +1249,32 @@ pub(super) fn try_normalize_constraint(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn existential_interval_extreme_bounds_defer_without_overflow() {
+        for (bound, op) in [(i128::MAX, CompareOp::Gt), (i128::MIN, CompareOp::Lt)] {
+            let c = ConstraintExpr::Compare {
+                lhs: NumericExpr::Var("'n".into()),
+                op,
+                rhs: NumericExpr::Symbol(bound.to_string()),
+            };
+            assert_eq!(interval_for_var(&c, "'n"), None);
+        }
+    }
+
+    #[test]
+    fn strict_bounds_exclude_machine_extremes_from_finite_sets() {
+        let mut facts = ConstraintFacts::default();
+        constraint_facts_add_set(&mut facts, HashSet::from([i64::MAX]));
+        constraint_facts_add_compare(&mut facts, CompareOp::Gt, i64::MAX);
+        assert!(facts_possible_values(&facts).unwrap().is_empty());
+        assert!(facts_are_contradictory(&facts));
+        let mut facts = ConstraintFacts::default();
+        constraint_facts_add_set(&mut facts, HashSet::from([i64::MIN]));
+        constraint_facts_add_compare(&mut facts, CompareOp::Lt, i64::MIN);
+        assert!(facts_possible_values(&facts).unwrap().is_empty());
+        assert!(facts_are_contradictory(&facts));
+    }
 
     #[test]
     fn polynomial_constant_folding_div() {
@@ -1537,10 +1458,10 @@ mod tests {
         let bits1 = Ty::app("bits", vec![TyArg::numeric("1")], "bits(1)");
 
         let mut subst1 = Subst::default();
-        let fwd = unify(&bit_ty, &bits1, &mut subst1);
+        let fwd = collect_type_bindings(&bit_ty, &bits1, &mut subst1);
 
         let mut subst2 = Subst::default();
-        let rev = unify(&bits1, &bit_ty, &mut subst2);
+        let rev = collect_type_bindings(&bits1, &bit_ty, &mut subst2);
 
         assert!(
             fwd || rev,
@@ -1557,7 +1478,10 @@ mod tests {
         let bits2 = Ty::app("bits", vec![TyArg::numeric("2")], "bits(2)");
         let mut subst = Subst::default();
 
-        assert!(!unify(&bit_ty, &bits2, &mut subst), "bit should not unify with bits(2)");
+        assert!(
+            !collect_type_bindings(&bit_ty, &bits2, &mut subst),
+            "bit should not unify with bits(2)"
+        );
     }
 
     /// Parse `if 'n == 32 then 22 else 44` as NumericExpr::If.
@@ -1591,17 +1515,122 @@ mod tests {
             "bits(if 'n == 32 then 22 else 44)",
         );
         let mut subst = Subst::default();
-        assert!(unify(&a, &b, &mut subst), "same if-then-else should unify");
+        assert!(collect_type_bindings(&a, &b, &mut subst), "same if-then-else should unify");
     }
 
-    /// Different if-then-else branches should still unify (permissive
-    /// for now, since LSP can't evaluate conditions without full context).
+    /// Neither branch can produce 64, regardless of the unknown condition.
     #[test]
-    fn if_then_else_different_cond_permissive() {
+    fn conditional_branches_cannot_equal_an_excluded_width() {
         let a = Ty::app("bits", vec![TyArg::numeric("if 'n == 32 then 22 else 44")], "");
         let b = Ty::app("bits", vec![TyArg::numeric("64")], "bits(64)");
         let mut subst = Subst::default();
-        // Permissive: If on one side, non-If on other → accept
-        assert!(unify(&a, &b, &mut subst), "if-then-else vs plain should be permissive");
+        assert!(!collect_type_bindings(&a, &b, &mut subst));
+    }
+}
+
+/// Every reading of a constraint as its numeric type aliases are unfolded.
+///
+/// `type flen : Int = flen_bytes * 8` gives a *name* to a number, and the
+/// two sides of a proof reach that number by different roads: a signature's
+/// `bits('n)` unified against `flenbits` binds `'n` to some unfolding of the
+/// alias, while an `assert(flen >= 16)` in the source records its fact under
+/// the alias's own name. The fact and the goal are then about the same
+/// integer and match on nothing, because the fact table is keyed by the
+/// rendered form and `flen` and `flen_bytes * 8` render differently.
+///
+/// How far the type side unfolded is not something this can ask — it depends
+/// on which of the aliases along the way were config-dependent, and that
+/// decision was made in `normalize_alias_deep` long before. So rather than
+/// guess at a matching depth, every depth is offered: the caller states the
+/// fact once per unfolding, and whichever one the goal stopped at finds it.
+/// Adding readings of a fact only ever proves more, never less.
+///
+/// It is the numeric half of what `expand_constraint_synonyms` does for the
+/// boolean half — upstream has one `Env.expand_synonyms` covering both, over
+/// a type-level nexp rather than over text.
+pub(super) fn numeric_alias_unfoldings(
+    expr: &ConstraintExpr,
+    aliases: &HashMap<String, std::sync::Arc<super::env::AliasScheme>>,
+) -> Vec<ConstraintExpr> {
+    let mut out = Vec::new();
+    if aliases.is_empty() {
+        return out;
+    }
+    let mut current = expr.clone();
+    for _ in 0..4 {
+        let next = expand_numeric_aliases_once(&current, aliases);
+        if next == current {
+            break;
+        }
+        out.push(next.clone());
+        current = next;
+    }
+    out
+}
+
+fn expand_numeric_aliases_once(
+    expr: &ConstraintExpr,
+    aliases: &HashMap<String, std::sync::Arc<super::env::AliasScheme>>,
+) -> ConstraintExpr {
+    let recur = |e: &ConstraintExpr| expand_numeric_aliases_once(e, aliases);
+    let num = |e: &NumericExpr| expand_numeric_aliases_in_numeric(e, aliases);
+    match expr {
+        ConstraintExpr::Compare { lhs, op, rhs } => {
+            ConstraintExpr::Compare { lhs: num(lhs), op: *op, rhs: num(rhs) }
+        }
+        ConstraintExpr::InSet { value, items } => {
+            ConstraintExpr::InSet { value: num(value), items: items.iter().map(num).collect() }
+        }
+        ConstraintExpr::And(items) => ConstraintExpr::And(items.iter().map(recur).collect()),
+        ConstraintExpr::Or(items) => ConstraintExpr::Or(items.iter().map(recur).collect()),
+        ConstraintExpr::Not(inner) => ConstraintExpr::Not(Box::new(recur(inner))),
+        _ => expr.clone(),
+    }
+}
+
+/// One round: every alias name becomes its body, and the body is left alone.
+fn expand_numeric_aliases_in_numeric(
+    expr: &NumericExpr,
+    aliases: &HashMap<String, std::sync::Arc<super::env::AliasScheme>>,
+) -> NumericExpr {
+    let recur = |e: &NumericExpr| Box::new(expand_numeric_aliases_in_numeric(e, aliases));
+    match expr {
+        // A quantifier is not an alias, and looking one up would let a
+        // signature's `'n` be rewritten by an unrelated top-level name.
+        NumericExpr::Var(name) | NumericExpr::Symbol(name) if !name.starts_with('\'') => {
+            // A parameterised alias is not a name for a number; only a
+            // nullary one is.
+            let Some(sch) = aliases.get(name).filter(|sch| sch.params.is_empty()) else {
+                return expr.clone();
+            };
+            let Some(parsed) = parse_numeric_expr_text(&sch.body.display_text()) else {
+                return expr.clone();
+            };
+            // `type x = x` would otherwise unfold forever, one round at a
+            // time, each round looking like progress.
+            match &parsed {
+                NumericExpr::Var(inner) | NumericExpr::Symbol(inner) if inner == name => {
+                    expr.clone()
+                }
+                _ => parsed,
+            }
+        }
+        NumericExpr::Neg(inner) => NumericExpr::Neg(recur(inner)),
+        NumericExpr::Add(lhs, rhs) => NumericExpr::Add(recur(lhs), recur(rhs)),
+        NumericExpr::Sub(lhs, rhs) => NumericExpr::Sub(recur(lhs), recur(rhs)),
+        NumericExpr::Mul(lhs, rhs) => NumericExpr::Mul(recur(lhs), recur(rhs)),
+        NumericExpr::Div(lhs, rhs) => NumericExpr::Div(recur(lhs), recur(rhs)),
+        NumericExpr::Mod(lhs, rhs) => NumericExpr::Mod(recur(lhs), recur(rhs)),
+        NumericExpr::Exp(inner) => NumericExpr::Exp(recur(inner)),
+        NumericExpr::App { name, args } => NumericExpr::App {
+            name: name.clone(),
+            args: args.iter().map(|a| expand_numeric_aliases_in_numeric(a, aliases)).collect(),
+        },
+        NumericExpr::If { cond, then_expr, else_expr } => NumericExpr::If {
+            cond: Box::new(expand_numeric_aliases_once(cond, aliases)),
+            then_expr: recur(then_expr),
+            else_expr: recur(else_expr),
+        },
+        _ => expr.clone(),
     }
 }
