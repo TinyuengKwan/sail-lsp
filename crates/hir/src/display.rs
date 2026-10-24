@@ -17,13 +17,13 @@ use crate::{
 };
 
 /// RA renders: `pub fn name(params) -> ret_ty`.
-/// Sail renders: `val name : signature` (or `function name` as fallback).
+/// ItemTree signatures already include the declaration keyword and name.
 impl HirDisplay for Function {
     fn hir_fmt(&self, f: &mut HirFormatter<'_>) -> Result<(), HirDisplayError> {
         let db = f.db;
         let name = self.name(db);
         if let Some(sig) = self.id.lookup_signature(db) {
-            write!(f, "val {name} : {sig}")?;
+            write!(f, "{sig}")?;
         } else {
             write!(f, "function {name}")?;
         }
@@ -45,8 +45,7 @@ impl HirDisplay for TypeDef {
         let name = self.name(db);
         if let Some(sig) = self.id.lookup_signature(db) {
             // A type definition's signature is its whole declaration —
-            // `enum Color = { Red, .. }` — where a `val`'s is only the
-            // type. Prepending the keyword and name to the first gave
+            // `enum Color = { Red, .. }`. Prepending the keyword and name gave
             // `enum Color = enum Color = { .. }`.
             write!(f, "{}", with_head(&sig, keyword, &name.to_string()))?;
         } else {
@@ -100,7 +99,7 @@ impl HirDisplay for Register {
         let db = f.db;
         let name = self.name(db);
         if let Some(sig) = self.id.lookup_signature(db) {
-            write!(f, "register {name} : {sig}")?;
+            write!(f, "{sig}")?;
         } else {
             write!(f, "register {name}")?;
         }
@@ -113,7 +112,7 @@ impl HirDisplay for Mapping {
         let db = f.db;
         let name = self.name(db);
         if let Some(sig) = self.id.lookup_signature(db) {
-            write!(f, "mapping {name} : {sig}")?;
+            write!(f, "{sig}")?;
         } else {
             write!(f, "mapping {name}")?;
         }

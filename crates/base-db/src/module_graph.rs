@@ -42,6 +42,12 @@ fn module_file_scope(
     input: WorkspaceModules,
     file: FileId,
 ) -> Option<Arc<FileScope>> {
+    if crate::preprocess::project_membership(db, file) == Some(false) {
+        return Some(Arc::new(FileScope {
+            visible: BTreeSet::from([file]),
+            own: BTreeSet::from([file]),
+        }));
+    }
     let graph = input.graph(db);
     if graph.modules.is_empty() {
         return None;

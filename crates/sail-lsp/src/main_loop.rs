@@ -189,6 +189,18 @@ impl GlobalState {
             }
         }
         self.project_error = None;
+        self.project_manifests = inputs.manifests.into_keys().collect();
+        if self.project_manifests.is_empty() {
+            self.log_message(MessageType::WARNING,
+                "No Sail project loaded. Set sail-lsp.workspace.projectFile; unlinked files receive syntax diagnostics only.");
+        } else {
+            for manifest in self.project_manifests.clone() {
+                self.log_message(
+                    MessageType::INFO,
+                    format!("Loaded Sail project: {}", manifest.display()),
+                );
+            }
+        }
         let url_to_fid: HashMap<Url, base_db::FileId> = files
             .iter()
             .filter_map(|(uri, _)| self.vfs.lookup_file_id_by_url(uri).map(|f| (uri.clone(), f)))
@@ -432,6 +444,12 @@ pub fn run_server(connection: Connection) {
     let (task_sender, task_receiver) = crossbeam_channel::unbounded();
     let mut state = GlobalState::new(connection.sender.clone(), task_sender);
 
+    // A running editor always has an explicit project model, even while it
+    // is empty/loading. Otherwise detached files enter legacy whole-program
+    // analysis before discovery has established any membership.
+    state.pending_change.set_source_project(Default::default());
+    state.process_changes();
+
     state.client_caps = client_caps;
     // Asked of the capabilities the client just sent, which is why it reads
     // them after they are stored.
@@ -441,7 +459,14 @@ pub fn run_server(connection: Connection) {
     // Workspace scan: discover all .sail files from workspace folders.
     // Initial scan goes through the same fetch_workspaces() path
     // as reloads, ensuring consistent behavior.
-    if let Some(folders) = init_params.workspace_folders {
+    let folders = init_params.workspace_folders.unwrap_or_else(|| {
+        init_params
+            .root_uri
+            .into_iter()
+            .map(|uri| WorkspaceFolder { uri, name: "workspace".into() })
+            .collect()
+    });
+    if !folders.is_empty() {
         let mut disk_folders = std::collections::HashSet::new();
         for folder in folders {
             disk_folders.insert(folder.uri);
@@ -452,6 +477,8 @@ pub fn run_server(connection: Connection) {
         // Force start immediately — on first iteration, should_start_op() will fire.
         let _ = state.fetch_workspaces_queue.should_start_op();
         state.fetch_workspaces("startup".into());
+    } else {
+        state.finish_workspace_load(&[], 0);
     }
 
     // Async responses now flow through Task::Response,

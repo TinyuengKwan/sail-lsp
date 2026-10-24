@@ -43,6 +43,7 @@ const PATIENCE: Duration = Duration::from_secs(60);
 enum Root {
     Real,
     Symlinked,
+    Detached,
 }
 
 pub(crate) struct ServerFixture {
@@ -57,6 +58,7 @@ pub(crate) struct ServerFixture {
     published: HashMap<Url, Vec<lsp_types::Diagnostic>>,
     responses: HashMap<i32, Response>,
     log: Vec<String>,
+    load_failed: bool,
     _guard: std::sync::MutexGuard<'static, ()>,
 }
 
@@ -65,6 +67,26 @@ impl ServerFixture {
     /// server running on it, and `initialize`/`initialized` exchanged.
     pub(crate) fn new(name: &str, files: &[(&str, &str)]) -> ServerFixture {
         Self::open(name, files, Root::Real)
+    }
+
+    /// Tests requiring complete semantic analysis declare a project explicitly.
+    /// Listed Sail files form one module in the supplied order. Tests of
+    /// discovery/unlinked buffers use `new` instead.
+    fn new_project(name: &str, files: &[(&str, &str)]) -> ServerFixture {
+        if files.iter().any(|(path, _)| crate::reload::is_project_file(std::path::Path::new(path)))
+        {
+            return Self::new(name, files);
+        }
+        let paths = files
+            .iter()
+            .filter(|(p, _)| p.ends_with(".sail"))
+            .map(|(p, _)| *p)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let manifest = format!("Main {{ files {paths} }}");
+        let mut files = files.to_vec();
+        files.push(("sail.proj", &manifest));
+        Self::new(name, &files)
     }
 
     /// The workspace reached through a symlinked directory, which is
@@ -97,7 +119,7 @@ impl ServerFixture {
         // `Root::Symlinked` puts the files in `<base>/real` and hands the
         // client `<base>/link`, so every path it sends crosses the link.
         let (root, contents_at) = match kind {
-            Root::Real => (base.clone(), base.clone()),
+            Root::Real | Root::Detached => (base.clone(), base.clone()),
             Root::Symlinked => (base.join("link"), base.join("real")),
         };
         std::fs::create_dir_all(&contents_at).expect("workspace dir");
@@ -134,13 +156,14 @@ impl ServerFixture {
             published: HashMap::new(),
             responses: HashMap::new(),
             log: Vec::new(),
+            load_failed: false,
             _guard: guard,
         };
-        fixture.initialize(imports);
+        fixture.initialize(imports, kind != Root::Detached);
         fixture
     }
 
-    fn initialize(&mut self, imports: Option<bool>) {
+    fn initialize(&mut self, imports: Option<bool>, has_workspace: bool) {
         let root_url = Url::from_directory_path(&self.root).expect("root url");
         let completion_properties = if imports.unwrap_or(false) {
             vec!["documentation", "additionalTextEdits"]
@@ -151,8 +174,8 @@ impl ServerFixture {
             "initialize",
             serde_json::json!({
                 "processId": std::process::id(),
-                "rootUri": root_url,
-                "workspaceFolders": [{ "uri": root_url, "name": "fixture" }],
+                "rootUri": has_workspace.then_some(&root_url),
+                "workspaceFolders": has_workspace.then_some(serde_json::json!([{ "uri": root_url, "name": "fixture" }])),
                 "capabilities": {
                     "window": { "workDoneProgress": true },
                     "textDocument": if imports.is_some() { serde_json::json!({
@@ -172,7 +195,9 @@ impl ServerFixture {
         self.wait_for_response(id);
         self.notify("initialized", serde_json::json!({}));
         // The scan is asynchronous; its completion is what "ready" means.
-        self.wait_until("the workspace to load", |f| f.log.iter().any(|m| m.contains("ready")));
+        self.wait_until("workspace loading to finish", |f| {
+            f.load_failed || f.log.iter().any(|m| m.contains("ready"))
+        });
     }
 
     fn request(&mut self, method: &str, params: serde_json::Value) -> i32 {
@@ -212,6 +237,7 @@ impl ServerFixture {
                     "window/logMessage" => {
                         let params: lsp_types::LogMessageParams =
                             serde_json::from_value(n.params).expect("logMessage params");
+                        self.load_failed |= params.typ == lsp_types::MessageType::ERROR;
                         self.log.push(params.message);
                     }
                     _ => {}
@@ -518,8 +544,208 @@ fn mentions(diags: &[lsp_types::Diagnostic], needle: &str) -> bool {
 /// `eviction_waits_for_the_pool_and_precedes_the_wave` holds that one by
 /// counting call sites.
 #[test]
+fn failed_initial_load_stays_unlinked_until_explicit_configuration_recovers() {
+    let source = "function bad() -> int = true\n";
+    let mut server = ServerFixture::new(
+        "failed-initial-project",
+        &[
+            ("sail.proj", "Broken { files absent.sail }"),
+            ("deep/model/selected.sail_project", "Main { files main.sail }"),
+            ("deep/model/main.sail", source),
+        ],
+    );
+    assert!(server.load_failed);
+    server.did_open("deep/model/main.sail", source);
+    let diagnostics = server.pull("deep/model/main.sail");
+    assert_eq!(errors(&diagnostics), 0, "{diagnostics:?}");
+    assert!(mentions(&diagnostics, "not part of a loaded Sail project"), "{diagnostics:?}");
+    server.configure(
+        serde_json::json!({"workspace": {"projectFile": "deep/model/selected.sail_project"}}),
+    );
+    server.wait_for_diagnostics(
+        "deep/model/main.sail",
+        "explicit project to restore type checking",
+        |ds| errors(ds) == 1 && !mentions(ds, "not part of a loaded Sail project"),
+    );
+    assert!(server
+        .log
+        .iter()
+        .any(|m| m.contains("Loaded Sail project:") && m.contains("selected.sail_project")));
+}
+
+#[test]
+fn single_file_without_workspace_is_explicitly_unlinked() {
+    let source = "function local(x : int) -> int = missing(x)\n";
+    let mut server =
+        ServerFixture::open("no-workspace", &[("scratch.sail", source)], Root::Detached);
+    server.did_open("scratch.sail", source);
+    let diagnostics = server.pull("scratch.sail");
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert_eq!(
+        diagnostics[0].code,
+        Some(lsp_types::NumberOrString::String("unlinked-file".into()))
+    );
+    let hover = server.ask(
+        "textDocument/hover",
+        serde_json::json!({
+            "textDocument": {"uri": server.url("scratch.sail")},
+            "position": {"line": 0, "character": 10}
+        }),
+    );
+    assert!(hover.to_string().contains("function local"), "{hover}");
+}
+
+#[test]
+fn unlinked_files_keep_local_features_and_follow_manifest_membership_changes() {
+    let core = "function use(x : int) -> int = zero_extend(x)\nfunction bad() -> int = true\n";
+    let prelude = "val zero_extend : int -> int\nfunction zero_extend(x) = x\n";
+    let mut server = ServerFixture::new(
+        "unlinked-membership",
+        &[
+            ("core.sail", core),
+            ("prelude.sail", prelude),
+            ("deep/nested/ignored.sail_project", "Unused { files missing.sail }"),
+        ],
+    );
+    server.did_open("core.sail", core);
+    server.did_open("prelude.sail", prelude);
+    let unlinked = |ds: &[lsp_types::Diagnostic]| {
+        ds.iter().any(|d| d.code == Some(lsp_types::NumberOrString::String("unlinked-file".into())))
+    };
+    let diagnostics = server.pull("core.sail");
+    assert!(unlinked(&diagnostics), "{diagnostics:?}");
+    assert_eq!(errors(&diagnostics), 0, "{diagnostics:?}");
+    assert!(server.log.iter().any(|m| m.contains("No Sail project loaded")));
+    let hover = server.ask(
+        "textDocument/hover",
+        serde_json::json!({
+            "textDocument": {"uri": server.url("core.sail")},
+            "position": {"line": 0, "character": 10}
+        }),
+    );
+    assert!(hover.to_string().contains("function use"), "{hover}");
+    let definition = server.ask(
+        "textDocument/definition",
+        serde_json::json!({
+            "textDocument": {"uri": server.url("core.sail")},
+            "position": {"line": 0, "character": core.find("zero_extend").unwrap()}
+        }),
+    );
+    assert!(!definition.to_string().contains("prelude.sail"), "{definition}");
+
+    server.did_open("broken.sail", "function broken( =\n");
+    let broken = server.pull("broken.sail");
+    assert!(unlinked(&broken) && errors(&broken) > 0, "{broken:?}");
+
+    std::fs::write(
+        server.path("sail.proj"),
+        "Prelude { files prelude.sail } Core { requires Prelude files core.sail }",
+    )
+    .unwrap();
+    server.notify(
+        "workspace/didChangeWatchedFiles",
+        serde_json::json!({
+            "changes": [{"uri": server.url("sail.proj"), "type": 1}]
+        }),
+    );
+    server.wait_for_diagnostics("core.sail", "configured project diagnostics", |ds| {
+        !unlinked(ds) && errors(ds) == 1
+    });
+    let configured = server.pull("core.sail");
+    assert!(!unlinked(&configured) && errors(&configured) == 1, "{configured:?}");
+    assert!(!mentions(&configured, "zero_extend"), "{configured:?}");
+    assert!(server
+        .log
+        .iter()
+        .any(|m| m.contains("Loaded Sail project:") && m.contains("sail.proj")));
+
+    // Being next to a configured file does not grant its scope to a buffer.
+    server.did_open("excluded.sail", core);
+    let excluded = server.pull("excluded.sail");
+    assert!(unlinked(&excluded) && errors(&excluded) == 0, "{excluded:?}");
+    let definition = server.ask(
+        "textDocument/definition",
+        serde_json::json!({
+            "textDocument": {"uri": server.url("excluded.sail")},
+            "position": {"line": 0, "character": core.find("zero_extend").unwrap()}
+        }),
+    );
+    assert!(!definition.to_string().contains("prelude.sail"), "{definition}");
+
+    let excluded_uri = server.url("excluded.sail");
+    server.close_url(&excluded_uri);
+    server.wait_for_diagnostics_cleared(&excluded_uri);
+
+    std::fs::remove_file(server.path("sail.proj")).unwrap();
+    server.notify(
+        "workspace/didChangeWatchedFiles",
+        serde_json::json!({
+            "changes": [{"uri": server.url("sail.proj"), "type": 3}]
+        }),
+    );
+    server.wait_for_diagnostics(
+        "core.sail",
+        "unlinked diagnostics after manifest deletion",
+        unlinked,
+    );
+    assert_eq!(errors(&server.pull("core.sail")), 0);
+}
+
+#[test]
+fn nested_project_loads_prelude_before_core() {
+    let prelude = "val zero_extend : int -> int\nfunction zero_extend(x) = x\n";
+    let core = "function creg2reg_idx(i : int) -> int = zero_extend(i)\n";
+    let mut server = ServerFixture::new(
+        "nested-project",
+        &[
+            ("model/riscv.sail_project", "prelude { files prelude/prelude.sail } core { requires prelude files core/types.sail }"),
+            ("model/prelude/prelude.sail", prelude),
+            ("model/core/types.sail", core),
+            ("tests/unrelated.sail", "function unrelated() = missing()\n"),
+        ],
+    );
+    server.did_open("model/core/types.sail", core);
+    let diagnostics = server.pull("model/core/types.sail");
+    assert_eq!(errors(&diagnostics), 0, "{diagnostics:?}");
+    let definition = server.ask(
+        "textDocument/definition",
+        serde_json::json!({
+            "textDocument": {"uri": server.url("model/core/types.sail")},
+            "position": {"line": 0, "character": 40}
+        }),
+    );
+    assert!(definition.to_string().contains("prelude/prelude.sail"), "{definition}");
+}
+
+#[test]
+fn declaration_hover_keeps_a_single_declaration_head() {
+    for (source, name, expected) in [
+        (
+            "function creg2reg_idx(i : int) -> int = i\n",
+            "creg2reg_idx",
+            "function creg2reg_idx(i : int) -> int",
+        ),
+        ("register counter : int\n", "counter", "register counter : int"),
+        ("mapping enc : int <-> int = { x <-> x }\n", "enc", "mapping enc : int <-> int"),
+    ] {
+        let mut server =
+            ServerFixture::new_project("hover-declaration-head", &[("types.sail", source)]);
+        server.did_open("types.sail", source);
+        let hover = server.ask(
+            "textDocument/hover",
+            serde_json::json!({
+                "textDocument": {"uri": server.url("types.sail")},
+                "position": {"line": 0, "character": source.find(name).unwrap()}
+            }),
+        );
+        let rendered = hover["contents"]["value"].as_str().expect("hover text");
+        assert_eq!(rendered.lines().next(), Some(expected), "{hover}");
+    }
+}
+
+#[test]
 fn opening_a_file_publishes_its_diagnostics() {
-    let mut server = ServerFixture::new("open", &[("a.sail", A_FILE_WITH_ONE_ERROR)]);
+    let mut server = ServerFixture::new_project("open", &[("a.sail", A_FILE_WITH_ONE_ERROR)]);
     server.did_open("a.sail", A_FILE_WITH_ONE_ERROR);
     server.wait_for_diagnostics("a.sail", "the file's diagnostics", |d| errors(d) == 1);
     assert!(mentions(&server.shown("a.sail"), "bits(4)"));
@@ -530,7 +756,7 @@ fn repeated_include_contexts_survive_editor_requests_and_edits() {
     let shared = "$ifdef SECOND\nprivate val second : unit -> bool\nfunction second() = helper_b()\n$else\nprivate val first : unit -> int\nfunction first() = helper_a()\n$endif\n";
     let a = "private val helper_a : unit -> int\nfunction helper_a() = 1\n$include \"shared.sail\"\nval use_a : unit -> int\nfunction use_a() = first()\n";
     let b = "$define SECOND\nprivate val helper_b : unit -> bool\nfunction helper_b() = true\n$include \"shared.sail\"\nval use_b : unit -> bool\nfunction use_b() = second()\n";
-    let mut server = ServerFixture::new(
+    let mut server = ServerFixture::new_project(
         "include-instances",
         &[
             ("sail.proj", "A { files a.sail } B { after A files b.sail }"),
@@ -701,7 +927,7 @@ fn repeated_include_contexts_survive_editor_requests_and_edits() {
 fn disjoint_include_contexts_do_not_create_false_cycles() {
     let a = "$ifndef SECOND\n$include \"b.sail\"\n$endif\n";
     let b = "$ifdef SECOND\n$include \"a.sail\"\n$endif\n";
-    let mut server = ServerFixture::new(
+    let mut server = ServerFixture::new_project(
         "include-context-cycles",
         &[
             ("sail.proj", "A { files first.sail } B { after A files second.sail }"),
@@ -722,7 +948,7 @@ fn shared_token_lenses_merge_contexts_without_duplicate_locations() {
     let shared = "private val leaf : unit -> int\n";
     let a = "$include \"shared.sail\"\nfunction use_a() = leaf()\n";
     let b = "$include \"shared.sail\"\nfunction use_b() = leaf()\n";
-    let mut server = ServerFixture::new(
+    let mut server = ServerFixture::new_project(
         "shared-token-lenses",
         &[
             ("sail.proj", "A { files a.sail } B { after A files b.sail }"),
@@ -762,7 +988,7 @@ fn repeated_manifest_roots_keep_topological_module_owners() {
     let shared = "$ifdef NEXT\nprivate val second : unit -> bool\nfunction second() = true\n$else\nprivate val first : unit -> int\nfunction first() = 1\n$endif\n$define NEXT\n";
     let a = "val use_a : unit -> int\nfunction use_a() = first()\n";
     let b = "val use_b : unit -> bool\nfunction use_b() = second()\n";
-    let mut server = ServerFixture::new(
+    let mut server = ServerFixture::new_project(
         "repeated-roots",
         &[
             (
@@ -823,7 +1049,7 @@ fn repeated_manifest_roots_keep_topological_module_owners() {
 #[test]
 fn includes_follow_target_and_unsaved_edits_through_the_server() {
     let source = "$iftarget c\n$include <c.sail>\n$else\n$include <fallback.sail>\n$endif\nval main : unit -> int\nfunction main() = selected()\n$ifdef NEVER\n$include <missing.sail>\nenum hidden = { Bad, Bad }\nfunction inactive() = absent()\n$endif\n";
-    let mut server = ServerFixture::new("include-closure", &[
+    let mut server = ServerFixture::new_project("include-closure", &[
         ("sail.proj", "Main { files main.sail }"),
         ("main.sail", source),
         ("no-stdlib/lib/c.sail", "val selected : unit -> int\nfunction selected() = 1\nval c_only : int\n"),
@@ -880,7 +1106,7 @@ fn includes_follow_target_and_unsaved_edits_through_the_server() {
 /// buffers with what was last saved.
 #[test]
 fn an_unsaved_edit_survives_a_rescan() {
-    let mut server = ServerFixture::new("rescan", &[("a.sail", "default Order dec\n")]);
+    let mut server = ServerFixture::new_project("rescan", &[("a.sail", "default Order dec\n")]);
     server.did_open("a.sail", A_FILE_WITH_ONE_ERROR);
     server.wait_for_diagnostics("a.sail", "the buffer's diagnostics", |d| errors(d) == 1);
 
@@ -905,7 +1131,7 @@ fn an_unsaved_edit_survives_a_rescan() {
 /// published nothing. The client kept the empty list.
 #[test]
 fn a_rescan_leaves_the_problems_panel_alone() {
-    let mut server = ServerFixture::new("panel", &[("a.sail", A_FILE_WITH_ONE_ERROR)]);
+    let mut server = ServerFixture::new_project("panel", &[("a.sail", A_FILE_WITH_ONE_ERROR)]);
     server.did_open("a.sail", A_FILE_WITH_ONE_ERROR);
     server.wait_for_diagnostics("a.sail", "the file's diagnostics", |d| errors(d) == 1);
 
@@ -935,7 +1161,7 @@ fn closing_a_document_restores_the_file() {
     // it reports nothing at all.
     let file_without_the_error =
         "default Order dec\n\nfunction f(x : bits(8)) -> bits(8) = {\n  let spare = x;\n  x\n}\n";
-    let mut server = ServerFixture::new("close", &[("a.sail", file_without_the_error)]);
+    let mut server = ServerFixture::new_project("close", &[("a.sail", file_without_the_error)]);
 
     server.did_open("a.sail", A_FILE_WITH_ONE_ERROR);
     server.wait_for_diagnostics("a.sail", "the buffer's diagnostics", |d| errors(d) == 1);
@@ -966,7 +1192,7 @@ fn closing_a_document_restores_the_file() {
 #[test]
 fn an_edit_changes_what_is_reported() {
     let clean = "default Order dec\n\nfunction f(x : bits(8)) -> bits(8) = x\n";
-    let mut server = ServerFixture::new("edit", &[("a.sail", clean)]);
+    let mut server = ServerFixture::new_project("edit", &[("a.sail", clean)]);
     server.did_open("a.sail", clean);
     server.wait_for_diagnostics("a.sail", "a clean file", |d| d.is_empty());
 
@@ -997,7 +1223,7 @@ fn an_edit_changes_what_is_reported() {
 /// as the assertion that nobody has.
 #[test]
 fn push_and_pull_agree() {
-    let mut server = ServerFixture::new("agree", &[("a.sail", A_FILE_WITH_ONE_ERROR)]);
+    let mut server = ServerFixture::new_project("agree", &[("a.sail", A_FILE_WITH_ONE_ERROR)]);
     server.did_open("a.sail", A_FILE_WITH_ONE_ERROR);
     server.wait_for_diagnostics("a.sail", "the file's diagnostics", |d| errors(d) == 1);
 
@@ -1018,9 +1244,13 @@ fn push_and_pull_agree() {
 /// them, which is rust-analyzer's rule and the useful one.
 #[test]
 fn closing_a_scratch_file_clears_its_diagnostics() {
-    let mut server = ServerFixture::new("scratch", &[("a.sail", "default Order dec\n")]);
+    let mut server = ServerFixture::new_project("scratch", &[("a.sail", "default Order dec\n")]);
     let scratch = server.open_outside_the_workspace("scratch.sail", A_FILE_WITH_ONE_ERROR);
-    server.wait_until("the scratch file's diagnostics", |f| errors(&f.shown_for(&scratch)) == 1);
+    server.wait_until("the scratch file's diagnostics", |f| {
+        f.shown_for(&scratch)
+            .iter()
+            .any(|d| d.code == Some(lsp_types::NumberOrString::String("unlinked-file".into())))
+    });
 
     server.close_url(&scratch);
     server.wait_for_diagnostics_cleared(&scratch);
@@ -1035,7 +1265,7 @@ fn closing_a_scratch_file_clears_its_diagnostics() {
 /// handler can be wrong about. Turning flycheck on wants its own scenario.
 #[test]
 fn saving_leaves_the_diagnostics_alone() {
-    let mut server = ServerFixture::new("save", &[("a.sail", A_FILE_WITH_ONE_ERROR)]);
+    let mut server = ServerFixture::new_project("save", &[("a.sail", A_FILE_WITH_ONE_ERROR)]);
     server.did_open("a.sail", A_FILE_WITH_ONE_ERROR);
     server.wait_for_diagnostics("a.sail", "the file's diagnostics", |d| errors(d) == 1);
 
@@ -1062,8 +1292,10 @@ fn saving_leaves_the_diagnostics_alone() {
 #[cfg(unix)]
 #[test]
 fn a_symlinked_workspace_root_behaves_like_the_real_one() {
-    let mut server =
-        ServerFixture::new_through_symlink("symlink", &[("a.sail", "default Order dec\n")]);
+    let mut server = ServerFixture::new_through_symlink(
+        "symlink",
+        &[("sail.proj", "Main { files a.sail }"), ("a.sail", "default Order dec\n")],
+    );
     server.did_open("a.sail", A_FILE_WITH_ONE_ERROR);
     server.wait_for_diagnostics("a.sail", "the buffer's diagnostics", |d| errors(d) == 1);
 
@@ -1099,7 +1331,7 @@ fn what_upstream_says_reaches_the_panel() {
     // Clean to this server's own analysis, so anything published is the
     // checker's.
     let clean = "default Order dec\n\nfunction f(x : bits(8)) -> bits(8) = x\n";
-    let mut server = ServerFixture::new("flycheck", &[("a.sail", clean)]);
+    let mut server = ServerFixture::new_project("flycheck", &[("a.sail", clean)]);
 
     let checker = server.fake_checker(
         "Type error:\n\
@@ -1155,7 +1387,7 @@ fn what_upstream_says_reaches_the_panel() {
 #[test]
 fn a_semantic_token_delta_describes_the_buffer_now() {
     let one_function = "default Order dec\n\nfunction f(x : bits(8)) -> bits(8) = x\n";
-    let mut server = ServerFixture::new("tokens", &[("a.sail", one_function)]);
+    let mut server = ServerFixture::new_project("tokens", &[("a.sail", one_function)]);
     server.did_open("a.sail", one_function);
 
     let full = server.ask(
@@ -1213,7 +1445,7 @@ fn a_semantic_token_delta_describes_the_buffer_now() {
 /// notification, and the queue existed for a while with no reader at all.
 #[test]
 fn a_cancelled_request_is_answered_as_cancelled() {
-    let mut server = ServerFixture::new("cancel", &[("a.sail", A_FILE_WITH_ONE_ERROR)]);
+    let mut server = ServerFixture::new_project("cancel", &[("a.sail", A_FILE_WITH_ONE_ERROR)]);
     server.did_open("a.sail", A_FILE_WITH_ONE_ERROR);
 
     // Ask something expensive enough to still be in flight, then take it back.
@@ -1245,13 +1477,16 @@ fn a_cancelled_request_is_answered_as_cancelled() {
 #[test]
 fn a_file_deleted_on_disk_leaves_the_workspace() {
     let clean = "default Order dec\n";
-    let mut server =
-        ServerFixture::new("delete", &[("a.sail", clean), ("gone.sail", A_FILE_WITH_ONE_ERROR)]);
+    let mut server = ServerFixture::new_project(
+        "delete",
+        &[("a.sail", clean), ("gone.sail", A_FILE_WITH_ONE_ERROR)],
+    );
     server.wait_until("the workspace to hold both files", |f| {
         f.log.iter().any(|m| m.contains("2 files"))
     });
 
     std::fs::remove_file(server.path("gone.sail")).expect("delete");
+    std::fs::write(server.path("sail.proj"), "Main { files a.sail }").unwrap();
     server.notify(
         "workspace/didChangeWatchedFiles",
         serde_json::json!({ "changes": [{ "uri": server.url("gone.sail"), "type": 3 }] }),
@@ -1272,7 +1507,7 @@ fn a_file_deleted_on_disk_leaves_the_workspace() {
 #[test]
 fn the_workspace_symbol_index_answers() {
     let file = "default Order dec\n\nfunction findable_by_name(x : bits(8)) -> bits(8) = x\n";
-    let mut server = ServerFixture::new("symbols", &[("a.sail", file)]);
+    let mut server = ServerFixture::new_project("symbols", &[("a.sail", file)]);
 
     let found = server.ask("workspace/symbol", serde_json::json!({ "query": "findable" }));
     let names: Vec<String> = found
@@ -1309,7 +1544,7 @@ fn the_workspace_symbol_index_answers() {
 #[test]
 fn the_clients_formatting_options_reach_the_formatter() {
     let no_final_newline = "default Order dec\n\nfunction f(x : bits(8)) -> bits(8) = x";
-    let mut server = ServerFixture::new("format", &[("a.sail", no_final_newline)]);
+    let mut server = ServerFixture::new_project("format", &[("a.sail", no_final_newline)]);
     server.did_open("a.sail", no_final_newline);
 
     let edits = server.ask(
@@ -1348,7 +1583,8 @@ fn goto_definition_follows_a_name_into_another_file() {
     let declares = "default Order dec\n\nfunction declared_elsewhere(x : bits(8)) -> bits(8) = x\n";
     let uses =
         "default Order dec\n\nfunction caller(y : bits(8)) -> bits(8) = declared_elsewhere(y)\n";
-    let mut server = ServerFixture::new("goto", &[("decl.sail", declares), ("use.sail", uses)]);
+    let mut server =
+        ServerFixture::new_project("goto", &[("decl.sail", declares), ("use.sail", uses)]);
     server.did_open("use.sail", uses);
 
     // The call, on the last line: `... = declared_elsewhere(y)`.
@@ -1393,7 +1629,7 @@ fn goto_definition_follows_a_name_into_another_file() {
 #[test]
 fn a_file_with_windows_line_endings_is_analysed() {
     let crlf = "default Order dec\r\n\r\nfunction f(x : bits(8)) -> bits(8) = {\r\n  let y : bits(4) = x;\r\n  x\r\n}\r\n";
-    let mut server = ServerFixture::new("crlf", &[("a.sail", crlf)]);
+    let mut server = ServerFixture::new_project("crlf", &[("a.sail", crlf)]);
     server.did_open("a.sail", crlf);
     server.wait_for_diagnostics("a.sail", "the file's diagnostics", |d| errors(d) == 1);
 
@@ -1433,7 +1669,7 @@ fn a_file_with_windows_line_endings_is_analysed() {
 #[test]
 fn completion_offers_what_the_file_declares() {
     let file = "default Order dec\n\nfunction a_declared_name(x : bits(8)) -> bits(8) = x\n\nfunction in_a_block(y : bits(8)) -> bits(8) = {\n  a_dec\n}\n\nfunction one_expression(y : bits(8)) -> bits(8) = a_dec\n";
-    let mut server = ServerFixture::new("completion", &[("a.sail", file)]);
+    let mut server = ServerFixture::new_project("completion", &[("a.sail", file)]);
     server.did_open("a.sail", file);
 
     // At the end of the partial name on the last line.
@@ -1489,7 +1725,7 @@ fn completion_offers_what_the_file_declares() {
 fn scattered_order_follows_include_expansion_and_reports_physical_sources() {
     let main = "scattered union U\n$include \"clause.sail\"\nend U\n";
     let clause = "union clause U = C : int\n";
-    let mut server = ServerFixture::new(
+    let mut server = ServerFixture::new_project(
         "scattered-order",
         &[("sail.proj", "M { files main.sail }"), ("main.sail", main), ("clause.sail", clause)],
     );
@@ -1530,7 +1766,7 @@ fn call_hierarchy_retains_origin_and_uses_each_files_line_index() {
     let caller = "val run : unit -> int\nfunction run() = helper()\n";
     let other =
         "private val helper : unit -> int\nval run : unit -> int\nfunction run() = helper()\n";
-    let mut server = ServerFixture::new(
+    let mut server = ServerFixture::new_project(
         "call-identity",
         &[
             ("sail.proj", "A { files decl.sail, caller.sail } B { after A files other.sail }"),
@@ -1568,7 +1804,7 @@ fn call_hierarchy_retains_origin_and_uses_each_files_line_index() {
 fn generated_call_hierarchy_preserves_names_ranges_and_stale_continuations() {
     let defs = "// Generated functions share one source declaration.\n\ndefault Order dec\nbitfield B : bits(8) = { part : 3 .. 0 }\n";
     let caller = "val run : unit -> bits(8)\nfunction run() = _get_B_bits(Mk_B(0x00))\n";
-    let mut server = ServerFixture::new(
+    let mut server = ServerFixture::new_project(
         "generated-call-identity",
         &[
             ("sail.proj", "M { files defs.sail, caller.sail }"),
@@ -1635,7 +1871,7 @@ fn type_hierarchy_keeps_include_context_through_continuations() {
     let a = "// header\nprivate struct BaseA = { x : int }\n$include \"shared.sail\"\n";
     let b = "private struct BaseB = { x : bool }\n$define SECOND\n$include \"shared.sail\"\n";
     let shared = "$ifdef SECOND\ntype AliasB = BaseB\n$else\ntype AliasA = BaseA\n$endif\n";
-    let mut server = ServerFixture::new(
+    let mut server = ServerFixture::new_project(
         "type-identity",
         &[
             ("sail.proj", "A { files a.sail } B { after A files b.sail }"),

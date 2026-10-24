@@ -373,7 +373,9 @@ pub fn syntax_diagnostics(
     // Phase 2: an operator with no fixity. Upstream refuses the program
     // (`initial_check.ml:308`); the parser here recovers, so the report
     // has to come from somewhere that knows the workspace's own table.
-    res.extend(handlers::undeclared_fixity::undeclared_fixity(db, file));
+    if base_db::preprocess::project_membership(db, ft.file_id(db)) != Some(false) {
+        res.extend(handlers::undeclared_fixity::undeclared_fixity(db, file));
+    }
 
     // Phase 3: ItemTree checks (Sail-specific). Bracket matching moved to
     // `syntax::validation`, so it arrives through phase 1.
@@ -404,6 +406,20 @@ pub fn semantic_diagnostics(
     ft: base_db::FileText,
     workspace_names: Option<&WorkspaceNames>,
 ) -> Vec<Diagnostic> {
+    if base_db::preprocess::project_membership(db, ft.file_id(db)) == Some(false) {
+        // Like RA's unlinked-file diagnostic, report the missing analysis
+        // context once instead of diagnosing a program we have not loaded.
+        let code = "unlinked-file";
+        return if config.disabled.contains(code) {
+            Vec::new()
+        } else {
+            vec![Diagnostic::new(
+                hir::diagnostics::DiagnosticCode::SailLint(code, Severity::Warning),
+                "This file is not part of a loaded Sail project. Project-dependent diagnostics are unavailable. Set sail-lsp.workspace.projectFile or add the file to the project's manifest/includes.",
+                hir::FileRange { file_id: ft.file_id(db), range: base_db::text_range(0, 0) },
+            ).with_severity(config.effective_severity(code, Severity::Warning))]
+        };
+    }
     let sema = hir::Semantics::new(db);
     let ctx = DiagnosticsContext { config, sema, resolve };
     let mut res = Vec::new();

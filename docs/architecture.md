@@ -415,6 +415,20 @@ Tracks side effects through the type-checker and call graph:
 
 ### Workspace reload
 
+Project discovery follows an explicit configuration or a bounded search: the
+workspace directory, then its immediate non-hidden children. It never recursively
+selects a manifest or assembles a Sail program from sorted directory contents.
+Ambiguous/invalid projects report a load error and preserve the last good model.
+Successful loads log the selected manifests.
+
+VFS presence and semantic membership are separate. `WorkspacePreprocessing`
+records files reached from manifest roots and active includes. The per-file
+membership query determines whether name resolution uses the configured program
+or a detached local declaration scope. Unlinked buffers retain syntax checking,
+hover and local navigation, but publish `unlinked-file` instead of running
+whole-program semantic diagnostics. Membership changes invalidate these results
+through Salsa, including when a manifest is created or removed.
+
 `didChangeWatchedFiles` with `.sail` file CREATED/DELETED sets `needs_reload` flag.
 Main loop spawns background `Task::WorkspaceScan` to re-scan workspace folders,
 rebuild include graph + SourceRoots + WorkspaceSymbolIndex. Progress reported.

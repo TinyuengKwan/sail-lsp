@@ -2323,6 +2323,16 @@ impl Analysis {
 
         // Build workspace cross-file name sets from all files'
         // TopLevelEnv (salsa-cached, no recomputation cost).
+        if base_db::preprocess::project_membership(&self.db, file_id) == Some(false) {
+            return ide_diagnostics::full_diagnostics(
+                &self.db,
+                config,
+                &ide_db::assists::AssistResolveStrategy::None,
+                &sf,
+                ft,
+                None,
+            );
+        }
         let ws_names = self.build_workspace_names_inner(Some(file_id));
 
         // Nothing downstream of this reads a diagnostic's fixes. A

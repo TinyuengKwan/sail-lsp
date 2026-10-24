@@ -298,7 +298,7 @@
         "sail-lsp.workspace.projectFile": {
           "type": ["null", "string"],
           "default": null,
-          "description": "Project manifest path, relative to each workspace folder or absolute. Auto-detection prefers sail.proj, otherwise requires a single *.sail_project."
+          "description": "Project manifest path, relative to each workspace folder or absolute. Auto-detection prefers root sail.proj, then a single root *.sail_project; otherwise checks immediate child directories for a unique project (excluding hidden directories). Files outside a loaded project receive syntax diagnostics and an unlinked-file warning."
         },
         "sail-lsp.workspace.projectVariables": {
           "type": "object",

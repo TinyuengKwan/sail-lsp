@@ -109,7 +109,7 @@ lspconfig.sail_lsp.setup({
 | `maxFiles` | `number` | `10000` | Maximum files to scan in workspace |
 | `target` | `string?` | `null` | Compilation target for `$iftarget` directives |
 | `includePaths` | `string[]` | `[]` | Fallback include search paths, absolute or relative to workspace roots. |
-| `projectFile` | `string?` | `null` | Manifest path relative to each workspace folder, or absolute. Auto-detection prefers `sail.proj`, otherwise requires exactly one `*.sail_project`. |
+| `projectFile` | `string?` | `null` | Manifest path relative to each workspace folder, or absolute. Auto-detection prefers root `sail.proj`, then a single root `*.sail_project`; otherwise checks immediate child directories for a unique project. |
 | `projectVariables` | `object` | `{}` | Boolean/string overrides for manifest variables. |
 | `projectModules` | `string[]` | `[]` | Select root modules, their descendants and transitive requirements. Empty means all modules. |
 
@@ -127,8 +127,24 @@ Changes reload the active file set. Conditional branches are evaluated, and
 `requires`, `before`, and `after` determine file order. Only `requires` adds
 modules to the selected dependency closure. Invalid manifests report a server
 error and retain the last successfully loaded workspace; they do not silently
-index every file in the directory. Directory discovery remains available when
-there is no manifest. An explicitly empty project stays empty.
+index every file in the directory. An explicitly empty project stays empty.
+
+Opening a repository root also discovers a nested manifest such as
+`model/riscv.sail_project`. Only one level of child directories is searched;
+hidden directories are excluded. Deeper projects require `workspace.projectFile`.
+Within a nested directory, `sail.proj` takes precedence over `*.sail_project`.
+If several projects remain, set `workspace.projectFile` explicitly; their
+sources are not merged into a single implicit project.
+
+The server logs the paths of successfully loaded manifests. If no project is
+found, it reports a warning instead of treating directory/file-name order as
+Sail declaration order. Only manifest roots and their reached includes belong
+to the semantic project; opening a file does not add it to that project.
+Unlinked files retain syntax diagnostics and local editing features, and receive
+an `unlinked-file` warning explaining how to configure the project. Type checking
+and other project-dependent diagnostics resume once the file joins a loaded
+project. Set `diagnostics.disabled` to include `unlinked-file` to hide that warning.
+This also applies when opening a single file without a workspace folder.
 
 Source preprocessing follows the selected root order and active includes.
 Only reached library files and the compiler's implicit `core/corelib.sail`

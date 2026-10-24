@@ -78,10 +78,11 @@ pub(crate) fn handle_did_close_text_document(
     // A workspace file keeps them, which is rust-analyzer's rule and the
     // useful one: errors in files you are not looking at are the reason
     // that panel exists.
+    let file_id = state.vfs.file_id_for_url(&uri);
     let in_workspace =
-        state.workspace_folders.iter().any(|folder| uri.as_str().starts_with(folder.as_str()));
+        base_db::preprocess::project_membership(state.analysis_host.raw_database(), file_id)
+            == Some(true);
     if !in_workspace {
-        let file_id = state.vfs.file_id_for_url(&uri);
         state.diagnostics.clear_native_for(file_id);
     }
     Ok(())

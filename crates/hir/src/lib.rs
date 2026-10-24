@@ -266,7 +266,7 @@ impl DefLocation {
 
     /// Look up the signature text of this definition from the ItemTree.
     ///
-    /// Returns the signature string (e.g. `"int -> bool"`) or `None` if
+    /// Returns the declaration signature (e.g. `"val f : int -> bool"`) or `None` if
     /// the item tree is unavailable or the index is out of range.
     pub fn lookup_signature(&self, db: &dyn salsa::Database) -> Option<String> {
         let sig = self.signature_text(db)?;

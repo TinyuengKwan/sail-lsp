@@ -72,7 +72,9 @@ pub fn is_project_file(path: &std::path::Path) -> bool {
     })
 }
 
-/// Find a `.sail_project` or `sail.proj` file in the given folder.
+/// Discover only at the workspace root and, if it has no manifest, one
+/// directory level below it. Like RA's child Cargo.toml discovery, this is
+/// bounded in depth rather than walking the repository. Explicit configuration wins.
 fn find_project_file(
     folder: &std::path::Path,
     configured: Option<&str>,
@@ -85,23 +87,39 @@ fn find_project_file(
             Err(format!("Project file does not exist: {}", path.display()))
         };
     }
-    let preferred = folder.join("sail.proj");
-    if preferred.is_file() {
-        return Ok(Some(preferred));
+    fn in_directory(folder: &std::path::Path) -> Result<Vec<PathBuf>, String> {
+        let preferred = folder.join("sail.proj");
+        if preferred.is_file() {
+            return Ok(vec![preferred]);
+        }
+        std::fs::read_dir(folder)
+            .map_err(|e| format!("{}: {e}", folder.display()))?
+            .map(|entry| entry.map(|e| e.path()).map_err(|e| e.to_string()))
+            .filter_map(|entry| match entry {
+                Ok(path) if path.is_file() && is_project_file(&path) => Some(Ok(path)),
+                Ok(_) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .collect()
     }
-    let mut candidates: Vec<_> = std::fs::read_dir(folder)
-        .map_err(|e| e.to_string())?
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| p.is_file() && is_project_file(p))
-        .collect();
+    let mut candidates = in_directory(folder)?;
+    if candidates.is_empty() {
+        for entry in std::fs::read_dir(folder).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            if entry.path().is_dir() && !entry.file_name().to_string_lossy().starts_with('.') {
+                candidates.extend(in_directory(&entry.path())?);
+            }
+        }
+    }
     candidates.sort();
+    candidates.dedup();
     match candidates.len() {
         0 => Ok(None),
         1 => Ok(candidates.pop()),
         _ => Err(format!(
-            "Multiple Sail project files in {}; select workspace.projectFile",
-            folder.display()
+            "Multiple Sail project files in {}; select workspace.projectFile: {}",
+            folder.display(),
+            candidates.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
         )),
     }
 }
@@ -180,6 +198,10 @@ impl GlobalState {
         if self.workspace_loaded && file_count == 0 && !self.workspace_folders.is_empty() {
             status.health = crate::lsp_ext::Health::Warning;
             message.push_str("No Sail files loaded. Check workspace folders.\n");
+        }
+        if self.workspace_loaded && self.project_manifests.is_empty() {
+            status.health = crate::lsp_ext::Health::Warning;
+            message.push_str("No Sail project loaded. Set sail-lsp.workspace.projectFile; unlinked files receive syntax diagnostics only.\n");
         }
 
         // Check for include graph cycles
@@ -395,24 +417,14 @@ fn scan_workspace_project(
             continue;
         }
 
-        let walker = walkdir::WalkDir::new(&folder_path)
-            .follow_links(true)
-            .into_iter()
-            .filter_map(|e| e.ok());
-
-        for entry in walker {
-            let path = entry.path();
-            if is_sail_file(path) {
-                if let Ok(uri) = Url::from_file_path(path) {
-                    folder_files.push((uri, path.to_path_buf()));
-                }
-            }
-        }
-        folder_files.sort_by(|a, b| a.1.cmp(&b.1));
-        source_roots.extend(folder_files.iter().map(|(url, _)| (url.clone(), None)));
-        local_files.extend(folder_files);
+        // No manifest means no semantic project. Opening a buffer still
+        // supplies its text through the VFS, but directory order cannot supply
+        // Sail declaration order or module membership.
     }
 
+    if inputs.manifests.is_empty() {
+        return Ok(Vec::new());
+    }
     let roots: Vec<_> = local_files.iter().map(|(_, p)| p.clone()).collect();
     let library = sail_dir.map(|p| p.join("lib"));
     let candidates =
@@ -686,7 +698,9 @@ mod tests {
             Self(path)
         }
         fn write(&self, name: &str, source: &str) {
-            std::fs::write(self.0.join(name), source).unwrap();
+            let path = self.0.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, source).unwrap();
         }
         fn scan(&self, config: &crate::config::WorkspaceConfig) -> Result<Vec<String>, String> {
             let folders = HashSet::from([Url::from_directory_path(&self.0).unwrap()]);
@@ -702,6 +716,46 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn discovery_is_bounded_and_does_not_invent_a_project() {
+        let f = Fixture::new();
+        f.write("stray.sail", "function stray() = missing()\n");
+        f.write("deep/nested/model.sail_project", "Main { files main.sail }");
+        f.write("deep/nested/main.sail", "");
+        assert_eq!(find_project_file(&f.0, None).unwrap(), None);
+        assert!(f.scan(&Default::default()).unwrap().is_empty());
+        let config = crate::config::WorkspaceConfig {
+            project_file: Some("deep/nested/model.sail_project".into()),
+            ..Default::default()
+        };
+        assert_eq!(f.scan(&config).unwrap(), ["main.sail"]);
+    }
+
+    #[test]
+    fn nested_manifest_selection_preserves_precedence_and_rejects_ambiguity() {
+        let f = Fixture::new();
+        f.write("stray.sail", "");
+        f.write("model/main.sail", "");
+        f.write("model/riscv.sail_project", "Main { files main.sail }");
+        f.write(".cache/ignored.sail_project", "Invalid {");
+        assert_eq!(f.scan(&Default::default()).unwrap(), ["main.sail"]);
+
+        f.write("model/sail.proj", "Empty { files [] }");
+        assert!(f.scan(&Default::default()).unwrap().is_empty());
+        f.write("other/other.sail_project", "Empty { files [] }");
+        assert!(f.scan(&Default::default()).unwrap_err().contains("Multiple"));
+        let config = crate::config::WorkspaceConfig {
+            project_file: Some("model/riscv.sail_project".into()),
+            ..Default::default()
+        };
+        assert_eq!(f.scan(&config).unwrap(), ["main.sail"]);
+
+        f.write("root.sail_project", "Main { files stray.sail }");
+        assert_eq!(f.scan(&Default::default()).unwrap(), ["stray.sail"]);
+        f.write("sail.proj", "Empty { files [] }");
+        assert!(f.scan(&Default::default()).unwrap().is_empty());
     }
 
     #[test]

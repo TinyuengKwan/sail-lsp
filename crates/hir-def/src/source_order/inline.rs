@@ -43,12 +43,15 @@ pub enum Scope {
 pub fn scope(db: &dyn salsa::Database, at: Declaration) -> Scope {
     // The configured expansion graph is authoritative when present. Inline
     // pragmas supply a program only for an otherwise unconfigured buffer.
-    if base_db::preprocess::WorkspaceSourceProject::try_get(db).is_none() {
+    if base_db::preprocess::project_membership(db, at.file.file_id(db)) != Some(true) {
         if let Some(project) = project(db, at.file) {
             return Scope::Inline {
                 file: at.file,
                 module: project.modules.get(at.index).cloned().flatten(),
             };
+        }
+        if base_db::preprocess::project_membership(db, at.file.file_id(db)) == Some(false) {
+            return Scope::Inline { file: at.file, module: None };
         }
     }
     let file = at.file.file_id(db);
@@ -73,7 +76,7 @@ impl Scope {
         if owner.file != *file {
             return None;
         }
-        let project = project(db, *file).as_ref()?;
+        let Some(project) = project(db, *file).as_ref() else { return Some(true) };
         let owner = if global { None } else { project.modules.get(owner.index).cloned().flatten() };
         Some(if private {
             owner == *user

@@ -99,6 +99,7 @@ pub(crate) struct GlobalState {
         Option<(crate::config::WorkspaceConfig, std::collections::HashSet<Url>, u64)>,
     pub(crate) loading_project_inputs: crate::reload::DiscoveryInputs,
     pub(crate) project_error: Option<String>,
+    pub(crate) project_manifests: Vec<std::path::PathBuf>,
     pub(crate) loading_module_graph: Option<base_db::module_graph::ModuleGraph>,
     pub(crate) loading_source_project: Option<base_db::preprocess::SourceProject>,
 
@@ -194,6 +195,7 @@ impl GlobalState {
             loading_project_config: None,
             loading_project_inputs: Default::default(),
             project_error: None,
+            project_manifests: Vec::new(),
             loading_module_graph: None,
             loading_source_project: None,
             task_pool: crate::task_pool::TaskPool::new_with_threads(

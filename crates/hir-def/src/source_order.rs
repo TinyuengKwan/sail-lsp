@@ -53,10 +53,11 @@ pub enum Program {
 }
 
 pub fn program(db: &dyn salsa::Database, file: FileText) -> Option<Program> {
-    if base_db::preprocess::WorkspaceSourceProject::try_get(db).is_some() {
-        Some(Program::Workspace)
-    } else {
-        inline::project(db, file).is_some().then_some(Program::Inline(file))
+    match base_db::preprocess::project_membership(db, file.file_id(db)) {
+        Some(true) => Some(Program::Workspace),
+        // Detached buffers have a local source order, never the project's.
+        Some(false) => Some(Program::Inline(file)),
+        None => inline::project(db, file).is_some().then_some(Program::Inline(file)),
     }
 }
 

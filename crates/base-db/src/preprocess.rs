@@ -48,7 +48,31 @@ pub struct WorkspacePreprocessing {
     pub order: Vec<(FileId, usize)>,
 }
 
+/// `None` is a legacy analysis without an explicit project model. Once a
+/// project model exists, only files reached by its expansion are members;
+/// loading a file into the VFS does not make it part of that project.
+pub fn project_membership(db: &dyn salsa::Database, file: FileId) -> Option<bool> {
+    WorkspaceSourceProject::try_get(db)?;
+    let source = physical_file(db, file);
+    Some(
+        WorkspacePreprocessing::try_get(db)
+            .is_some_and(|input| is_project_member(db, input, source)),
+    )
+}
+
+#[salsa::tracked]
+fn is_project_member(
+    db: &dyn salsa::Database,
+    input: WorkspacePreprocessing,
+    source: FileId,
+) -> bool {
+    input.instances(db).contains_key(&source)
+}
+
 pub fn file_regions(db: &dyn salsa::Database, file: FileId) -> Option<&Vec<bool>> {
+    if project_membership(db, file) == Some(false) {
+        return None;
+    }
     let input = WorkspacePreprocessing::try_get(db)?;
     projected_regions(db, input, file).as_ref()
 }
