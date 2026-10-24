@@ -248,6 +248,12 @@ pub(crate) fn server_capabilities(client: &ClientCapabilities) -> ServerCapabili
             ..Default::default()
         }),
         workspace: Some(WorkspaceServerCapabilities {
+            // Zed gates subsequent folder notifications on this capability.
+            // The handler alone is insufficient: roots can arrive after init.
+            workspace_folders: Some(WorkspaceFoldersServerCapabilities {
+                supported: Some(true),
+                change_notifications: Some(OneOf::Left(true)),
+            }),
             file_operations: Some(WorkspaceFileOperationsServerCapabilities {
                 will_rename: Some(FileOperationRegistrationOptions {
                     filters: vec![

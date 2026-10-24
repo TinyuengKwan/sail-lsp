@@ -253,13 +253,8 @@ impl GlobalState {
         self.register_file_watchers();
 
         let folders = self.workspace_folders.clone();
-        if folders.is_empty() {
-            // No folders to scan — mark op as completed immediately.
-            if self.fetch_workspaces_queue.op_in_progress() {
-                self.fetch_workspaces_queue.op_completed(());
-            }
-            return;
-        }
+        // Removing the last folder still needs to publish an empty project.
+        // Completing the operation here would leave its old members active.
 
         let sender = self.sender.clone();
         let supports_progress = self.supports_progress;

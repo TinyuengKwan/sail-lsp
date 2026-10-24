@@ -1,29 +1,28 @@
 # Troubleshooting
 
-## Check the version
+## Check the server binary
 
-```bash
-sail-lsp --version
-```
-
-If you built from source, rebuild with `cargo build --release` to pick up
-recent fixes.
+Check the executable path used by the editor, especially for remote sessions:
+it may differ from the server on your terminal's `PATH`. After installing a
+new build, restart the language server. The LSP `initialize` response includes
+the package version in `serverInfo`; it does not distinguish local commits.
 
 ## Check the logs
 
-sail-lsp logs to stderr. In VS Code, open `Output > Sail Language Server`
-to see log messages. For more detail:
+sail-lsp sends project-loading messages through LSP `window/logMessage`.
+Inspect these in the editor's language-server logs (including Zed's RPC log).
+Tracing output goes to stderr; its filter is controlled by `SAIL_LOG`:
 
 ```bash
 # Set log level via environment variable
-SAIL_LSP_LOG=info sail-lsp
+SAIL_LOG=info sail-lsp
 
 # Or via VS Code settings
-"sail-lsp.server.extraEnv": { "SAIL_LSP_LOG": "info" }
+"sail-lsp.server.extraEnv": { "SAIL_LOG": "info" }
 ```
 
-Use `SAIL_LSP_LOG=hir_ty=debug` to see type inference details, or
-`SAIL_LSP_LOG=sail_lsp=debug` for LSP message tracing.
+Use `SAIL_LOG=debug` for additional tracing. To inspect protocol messages,
+enable the editor's LSP trace; that is separate from the stderr filter.
 
 ## Standard library not found
 
@@ -36,21 +35,29 @@ export SAIL_DIR=/path/to/sail   # points to the sail compiler repo root
 
 When set, `$SAIL_DIR/lib/` is used instead of the embedded copy.
 
-## Nothing works / no diagnostics
+## Every file reports `unlinked-file`
 
-Check that the workspace root is correct. sail-lsp looks for `.sail` files
-starting from the workspace folder. If your project uses a `sail.proj` file,
-ensure it's in the workspace root.
-
-To verify the server sees your files, check the initial log output for the
-file count:
+Opening a repository directory should provide a project root to the server.
+Check `rootUri` and `workspaceFolders` in the `initialize` request, followed
+by the server's loading messages. For sail-riscv, expect paths like:
 
 ```
-Loading workspace from /path/to/project...
-Loaded 158 project files in 45 ms
+Workspace roots from initialize: file:///path/to/sail-riscv
+Loaded Sail project: /path/to/sail-riscv/model/riscv.sail_project
+background scan: ...
 ```
 
-If the count is 0, the workspace root is wrong.
+An empty `workspaceFolders` list falls back to a supplied `rootUri`. The server
+also accepts folders added through `workspace/didChangeWorkspaceFolders` after
+initialization. This is important for clients that attach roots later.
+
+If the root is correct but no project loads, inspect the load error (for
+example, ambiguous manifests or a missing source file). Discovery checks the
+root and its immediate children; deeper projects require `workspace.projectFile`.
+If a manifest loads but a file remains unlinked, check that the selected
+modules/include branches reach it and that the document URI matches the loaded
+path. Do not hide `unlinked-file` to diagnose a loading failure: disabling the
+warning does not enable type checking.
 
 ## Batch analysis
 
@@ -82,15 +89,14 @@ RUST_BACKTRACE=1 sail-lsp
 
 When filing an issue, include:
 
-1. `sail-lsp --version` output
+1. The editor's server executable path and installed release or source commit
 2. The `.sail` file (or minimal reproduction) that triggers the problem
 3. The error/warning message from the editor
-4. Log output with `SAIL_LSP_LOG=info`
+4. The initialization roots and project-loading log messages; optionally stderr with `SAIL_LOG=info`
 
 An ideal reproduction:
 
 ```bash
 git clone https://github.com/user/repo.git && cd repo && git checkout <hash>
-sail-lsp --version
 cargo run --example corpus_check -- .
 ```

@@ -44,6 +44,7 @@ enum Root {
     Real,
     Symlinked,
     Detached,
+    EmptyFolders,
 }
 
 pub(crate) struct ServerFixture {
@@ -59,6 +60,7 @@ pub(crate) struct ServerFixture {
     responses: HashMap<i32, Response>,
     log: Vec<String>,
     load_failed: bool,
+    capabilities: serde_json::Value,
     _guard: std::sync::MutexGuard<'static, ()>,
 }
 
@@ -119,7 +121,7 @@ impl ServerFixture {
         // `Root::Symlinked` puts the files in `<base>/real` and hands the
         // client `<base>/link`, so every path it sends crosses the link.
         let (root, contents_at) = match kind {
-            Root::Real | Root::Detached => (base.clone(), base.clone()),
+            Root::Real | Root::Detached | Root::EmptyFolders => (base.clone(), base.clone()),
             Root::Symlinked => (base.join("link"), base.join("real")),
         };
         std::fs::create_dir_all(&contents_at).expect("workspace dir");
@@ -157,14 +159,21 @@ impl ServerFixture {
             responses: HashMap::new(),
             log: Vec::new(),
             load_failed: false,
+            capabilities: serde_json::Value::Null,
             _guard: guard,
         };
-        fixture.initialize(imports, kind != Root::Detached);
+        fixture.initialize(imports, kind);
         fixture
     }
 
-    fn initialize(&mut self, imports: Option<bool>, has_workspace: bool) {
+    fn initialize(&mut self, imports: Option<bool>, kind: Root) {
         let root_url = Url::from_directory_path(&self.root).expect("root url");
+        let has_workspace = kind != Root::Detached;
+        let folders = match kind {
+            Root::Detached => serde_json::Value::Null,
+            Root::EmptyFolders => serde_json::json!([]),
+            _ => serde_json::json!([{ "uri": root_url, "name": "fixture" }]),
+        };
         let completion_properties = if imports.unwrap_or(false) {
             vec!["documentation", "additionalTextEdits"]
         } else {
@@ -175,7 +184,7 @@ impl ServerFixture {
             serde_json::json!({
                 "processId": std::process::id(),
                 "rootUri": has_workspace.then_some(&root_url),
-                "workspaceFolders": has_workspace.then_some(serde_json::json!([{ "uri": root_url, "name": "fixture" }])),
+                "workspaceFolders": folders,
                 "capabilities": {
                     "window": { "workDoneProgress": true },
                     "textDocument": if imports.is_some() { serde_json::json!({
@@ -192,7 +201,8 @@ impl ServerFixture {
                 },
             }),
         );
-        self.wait_for_response(id);
+        let response = self.wait_for_response(id);
+        self.capabilities = response.result.expect("initialize response")["capabilities"].clone();
         self.notify("initialized", serde_json::json!({}));
         // The scan is asynchronous; its completion is what "ready" means.
         self.wait_until("workspace loading to finish", |f| {
@@ -543,6 +553,63 @@ fn mentions(diags: &[lsp_types::Diagnostic], needle: &str) -> bool {
 /// site on its own, because priming here finishes before the wave starts;
 /// `eviction_waits_for_the_pool_and_precedes_the_wave` holds that one by
 /// counting call sites.
+#[test]
+fn empty_workspace_folders_use_the_clients_root_uri() {
+    let source = "function bad() -> int = true\n";
+    let mut server = ServerFixture::open(
+        "empty-workspace-folders",
+        &[("model/riscv.sail_project", "Main { files types.sail }"), ("model/types.sail", source)],
+        Root::EmptyFolders,
+    );
+    server.did_open("model/types.sail", source);
+    let diagnostics = server.pull("model/types.sail");
+    assert_eq!(errors(&diagnostics), 1, "{diagnostics:?}");
+    assert!(!mentions(&diagnostics, "not part of a loaded Sail project"), "{diagnostics:?}");
+    assert!(server
+        .log
+        .iter()
+        .any(|m| m.contains("Loaded Sail project:") && m.contains("riscv.sail_project")));
+}
+
+#[test]
+fn advertised_workspace_folder_changes_attach_already_open_files() {
+    let source = "function bad() -> int = true\n";
+    let mut server = ServerFixture::open(
+        "late-workspace-folder",
+        &[("model/riscv.sail_project", "Main { files types.sail }"), ("model/types.sail", source)],
+        Root::Detached,
+    );
+    server.did_open("model/types.sail", source);
+    assert!(mentions(&server.pull("model/types.sail"), "not part of a loaded Sail project"));
+    // Zed only sends additions when the server advertises changeNotifications.
+    let folders = &server.capabilities["workspace"]["workspaceFolders"];
+    assert_eq!(folders["supported"], true, "{folders}");
+    assert_eq!(folders["changeNotifications"], true, "{folders}");
+    let root = Url::from_directory_path(&server.root).unwrap();
+    server.notify(
+        "workspace/didChangeWorkspaceFolders",
+        serde_json::json!({
+            "event": {"added": [{"uri": root, "name": "fixture"}], "removed": []}
+        }),
+    );
+    server.wait_for_diagnostics(
+        "model/types.sail",
+        "project attached after initialization",
+        |ds| errors(ds) == 1 && !mentions(ds, "not part of a loaded Sail project"),
+    );
+    server.notify(
+        "workspace/didChangeWorkspaceFolders",
+        serde_json::json!({
+            "event": {"added": [], "removed": [{"uri": root, "name": "fixture"}]}
+        }),
+    );
+    server.wait_for_diagnostics(
+        "model/types.sail",
+        "project detached after removing its folder",
+        |ds| errors(ds) == 0 && mentions(ds, "not part of a loaded Sail project"),
+    );
+}
+
 #[test]
 fn failed_initial_load_stays_unlinked_until_explicit_configuration_recovers() {
     let source = "function bad() -> int = true\n";

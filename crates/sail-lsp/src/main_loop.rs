@@ -456,16 +456,30 @@ pub fn run_server(connection: Connection) {
     let supports_progress = state.client_caps.work_done_progress_support();
     state.supports_progress = supports_progress;
 
-    // Workspace scan: discover all .sail files from workspace folders.
+    // Discover projects from the client's workspace roots.
     // Initial scan goes through the same fetch_workspaces() path
     // as reloads, ensuring consistent behavior.
-    let folders = init_params.workspace_folders.unwrap_or_else(|| {
-        init_params
-            .root_uri
-            .into_iter()
-            .map(|uri| WorkspaceFolder { uri, name: "workspace".into() })
-            .collect()
-    });
+    // Zed may initialize with an empty folder list and a valid rootUri.
+    // As in RA, an empty list must not discard that explicit root.
+    let folders =
+        init_params.workspace_folders.filter(|folders| !folders.is_empty()).unwrap_or_else(|| {
+            init_params
+                .root_uri
+                .into_iter()
+                .map(|uri| WorkspaceFolder { uri, name: "workspace".into() })
+                .collect()
+        });
+    state.log_message(
+        MessageType::INFO,
+        format!(
+            "Workspace roots from initialize: {}",
+            if folders.is_empty() {
+                "<none>".to_owned()
+            } else {
+                folders.iter().map(|folder| folder.uri.as_str()).collect::<Vec<_>>().join(", ")
+            },
+        ),
+    );
     if !folders.is_empty() {
         let mut disk_folders = std::collections::HashSet::new();
         for folder in folders {
