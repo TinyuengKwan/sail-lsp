@@ -328,6 +328,10 @@ impl<'t> Parser<'t> {
                     }
                     pm.complete(self, SK::PARAM_LIST);
                 }
+                if matches!(item_keyword, T![union] | T![struct]) && self.at(T![,]) {
+                    self.bump_any();
+                    self.parse_type_expr(TYPE_RECOVERY.union(TokenSet::new(&[T![=]])));
+                }
                 if self.at(T![:]) {
                     self.bump_any();
                     self.parse_type_expr(TYPE_RECOVERY);

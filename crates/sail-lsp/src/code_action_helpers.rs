@@ -16,6 +16,14 @@ pub fn code_action_kind_allowed(
         .any(|kind| action.starts_with(kind.as_str()) || kind.as_str().starts_with(action))
 }
 
+/// Cheap source identity carried by lazy actions to reject stale edits.
+pub fn source_fingerprint(text: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hash);
+    format!("{:016x}", hash.finish())
+}
+
 /// The edit an unresolved code action carries until the client asks for it.
 ///
 /// It used to be `{uri, edits}` — one file — because a `CodeAction` carried

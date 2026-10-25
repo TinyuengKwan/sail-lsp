@@ -118,17 +118,14 @@ mod tests {
         let _ = gate_tx.send(());
         assert_eq!(receiver.recv().expect("the task answers"), 7);
 
-        // Its panic is the point; the default hook would print it.
-        let hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
         pool.spawn(ThreadIntent::Worker, || panic!("the worker gives up"));
-        for _ in 0..1000 {
-            if pool.is_empty() {
-                break;
-            }
-            std::thread::yield_now();
+        // Yielding a fixed number of times does not guarantee the worker
+        // gets scheduled, especially while other test binaries are busy.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !pool.is_empty() {
+            assert!(std::time::Instant::now() < deadline, "a panicking task is still counted out");
+            std::thread::sleep(std::time::Duration::from_millis(1));
         }
-        std::panic::set_hook(hook);
         assert!(pool.is_empty(), "a panicking task is still counted out");
     }
 

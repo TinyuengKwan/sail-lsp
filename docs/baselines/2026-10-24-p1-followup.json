@@ -1,0 +1,2403 @@
+{
+  "schema_version": 1,
+  "date_utc": "2026-10-24",
+  "scope": "P1 follow-up: extended upstream semantic alignment and classification/remediation of deferred RISC-V constraints",
+  "source": {
+    "checkpoint_commit": "6316568cfdb8ee1eee733eb6de4393b2940df4c1",
+    "result": "Uncommitted changes, including preexisting ablation simplifications; historical baselines preserved.",
+    "rust_and_cargo_source_sha256": "c5ba02b78b8d11dd8491139ed9c429d3e253217d33112e283b8e0566de5fa8c3",
+    "hash_method": "SHA256 of sorted rg --files paths (*.rs, Cargo.toml, Cargo.lock, rust-toolchain.toml), each path + NUL + contents + NUL.",
+    "sail_commit": "ac09f8870b9d85e528e2a3436150b03b9d805d40",
+    "sail_riscv_commit": "20690c8a8d6ccbb0e6adea8e2977efd3adaf8391",
+    "toolchain": "rustc 1.97.1 (8bab26f4f 2026-07-14)"
+  },
+  "fixes": [
+    {
+      "area": "extended corpus",
+      "changes": [
+        "Join array element ranges without identifying distinct singleton values (bitvec_operation).",
+        "Treat implicit numeric parameters as numeric scalars (splitreturn).",
+        "Retain constructor existential tuple evidence and parse constructor parameter patterns (ast_with_dep_tuple).",
+        "Open subrange endpoint finite-set evidence (enummatch).",
+        "Retain literal evidence in constructor arguments; never substitute the type name int as a numeric witness (existentials2).",
+        "Propagate the surviving branch predicate after an escaping then or else branch (throw_fact)."
+      ]
+    },
+    {
+      "area": "deferred obligations",
+      "changes": [
+        "Expand numeric and Boolean aliases in goals and assumptions, preserving complete conditional aliases.",
+        "Preserve Boolean identities, mapping equivalences, and global finite-set binders.",
+        "Project only logically implied supported assumptions for SMT entailment.",
+        "Replay confirmed overload substitutions after probe rollback; bind exact numeric inference witnesses without binding caller-owned indices.",
+        "Open each source range value for existential introduction; keep conditional existential witnesses distinct and guard their predicates.",
+        "Preserve loop endpoint, symbolic exponentiation, and existential arithmetic evidence.",
+        "Add nonnegative constraints for Nat kind parameters.",
+        "Cancel common polynomial terms, including pure conditional expressions, before enumerating residual values."
+      ]
+    },
+    {
+      "area": "diagnostics and validation",
+      "changes": [
+        "Reject incompatible call result candidates and report the full call with original parameter names.",
+        "Include active dependency diagnostics in the conformance oracle comparison.",
+        "Regenerate stale upstream oracle against the pinned current checkout.",
+        "Replace task-pool fixed-yield polling with a deadline; avoid changing process-wide panic hooks."
+      ]
+    }
+  ],
+  "validation": {
+    "workspace_command": "cargo +1.97.1 test --workspace --lib -- --test-threads=1",
+    "workspace_passed": 2256,
+    "workspace_failed": 0,
+    "workspace_ignored": 4,
+    "workspace_suites": 27,
+    "all_targets_command": "cargo +1.97.1 check --workspace --all-targets",
+    "all_targets_success": true,
+    "regressions": [
+      "Exact upstream throw_fact fixture",
+      "Both escaping branch directions",
+      "Non-escaping branches must not establish the condition",
+      "Conditional existential predicates must not make both branches unreachable",
+      "Negative Nat instantiation",
+      "Nonzero-factor witness cancellation, including zero-factor rejection"
+    ]
+  },
+  "conformance": {
+    "strict": {
+      "pass": [
+        276,
+        276
+      ],
+      "fail": [
+        217,
+        217
+      ],
+      "command": "target/release/examples/conformance_check ../sail/test/typecheck"
+    },
+    "default": {
+      "pass": [
+        276,
+        276
+      ],
+      "fail": [
+        216,
+        217
+      ],
+      "expected_difference": "negative_bits_list is accepted by upstream without --strict-bitvector",
+      "command": "target/release/examples/conformance_check --default-bitvector --typecheck-only ../sail/test/typecheck"
+    },
+    "targeted_rejection_evidence": {
+      "negative_bits": "prelude: 59 files from /home/clair/tinyueng_workplace/sail-lsp/crates/sail-lsp/data/sail-lib\nTypecheck mode: strict-bitvector=true; extended corpora: default\n## FALSE POSITIVES (upstream accepts, sail-lsp errors)\n\n## FALSE NEGATIVES (upstream rejects, sail-lsp silent)\n\n============================================================\nCONFORMANCE vs upstream Sail typecheck suite (1166 ms)\n============================================================\n  pass/: 0/0 clean   (0 files with false-positive errors)\n  fail/: 7/7 rejected (0 false negatives)\n         7/7 at upstream's caret, 0/7 in upstream's words\n         0 say upstream's words somewhere else\n         0 name an existential witness (`'ex1#`) no other process can reproduce\n\n  fail/ disagreements, by upstream's own message:\n      4  Types are not well-formed within this type definition. Note that recursive types are forbidden.\n         negative_bits_existential.sail: Well-formedness check failed for type: constraint 'n >= 0 does not hold\n         negative_bits_struct2.sail: Well-formedness check failed for type: constraint -3 >= 0 does not hold\n         negative_bits_union.sail: Well-formedness check failed for type: constraint 'n - 2 >= 0 does not hold\n         negative_bits_union2.sail: Well-formedness check failed for type: constraint 'n - 2 >= 0 does not hold\n      3  Well-formedness check failed for type\n         negative_bits_list.sail: Well-formedness check failed for type: constraint -1 >= 0 does not hold\n         negative_bits_struct.sail: Well-formedness check failed for type: constraint 1 >= 2 does not hold\n         negative_bits_tuple.sail: Well-formedness check failed for type: constraint -1 >= 0 does not hold\n\n\n  False-positive diagnostics by code:\n",
+      "procstate1": "prelude: 59 files from /home/clair/tinyueng_workplace/sail-lsp/crates/sail-lsp/data/sail-lib\nTypecheck mode: strict-bitvector=true; extended corpora: default\n## FALSE POSITIVES (upstream accepts, sail-lsp errors)\n\n## FALSE NEGATIVES (upstream rejects, sail-lsp silent)\n\n============================================================\nCONFORMANCE vs upstream Sail typecheck suite (528 ms)\n============================================================\n  pass/: 1/1 clean   (0 files with false-positive errors)\n  fail/: 1/1 rejected (0 false negatives)\n         1/1 at upstream's caret, 0/1 in upstream's words\n         0 say upstream's words somewhere else\n         0 name an existential witness (`'ex1#`) no other process can reproduce\n\n  fail/ disagreements, by upstream's own message:\n      1  Types are not well-formed within this type definition. Note that recursive types are forbidden.\n         procstate1.sail: Well-formedness check failed for type: constraint 'n >= 0 does not hold\n\n\n  False-positive diagnostics by code:\n"
+    },
+    "extended": [
+      {
+        "corpus": "builtins",
+        "agree": 30,
+        "false_positive": 0,
+        "false_negative": 0,
+        "scope_only": 0
+      },
+      {
+        "corpus": "float",
+        "agree": 19,
+        "false_positive": 0,
+        "false_negative": 0,
+        "scope_only": 1
+      },
+      {
+        "corpus": "lean",
+        "agree": 37,
+        "false_positive": 0,
+        "false_negative": 0,
+        "scope_only": 0
+      },
+      {
+        "corpus": "mono",
+        "agree": 41,
+        "false_positive": 0,
+        "false_negative": 0,
+        "scope_only": 0
+      },
+      {
+        "corpus": "ocaml",
+        "agree": 4,
+        "false_positive": 0,
+        "false_negative": 0,
+        "scope_only": 15
+      },
+      {
+        "corpus": "pattern_completeness",
+        "agree": 43,
+        "false_positive": 0,
+        "false_negative": 0,
+        "scope_only": 0
+      },
+      {
+        "corpus": "rocq",
+        "agree": 59,
+        "false_positive": 0,
+        "false_negative": 0,
+        "scope_only": 1
+      },
+      {
+        "corpus": "smt",
+        "agree": 122,
+        "false_positive": 0,
+        "false_negative": 0,
+        "scope_only": 0
+      }
+    ],
+    "oracle": {
+      "path": "docs/upstream-accepts.txt",
+      "sha256": "4252d064ab0a3135b10b5eab05651b844a7beef0e0e1bca6966b27f0372be0b5",
+      "rows": 372,
+      "OK": 344,
+      "SCOPE": 17,
+      "REJECT": 11,
+      "notes": "Old corpus rows included deleted test/c files. Two previously reported false positives were stale oracle records involving missing lib/regfp.sail. Current active include diagnostics are checked; scope-only outcomes are excluded from semantic agreement."
+    }
+  },
+  "riscv": {
+    "command": "target/release/examples/analysis_stats --constraint-report target/p1-followup/constraints-verified.json ../sail-riscv/model/riscv.sail_project",
+    "metrics": {
+      "workspace_load": {
+        "value": 662,
+        "unit": "ms"
+      },
+      "parse_all": {
+        "value": 1,
+        "unit": "ms"
+      },
+      "total_lines": {
+        "value": 29968,
+        "unit": "lines"
+      },
+      "item_tree_all": {
+        "value": 13,
+        "unit": "ms"
+      },
+      "body_lowering": {
+        "value": 149,
+        "unit": "ms"
+      },
+      "bodies": {
+        "value": 3318,
+        "unit": "count"
+      },
+      "scattered_type_clauses": {
+        "value": 471,
+        "unit": "count"
+      },
+      "infer_all": {
+        "value": 30743,
+        "unit": "ms"
+      },
+      "callables": {
+        "value": 3318,
+        "unit": "count"
+      },
+      "exprs": {
+        "value": 81543,
+        "unit": "count"
+      },
+      "unknown type": {
+        "value": 0,
+        "unit": "#"
+      },
+      "partially unknown type": {
+        "value": 0,
+        "unit": "#"
+      },
+      "type mismatches": {
+        "value": 0,
+        "unit": "#"
+      },
+      "diagnostics_all": {
+        "value": 3124,
+        "unit": "ms"
+      },
+      "inlay_hints_all": {
+        "value": 444,
+        "unit": "ms"
+      },
+      "inlay_hints": {
+        "value": 18278,
+        "unit": "count"
+      },
+      "semantic_tokens_avg": {
+        "value": 58,
+        "unit": "µs"
+      },
+      "goto_def_resolve_pct": {
+        "value": 94,
+        "unit": "%"
+      },
+      "hover_answer_pct": {
+        "value": 93,
+        "unit": "%"
+      },
+      "symbol_index": {
+        "value": 19,
+        "unit": "ms"
+      },
+      "symbols": {
+        "value": 12472,
+        "unit": "count"
+      },
+      "prime_caches_parallel": {
+        "value": 7923,
+        "unit": "ms"
+      },
+      "prime_caches_sequential": {
+        "value": 27624,
+        "unit": "ms"
+      },
+      "total_analysis": {
+        "value": 35159,
+        "unit": "ms"
+      }
+    },
+    "diagnostics_by_severity": {
+      "Hint": 6,
+      "Warning": 62
+    },
+    "constraint_report": {
+      "schema_version": 1,
+      "scope": "committed_deferred_obligations",
+      "sites": [
+        {
+          "assumptions": [
+            "3 <= vlen_exp & vlen_exp <= 16",
+            "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+            "xlen in {32, 64}",
+            "'_sk1__set in {8, 16, 32, 64}",
+            "-3 <= '_sk2_LMUL_pow & '_sk2_LMUL_pow <= 3",
+            "1 <= '_sk3_num_elem & '_sk3_num_elem <= vlen",
+            "1 <= '_sk4_SEW_frac_pow & '_sk4_SEW_frac_pow <= 3",
+            "true",
+            "<unsupported>",
+            "~(<unsupported> | ~(valid_reg_overlap(vs2, vd, LMUL_pow_div, LMUL_pow)))",
+            "'_sk1__set / 2 ^ '_sk4_SEW_frac_pow >= 8",
+            "SEW_div >= 8",
+            "0 <= '_sk11__loop_index & '_sk11__loop_index <= '_sk3_num_elem - 1",
+            "1 <= '_sk3_num_elem & '_sk3_num_elem <= 2 ^ vlen_exp"
+          ],
+          "callable": "execute",
+          "cause": "Compatibility",
+          "clause": 23,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_arith_insts.sail",
+          "goal": "'_sk1__set >= '_sk1__set / 2 ^ '_sk4_SEW_frac_pow",
+          "location": {
+            "column": 23,
+            "end": 76291,
+            "line": 1903,
+            "source": "VEXT8_ZVF8 => zero_extend(vs2_val[i]),",
+            "start": 76268
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk11__loop_index",
+            "'_sk1__set",
+            "'_sk2_LMUL_pow",
+            "'_sk3_num_elem",
+            "'_sk4_SEW_frac_pow"
+          ],
+          "status": "unknown",
+          "independent_replay_index": 1
+        },
+        {
+          "assumptions": [
+            "3 <= vlen_exp & vlen_exp <= 16",
+            "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+            "xlen in {32, 64}",
+            "'_sk1__set in {8, 16, 32, 64}",
+            "-3 <= '_sk2_LMUL_pow & '_sk2_LMUL_pow <= 3",
+            "1 <= '_sk3_num_elem & '_sk3_num_elem <= vlen",
+            "1 <= '_sk4_SEW_frac_pow & '_sk4_SEW_frac_pow <= 3",
+            "true",
+            "<unsupported>",
+            "~(<unsupported> | ~(valid_reg_overlap(vs2, vd, LMUL_pow_div, LMUL_pow)))",
+            "'_sk1__set / 2 ^ '_sk4_SEW_frac_pow >= 8",
+            "SEW_div >= 8",
+            "0 <= '_sk11__loop_index & '_sk11__loop_index <= '_sk3_num_elem - 1",
+            "1 <= '_sk3_num_elem & '_sk3_num_elem <= 2 ^ vlen_exp"
+          ],
+          "callable": "execute",
+          "cause": "Compatibility",
+          "clause": 23,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_arith_insts.sail",
+          "goal": "'_sk1__set >= '_sk1__set / 2 ^ '_sk4_SEW_frac_pow",
+          "location": {
+            "column": 23,
+            "end": 76338,
+            "line": 1904,
+            "source": "VEXT8_SVF8 => sign_extend(vs2_val[i]),",
+            "start": 76315
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk11__loop_index",
+            "'_sk1__set",
+            "'_sk2_LMUL_pow",
+            "'_sk3_num_elem",
+            "'_sk4_SEW_frac_pow"
+          ],
+          "status": "unknown",
+          "independent_replay_index": 2
+        },
+        {
+          "assumptions": [
+            "(0 >= '_sk1_LMUL_pow & '_sk8__sk7__sk6__sk5_z == 0 | 0 < '_sk1_LMUL_pow & '_sk8__sk7__sk6__sk5_z == '_sk1_LMUL_pow)",
+            "3 <= vlen_exp & vlen_exp <= 16",
+            "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+            "-3 <= '_sk1_LMUL_pow & '_sk1_LMUL_pow <= 3",
+            "'_sk2__set in {8, 16, 32, 64}",
+            "'_sk3__set in {8, 16, 32, 64}",
+            "vlen >= '_sk3__set",
+            "vlen >= SEW",
+            "0 >= '_sk1_LMUL_pow & '_sk5_z == 0 | 0 < '_sk1_LMUL_pow & '_sk5_z == '_sk1_LMUL_pow",
+            "(0 >= '_sk1_LMUL_pow & '_sk6__sk5_z == 0 | 0 < '_sk1_LMUL_pow & '_sk6__sk5_z == '_sk1_LMUL_pow)",
+            "(0 >= '_sk1_LMUL_pow & '_sk7__sk6__sk5_z == 0 | 0 < '_sk1_LMUL_pow & '_sk7__sk6__sk5_z == '_sk1_LMUL_pow)",
+            "2 ^ vlen_exp >= '_sk3__set",
+            "2 ^ vlen_exp >= SEW"
+          ],
+          "callable": "get_num_elem",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_control.sail",
+          "goal": "1 <= div(2 ^ '_sk8__sk7__sk6__sk5_z * 2 ^ vlen_exp, '_sk3__set) & div(2 ^ '_sk8__sk7__sk6__sk5_z * 2 ^ vlen_exp, '_sk3__set) <= 2 ^ vlen_exp",
+          "location": {
+            "column": 3,
+            "end": 2723,
+            "line": 39,
+            "source": "(2 ^ max(0, LMUL_pow)) * vlen / SEW",
+            "start": 2688
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk1_LMUL_pow",
+            "'_sk2__set",
+            "'_sk3__set",
+            "'_sk5_z",
+            "'_sk6__sk5_z",
+            "'_sk7__sk6__sk5_z",
+            "'_sk8__sk7__sk6__sk5_z"
+          ],
+          "status": "unknown",
+          "independent_replay_index": 3
+        },
+        {
+          "assumptions": [
+            "3 <= vlen_exp & vlen_exp <= 16",
+            "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+            "xlen in {32, 64}",
+            "'sew in {8, 16, 32, 64}",
+            "0 <= '_sk1_index",
+            "'sew <= vlen",
+            "EEW <= vlen",
+            "'sew <= 2 ^ vlen_exp",
+            "EEW <= 2 ^ vlen_exp"
+          ],
+          "callable": "read_single_element",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_control.sail",
+          "goal": "2 ^ vlen_exp % 'sew == 0",
+          "location": {
+            "column": 3,
+            "end": 3007,
+            "line": 46,
+            "source": "static_assert(vlen % EEW == 0);",
+            "start": 2977
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk1_index"
+          ],
+          "status": "unknown",
+          "independent_replay_index": 4
+        },
+        {
+          "assumptions": [
+            "3 <= vlen_exp & vlen_exp <= 16",
+            "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+            "xlen in {32, 64}",
+            "'sew in {8, 16, 32, 64}",
+            "0 <= '_sk1_index",
+            "'sew <= vlen",
+            "EEW <= vlen",
+            "'sew <= 2 ^ vlen_exp",
+            "EEW <= 2 ^ vlen_exp"
+          ],
+          "callable": "write_single_element",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_control.sail",
+          "goal": "2 ^ vlen_exp % 'sew == 0",
+          "location": {
+            "column": 3,
+            "end": 4753,
+            "line": 88,
+            "source": "static_assert(vlen % EEW == 0);",
+            "start": 4723
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk1_index"
+          ],
+          "status": "unknown",
+          "independent_replay_index": 5
+        },
+        {
+          "assumptions": [
+            "3 <= vlen_exp & vlen_exp <= 16",
+            "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+            "xlen in {32, 64}",
+            "'n >= 0 & 'sew in {8, 16, 32, 64}",
+            "-3 <= '_sk1_LMUL_pow & '_sk1_LMUL_pow <= 3",
+            "'_sk1_LMUL_pow >= 0 & '_sk3_z == '_sk1_LMUL_pow | '_sk1_LMUL_pow < 0 & '_sk3_z == 0",
+            "('_sk1_LMUL_pow >= 0 & '_sk4__sk3_z == '_sk1_LMUL_pow | '_sk1_LMUL_pow < 0 & '_sk4__sk3_z == 0)",
+            "'sew <= vlen",
+            "SEW <= vlen",
+            "'sew <= 2 ^ vlen_exp",
+            "SEW <= 2 ^ vlen_exp"
+          ],
+          "callable": "write_vreg",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_control.sail",
+          "goal": "2 ^ vlen_exp % 'sew == 0",
+          "location": {
+            "column": 3,
+            "end": 6106,
+            "line": 123,
+            "source": "static_assert(vlen % SEW == 0);",
+            "start": 6076
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk1_LMUL_pow",
+            "'_sk3_z",
+            "'_sk4__sk3_z"
+          ],
+          "status": "unknown",
+          "independent_replay_index": 6
+        },
+        {
+          "assumptions": [
+            "xlen in {32, 64}",
+            "'n > 0",
+            "'_sk1__set in {8, 16, 32, 64}",
+            "0 <= '_sk2_i",
+            "0 <= '_sk5__loop_index & '_sk5__loop_index <= 3",
+            "('_sk5__loop_index + 1) * '_sk1__set <= 'n",
+            "(j + 1) * SEW <= 'n"
+          ],
+          "callable": "write_velem_quad",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_utils_insts.sail",
+          "goal": "0 <= 4 * '_sk2_i + '_sk5__loop_index",
+          "location": {
+            "column": 5,
+            "end": 11195,
+            "line": 244,
+            "source": "write_single_element(SEW, 4 * i + j, vd, input[(j + 1) * SEW - 1 .. j * SEW]);",
+            "start": 11118
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk1__set",
+            "'_sk2_i",
+            "'_sk5__loop_index"
+          ],
+          "status": "unknown",
+          "independent_replay_index": 8
+        },
+        {
+          "assumptions": [
+            "xlen in {32, 64}",
+            "'n > 0",
+            "'_sk1__set in {8, 16, 32, 64}",
+            "0 <= '_sk2_i",
+            "0 <= '_sk5__loop_index & '_sk5__loop_index <= 3",
+            "('_sk5__loop_index + 1) * '_sk1__set <= 'n",
+            "(j + 1) * SEW <= 'n"
+          ],
+          "callable": "write_velem_quad",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_utils_insts.sail",
+          "goal": "0 <= 4 * '_sk2_i + '_sk5__loop_index",
+          "location": {
+            "column": 5,
+            "end": 11195,
+            "line": 244,
+            "source": "write_single_element(SEW, 4 * i + j, vd, input[(j + 1) * SEW - 1 .. j * SEW]);",
+            "start": 11118
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk1__set",
+            "'_sk2_i",
+            "'_sk5__loop_index"
+          ],
+          "status": "unknown",
+          "independent_replay_index": 8
+        },
+        {
+          "assumptions": [
+            "xlen in {32, 64}",
+            "'n >= 0 & 'm in {8, 16, 32, 64} & 'q > 0 & 'q <= 8",
+            "true",
+            "true"
+          ],
+          "callable": "read_vreg_seg",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_utils_insts.sail",
+          "goal": "'q * 'm >= 0",
+          "location": {
+            "column": 56,
+            "end": 20658,
+            "line": 480,
+            "source": "var result : vector('n, bits('q * 'm)) = vector_init(zeros());",
+            "start": 20651
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [],
+          "status": "unknown",
+          "independent_replay_index": 9
+        },
+        {
+          "assumptions": [
+            "xlen in {32, 64}",
+            "'n >= 0 & 'm in {8, 16, 32, 64} & 'q > 0 & 'q <= 8",
+            "true",
+            "true",
+            "0 <= '_sk7__loop_index & '_sk7__loop_index <= 'n - 1"
+          ],
+          "callable": "read_vreg_seg",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_utils_insts.sail",
+          "goal": "'q * 'm >= 0",
+          "location": {
+            "column": 17,
+            "end": 20882,
+            "line": 485,
+            "source": "result[i] = zeros('q * 'm);",
+            "start": 20868
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk7__loop_index"
+          ],
+          "status": "unknown",
+          "independent_replay_index": 10
+        },
+        {
+          "assumptions": [
+            "xlen in {32, 64}",
+            "'n >= 0 & 'm in {8, 16, 32, 64} & 'q > 0 & 'q <= 8",
+            "true",
+            "true",
+            "0 <= '_sk7__loop_index & '_sk7__loop_index <= 'n - 1",
+            "0 <= '_sk9__loop_index & '_sk9__loop_index <= 'q - 1"
+          ],
+          "callable": "read_vreg_seg",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_utils_insts.sail",
+          "goal": "'q * 'm >= 'm",
+          "location": {
+            "column": 32,
+            "end": 20980,
+            "line": 487,
+            "source": "result[i] = result[i] | (zero_extend(vreg_list[j][i]) << (j * 'm))",
+            "start": 20952
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk7__loop_index",
+            "'_sk9__loop_index"
+          ],
+          "status": "unknown",
+          "independent_replay_index": 11
+        },
+        {
+          "assumptions": [
+            "xlen in {32, 64}",
+            "'v in {32, 39, 48, 57}",
+            "0 <= '_sk1_level & '_sk1_level <= (if 'v == 32 then 1 else (if 'v == 39 then 2 else (if 'v == 48 then 3 else 4)))",
+            "true",
+            "0 <= '_sk4_index & '_sk4_index <= num_tlb_entries - 1",
+            "0 <= '_sk4_index & '_sk4_index <= 2 ^ num_tlb_entries_exp - 1",
+            "0 <= '_sk4_index & '_sk4_index <= 2 ^ 6 - 1"
+          ],
+          "callable": "add_to_TLB",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/sys/vmem_tlb.sail",
+          "goal": "'v - 12 >= '_sk1_level * (if 'v == 32 then 10 else 9)",
+          "location": {
+            "column": 21,
+            "end": 5981,
+            "line": 157,
+            "source": "let vpn = vpn & ~(zero_extend(levelMask));",
+            "start": 5959
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk1_level",
+            "'_sk4_index"
+          ],
+          "status": "unknown",
+          "independent_replay_index": 14
+        },
+        {
+          "assumptions": [
+            "xlen in {32, 64}",
+            "'v in {32, 39, 48, 57}",
+            "0 <= '_sk1_level & '_sk1_level <= (if 'v == 32 then 1 else (if 'v == 39 then 2 else (if 'v == 48 then 3 else 4)))",
+            "true",
+            "0 <= '_sk4_index & '_sk4_index <= num_tlb_entries - 1",
+            "0 <= '_sk4_index & '_sk4_index <= 2 ^ num_tlb_entries_exp - 1",
+            "0 <= '_sk4_index & '_sk4_index <= 2 ^ 6 - 1"
+          ],
+          "callable": "add_to_TLB",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/sys/vmem_tlb.sail",
+          "goal": "(if 'v == 32 then 22 else 44) >= '_sk1_level * (if 'v == 32 then 10 else 9)",
+          "location": {
+            "column": 21,
+            "end": 6026,
+            "line": 158,
+            "source": "let ppn = ppn & ~(zero_extend(levelMask));",
+            "start": 6004
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk1_level",
+            "'_sk4_index"
+          ],
+          "status": "unknown",
+          "independent_replay_index": 15
+        },
+        {
+          "assumptions": [
+            "xlen in {32, 64}",
+            "'v in {32, 39, 48, 57}",
+            "0 <= '_sk1_level & '_sk1_level <= (if 'v == 32 then 1 else (if 'v == 39 then 2 else (if 'v == 48 then 3 else 4)))",
+            "true",
+            "0 <= '_sk4_index & '_sk4_index <= num_tlb_entries - 1",
+            "0 <= '_sk4_index & '_sk4_index <= 2 ^ num_tlb_entries_exp - 1",
+            "0 <= '_sk4_index & '_sk4_index <= 2 ^ 6 - 1"
+          ],
+          "callable": "add_to_TLB",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/sys/vmem_tlb.sail",
+          "goal": "57 - 12 >= '_sk1_level * (if 'v == 32 then 10 else 9)",
+          "location": {
+            "column": 46,
+            "end": 6318,
+            "line": 164,
+            "source": "levelMask = zero_extend(levelMask),",
+            "start": 6296
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk1_level",
+            "'_sk4_index"
+          ],
+          "status": "unknown",
+          "independent_replay_index": 16
+        },
+        {
+          "assumptions": [
+            "xlen in {32, 64}",
+            "'v in {32, 39, 48, 57}",
+            "0 <= '_sk1_level & '_sk1_level <= (if 'v == 32 then 1 else (if 'v == 39 then 2 else (if 'v == 48 then 3 else 4)))",
+            "true",
+            "0 <= '_sk4_index & '_sk4_index <= num_tlb_entries - 1",
+            "0 <= '_sk4_index & '_sk4_index <= 2 ^ num_tlb_entries_exp - 1",
+            "0 <= '_sk4_index & '_sk4_index <= 2 ^ 6 - 1"
+          ],
+          "callable": "add_to_TLB",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/sys/vmem_tlb.sail",
+          "goal": "57 - 12 >= 'v - 12",
+          "location": {
+            "column": 46,
+            "end": 6381,
+            "line": 165,
+            "source": "vpn       = sign_extend(vpn),",
+            "start": 6365
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk1_level",
+            "'_sk4_index"
+          ],
+          "status": "unknown",
+          "independent_replay_index": 17
+        }
+      ],
+      "smt_enabled": true,
+      "totals": {
+        "proved": 2904,
+        "refuted": 0,
+        "total": 2919,
+        "unknown": 15
+      },
+      "unknown_by_reason": {
+        "budget_exhausted": 15
+      },
+      "workspace": "/home/clair/tinyueng_workplace/sail-riscv/model/riscv.sail_project"
+    },
+    "historical_obligations": {
+      "total": 3295,
+      "proved": 2719,
+      "refuted": 0,
+      "unknown": 576,
+      "unknown_by_reason": {
+        "not_established": 486,
+        "flexible_witness": 30,
+        "recovery": 26,
+        "unsupported_goal": 18,
+        "budget_exhausted": 16
+      }
+    },
+    "comparison_note": "Obligation totals change when inference preserves stronger evidence or discharges a relation earlier. Expression coverage stays fixed. Remaining unknown obligations are not unknown expression types."
+  },
+  "independent_solver_replay": {
+    "method": "Reparse recorded goal and assumptions with parse_constraint_text, use empty Subst, and invoke the same solver outside a model request. Experimental limits affect only this replay. Earlier normal successes may be reused by solver cache.",
+    "normal_limits": {
+      "total_ms": 200,
+      "per_check_ms": 50,
+      "checks": 64
+    },
+    "experimental_limits": {
+      "total_ms": 3000,
+      "per_check_ms": 500,
+      "checks": 128
+    },
+    "production_budget_changed": false,
+    "sites": [
+      {
+        "assumptions": [
+          "3 <= vlen_exp & vlen_exp <= 16",
+          "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+          "xlen in {32, 64}",
+          "'_sk1__set in {8, 16, 32, 64}",
+          "-3 <= '_sk2_LMUL_pow & '_sk2_LMUL_pow <= 3",
+          "1 <= '_sk3_num_elem & '_sk3_num_elem <= vlen",
+          "1 <= '_sk4_SEW_frac_pow & '_sk4_SEW_frac_pow <= 3",
+          "true",
+          "<unsupported>",
+          "~(<unsupported> | ~(valid_reg_overlap(vs2, vd, LMUL_pow_div, LMUL_pow)))",
+          "'_sk1__set / 2 ^ '_sk4_SEW_frac_pow >= 8",
+          "SEW_div >= 8",
+          "0 <= '_sk11__loop_index & '_sk11__loop_index <= '_sk3_num_elem - 1",
+          "1 <= '_sk3_num_elem & '_sk3_num_elem <= 2 ^ vlen_exp"
+        ],
+        "callable": "execute",
+        "cause": "Compatibility",
+        "clause": 23,
+        "compatibility_types": null,
+        "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_arith_insts.sail",
+        "goal": "'_sk1__set >= '_sk1__set / 2 ^ '_sk4_SEW_frac_pow",
+        "location": {
+          "column": 23,
+          "end": 76244,
+          "line": 1902,
+          "source": "VEXT4_SVF4 => sign_extend(vs2_val[i]),",
+          "start": 76221
+        },
+        "origin_is_fallback": false,
+        "reason": "budget_exhausted",
+        "recovery_types": null,
+        "rigid_variables": [
+          "'_sk11__loop_index",
+          "'_sk1__set",
+          "'_sk2_LMUL_pow",
+          "'_sk3_num_elem",
+          "'_sk4_SEW_frac_pow"
+        ],
+        "status": "unknown"
+      },
+      {
+        "assumptions": [
+          "3 <= vlen_exp & vlen_exp <= 16",
+          "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+          "xlen in {32, 64}",
+          "'_sk1__set in {8, 16, 32, 64}",
+          "-3 <= '_sk2_LMUL_pow & '_sk2_LMUL_pow <= 3",
+          "1 <= '_sk3_num_elem & '_sk3_num_elem <= vlen",
+          "1 <= '_sk4_SEW_frac_pow & '_sk4_SEW_frac_pow <= 3",
+          "true",
+          "<unsupported>",
+          "~(<unsupported> | ~(valid_reg_overlap(vs2, vd, LMUL_pow_div, LMUL_pow)))",
+          "'_sk1__set / 2 ^ '_sk4_SEW_frac_pow >= 8",
+          "SEW_div >= 8",
+          "0 <= '_sk11__loop_index & '_sk11__loop_index <= '_sk3_num_elem - 1",
+          "1 <= '_sk3_num_elem & '_sk3_num_elem <= 2 ^ vlen_exp"
+        ],
+        "callable": "execute",
+        "cause": "Compatibility",
+        "clause": 23,
+        "compatibility_types": null,
+        "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_arith_insts.sail",
+        "goal": "'_sk1__set >= '_sk1__set / 2 ^ '_sk4_SEW_frac_pow",
+        "location": {
+          "column": 23,
+          "end": 76291,
+          "line": 1903,
+          "source": "VEXT8_ZVF8 => zero_extend(vs2_val[i]),",
+          "start": 76268
+        },
+        "origin_is_fallback": false,
+        "reason": "budget_exhausted",
+        "recovery_types": null,
+        "rigid_variables": [
+          "'_sk11__loop_index",
+          "'_sk1__set",
+          "'_sk2_LMUL_pow",
+          "'_sk3_num_elem",
+          "'_sk4_SEW_frac_pow"
+        ],
+        "status": "unknown"
+      },
+      {
+        "assumptions": [
+          "3 <= vlen_exp & vlen_exp <= 16",
+          "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+          "xlen in {32, 64}",
+          "'_sk1__set in {8, 16, 32, 64}",
+          "-3 <= '_sk2_LMUL_pow & '_sk2_LMUL_pow <= 3",
+          "1 <= '_sk3_num_elem & '_sk3_num_elem <= vlen",
+          "1 <= '_sk4_SEW_frac_pow & '_sk4_SEW_frac_pow <= 3",
+          "true",
+          "<unsupported>",
+          "~(<unsupported> | ~(valid_reg_overlap(vs2, vd, LMUL_pow_div, LMUL_pow)))",
+          "'_sk1__set / 2 ^ '_sk4_SEW_frac_pow >= 8",
+          "SEW_div >= 8",
+          "0 <= '_sk11__loop_index & '_sk11__loop_index <= '_sk3_num_elem - 1",
+          "1 <= '_sk3_num_elem & '_sk3_num_elem <= 2 ^ vlen_exp"
+        ],
+        "callable": "execute",
+        "cause": "Compatibility",
+        "clause": 23,
+        "compatibility_types": null,
+        "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_arith_insts.sail",
+        "goal": "'_sk1__set >= '_sk1__set / 2 ^ '_sk4_SEW_frac_pow",
+        "location": {
+          "column": 23,
+          "end": 76338,
+          "line": 1904,
+          "source": "VEXT8_SVF8 => sign_extend(vs2_val[i]),",
+          "start": 76315
+        },
+        "origin_is_fallback": false,
+        "reason": "budget_exhausted",
+        "recovery_types": null,
+        "rigid_variables": [
+          "'_sk11__loop_index",
+          "'_sk1__set",
+          "'_sk2_LMUL_pow",
+          "'_sk3_num_elem",
+          "'_sk4_SEW_frac_pow"
+        ],
+        "status": "unknown"
+      },
+      {
+        "assumptions": [
+          "(0 >= '_sk1_LMUL_pow & '_sk8__sk7__sk6__sk5_z == 0 | 0 < '_sk1_LMUL_pow & '_sk8__sk7__sk6__sk5_z == '_sk1_LMUL_pow)",
+          "3 <= vlen_exp & vlen_exp <= 16",
+          "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+          "-3 <= '_sk1_LMUL_pow & '_sk1_LMUL_pow <= 3",
+          "'_sk2__set in {8, 16, 32, 64}",
+          "'_sk3__set in {8, 16, 32, 64}",
+          "vlen >= '_sk3__set",
+          "vlen >= SEW",
+          "0 >= '_sk1_LMUL_pow & '_sk5_z == 0 | 0 < '_sk1_LMUL_pow & '_sk5_z == '_sk1_LMUL_pow",
+          "(0 >= '_sk1_LMUL_pow & '_sk6__sk5_z == 0 | 0 < '_sk1_LMUL_pow & '_sk6__sk5_z == '_sk1_LMUL_pow)",
+          "(0 >= '_sk1_LMUL_pow & '_sk7__sk6__sk5_z == 0 | 0 < '_sk1_LMUL_pow & '_sk7__sk6__sk5_z == '_sk1_LMUL_pow)",
+          "2 ^ vlen_exp >= '_sk3__set",
+          "2 ^ vlen_exp >= SEW"
+        ],
+        "callable": "get_num_elem",
+        "cause": "Compatibility",
+        "clause": 0,
+        "compatibility_types": null,
+        "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_control.sail",
+        "goal": "1 <= div(2 ^ '_sk8__sk7__sk6__sk5_z * 2 ^ vlen_exp, '_sk3__set) & div(2 ^ '_sk8__sk7__sk6__sk5_z * 2 ^ vlen_exp, '_sk3__set) <= 2 ^ vlen_exp",
+        "location": {
+          "column": 3,
+          "end": 2723,
+          "line": 39,
+          "source": "(2 ^ max(0, LMUL_pow)) * vlen / SEW",
+          "start": 2688
+        },
+        "origin_is_fallback": false,
+        "reason": "budget_exhausted",
+        "recovery_types": null,
+        "rigid_variables": [
+          "'_sk1_LMUL_pow",
+          "'_sk2__set",
+          "'_sk3__set",
+          "'_sk5_z",
+          "'_sk6__sk5_z",
+          "'_sk7__sk6__sk5_z",
+          "'_sk8__sk7__sk6__sk5_z"
+        ],
+        "status": "unknown"
+      },
+      {
+        "assumptions": [
+          "3 <= vlen_exp & vlen_exp <= 16",
+          "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+          "xlen in {32, 64}",
+          "'sew in {8, 16, 32, 64}",
+          "0 <= '_sk1_index",
+          "'sew <= vlen",
+          "EEW <= vlen",
+          "'sew <= 2 ^ vlen_exp",
+          "EEW <= 2 ^ vlen_exp"
+        ],
+        "callable": "read_single_element",
+        "cause": "Compatibility",
+        "clause": 0,
+        "compatibility_types": null,
+        "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_control.sail",
+        "goal": "2 ^ vlen_exp % 'sew == 0",
+        "location": {
+          "column": 3,
+          "end": 3007,
+          "line": 46,
+          "source": "static_assert(vlen % EEW == 0);",
+          "start": 2977
+        },
+        "origin_is_fallback": false,
+        "reason": "budget_exhausted",
+        "recovery_types": null,
+        "rigid_variables": [
+          "'_sk1_index"
+        ],
+        "status": "unknown"
+      },
+      {
+        "assumptions": [
+          "3 <= vlen_exp & vlen_exp <= 16",
+          "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+          "xlen in {32, 64}",
+          "'sew in {8, 16, 32, 64}",
+          "0 <= '_sk1_index",
+          "'sew <= vlen",
+          "EEW <= vlen",
+          "'sew <= 2 ^ vlen_exp",
+          "EEW <= 2 ^ vlen_exp"
+        ],
+        "callable": "write_single_element",
+        "cause": "Compatibility",
+        "clause": 0,
+        "compatibility_types": null,
+        "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_control.sail",
+        "goal": "2 ^ vlen_exp % 'sew == 0",
+        "location": {
+          "column": 3,
+          "end": 4753,
+          "line": 88,
+          "source": "static_assert(vlen % EEW == 0);",
+          "start": 4723
+        },
+        "origin_is_fallback": false,
+        "reason": "budget_exhausted",
+        "recovery_types": null,
+        "rigid_variables": [
+          "'_sk1_index"
+        ],
+        "status": "unknown"
+      },
+      {
+        "assumptions": [
+          "3 <= vlen_exp & vlen_exp <= 16",
+          "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+          "xlen in {32, 64}",
+          "'n >= 0 & 'sew in {8, 16, 32, 64}",
+          "-3 <= '_sk1_LMUL_pow & '_sk1_LMUL_pow <= 3",
+          "'_sk1_LMUL_pow >= 0 & '_sk3_z == '_sk1_LMUL_pow | '_sk1_LMUL_pow < 0 & '_sk3_z == 0",
+          "('_sk1_LMUL_pow >= 0 & '_sk4__sk3_z == '_sk1_LMUL_pow | '_sk1_LMUL_pow < 0 & '_sk4__sk3_z == 0)",
+          "'sew <= vlen",
+          "SEW <= vlen",
+          "'sew <= 2 ^ vlen_exp",
+          "SEW <= 2 ^ vlen_exp"
+        ],
+        "callable": "write_vreg",
+        "cause": "Compatibility",
+        "clause": 0,
+        "compatibility_types": null,
+        "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_control.sail",
+        "goal": "2 ^ vlen_exp % 'sew == 0",
+        "location": {
+          "column": 3,
+          "end": 6106,
+          "line": 123,
+          "source": "static_assert(vlen % SEW == 0);",
+          "start": 6076
+        },
+        "origin_is_fallback": false,
+        "reason": "budget_exhausted",
+        "recovery_types": null,
+        "rigid_variables": [
+          "'_sk1_LMUL_pow",
+          "'_sk3_z",
+          "'_sk4__sk3_z"
+        ],
+        "status": "unknown"
+      },
+      {
+        "assumptions": [
+          "xlen in {32, 64}",
+          "'n > 0",
+          "'_sk1__set in {8, 16, 32, 64}",
+          "0 <= '_sk2_i",
+          "0 <= '_sk5__loop_index & '_sk5__loop_index <= 3",
+          "('_sk5__loop_index + 1) * '_sk1__set <= 'n",
+          "(j + 1) * SEW <= 'n"
+        ],
+        "callable": "write_velem_quad",
+        "cause": "Compatibility",
+        "clause": 0,
+        "compatibility_types": null,
+        "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_utils_insts.sail",
+        "goal": "0 <= 4 * '_sk2_i + '_sk5__loop_index",
+        "location": {
+          "column": 5,
+          "end": 11195,
+          "line": 244,
+          "source": "write_single_element(SEW, 4 * i + j, vd, input[(j + 1) * SEW - 1 .. j * SEW]);",
+          "start": 11118
+        },
+        "origin_is_fallback": false,
+        "reason": "budget_exhausted",
+        "recovery_types": null,
+        "rigid_variables": [
+          "'_sk1__set",
+          "'_sk2_i",
+          "'_sk5__loop_index"
+        ],
+        "status": "unknown"
+      },
+      {
+        "assumptions": [
+          "xlen in {32, 64}",
+          "'n > 0",
+          "'_sk1__set in {8, 16, 32, 64}",
+          "0 <= '_sk2_i",
+          "0 <= '_sk5__loop_index & '_sk5__loop_index <= 3",
+          "('_sk5__loop_index + 1) * '_sk1__set <= 'n",
+          "(j + 1) * SEW <= 'n"
+        ],
+        "callable": "write_velem_quad",
+        "cause": "Compatibility",
+        "clause": 0,
+        "compatibility_types": null,
+        "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_utils_insts.sail",
+        "goal": "0 <= 4 * '_sk2_i + '_sk5__loop_index",
+        "location": {
+          "column": 5,
+          "end": 11195,
+          "line": 244,
+          "source": "write_single_element(SEW, 4 * i + j, vd, input[(j + 1) * SEW - 1 .. j * SEW]);",
+          "start": 11118
+        },
+        "origin_is_fallback": false,
+        "reason": "budget_exhausted",
+        "recovery_types": null,
+        "rigid_variables": [
+          "'_sk1__set",
+          "'_sk2_i",
+          "'_sk5__loop_index"
+        ],
+        "status": "unknown"
+      },
+      {
+        "assumptions": [
+          "xlen in {32, 64}",
+          "'n >= 0 & 'm in {8, 16, 32, 64} & 'q > 0 & 'q <= 8",
+          "true",
+          "true"
+        ],
+        "callable": "read_vreg_seg",
+        "cause": "Compatibility",
+        "clause": 0,
+        "compatibility_types": null,
+        "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_utils_insts.sail",
+        "goal": "'q * 'm >= 0",
+        "location": {
+          "column": 56,
+          "end": 20658,
+          "line": 480,
+          "source": "var result : vector('n, bits('q * 'm)) = vector_init(zeros());",
+          "start": 20651
+        },
+        "origin_is_fallback": false,
+        "reason": "budget_exhausted",
+        "recovery_types": null,
+        "rigid_variables": [],
+        "status": "unknown"
+      },
+      {
+        "assumptions": [
+          "xlen in {32, 64}",
+          "'n >= 0 & 'm in {8, 16, 32, 64} & 'q > 0 & 'q <= 8",
+          "true",
+          "true",
+          "0 <= '_sk7__loop_index & '_sk7__loop_index <= 'n - 1"
+        ],
+        "callable": "read_vreg_seg",
+        "cause": "Compatibility",
+        "clause": 0,
+        "compatibility_types": null,
+        "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_utils_insts.sail",
+        "goal": "'q * 'm >= 0",
+        "location": {
+          "column": 17,
+          "end": 20882,
+          "line": 485,
+          "source": "result[i] = zeros('q * 'm);",
+          "start": 20868
+        },
+        "origin_is_fallback": false,
+        "reason": "budget_exhausted",
+        "recovery_types": null,
+        "rigid_variables": [
+          "'_sk7__loop_index"
+        ],
+        "status": "unknown"
+      },
+      {
+        "assumptions": [
+          "xlen in {32, 64}",
+          "'n >= 0 & 'm in {8, 16, 32, 64} & 'q > 0 & 'q <= 8",
+          "true",
+          "true",
+          "0 <= '_sk7__loop_index & '_sk7__loop_index <= 'n - 1",
+          "0 <= '_sk9__loop_index & '_sk9__loop_index <= 'q - 1"
+        ],
+        "callable": "read_vreg_seg",
+        "cause": "Compatibility",
+        "clause": 0,
+        "compatibility_types": null,
+        "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_utils_insts.sail",
+        "goal": "'q * 'm >= 'm",
+        "location": {
+          "column": 32,
+          "end": 20980,
+          "line": 487,
+          "source": "result[i] = result[i] | (zero_extend(vreg_list[j][i]) << (j * 'm))",
+          "start": 20952
+        },
+        "origin_is_fallback": false,
+        "reason": "budget_exhausted",
+        "recovery_types": null,
+        "rigid_variables": [
+          "'_sk7__loop_index",
+          "'_sk9__loop_index"
+        ],
+        "status": "unknown"
+      },
+      {
+        "assumptions": [
+          "xlen in {32, 64}",
+          "3 <= vlen_exp & vlen_exp <= 16",
+          "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+          "true",
+          "true",
+          "<unsupported>",
+          "~(<unsupported> | <unsupported>)",
+          "-4 <= '_sk5_LMUL_pow_new & '_sk5_LMUL_pow_new <= 3",
+          "3 <= '_sk6_SEW_pow_new & '_sk6_SEW_pow_new <= 10",
+          "-9 <= '_sk7_lmul_sew_ratio & '_sk7_lmul_sew_ratio <= 0",
+          "~('_sk6_SEW_pow_new > '_sk5_LMUL_pow_new + elen_exp | '_sk1__flow_bool & <unsupported>)",
+          "~(SEW_pow_new > LMUL_pow_new + elen_exp | requires_fixed_vlmax & (lmul_sew_ratio != lmul_sew_ratio_new | ~(valid_vtype())))"
+        ],
+        "callable": "execute_vsetvl_type",
+        "cause": "Compatibility",
+        "clause": 0,
+        "compatibility_types": null,
+        "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_vset_insts.sail",
+        "goal": "1 <= 2 ^ ('_sk5_LMUL_pow_new + vlen_exp - '_sk6_SEW_pow_new) & 2 ^ ('_sk5_LMUL_pow_new + vlen_exp - '_sk6_SEW_pow_new) <= 2 ^ vlen_exp",
+        "location": {
+          "column": 16,
+          "end": 4187,
+          "line": 119,
+          "source": "vl = to_bits(calculate_new_vl(avl, VLMAX));",
+          "start": 4159
+        },
+        "origin_is_fallback": false,
+        "reason": "budget_exhausted",
+        "recovery_types": null,
+        "rigid_variables": [
+          "'_sk1__flow_bool",
+          "'_sk5_LMUL_pow_new",
+          "'_sk6_SEW_pow_new",
+          "'_sk7_lmul_sew_ratio"
+        ],
+        "status": "unknown"
+      },
+      {
+        "assumptions": [
+          "xlen in {32, 64}",
+          "'v in {32, 39, 48, 57}",
+          "true",
+          "true",
+          "0 <= '_sk3_level & '_sk3_level <= (if 'v == 32 then 1 else (if 'v == 39 then 2 else (if 'v == 48 then 3 else 4)))",
+          "true",
+          "'v == 32 | xlen == 64",
+          "sv_width == 32 | xlen == 64",
+          "true"
+        ],
+        "callable": "pt_walk",
+        "cause": "Compatibility",
+        "clause": 0,
+        "compatibility_types": null,
+        "file": "/home/clair/tinyueng_workplace/sail-riscv/model/sys/vmem.sail",
+        "goal": "(if 8 * 2 ^ (if 'v == 32 then 2 else 3) == 32 then 22 else 44) - 1 - (if 'v == 32 then 10 else 9) * '_sk3_level + 1 + ((if 'v == 32 then 10 else 9) * '_sk3_level - 1 + 1) == (if 'v == 32 then 22 else 44)",
+        "location": {
+          "column": 18,
+          "end": 8713,
+          "line": 204,
+          "source": "Ok(struct {ppn=ppn, pte=pte, pteAddr=pte_addr, level=level, pbmt=pbmt, global=global}, ext_ptw)",
+          "start": 8631
+        },
+        "origin_is_fallback": false,
+        "reason": "not_established",
+        "recovery_types": null,
+        "rigid_variables": [
+          "'_sk3_level"
+        ],
+        "status": "unknown"
+      },
+      {
+        "assumptions": [
+          "xlen in {32, 64}",
+          "'v in {32, 39, 48, 57}",
+          "0 <= '_sk1_level & '_sk1_level <= (if 'v == 32 then 1 else (if 'v == 39 then 2 else (if 'v == 48 then 3 else 4)))",
+          "true",
+          "0 <= '_sk4_index & '_sk4_index <= num_tlb_entries - 1",
+          "0 <= '_sk4_index & '_sk4_index <= 2 ^ num_tlb_entries_exp - 1",
+          "0 <= '_sk4_index & '_sk4_index <= 2 ^ 6 - 1"
+        ],
+        "callable": "add_to_TLB",
+        "cause": "Compatibility",
+        "clause": 0,
+        "compatibility_types": null,
+        "file": "/home/clair/tinyueng_workplace/sail-riscv/model/sys/vmem_tlb.sail",
+        "goal": "'v - 12 >= '_sk1_level * (if 'v == 32 then 10 else 9)",
+        "location": {
+          "column": 21,
+          "end": 5981,
+          "line": 157,
+          "source": "let vpn = vpn & ~(zero_extend(levelMask));",
+          "start": 5959
+        },
+        "origin_is_fallback": false,
+        "reason": "budget_exhausted",
+        "recovery_types": null,
+        "rigid_variables": [
+          "'_sk1_level",
+          "'_sk4_index"
+        ],
+        "status": "unknown"
+      },
+      {
+        "assumptions": [
+          "xlen in {32, 64}",
+          "'v in {32, 39, 48, 57}",
+          "0 <= '_sk1_level & '_sk1_level <= (if 'v == 32 then 1 else (if 'v == 39 then 2 else (if 'v == 48 then 3 else 4)))",
+          "true",
+          "0 <= '_sk4_index & '_sk4_index <= num_tlb_entries - 1",
+          "0 <= '_sk4_index & '_sk4_index <= 2 ^ num_tlb_entries_exp - 1",
+          "0 <= '_sk4_index & '_sk4_index <= 2 ^ 6 - 1"
+        ],
+        "callable": "add_to_TLB",
+        "cause": "Compatibility",
+        "clause": 0,
+        "compatibility_types": null,
+        "file": "/home/clair/tinyueng_workplace/sail-riscv/model/sys/vmem_tlb.sail",
+        "goal": "(if 'v == 32 then 22 else 44) >= '_sk1_level * (if 'v == 32 then 10 else 9)",
+        "location": {
+          "column": 21,
+          "end": 6026,
+          "line": 158,
+          "source": "let ppn = ppn & ~(zero_extend(levelMask));",
+          "start": 6004
+        },
+        "origin_is_fallback": false,
+        "reason": "budget_exhausted",
+        "recovery_types": null,
+        "rigid_variables": [
+          "'_sk1_level",
+          "'_sk4_index"
+        ],
+        "status": "unknown"
+      },
+      {
+        "assumptions": [
+          "xlen in {32, 64}",
+          "'v in {32, 39, 48, 57}",
+          "0 <= '_sk1_level & '_sk1_level <= (if 'v == 32 then 1 else (if 'v == 39 then 2 else (if 'v == 48 then 3 else 4)))",
+          "true",
+          "0 <= '_sk4_index & '_sk4_index <= num_tlb_entries - 1",
+          "0 <= '_sk4_index & '_sk4_index <= 2 ^ num_tlb_entries_exp - 1",
+          "0 <= '_sk4_index & '_sk4_index <= 2 ^ 6 - 1"
+        ],
+        "callable": "add_to_TLB",
+        "cause": "Compatibility",
+        "clause": 0,
+        "compatibility_types": null,
+        "file": "/home/clair/tinyueng_workplace/sail-riscv/model/sys/vmem_tlb.sail",
+        "goal": "57 - 12 >= '_sk1_level * (if 'v == 32 then 10 else 9)",
+        "location": {
+          "column": 46,
+          "end": 6318,
+          "line": 164,
+          "source": "levelMask = zero_extend(levelMask),",
+          "start": 6296
+        },
+        "origin_is_fallback": false,
+        "reason": "budget_exhausted",
+        "recovery_types": null,
+        "rigid_variables": [
+          "'_sk1_level",
+          "'_sk4_index"
+        ],
+        "status": "unknown"
+      },
+      {
+        "assumptions": [
+          "xlen in {32, 64}",
+          "'v in {32, 39, 48, 57}",
+          "0 <= '_sk1_level & '_sk1_level <= (if 'v == 32 then 1 else (if 'v == 39 then 2 else (if 'v == 48 then 3 else 4)))",
+          "true",
+          "0 <= '_sk4_index & '_sk4_index <= num_tlb_entries - 1",
+          "0 <= '_sk4_index & '_sk4_index <= 2 ^ num_tlb_entries_exp - 1",
+          "0 <= '_sk4_index & '_sk4_index <= 2 ^ 6 - 1"
+        ],
+        "callable": "add_to_TLB",
+        "cause": "Compatibility",
+        "clause": 0,
+        "compatibility_types": null,
+        "file": "/home/clair/tinyueng_workplace/sail-riscv/model/sys/vmem_tlb.sail",
+        "goal": "57 - 12 >= 'v - 12",
+        "location": {
+          "column": 46,
+          "end": 6381,
+          "line": 165,
+          "source": "vpn       = sign_extend(vpn),",
+          "start": 6365
+        },
+        "origin_is_fallback": false,
+        "reason": "budget_exhausted",
+        "recovery_types": null,
+        "rigid_variables": [
+          "'_sk1_level",
+          "'_sk4_index"
+        ],
+        "status": "unknown"
+      }
+    ],
+    "results": [
+      {
+        "index": 0,
+        "cheap": "Unknown",
+        "normal": "Satisfied",
+        "experimental_budget": "Satisfied"
+      },
+      {
+        "index": 1,
+        "cheap": "Unknown",
+        "normal": "Satisfied",
+        "experimental_budget": "Satisfied"
+      },
+      {
+        "index": 2,
+        "cheap": "Unknown",
+        "normal": "Satisfied",
+        "experimental_budget": "Satisfied"
+      },
+      {
+        "index": 3,
+        "cheap": "Unknown",
+        "normal": "Unknown",
+        "experimental_budget": "Satisfied"
+      },
+      {
+        "index": 4,
+        "cheap": "Unknown",
+        "normal": "Unknown",
+        "experimental_budget": "Satisfied"
+      },
+      {
+        "index": 5,
+        "cheap": "Unknown",
+        "normal": "Satisfied",
+        "experimental_budget": "Satisfied"
+      },
+      {
+        "index": 6,
+        "cheap": "Unknown",
+        "normal": "Unknown",
+        "experimental_budget": "Satisfied"
+      },
+      {
+        "index": 7,
+        "cheap": "Unknown",
+        "normal": "Unknown",
+        "experimental_budget": "Satisfied"
+      },
+      {
+        "index": 8,
+        "cheap": "Unknown",
+        "normal": "Satisfied",
+        "experimental_budget": "Satisfied"
+      },
+      {
+        "index": 9,
+        "cheap": "Unknown",
+        "normal": "Unknown",
+        "experimental_budget": "Satisfied"
+      },
+      {
+        "index": 10,
+        "cheap": "Unknown",
+        "normal": "Unknown",
+        "experimental_budget": "Satisfied"
+      },
+      {
+        "index": 11,
+        "cheap": "Unknown",
+        "normal": "Unknown",
+        "experimental_budget": "Satisfied"
+      },
+      {
+        "index": 12,
+        "cheap": "Unknown",
+        "normal": "Unknown",
+        "experimental_budget": "Satisfied"
+      },
+      {
+        "index": 13,
+        "cheap": "Satisfied",
+        "normal": "Satisfied",
+        "experimental_budget": "Satisfied"
+      },
+      {
+        "index": 14,
+        "cheap": "Unknown",
+        "normal": "Satisfied",
+        "experimental_budget": "Satisfied"
+      },
+      {
+        "index": 15,
+        "cheap": "Unknown",
+        "normal": "Satisfied",
+        "experimental_budget": "Satisfied"
+      },
+      {
+        "index": 16,
+        "cheap": "Unknown",
+        "normal": "Satisfied",
+        "experimental_budget": "Satisfied"
+      },
+      {
+        "index": 17,
+        "cheap": "Unknown",
+        "normal": "Satisfied",
+        "experimental_budget": "Satisfied"
+      }
+    ],
+    "reproduction_source": "use super::*;\n#[test]\nfn replay_remaining_p1_constraints() {\n{let goal = parse_constraint_text(\"'_sk1__set >= '_sk1__set / 2 ^ '_sk4_SEW_frac_pow\"); let facts = vec![parse_constraint_text(\"3 <= vlen_exp & vlen_exp <= 16\"), parse_constraint_text(\"3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp\"), parse_constraint_text(\"xlen in {32, 64}\"), parse_constraint_text(\"'_sk1__set in {8, 16, 32, 64}\"), parse_constraint_text(\"-3 <= '_sk2_LMUL_pow & '_sk2_LMUL_pow <= 3\"), parse_constraint_text(\"1 <= '_sk3_num_elem & '_sk3_num_elem <= vlen\"), parse_constraint_text(\"1 <= '_sk4_SEW_frac_pow & '_sk4_SEW_frac_pow <= 3\"), parse_constraint_text(\"true\"), parse_constraint_text(\"<unsupported>\"), parse_constraint_text(\"~(<unsupported> | ~(valid_reg_overlap(vs2, vd, LMUL_pow_div, LMUL_pow)))\"), parse_constraint_text(\"'_sk1__set / 2 ^ '_sk4_SEW_frac_pow >= 8\"), parse_constraint_text(\"SEW_div >= 8\"), parse_constraint_text(\"0 <= '_sk11__loop_index & '_sk11__loop_index <= '_sk3_num_elem - 1\"), parse_constraint_text(\"1 <= '_sk3_num_elem & '_sk3_num_elem <= 2 ^ vlen_exp\")];\nlet cheap = solver::solve_without_smt(&goal, &Subst::default(), &facts);\nlet normal = solver::solve(&goal, &Subst::default(), &facts);\nlet _budget = crate::solver_budget::SolverBudget::enter(crate::CancellationToken::never(), crate::solver_budget::SolverLimits { total: std::time::Duration::from_secs(3), per_check: std::time::Duration::from_millis(500), checks: 128 });\nlet extended = solver::solve(&goal, &Subst::default(), &facts);\neprintln!(\"P1_REPLAY 0 {:?} {:?} {:?}\", cheap, normal, extended);}\n{let goal = parse_constraint_text(\"'_sk1__set >= '_sk1__set / 2 ^ '_sk4_SEW_frac_pow\"); let facts = vec![parse_constraint_text(\"3 <= vlen_exp & vlen_exp <= 16\"), parse_constraint_text(\"3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp\"), parse_constraint_text(\"xlen in {32, 64}\"), parse_constraint_text(\"'_sk1__set in {8, 16, 32, 64}\"), parse_constraint_text(\"-3 <= '_sk2_LMUL_pow & '_sk2_LMUL_pow <= 3\"), parse_constraint_text(\"1 <= '_sk3_num_elem & '_sk3_num_elem <= vlen\"), parse_constraint_text(\"1 <= '_sk4_SEW_frac_pow & '_sk4_SEW_frac_pow <= 3\"), parse_constraint_text(\"true\"), parse_constraint_text(\"<unsupported>\"), parse_constraint_text(\"~(<unsupported> | ~(valid_reg_overlap(vs2, vd, LMUL_pow_div, LMUL_pow)))\"), parse_constraint_text(\"'_sk1__set / 2 ^ '_sk4_SEW_frac_pow >= 8\"), parse_constraint_text(\"SEW_div >= 8\"), parse_constraint_text(\"0 <= '_sk11__loop_index & '_sk11__loop_index <= '_sk3_num_elem - 1\"), parse_constraint_text(\"1 <= '_sk3_num_elem & '_sk3_num_elem <= 2 ^ vlen_exp\")];\nlet cheap = solver::solve_without_smt(&goal, &Subst::default(), &facts);\nlet normal = solver::solve(&goal, &Subst::default(), &facts);\nlet _budget = crate::solver_budget::SolverBudget::enter(crate::CancellationToken::never(), crate::solver_budget::SolverLimits { total: std::time::Duration::from_secs(3), per_check: std::time::Duration::from_millis(500), checks: 128 });\nlet extended = solver::solve(&goal, &Subst::default(), &facts);\neprintln!(\"P1_REPLAY 1 {:?} {:?} {:?}\", cheap, normal, extended);}\n{let goal = parse_constraint_text(\"'_sk1__set >= '_sk1__set / 2 ^ '_sk4_SEW_frac_pow\"); let facts = vec![parse_constraint_text(\"3 <= vlen_exp & vlen_exp <= 16\"), parse_constraint_text(\"3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp\"), parse_constraint_text(\"xlen in {32, 64}\"), parse_constraint_text(\"'_sk1__set in {8, 16, 32, 64}\"), parse_constraint_text(\"-3 <= '_sk2_LMUL_pow & '_sk2_LMUL_pow <= 3\"), parse_constraint_text(\"1 <= '_sk3_num_elem & '_sk3_num_elem <= vlen\"), parse_constraint_text(\"1 <= '_sk4_SEW_frac_pow & '_sk4_SEW_frac_pow <= 3\"), parse_constraint_text(\"true\"), parse_constraint_text(\"<unsupported>\"), parse_constraint_text(\"~(<unsupported> | ~(valid_reg_overlap(vs2, vd, LMUL_pow_div, LMUL_pow)))\"), parse_constraint_text(\"'_sk1__set / 2 ^ '_sk4_SEW_frac_pow >= 8\"), parse_constraint_text(\"SEW_div >= 8\"), parse_constraint_text(\"0 <= '_sk11__loop_index & '_sk11__loop_index <= '_sk3_num_elem - 1\"), parse_constraint_text(\"1 <= '_sk3_num_elem & '_sk3_num_elem <= 2 ^ vlen_exp\")];\nlet cheap = solver::solve_without_smt(&goal, &Subst::default(), &facts);\nlet normal = solver::solve(&goal, &Subst::default(), &facts);\nlet _budget = crate::solver_budget::SolverBudget::enter(crate::CancellationToken::never(), crate::solver_budget::SolverLimits { total: std::time::Duration::from_secs(3), per_check: std::time::Duration::from_millis(500), checks: 128 });\nlet extended = solver::solve(&goal, &Subst::default(), &facts);\neprintln!(\"P1_REPLAY 2 {:?} {:?} {:?}\", cheap, normal, extended);}\n{let goal = parse_constraint_text(\"1 <= div(2 ^ '_sk8__sk7__sk6__sk5_z * 2 ^ vlen_exp, '_sk3__set) & div(2 ^ '_sk8__sk7__sk6__sk5_z * 2 ^ vlen_exp, '_sk3__set) <= 2 ^ vlen_exp\"); let facts = vec![parse_constraint_text(\"(0 >= '_sk1_LMUL_pow & '_sk8__sk7__sk6__sk5_z == 0 | 0 < '_sk1_LMUL_pow & '_sk8__sk7__sk6__sk5_z == '_sk1_LMUL_pow)\"), parse_constraint_text(\"3 <= vlen_exp & vlen_exp <= 16\"), parse_constraint_text(\"3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp\"), parse_constraint_text(\"-3 <= '_sk1_LMUL_pow & '_sk1_LMUL_pow <= 3\"), parse_constraint_text(\"'_sk2__set in {8, 16, 32, 64}\"), parse_constraint_text(\"'_sk3__set in {8, 16, 32, 64}\"), parse_constraint_text(\"vlen >= '_sk3__set\"), parse_constraint_text(\"vlen >= SEW\"), parse_constraint_text(\"0 >= '_sk1_LMUL_pow & '_sk5_z == 0 | 0 < '_sk1_LMUL_pow & '_sk5_z == '_sk1_LMUL_pow\"), parse_constraint_text(\"(0 >= '_sk1_LMUL_pow & '_sk6__sk5_z == 0 | 0 < '_sk1_LMUL_pow & '_sk6__sk5_z == '_sk1_LMUL_pow)\"), parse_constraint_text(\"(0 >= '_sk1_LMUL_pow & '_sk7__sk6__sk5_z == 0 | 0 < '_sk1_LMUL_pow & '_sk7__sk6__sk5_z == '_sk1_LMUL_pow)\"), parse_constraint_text(\"2 ^ vlen_exp >= '_sk3__set\"), parse_constraint_text(\"2 ^ vlen_exp >= SEW\")];\nlet cheap = solver::solve_without_smt(&goal, &Subst::default(), &facts);\nlet normal = solver::solve(&goal, &Subst::default(), &facts);\nlet _budget = crate::solver_budget::SolverBudget::enter(crate::CancellationToken::never(), crate::solver_budget::SolverLimits { total: std::time::Duration::from_secs(3), per_check: std::time::Duration::from_millis(500), checks: 128 });\nlet extended = solver::solve(&goal, &Subst::default(), &facts);\neprintln!(\"P1_REPLAY 3 {:?} {:?} {:?}\", cheap, normal, extended);}\n{let goal = parse_constraint_text(\"2 ^ vlen_exp % 'sew == 0\"); let facts = vec![parse_constraint_text(\"3 <= vlen_exp & vlen_exp <= 16\"), parse_constraint_text(\"3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp\"), parse_constraint_text(\"xlen in {32, 64}\"), parse_constraint_text(\"'sew in {8, 16, 32, 64}\"), parse_constraint_text(\"0 <= '_sk1_index\"), parse_constraint_text(\"'sew <= vlen\"), parse_constraint_text(\"EEW <= vlen\"), parse_constraint_text(\"'sew <= 2 ^ vlen_exp\"), parse_constraint_text(\"EEW <= 2 ^ vlen_exp\")];\nlet cheap = solver::solve_without_smt(&goal, &Subst::default(), &facts);\nlet normal = solver::solve(&goal, &Subst::default(), &facts);\nlet _budget = crate::solver_budget::SolverBudget::enter(crate::CancellationToken::never(), crate::solver_budget::SolverLimits { total: std::time::Duration::from_secs(3), per_check: std::time::Duration::from_millis(500), checks: 128 });\nlet extended = solver::solve(&goal, &Subst::default(), &facts);\neprintln!(\"P1_REPLAY 4 {:?} {:?} {:?}\", cheap, normal, extended);}\n{let goal = parse_constraint_text(\"2 ^ vlen_exp % 'sew == 0\"); let facts = vec![parse_constraint_text(\"3 <= vlen_exp & vlen_exp <= 16\"), parse_constraint_text(\"3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp\"), parse_constraint_text(\"xlen in {32, 64}\"), parse_constraint_text(\"'sew in {8, 16, 32, 64}\"), parse_constraint_text(\"0 <= '_sk1_index\"), parse_constraint_text(\"'sew <= vlen\"), parse_constraint_text(\"EEW <= vlen\"), parse_constraint_text(\"'sew <= 2 ^ vlen_exp\"), parse_constraint_text(\"EEW <= 2 ^ vlen_exp\")];\nlet cheap = solver::solve_without_smt(&goal, &Subst::default(), &facts);\nlet normal = solver::solve(&goal, &Subst::default(), &facts);\nlet _budget = crate::solver_budget::SolverBudget::enter(crate::CancellationToken::never(), crate::solver_budget::SolverLimits { total: std::time::Duration::from_secs(3), per_check: std::time::Duration::from_millis(500), checks: 128 });\nlet extended = solver::solve(&goal, &Subst::default(), &facts);\neprintln!(\"P1_REPLAY 5 {:?} {:?} {:?}\", cheap, normal, extended);}\n{let goal = parse_constraint_text(\"2 ^ vlen_exp % 'sew == 0\"); let facts = vec![parse_constraint_text(\"3 <= vlen_exp & vlen_exp <= 16\"), parse_constraint_text(\"3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp\"), parse_constraint_text(\"xlen in {32, 64}\"), parse_constraint_text(\"'n >= 0 & 'sew in {8, 16, 32, 64}\"), parse_constraint_text(\"-3 <= '_sk1_LMUL_pow & '_sk1_LMUL_pow <= 3\"), parse_constraint_text(\"'_sk1_LMUL_pow >= 0 & '_sk3_z == '_sk1_LMUL_pow | '_sk1_LMUL_pow < 0 & '_sk3_z == 0\"), parse_constraint_text(\"('_sk1_LMUL_pow >= 0 & '_sk4__sk3_z == '_sk1_LMUL_pow | '_sk1_LMUL_pow < 0 & '_sk4__sk3_z == 0)\"), parse_constraint_text(\"'sew <= vlen\"), parse_constraint_text(\"SEW <= vlen\"), parse_constraint_text(\"'sew <= 2 ^ vlen_exp\"), parse_constraint_text(\"SEW <= 2 ^ vlen_exp\")];\nlet cheap = solver::solve_without_smt(&goal, &Subst::default(), &facts);\nlet normal = solver::solve(&goal, &Subst::default(), &facts);\nlet _budget = crate::solver_budget::SolverBudget::enter(crate::CancellationToken::never(), crate::solver_budget::SolverLimits { total: std::time::Duration::from_secs(3), per_check: std::time::Duration::from_millis(500), checks: 128 });\nlet extended = solver::solve(&goal, &Subst::default(), &facts);\neprintln!(\"P1_REPLAY 6 {:?} {:?} {:?}\", cheap, normal, extended);}\n{let goal = parse_constraint_text(\"0 <= 4 * '_sk2_i + '_sk5__loop_index\"); let facts = vec![parse_constraint_text(\"xlen in {32, 64}\"), parse_constraint_text(\"'n > 0\"), parse_constraint_text(\"'_sk1__set in {8, 16, 32, 64}\"), parse_constraint_text(\"0 <= '_sk2_i\"), parse_constraint_text(\"0 <= '_sk5__loop_index & '_sk5__loop_index <= 3\"), parse_constraint_text(\"('_sk5__loop_index + 1) * '_sk1__set <= 'n\"), parse_constraint_text(\"(j + 1) * SEW <= 'n\")];\nlet cheap = solver::solve_without_smt(&goal, &Subst::default(), &facts);\nlet normal = solver::solve(&goal, &Subst::default(), &facts);\nlet _budget = crate::solver_budget::SolverBudget::enter(crate::CancellationToken::never(), crate::solver_budget::SolverLimits { total: std::time::Duration::from_secs(3), per_check: std::time::Duration::from_millis(500), checks: 128 });\nlet extended = solver::solve(&goal, &Subst::default(), &facts);\neprintln!(\"P1_REPLAY 7 {:?} {:?} {:?}\", cheap, normal, extended);}\n{let goal = parse_constraint_text(\"0 <= 4 * '_sk2_i + '_sk5__loop_index\"); let facts = vec![parse_constraint_text(\"xlen in {32, 64}\"), parse_constraint_text(\"'n > 0\"), parse_constraint_text(\"'_sk1__set in {8, 16, 32, 64}\"), parse_constraint_text(\"0 <= '_sk2_i\"), parse_constraint_text(\"0 <= '_sk5__loop_index & '_sk5__loop_index <= 3\"), parse_constraint_text(\"('_sk5__loop_index + 1) * '_sk1__set <= 'n\"), parse_constraint_text(\"(j + 1) * SEW <= 'n\")];\nlet cheap = solver::solve_without_smt(&goal, &Subst::default(), &facts);\nlet normal = solver::solve(&goal, &Subst::default(), &facts);\nlet _budget = crate::solver_budget::SolverBudget::enter(crate::CancellationToken::never(), crate::solver_budget::SolverLimits { total: std::time::Duration::from_secs(3), per_check: std::time::Duration::from_millis(500), checks: 128 });\nlet extended = solver::solve(&goal, &Subst::default(), &facts);\neprintln!(\"P1_REPLAY 8 {:?} {:?} {:?}\", cheap, normal, extended);}\n{let goal = parse_constraint_text(\"'q * 'm >= 0\"); let facts = vec![parse_constraint_text(\"xlen in {32, 64}\"), parse_constraint_text(\"'n >= 0 & 'm in {8, 16, 32, 64} & 'q > 0 & 'q <= 8\"), parse_constraint_text(\"true\"), parse_constraint_text(\"true\")];\nlet cheap = solver::solve_without_smt(&goal, &Subst::default(), &facts);\nlet normal = solver::solve(&goal, &Subst::default(), &facts);\nlet _budget = crate::solver_budget::SolverBudget::enter(crate::CancellationToken::never(), crate::solver_budget::SolverLimits { total: std::time::Duration::from_secs(3), per_check: std::time::Duration::from_millis(500), checks: 128 });\nlet extended = solver::solve(&goal, &Subst::default(), &facts);\neprintln!(\"P1_REPLAY 9 {:?} {:?} {:?}\", cheap, normal, extended);}\n{let goal = parse_constraint_text(\"'q * 'm >= 0\"); let facts = vec![parse_constraint_text(\"xlen in {32, 64}\"), parse_constraint_text(\"'n >= 0 & 'm in {8, 16, 32, 64} & 'q > 0 & 'q <= 8\"), parse_constraint_text(\"true\"), parse_constraint_text(\"true\"), parse_constraint_text(\"0 <= '_sk7__loop_index & '_sk7__loop_index <= 'n - 1\")];\nlet cheap = solver::solve_without_smt(&goal, &Subst::default(), &facts);\nlet normal = solver::solve(&goal, &Subst::default(), &facts);\nlet _budget = crate::solver_budget::SolverBudget::enter(crate::CancellationToken::never(), crate::solver_budget::SolverLimits { total: std::time::Duration::from_secs(3), per_check: std::time::Duration::from_millis(500), checks: 128 });\nlet extended = solver::solve(&goal, &Subst::default(), &facts);\neprintln!(\"P1_REPLAY 10 {:?} {:?} {:?}\", cheap, normal, extended);}\n{let goal = parse_constraint_text(\"'q * 'm >= 'm\"); let facts = vec![parse_constraint_text(\"xlen in {32, 64}\"), parse_constraint_text(\"'n >= 0 & 'm in {8, 16, 32, 64} & 'q > 0 & 'q <= 8\"), parse_constraint_text(\"true\"), parse_constraint_text(\"true\"), parse_constraint_text(\"0 <= '_sk7__loop_index & '_sk7__loop_index <= 'n - 1\"), parse_constraint_text(\"0 <= '_sk9__loop_index & '_sk9__loop_index <= 'q - 1\")];\nlet cheap = solver::solve_without_smt(&goal, &Subst::default(), &facts);\nlet normal = solver::solve(&goal, &Subst::default(), &facts);\nlet _budget = crate::solver_budget::SolverBudget::enter(crate::CancellationToken::never(), crate::solver_budget::SolverLimits { total: std::time::Duration::from_secs(3), per_check: std::time::Duration::from_millis(500), checks: 128 });\nlet extended = solver::solve(&goal, &Subst::default(), &facts);\neprintln!(\"P1_REPLAY 11 {:?} {:?} {:?}\", cheap, normal, extended);}\n{let goal = parse_constraint_text(\"1 <= 2 ^ ('_sk5_LMUL_pow_new + vlen_exp - '_sk6_SEW_pow_new) & 2 ^ ('_sk5_LMUL_pow_new + vlen_exp - '_sk6_SEW_pow_new) <= 2 ^ vlen_exp\"); let facts = vec![parse_constraint_text(\"xlen in {32, 64}\"), parse_constraint_text(\"3 <= vlen_exp & vlen_exp <= 16\"), parse_constraint_text(\"3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp\"), parse_constraint_text(\"true\"), parse_constraint_text(\"true\"), parse_constraint_text(\"<unsupported>\"), parse_constraint_text(\"~(<unsupported> | <unsupported>)\"), parse_constraint_text(\"-4 <= '_sk5_LMUL_pow_new & '_sk5_LMUL_pow_new <= 3\"), parse_constraint_text(\"3 <= '_sk6_SEW_pow_new & '_sk6_SEW_pow_new <= 10\"), parse_constraint_text(\"-9 <= '_sk7_lmul_sew_ratio & '_sk7_lmul_sew_ratio <= 0\"), parse_constraint_text(\"~('_sk6_SEW_pow_new > '_sk5_LMUL_pow_new + elen_exp | '_sk1__flow_bool & <unsupported>)\"), parse_constraint_text(\"~(SEW_pow_new > LMUL_pow_new + elen_exp | requires_fixed_vlmax & (lmul_sew_ratio != lmul_sew_ratio_new | ~(valid_vtype())))\")];\nlet cheap = solver::solve_without_smt(&goal, &Subst::default(), &facts);\nlet normal = solver::solve(&goal, &Subst::default(), &facts);\nlet _budget = crate::solver_budget::SolverBudget::enter(crate::CancellationToken::never(), crate::solver_budget::SolverLimits { total: std::time::Duration::from_secs(3), per_check: std::time::Duration::from_millis(500), checks: 128 });\nlet extended = solver::solve(&goal, &Subst::default(), &facts);\neprintln!(\"P1_REPLAY 12 {:?} {:?} {:?}\", cheap, normal, extended);}\n{let goal = parse_constraint_text(\"(if 8 * 2 ^ (if 'v == 32 then 2 else 3) == 32 then 22 else 44) - 1 - (if 'v == 32 then 10 else 9) * '_sk3_level + 1 + ((if 'v == 32 then 10 else 9) * '_sk3_level - 1 + 1) == (if 'v == 32 then 22 else 44)\"); let facts = vec![parse_constraint_text(\"xlen in {32, 64}\"), parse_constraint_text(\"'v in {32, 39, 48, 57}\"), parse_constraint_text(\"true\"), parse_constraint_text(\"true\"), parse_constraint_text(\"0 <= '_sk3_level & '_sk3_level <= (if 'v == 32 then 1 else (if 'v == 39 then 2 else (if 'v == 48 then 3 else 4)))\"), parse_constraint_text(\"true\"), parse_constraint_text(\"'v == 32 | xlen == 64\"), parse_constraint_text(\"sv_width == 32 | xlen == 64\"), parse_constraint_text(\"true\")];\nlet cheap = solver::solve_without_smt(&goal, &Subst::default(), &facts);\nlet normal = solver::solve(&goal, &Subst::default(), &facts);\nlet _budget = crate::solver_budget::SolverBudget::enter(crate::CancellationToken::never(), crate::solver_budget::SolverLimits { total: std::time::Duration::from_secs(3), per_check: std::time::Duration::from_millis(500), checks: 128 });\nlet extended = solver::solve(&goal, &Subst::default(), &facts);\neprintln!(\"P1_REPLAY 13 {:?} {:?} {:?}\", cheap, normal, extended);}\n{let goal = parse_constraint_text(\"'v - 12 >= '_sk1_level * (if 'v == 32 then 10 else 9)\"); let facts = vec![parse_constraint_text(\"xlen in {32, 64}\"), parse_constraint_text(\"'v in {32, 39, 48, 57}\"), parse_constraint_text(\"0 <= '_sk1_level & '_sk1_level <= (if 'v == 32 then 1 else (if 'v == 39 then 2 else (if 'v == 48 then 3 else 4)))\"), parse_constraint_text(\"true\"), parse_constraint_text(\"0 <= '_sk4_index & '_sk4_index <= num_tlb_entries - 1\"), parse_constraint_text(\"0 <= '_sk4_index & '_sk4_index <= 2 ^ num_tlb_entries_exp - 1\"), parse_constraint_text(\"0 <= '_sk4_index & '_sk4_index <= 2 ^ 6 - 1\")];\nlet cheap = solver::solve_without_smt(&goal, &Subst::default(), &facts);\nlet normal = solver::solve(&goal, &Subst::default(), &facts);\nlet _budget = crate::solver_budget::SolverBudget::enter(crate::CancellationToken::never(), crate::solver_budget::SolverLimits { total: std::time::Duration::from_secs(3), per_check: std::time::Duration::from_millis(500), checks: 128 });\nlet extended = solver::solve(&goal, &Subst::default(), &facts);\neprintln!(\"P1_REPLAY 14 {:?} {:?} {:?}\", cheap, normal, extended);}\n{let goal = parse_constraint_text(\"(if 'v == 32 then 22 else 44) >= '_sk1_level * (if 'v == 32 then 10 else 9)\"); let facts = vec![parse_constraint_text(\"xlen in {32, 64}\"), parse_constraint_text(\"'v in {32, 39, 48, 57}\"), parse_constraint_text(\"0 <= '_sk1_level & '_sk1_level <= (if 'v == 32 then 1 else (if 'v == 39 then 2 else (if 'v == 48 then 3 else 4)))\"), parse_constraint_text(\"true\"), parse_constraint_text(\"0 <= '_sk4_index & '_sk4_index <= num_tlb_entries - 1\"), parse_constraint_text(\"0 <= '_sk4_index & '_sk4_index <= 2 ^ num_tlb_entries_exp - 1\"), parse_constraint_text(\"0 <= '_sk4_index & '_sk4_index <= 2 ^ 6 - 1\")];\nlet cheap = solver::solve_without_smt(&goal, &Subst::default(), &facts);\nlet normal = solver::solve(&goal, &Subst::default(), &facts);\nlet _budget = crate::solver_budget::SolverBudget::enter(crate::CancellationToken::never(), crate::solver_budget::SolverLimits { total: std::time::Duration::from_secs(3), per_check: std::time::Duration::from_millis(500), checks: 128 });\nlet extended = solver::solve(&goal, &Subst::default(), &facts);\neprintln!(\"P1_REPLAY 15 {:?} {:?} {:?}\", cheap, normal, extended);}\n{let goal = parse_constraint_text(\"57 - 12 >= '_sk1_level * (if 'v == 32 then 10 else 9)\"); let facts = vec![parse_constraint_text(\"xlen in {32, 64}\"), parse_constraint_text(\"'v in {32, 39, 48, 57}\"), parse_constraint_text(\"0 <= '_sk1_level & '_sk1_level <= (if 'v == 32 then 1 else (if 'v == 39 then 2 else (if 'v == 48 then 3 else 4)))\"), parse_constraint_text(\"true\"), parse_constraint_text(\"0 <= '_sk4_index & '_sk4_index <= num_tlb_entries - 1\"), parse_constraint_text(\"0 <= '_sk4_index & '_sk4_index <= 2 ^ num_tlb_entries_exp - 1\"), parse_constraint_text(\"0 <= '_sk4_index & '_sk4_index <= 2 ^ 6 - 1\")];\nlet cheap = solver::solve_without_smt(&goal, &Subst::default(), &facts);\nlet normal = solver::solve(&goal, &Subst::default(), &facts);\nlet _budget = crate::solver_budget::SolverBudget::enter(crate::CancellationToken::never(), crate::solver_budget::SolverLimits { total: std::time::Duration::from_secs(3), per_check: std::time::Duration::from_millis(500), checks: 128 });\nlet extended = solver::solve(&goal, &Subst::default(), &facts);\neprintln!(\"P1_REPLAY 16 {:?} {:?} {:?}\", cheap, normal, extended);}\n{let goal = parse_constraint_text(\"57 - 12 >= 'v - 12\"); let facts = vec![parse_constraint_text(\"xlen in {32, 64}\"), parse_constraint_text(\"'v in {32, 39, 48, 57}\"), parse_constraint_text(\"0 <= '_sk1_level & '_sk1_level <= (if 'v == 32 then 1 else (if 'v == 39 then 2 else (if 'v == 48 then 3 else 4)))\"), parse_constraint_text(\"true\"), parse_constraint_text(\"0 <= '_sk4_index & '_sk4_index <= num_tlb_entries - 1\"), parse_constraint_text(\"0 <= '_sk4_index & '_sk4_index <= 2 ^ num_tlb_entries_exp - 1\"), parse_constraint_text(\"0 <= '_sk4_index & '_sk4_index <= 2 ^ 6 - 1\")];\nlet cheap = solver::solve_without_smt(&goal, &Subst::default(), &facts);\nlet normal = solver::solve(&goal, &Subst::default(), &facts);\nlet _budget = crate::solver_budget::SolverBudget::enter(crate::CancellationToken::never(), crate::solver_budget::SolverLimits { total: std::time::Duration::from_secs(3), per_check: std::time::Duration::from_millis(500), checks: 128 });\nlet extended = solver::solve(&goal, &Subst::default(), &facts);\neprintln!(\"P1_REPLAY 17 {:?} {:?} {:?}\", cheap, normal, extended);}\n}\n",
+    "reproduction_instructions": "In a disposable checkout, write reproduction_source to crates/hir-ty/src/infer/p1_replay.rs, append #[cfg(test)] mod p1_replay; to infer/mod.rs, then run cargo +1.97.1 test -p hir-ty --lib replay_remaining_p1_constraints -- --nocapture --test-threads=1. No replay module is installed in production source."
+  },
+  "incremental": {
+    "method": "Serialized probes after corpus/model validation; 32 edits per size/mode. Timings are machine-local, not a rust-analyzer parity claim.",
+    "probes": [
+      {
+        "files": 160,
+        "mode": "body",
+        "edits": 32,
+        "command": "target/release/examples/incremental_stats 160 32 body --modules",
+        "metrics": {
+          "incremental_cold": {
+            "value": 94203,
+            "unit": "us"
+          },
+          "incremental_callables": {
+            "value": 320,
+            "unit": "count"
+          },
+          "incremental_warm_p50": {
+            "value": 46,
+            "unit": "us"
+          },
+          "incremental_warm_p95": {
+            "value": 54,
+            "unit": "us"
+          },
+          "incremental_warm_p99": {
+            "value": 55,
+            "unit": "us"
+          },
+          "incremental_body_edit_p50": {
+            "value": 1696,
+            "unit": "us"
+          },
+          "incremental_body_edit_p95": {
+            "value": 1758,
+            "unit": "us"
+          },
+          "incremental_body_edit_p99": {
+            "value": 1781,
+            "unit": "us"
+          },
+          "incremental_snapshot_p50": {
+            "value": 1460,
+            "unit": "ns"
+          },
+          "incremental_snapshot_p95": {
+            "value": 1777,
+            "unit": "ns"
+          },
+          "incremental_snapshot_p99": {
+            "value": 2382,
+            "unit": "ns"
+          },
+          "incremental_reinferred_min": {
+            "value": 1,
+            "unit": "count"
+          },
+          "incremental_reinferred_max": {
+            "value": 1,
+            "unit": "count"
+          }
+        },
+        "previous_p95_us": 1715,
+        "p95_ratio": 1.0250728862973761,
+        "runs": [
+          {
+            "incremental_cold": {
+              "value": 94203,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 320,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 46,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 54,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 55,
+              "unit": "us"
+            },
+            "incremental_body_edit_p50": {
+              "value": 1696,
+              "unit": "us"
+            },
+            "incremental_body_edit_p95": {
+              "value": 1758,
+              "unit": "us"
+            },
+            "incremental_body_edit_p99": {
+              "value": 1781,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1460,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 1777,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 2382,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 1,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 1,
+              "unit": "count"
+            }
+          }
+        ],
+        "edit_p95_us": {
+          "min": 1758,
+          "max": 1758,
+          "median_across_runs": 1758
+        }
+      },
+      {
+        "files": 160,
+        "mode": "signature",
+        "edits": 32,
+        "command": "target/release/examples/incremental_stats 160 32 signature --modules",
+        "metrics": {
+          "incremental_cold": {
+            "value": 64435,
+            "unit": "us"
+          },
+          "incremental_callables": {
+            "value": 320,
+            "unit": "count"
+          },
+          "incremental_warm_p50": {
+            "value": 47,
+            "unit": "us"
+          },
+          "incremental_warm_p95": {
+            "value": 60,
+            "unit": "us"
+          },
+          "incremental_warm_p99": {
+            "value": 61,
+            "unit": "us"
+          },
+          "incremental_signature_edit_p50": {
+            "value": 2063,
+            "unit": "us"
+          },
+          "incremental_signature_edit_p95": {
+            "value": 2107,
+            "unit": "us"
+          },
+          "incremental_signature_edit_p99": {
+            "value": 2144,
+            "unit": "us"
+          },
+          "incremental_snapshot_p50": {
+            "value": 1562,
+            "unit": "ns"
+          },
+          "incremental_snapshot_p95": {
+            "value": 1796,
+            "unit": "ns"
+          },
+          "incremental_snapshot_p99": {
+            "value": 1802,
+            "unit": "ns"
+          },
+          "incremental_reinferred_min": {
+            "value": 3,
+            "unit": "count"
+          },
+          "incremental_reinferred_max": {
+            "value": 3,
+            "unit": "count"
+          }
+        },
+        "previous_p95_us": 2275,
+        "p95_ratio": 0.9261538461538461,
+        "runs": [
+          {
+            "incremental_cold": {
+              "value": 64435,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 320,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 47,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 60,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 61,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p50": {
+              "value": 2063,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p95": {
+              "value": 2107,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p99": {
+              "value": 2144,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1562,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 1796,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 1802,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 3,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 3,
+              "unit": "count"
+            }
+          }
+        ],
+        "edit_p95_us": {
+          "min": 2107,
+          "max": 2107,
+          "median_across_runs": 2107
+        }
+      },
+      {
+        "files": 1600,
+        "mode": "body",
+        "edits": 32,
+        "command": "target/release/examples/incremental_stats 1600 32 body --modules",
+        "metrics": {
+          "incremental_cold": {
+            "value": 769850,
+            "unit": "us"
+          },
+          "incremental_callables": {
+            "value": 3200,
+            "unit": "count"
+          },
+          "incremental_warm_p50": {
+            "value": 829,
+            "unit": "us"
+          },
+          "incremental_warm_p95": {
+            "value": 1011,
+            "unit": "us"
+          },
+          "incremental_warm_p99": {
+            "value": 1326,
+            "unit": "us"
+          },
+          "incremental_body_edit_p50": {
+            "value": 14578,
+            "unit": "us"
+          },
+          "incremental_body_edit_p95": {
+            "value": 17904,
+            "unit": "us"
+          },
+          "incremental_body_edit_p99": {
+            "value": 20266,
+            "unit": "us"
+          },
+          "incremental_snapshot_p50": {
+            "value": 1762,
+            "unit": "ns"
+          },
+          "incremental_snapshot_p95": {
+            "value": 2664,
+            "unit": "ns"
+          },
+          "incremental_snapshot_p99": {
+            "value": 3378,
+            "unit": "ns"
+          },
+          "incremental_reinferred_min": {
+            "value": 1,
+            "unit": "count"
+          },
+          "incremental_reinferred_max": {
+            "value": 2,
+            "unit": "count"
+          }
+        },
+        "previous_p95_us": 14991,
+        "p95_ratio": 1.1943165899539723,
+        "runs": [
+          {
+            "incremental_cold": {
+              "value": 769850,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 3200,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 829,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 1011,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 1326,
+              "unit": "us"
+            },
+            "incremental_body_edit_p50": {
+              "value": 14578,
+              "unit": "us"
+            },
+            "incremental_body_edit_p95": {
+              "value": 17904,
+              "unit": "us"
+            },
+            "incremental_body_edit_p99": {
+              "value": 20266,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1762,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 2664,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 3378,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 1,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 2,
+              "unit": "count"
+            }
+          },
+          {
+            "incremental_cold": {
+              "value": 751360,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 3200,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 848,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 919,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 1112,
+              "unit": "us"
+            },
+            "incremental_body_edit_p50": {
+              "value": 14437,
+              "unit": "us"
+            },
+            "incremental_body_edit_p95": {
+              "value": 15538,
+              "unit": "us"
+            },
+            "incremental_body_edit_p99": {
+              "value": 18407,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1769,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 2426,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 3268,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 1,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 2,
+              "unit": "count"
+            }
+          },
+          {
+            "incremental_cold": {
+              "value": 772649,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 3200,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 582,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 618,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 922,
+              "unit": "us"
+            },
+            "incremental_body_edit_p50": {
+              "value": 10181,
+              "unit": "us"
+            },
+            "incremental_body_edit_p95": {
+              "value": 11735,
+              "unit": "us"
+            },
+            "incremental_body_edit_p99": {
+              "value": 14796,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1098,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 1682,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 2891,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 1,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 2,
+              "unit": "count"
+            }
+          },
+          {
+            "incremental_cold": {
+              "value": 570093,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 3200,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 582,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 629,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 916,
+              "unit": "us"
+            },
+            "incremental_body_edit_p50": {
+              "value": 10246,
+              "unit": "us"
+            },
+            "incremental_body_edit_p95": {
+              "value": 11803,
+              "unit": "us"
+            },
+            "incremental_body_edit_p99": {
+              "value": 15464,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1135,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 2861,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 3559,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 1,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 2,
+              "unit": "count"
+            }
+          }
+        ],
+        "edit_p95_us": {
+          "min": 11735,
+          "max": 17904,
+          "median_across_runs": 13670.5
+        }
+      },
+      {
+        "files": 1600,
+        "mode": "signature",
+        "edits": 32,
+        "command": "target/release/examples/incremental_stats 1600 32 signature --modules",
+        "metrics": {
+          "incremental_cold": {
+            "value": 749663,
+            "unit": "us"
+          },
+          "incremental_callables": {
+            "value": 3200,
+            "unit": "count"
+          },
+          "incremental_warm_p50": {
+            "value": 808,
+            "unit": "us"
+          },
+          "incremental_warm_p95": {
+            "value": 865,
+            "unit": "us"
+          },
+          "incremental_warm_p99": {
+            "value": 1080,
+            "unit": "us"
+          },
+          "incremental_signature_edit_p50": {
+            "value": 14534,
+            "unit": "us"
+          },
+          "incremental_signature_edit_p95": {
+            "value": 15174,
+            "unit": "us"
+          },
+          "incremental_signature_edit_p99": {
+            "value": 18349,
+            "unit": "us"
+          },
+          "incremental_snapshot_p50": {
+            "value": 1593,
+            "unit": "ns"
+          },
+          "incremental_snapshot_p95": {
+            "value": 2759,
+            "unit": "ns"
+          },
+          "incremental_snapshot_p99": {
+            "value": 3106,
+            "unit": "ns"
+          },
+          "incremental_reinferred_min": {
+            "value": 3,
+            "unit": "count"
+          },
+          "incremental_reinferred_max": {
+            "value": 3,
+            "unit": "count"
+          }
+        },
+        "previous_p95_us": 15080,
+        "p95_ratio": 1.0062334217506632,
+        "runs": [
+          {
+            "incremental_cold": {
+              "value": 749663,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 3200,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 808,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 865,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 1080,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p50": {
+              "value": 14534,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p95": {
+              "value": 15174,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p99": {
+              "value": 18349,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1593,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 2759,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 3106,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 3,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 3,
+              "unit": "count"
+            }
+          },
+          {
+            "incremental_cold": {
+              "value": 803920,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 3200,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 854,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 895,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 1100,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p50": {
+              "value": 14874,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p95": {
+              "value": 15429,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p99": {
+              "value": 18940,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1754,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 2163,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 3276,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 3,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 3,
+              "unit": "count"
+            }
+          },
+          {
+            "incremental_cold": {
+              "value": 573976,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 3200,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 563,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 613,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 897,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p50": {
+              "value": 10641,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p95": {
+              "value": 12176,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p99": {
+              "value": 15184,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1098,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 2048,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 2898,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 3,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 3,
+              "unit": "count"
+            }
+          },
+          {
+            "incremental_cold": {
+              "value": 573722,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 3200,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 563,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 596,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 915,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p50": {
+              "value": 10570,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p95": {
+              "value": 12143,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p99": {
+              "value": 15392,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1118,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 2577,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 3253,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 3,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 3,
+              "unit": "count"
+            }
+          }
+        ],
+        "edit_p95_us": {
+          "min": 12143,
+          "max": 15429,
+          "median_across_runs": 13675.0
+        }
+      }
+    ],
+    "finding": "Reinference scope is unchanged: body edits 1 (160 files), 1–2 (1600 files); signature edits 3. Initial 1600-file body p95 was 17.904 ms versus 14.991 ms before; serial repeats measured 15.538, 11.735, and 11.803 ms. Signature p95 ranged 12.143–15.429 ms. No stable latency regression was reproduced; all samples are retained."
+  },
+  "limitations": [
+    "Budget-exhausted obligations remain Unknown during normal requests; independent proof is audit evidence, not a change to runtime status.",
+    "Acceptance/rejection agreement does not establish complete diagnostic wording/location parity.",
+    "17 extended files are scope-only; they are not counted as semantic agreement."
+  ],
+  "local_full_artifacts": "target/p1-followup/"
+}

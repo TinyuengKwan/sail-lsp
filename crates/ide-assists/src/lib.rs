@@ -144,21 +144,6 @@ mod lib_tests {
         fn parsed(&self) -> Option<&ParsedFile> {
             self.parsed.as_ref()
         }
-        fn signature_index(
-            &self,
-        ) -> Option<&std::collections::HashMap<String, ide_db::CallableSignature>> {
-            None
-        }
-        fn ref_counts(&self) -> &std::collections::HashMap<String, usize> {
-            static EMPTY: std::sync::OnceLock<std::collections::HashMap<String, usize>> =
-                std::sync::OnceLock::new();
-            EMPTY.get_or_init(std::collections::HashMap::new)
-        }
-        fn impl_counts(&self) -> &std::collections::HashMap<String, usize> {
-            static EMPTY: std::sync::OnceLock<std::collections::HashMap<String, usize>> =
-                std::sync::OnceLock::new();
-            EMPTY.get_or_init(std::collections::HashMap::new)
-        }
         fn bodies(&self) -> Option<&hir::CallableBodies> {
             self.bodies.as_deref()
         }
@@ -194,12 +179,15 @@ mod lib_tests {
     }
 
     #[test]
-    fn organize_imports_sorts_and_deduplicates_top_block() {
-        let src = "$include \"b.sail\"\n$include \"a.sail\"\n$include \"a.sail\"\nlet x = 1\n";
+    fn organize_imports_preserves_source_order_and_repeated_includes() {
+        let src = "  $include \"b.sail\"  \n$include \"a.sail\"\n$include \"a.sail\"\nlet x = 1\n";
         let file = TestFile::new(src);
         let edits = organize_imports_edits(&file).expect("organize edits");
         assert_eq!(edits.len(), 1);
-        assert_eq!(edits[0].new_text, "$include \"a.sail\"\n$include \"b.sail\"\n");
+        assert_eq!(
+            edits[0].new_text,
+            "$include \"b.sail\"\n$include \"a.sail\"\n$include \"a.sail\"\n"
+        );
     }
 
     #[test]

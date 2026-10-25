@@ -8,9 +8,28 @@ use hir::diagnostics::DiagnosticCode;
 use crate::{DiagnosticsContext, DuplicateBindingDiag};
 
 pub(crate) fn duplicate_binding(
-    _ctx: &DiagnosticsContext<'_>,
+    ctx: &DiagnosticsContext<'_>,
     d: &DuplicateBindingDiag,
 ) -> Diagnostic {
+    let mut range = crate::node_file_range(&d.node);
+    if d.in_struct_pattern {
+        let field = ctx
+            .file
+            .filter(|file| file.file_id(ctx.db()) == d.node.file_id)
+            .and_then(|file| ctx.sema.parse(file))
+            .and_then(|root| d.node.value.try_to_node(&root))
+            .and_then(|node| {
+                node.ancestors().find(|ancestor| ancestor.kind() == syntax::SyntaxKind::FIELD_INIT)
+            })
+            .and_then(|node| {
+                node.children_with_tokens().filter_map(|it| it.into_token()).find(|token| {
+                    token.kind() == syntax::SyntaxKind::IDENT && token.text() == d.name
+                })
+            });
+        if let Some(field) = field {
+            range.range = field.text_range();
+        }
+    }
     Diagnostic::new(
         DiagnosticCode::SailError("duplicate-definition"),
         // `Duplicate binding for {id} in pattern` (`type_check.ml:1650`),
@@ -22,7 +41,7 @@ pub(crate) fn duplicate_binding(
         } else {
             format!("Duplicate binding for {} in pattern", d.name)
         },
-        crate::node_file_range(&d.node),
+        range,
     )
 }
 

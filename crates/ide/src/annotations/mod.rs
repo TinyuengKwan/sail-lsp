@@ -167,13 +167,6 @@ pub fn collect_reference_counts<F: FileDb + ?Sized>(
 ) -> HashMap<String, usize> {
     let mut counts = HashMap::<String, usize>::new();
     for (_, file) in files {
-        let cached = file.ref_counts();
-        if !cached.is_empty() {
-            for (name, count) in cached.iter() {
-                *counts.entry(name.clone()).or_insert(0) += count;
-            }
-            continue;
-        }
         // From the callgraph, which is built from the lowered bodies. The
         // flat `symbol_occurrences` scrape counted every value-position name
         // whether or not it resolved, so a shadowing local and the top-level
@@ -193,13 +186,6 @@ pub fn collect_implementation_counts<F: FileDb + ?Sized>(
 ) -> HashMap<String, usize> {
     let mut counts = HashMap::<String, usize>::new();
     for (_, file) in files {
-        let cached = file.impl_counts();
-        if !cached.is_empty() {
-            for (name, count) in cached.iter() {
-                *counts.entry(name.clone()).or_insert(0) += count;
-            }
-            continue;
-        }
         // From the item tree, which already classified every definition —
         // including the `function clause`es of a scattered function, which
         // it calls `ScatteredClause` and which are exactly what "N
@@ -249,9 +235,13 @@ pub fn code_lenses_ide(
     file: &dyn FileDb,
     ref_counts: &HashMap<String, usize>,
     impl_counts: &HashMap<String, usize>,
+    config: &AnnotationConfig,
 ) -> Vec<ide_db::ide_types::Annotation> {
     let mut out = Vec::new();
 
+    if !config.annotate_impls && !config.annotate_references && !config.annotate_runnables {
+        return out;
+    }
     for decl in extract_symbol_decls(file) {
         if decl.detail == "binding" || decl.kind == SymbolKind::EnumMember {
             continue;
@@ -259,18 +249,22 @@ pub fn code_lenses_ide(
         let range = declaration_range(file, &decl);
         let refs = ref_counts.get(&decl.name).copied().unwrap_or(0);
 
-        out.push(ide_db::ide_types::Annotation {
-            range,
-            title: String::new(),
-            command: None,
-            data: Some(serde_json::json!({
-                "kind": "refs",
-                "name": decl.name,
-                "count": refs
-            })),
-        });
+        if config.annotate_references {
+            out.push(ide_db::ide_types::Annotation {
+                range,
+                title: String::new(),
+                command: None,
+                data: Some(serde_json::json!({
+                    "kind": "refs",
+                    "name": decl.name,
+                    "count": refs
+                })),
+            });
+        }
 
-        if matches!(decl.kind, SymbolKind::Function | SymbolKind::Struct | SymbolKind::Enum) {
+        if config.annotate_impls
+            && matches!(decl.kind, SymbolKind::Function | SymbolKind::Struct | SymbolKind::Enum)
+        {
             let impls = impl_counts.get(&decl.name).copied().unwrap_or(0);
             out.push(ide_db::ide_types::Annotation {
                 range,
@@ -286,24 +280,25 @@ pub fn code_lenses_ide(
     }
 
     // Runnable lenses: detect `main` and `$[test]`-annotated functions.
-    for runnable in crate::runnables::runnables(file) {
-        let range = base_db::span_to_text_range(&runnable.span);
-        let runnable_kind = match runnable.kind {
-            crate::runnables::RunnableKind::Main => "run",
-            crate::runnables::RunnableKind::Test => "test",
-        };
-        out.push(ide_db::ide_types::Annotation {
-            range,
-            title: String::new(),
-            command: None,
-            data: Some(serde_json::json!({
-                "kind": "runnable",
-                "name": runnable.name,
-                "runnableKind": runnable_kind
-            })),
-        });
+    if config.annotate_runnables {
+        for runnable in crate::runnables::runnables(file) {
+            let range = base_db::span_to_text_range(&runnable.span);
+            let runnable_kind = match runnable.kind {
+                crate::runnables::RunnableKind::Main => "run",
+                crate::runnables::RunnableKind::Test => "test",
+            };
+            out.push(ide_db::ide_types::Annotation {
+                range,
+                title: String::new(),
+                command: None,
+                data: Some(serde_json::json!({
+                    "kind": "runnable",
+                    "name": runnable.name,
+                    "runnableKind": runnable_kind
+                })),
+            });
+        }
     }
-
     out
 }
 mod fn_references;

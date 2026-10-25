@@ -19,8 +19,7 @@ use hir::callgraph::WorkspaceFile;
 use parser::{Span, Token};
 use syntax::parser_lower::ParsedFile;
 
-use crate::db_query::signature_index;
-use crate::{CallableSignature, FileDb};
+use crate::FileDb;
 
 /// Monotonically incrementing counter for change tracking.
 #[derive(Debug, Clone)]
@@ -71,6 +70,7 @@ impl Default for RootDatabase {
             files: Files::default(),
             include_instances: Arc::default(),
         };
+        base_db::LanguageOptions::new(&db, false);
         base_db::preprocess::WorkspacePreprocessing::new(
             &db,
             Default::default(),
@@ -360,50 +360,11 @@ impl<'a> FileDb for SalsaFile<'a> {
         crate::db_query::enriched_parsed_file(self.db, self.input).as_ref().map(Arc::as_ref)
     }
 
-    fn signature_index(&self) -> Option<&HashMap<String, CallableSignature>> {
-        Some(signature_index(self.db, self.input).as_ref())
-    }
-
-    fn ref_counts(&self) -> &HashMap<String, usize> {
-        // Delegate to salsa query (replaces legacy File cache).
-        crate::db_query::ref_counts(self.db, self.input).as_ref()
-    }
-
-    fn impl_counts(&self) -> &HashMap<String, usize> {
-        crate::db_query::impl_counts(self.db, self.input).as_ref()
-    }
-
     // item_tree() is inherited from SourceFileInfo impl above.
 
     fn bodies(&self) -> Option<&hir::CallableBodies> {
         let bodies = hir::def_query::callable_bodies(self.db, self.input);
         bodies.as_ref().map(|b| b.0.as_ref())
-    }
-
-    // C5: binding_type_text now queries salsa infer.
-    // ide-db depends on hir-ty, so this is safe.
-    fn binding_type_text(&self, span: parser::Span) -> Option<String> {
-        let callable_ids = hir::def_query::file_def_with_body_ids(self.db, self.input);
-        let bodies = self.bodies();
-        for &id in callable_ids {
-            let tcr = hir::ty_query::infer(self.db, id);
-            if let Some(ty_text) = tcr.0.binding_type_text(span, bodies) {
-                return Some(ty_text);
-            }
-        }
-        None
-    }
-
-    fn cached_expr_type_text(&self, span: parser::Span) -> Option<String> {
-        let callable_ids = hir::def_query::file_def_with_body_ids(self.db, self.input);
-        let bodies = self.bodies();
-        for &id in callable_ids {
-            let tcr = hir::ty_query::infer(self.db, id);
-            if let Some(ty_text) = tcr.0.expr_type_text(span, bodies) {
-                return Some(ty_text);
-            }
-        }
-        None
     }
 }
 
@@ -437,7 +398,7 @@ mod tests {
         assert!(parsed.is_some());
 
         // signature_index
-        let idx = sf.signature_index().unwrap();
+        let idx = crate::signatures::signature_index(&sf);
         assert!(idx.contains_key("foo"));
 
         // item_tree
@@ -465,7 +426,7 @@ mod tests {
 
         {
             let sf = SalsaFile::new(&db, input);
-            let idx = sf.signature_index().unwrap();
+            let idx = crate::signatures::signature_index(&sf);
             assert!(idx.contains_key("x"), "should have val x");
         }
 
@@ -474,7 +435,7 @@ mod tests {
 
         {
             let sf = SalsaFile::new(&db, input);
-            let idx = sf.signature_index().unwrap();
+            let idx = crate::signatures::signature_index(&sf);
             assert!(!idx.contains_key("x"), "x should be gone");
             assert!(idx.contains_key("y"), "should have val y");
         }
@@ -489,8 +450,8 @@ mod tests {
         let input = FileText::new(&db, Arc::from(src), FileId::from_raw(0));
         let sf = SalsaFile::new(&db, input);
 
-        // Use the legacy build_signature_index (takes &dyn FileDb)
-        let idx = crate::build_signature_index(&sf);
+        // Read the same cached signature index used by IDE features.
+        let idx = crate::signatures::signature_index(&sf);
         assert!(idx.contains_key("foo"));
         let sig = &idx["foo"];
         assert_eq!(sig.return_type.as_deref(), Some("bool"));

@@ -59,6 +59,8 @@ pub mod move_item;
 pub mod navigation;
 /// Unified navigation target type.
 pub mod navigation_target;
+#[cfg(test)]
+mod quick_fix_tests;
 pub mod references;
 #[cfg(test)]
 mod regression_tests;

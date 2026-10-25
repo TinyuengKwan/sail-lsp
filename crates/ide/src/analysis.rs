@@ -147,17 +147,8 @@ fn taken_include_error(
 }
 
 impl AnalysisHost {
-    /// Create a new AnalysisHost with optional LRU capacity hint.
-    ///
-    /// salsa 0.25 sets LRU per query at compile time via
-    /// `#[salsa::tracked(lru = N)]`, so a runtime capacity cannot be
-    /// honoured and this argument is ignored. rust-analyzer is in the same
-    /// position: its `update_base_query_lru_capacities` is a function whose
-    /// body is entirely commented out. Kept so the call sites read the same
-    /// as RA'''s, and so the day salsa grows a runtime setter there is
-    /// somewhere to put it.
-    pub fn new(lru_capacity: Option<u16>) -> Self {
-        let _ = lru_capacity; // TODO: wire to per-query LRU config if needed
+    /// Create an analysis host with the database's per-query cache policy.
+    pub fn new() -> Self {
         Self { db: RootDatabase::default() }
     }
 
@@ -238,7 +229,7 @@ impl AnalysisHost {
 
 impl Default for AnalysisHost {
     fn default() -> Self {
-        Self::new(None)
+        Self::new()
     }
 }
 
@@ -888,7 +879,26 @@ impl Analysis {
             change
         };
         let mut out = Vec::new();
+        // Client diagnostics can lag behind didChange. Revalidate against this
+        // snapshot before producing an edit; a resolve fingerprint alone only
+        // detects changes made *after* the code-action request.
+        let current_diagnostics = if diagnostics.is_empty() {
+            Vec::new()
+        } else {
+            self.file_diagnostics_inner(
+                file_id,
+                &ide_diagnostics::DiagnosticsConfig::new(),
+                &ide_db::assists::AssistResolveStrategy::All,
+            )
+        };
         for (i, diagnostic) in diagnostics.iter().enumerate() {
+            let Some(current) = current_diagnostics.iter().find(|current| {
+                current.code.as_str() == diagnostic.code.as_str()
+                    && current.range.range == diagnostic.range.range
+                    && current.message == diagnostic.message
+            }) else {
+                continue;
+            };
             if let Some((title, edit, is_preferred)) = self.quick_fix_inner(url, diagnostic) {
                 out.push(CodeAction {
                     import: None,
@@ -897,6 +907,20 @@ impl Analysis {
                     source_change: one_file(vec![edit]),
                     for_diagnostic: Some(i),
                     is_preferred: Some(is_preferred),
+                    is_fix_all: false,
+                });
+            }
+            // The fixes the diagnostic's own handler built. A stub with no
+            // edit (`unresolved_fix`) offers nothing to apply.
+            for fix in current.fixes.iter().flatten() {
+                let Some(source_change) = &fix.source_change else { continue };
+                out.push(CodeAction {
+                    import: None,
+                    title: fix.label.0.clone(),
+                    kind: ide_db::assists::AssistKind::QuickFix,
+                    source_change: source_change.clone(),
+                    for_diagnostic: Some(i),
+                    is_preferred: None,
                     is_fix_all: false,
                 });
             }
@@ -1120,11 +1144,13 @@ impl Analysis {
         &self,
         file_id: FileId,
         position: ide_db::LineCol,
+        config: &ide_completion::CompletionConfig,
     ) -> ide_db::ide_types::Cancellable<Vec<ide_completion::item::CompletionItem>> {
         self.with_db(|a| {
             a.completions_inner(
                 a.position_instances(file_id, position).first().copied().unwrap_or(file_id),
                 position,
+                config,
             )
         })?
     }
@@ -1145,8 +1171,9 @@ impl Analysis {
     pub fn code_lenses(
         &self,
         file_id: FileId,
+        config: &crate::annotations::AnnotationConfig,
     ) -> ide_db::ide_types::Cancellable<Vec<ide_db::ide_types::Annotation>> {
-        self.with_db(|a| a.code_lenses_inner(file_id))?
+        self.with_db(|a| a.code_lenses_inner(file_id, config))?
     }
 
     /// See [`Analysis::with_db`]: a salsa cancellation reaches the caller
@@ -2002,7 +2029,11 @@ impl Analysis {
         file_id: FileId,
     ) -> ide_db::ide_types::Cancellable<Vec<ide_diagnostics::Diagnostic>> {
         let config = ide_diagnostics::DiagnosticsConfig::new();
-        Ok(self.file_diagnostics_inner(file_id, &config))
+        Ok(self.file_diagnostics_inner(
+            file_id,
+            &config,
+            &ide_db::assists::AssistResolveStrategy::None,
+        ))
     }
 
     /// Signature index for a file.: takes FileId.
@@ -2016,7 +2047,7 @@ impl Analysis {
             Some(ft) => ft,
             None => return Ok(None),
         };
-        Ok(Some(ide_db::db_query::signature_index(&self.db, ft).clone()))
+        Ok(Some(hir::Semantics::new(&self.db).signature_index(ft)))
     }
 
     /// Hover information for a symbol at position.
@@ -2035,7 +2066,7 @@ impl Analysis {
             None => return Ok(None),
         };
         let offset = sf.offset_at(&position);
-        let (token, _) = match sf.token_at(position) {
+        let (token, token_span) = match sf.token_at(position) {
             Some(t) => t,
             None => return Ok(None),
         };
@@ -2043,7 +2074,7 @@ impl Analysis {
             Some(k) => k,
             None => return Ok(None),
         };
-        let range = base_db::text_range(offset, offset + symbol_key.len());
+        let range = base_db::text_range(token_span.start, token_span.end);
         let owned: Vec<_> = self
             .visible_salsa_files(file_id)
             .into_iter()
@@ -2085,6 +2116,7 @@ impl Analysis {
         &self,
         file_id: FileId,
         position: ide_db::LineCol,
+        config: &ide_completion::CompletionConfig,
     ) -> ide_db::ide_types::Cancellable<Vec<ide_completion::item::CompletionItem>> {
         let sf = match self.file_by_id(file_id) {
             Some(f) => f,
@@ -2108,7 +2140,7 @@ impl Analysis {
         };
         let all: Vec<(&url::Url, &dyn FileDb)> =
             owned.iter().map(|(u, sf)| (u, sf as &dyn FileDb)).collect();
-        Ok(crate::completion::completions(
+        Ok(crate::completion::completions_with_config(
             &self.db,
             file_text,
             &all,
@@ -2119,6 +2151,7 @@ impl Analysis {
             prefix,
             ide_db::SAIL_KEYWORDS,
             ide_db::SAIL_BUILTINS,
+            config,
         ))
     }
 
@@ -2159,8 +2192,9 @@ impl Analysis {
         // Through `hir`, not `hir_ty`: `ide` talks to one semantic API.
         let sema = hir::Semantics::new(&self.db);
         let ft = self.file_text(file_id);
-        let type_check = ft.map(|ft| sema.infer_file(ft));
-        let transitive_effects = ft.map(|ft| sema.transitive_effects(ft));
+        let type_check = ft.filter(|_| config.type_hints).map(|ft| sema.infer_file(ft));
+        let transitive_effects =
+            ft.filter(|_| config.effect_hints).map(|ft| sema.transitive_effects(ft));
 
         Ok(crate::inlay_hints::inlay_hints_ide_with_types(
             &all,
@@ -2177,13 +2211,14 @@ impl Analysis {
     fn code_lenses_inner(
         &self,
         file_id: FileId,
+        config: &crate::annotations::AnnotationConfig,
     ) -> ide_db::ide_types::Cancellable<Vec<ide_db::ide_types::Annotation>> {
         let mut lenses: std::collections::BTreeMap<_, ide_db::ide_types::Annotation> =
             std::collections::BTreeMap::new();
         let empty = HashMap::new();
         for view in base_db::preprocess::file_instances(&self.db, file_id) {
             let Some(sf) = self.file_by_id(view) else { continue };
-            for mut lens in crate::annotations::code_lenses_ide(&sf, &empty, &empty) {
+            for mut lens in crate::annotations::code_lenses_ide(&sf, &empty, &empty, config) {
                 let Some(data) = lens.data.as_mut() else { continue };
                 data["source"] =
                     serde_json::json!(base_db::preprocess::physical_file(&self.db, view).index());
@@ -2282,21 +2317,37 @@ impl Analysis {
         file_id: FileId,
         config: &ide_diagnostics::DiagnosticsConfig,
     ) -> crate::Cancellable<Vec<ide_diagnostics::Diagnostic>> {
-        self.with_db(|a| a.file_diagnostics_inner(file_id, config))
+        self.with_db(|a| {
+            a.file_diagnostics_inner(file_id, config, &ide_db::assists::AssistResolveStrategy::None)
+        })
     }
 
+    /// Keeps the edit of every fix `resolve` asks for. A fix is built
+    /// against the view it was found in and names no file
+    /// (`SourceChange::from_text_edit`); it is moved here onto the physical
+    /// file the diagnostic is reported in, which shares the view's offsets.
     fn file_diagnostics_inner(
         &self,
         file_id: FileId,
         config: &ide_diagnostics::DiagnosticsConfig,
+        resolve: &ide_db::assists::AssistResolveStrategy,
     ) -> Vec<ide_diagnostics::Diagnostic> {
         let mut out = Vec::new();
         for view in base_db::preprocess::file_instances(&self.db, file_id) {
-            for mut diagnostic in self.instance_diagnostics(view, config) {
+            for mut diagnostic in self.instance_diagnostics(view, config, resolve) {
                 diagnostic.range.file_id =
                     base_db::preprocess::physical_file(&self.db, diagnostic.range.file_id);
                 for (range, _) in &mut diagnostic.related {
                     range.file_id = base_db::preprocess::physical_file(&self.db, range.file_id);
+                }
+                for fix in diagnostic.fixes.iter_mut().flatten() {
+                    if let Some(change) = &mut fix.source_change {
+                        let edits = std::mem::take(&mut change.source_file_edits)
+                            .into_values()
+                            .flatten()
+                            .collect();
+                        change.insert_source_edit(diagnostic.range.file_id, edits);
+                    }
                 }
                 if !out.iter().any(|d: &ide_diagnostics::Diagnostic| {
                     d.range == diagnostic.range
@@ -2314,6 +2365,7 @@ impl Analysis {
         &self,
         file_id: FileId,
         config: &ide_diagnostics::DiagnosticsConfig,
+        resolve: &ide_db::assists::AssistResolveStrategy,
     ) -> Vec<ide_diagnostics::Diagnostic> {
         let ft = match self.file_text(file_id) {
             Some(ft) => ft,
@@ -2324,30 +2376,16 @@ impl Analysis {
         // Build workspace cross-file name sets from all files'
         // TopLevelEnv (salsa-cached, no recomputation cost).
         if base_db::preprocess::project_membership(&self.db, file_id) == Some(false) {
-            return ide_diagnostics::full_diagnostics(
-                &self.db,
-                config,
-                &ide_db::assists::AssistResolveStrategy::None,
-                &sf,
-                ft,
-                None,
-            );
+            return ide_diagnostics::full_diagnostics(&self.db, config, resolve, &sf, ft, None);
         }
         let ws_names = self.build_workspace_names_inner(Some(file_id));
 
-        // Nothing downstream of this reads a diagnostic's fixes. A
-        // published `textDocument/publishDiagnostics` carries a message, a
-        // range, tags and related information — `to_proto::diagnostic`
-        // sends no edit — and a quick fix reaches the client through
-        // `textDocument/codeAction`, which recomputes it from the
-        // diagnostics the client hands back. So every fix built here was
-        // built to be dropped.
-        //
-        // `AssistResolveStrategy` is how rust-analyzer says that, and
-        // `should_resolve` had no caller: the strategy was hard-coded to
-        // `All` at the only place that chose one.
-        let resolve = ide_db::assists::AssistResolveStrategy::None;
-        ide_diagnostics::full_diagnostics(&self.db, config, &resolve, &sf, ft, Some(&ws_names))
+        // A published diagnostic carries no edit, so the diagnostics pass
+        // asks for none (`AssistResolveStrategy::None`). Only
+        // `code_actions_inner` resolves fixes: a quick fix reaches the
+        // client through `textDocument/codeAction`, recomputed from the
+        // diagnostics the client hands back.
+        ide_diagnostics::full_diagnostics(&self.db, config, resolve, &sf, ft, Some(&ws_names))
     }
 
     /// Build cross-file name sets from all workspace files.
@@ -2550,30 +2588,6 @@ impl Analysis {
         hir::Semantics::new(&self.db).binding_type_text(ft, span, sf.bodies())
     }
 
-    /// Workspace-level reference counts — computed on demand.
-    pub fn ref_counts(&self) -> crate::Cancellable<HashMap<String, usize>> {
-        self.with_db(|a| a.ref_counts_inner())
-    }
-
-    fn ref_counts_inner(&self) -> HashMap<String, usize> {
-        let owned = self.all_salsa_files_vec();
-        let all: Vec<(&url::Url, &dyn FileDb)> =
-            owned.iter().map(|(u, sf)| (u, sf as &dyn FileDb)).collect();
-        crate::annotations::collect_reference_counts(&all)
-    }
-
-    /// Workspace-level implementation counts — computed on demand.
-    pub fn impl_counts(&self) -> crate::Cancellable<HashMap<String, usize>> {
-        self.with_db(|a| a.impl_counts_inner())
-    }
-
-    fn impl_counts_inner(&self) -> HashMap<String, usize> {
-        let owned = self.all_salsa_files_vec();
-        let all: Vec<(&url::Url, &dyn FileDb)> =
-            owned.iter().map(|(u, sf)| (u, sf as &dyn FileDb)).collect();
-        crate::annotations::collect_implementation_counts(&all)
-    }
-
     // Handlers call `analysis.method()` which internally
     // constructs the file adapter. This generic method enables
     // handlers to pass a closure that operates on &dyn FileDb.
@@ -2658,7 +2672,7 @@ mod tests {
     #[test]
     fn module_privacy_members_and_scattered_rename_keep_definition_origins() {
         use base_db::module_graph::{ModuleData, ModuleGraph};
-        let mut host = AnalysisHost::new(None);
+        let mut host = AnalysisHost::new();
         let mut files = Files::default();
         let mut vfs = vfs::Vfs::default();
         let sources = [
@@ -2691,7 +2705,9 @@ mod tests {
         assert!(!analysis.goto_definition(&urls[1], position(1, "secret")).unwrap().is_empty());
         assert!(analysis.goto_definition(&urls[2], position(2, "secret")).unwrap().is_empty());
         for (i, line, col, visible) in [(1, 2, 22, true), (2, 4, 23, false)] {
-            let items = analysis.completions(ids[i], ide_db::LineCol { line, col }).unwrap();
+            let items = analysis
+                .completions(ids[i], ide_db::LineCol { line, col }, &Default::default())
+                .unwrap();
             assert_eq!(items.iter().any(|item| item.label == "secret"), visible);
         }
         let renamed =
@@ -2708,7 +2724,7 @@ mod tests {
     #[test]
     fn module_visibility_is_shared_by_inference_navigation_completion_and_rename() {
         use base_db::module_graph::{ModuleData, ModuleGraph};
-        let mut host = AnalysisHost::new(None);
+        let mut host = AnalysisHost::new();
         let mut files = Files::default();
         let mut vfs = vfs::Vfs::default();
         let urls: Vec<_> = ["leaf", "bridge", "main", "unrelated"]
@@ -2747,7 +2763,9 @@ mod tests {
             let nav = analysis.goto_definition(&urls[2], pos).unwrap();
             assert_eq!(!nav.is_empty(), direct, "{nav:?}");
             assert!(nav.iter().all(|n| n.url == urls[0]));
-            let items = analysis.completions(ids[2], ide_db::LineCol { line: 2, col: 21 }).unwrap();
+            let items = analysis
+                .completions(ids[2], ide_db::LineCol { line: 2, col: 21 }, &Default::default())
+                .unwrap();
             assert_eq!(items.iter().any(|i| i.label == "leaf"), direct);
             assert!(items.iter().all(|item| item.scope_file == Some(ids[2])));
             // Resolving a previously offered item must use the current graph
@@ -2792,7 +2810,7 @@ mod tests {
 
     #[test]
     fn analysis_host_basic() {
-        let mut host = AnalysisHost::new(None);
+        let mut host = AnalysisHost::new();
         let mut files = Files::default();
         let mut vfs = vfs::Vfs::default();
         let u = url::Url::parse("file:///test.sail").unwrap();
@@ -2807,7 +2825,7 @@ mod tests {
 
     #[test]
     fn configuration_switch_excludes_retained_files_from_ide_queries() {
-        let mut host = AnalysisHost::new(None);
+        let mut host = AnalysisHost::new();
         let mut files = Files::default();
         let mut vfs = vfs::Vfs::default();
         let main = url::Url::parse("file:///main.sail").unwrap();
@@ -2848,8 +2866,9 @@ mod tests {
                 analysis.goto_definition(&main, ide_db::LineCol { line: 1, col: 21 }).unwrap();
             assert!(!targets.is_empty());
             assert!(targets.iter().all(|target| target.url == *active), "{targets:?}");
-            let items =
-                analysis.completions(main_id, ide_db::LineCol { line: 2, col: 22 }).unwrap();
+            let items = analysis
+                .completions(main_id, ide_db::LineCol { line: 2, col: 22 }, &Default::default())
+                .unwrap();
             assert!(items.iter().any(|item| item.label == unique), "missing {unique}");
             assert!(!items.iter().any(|item| item.label == hidden), "leaked {hidden}");
             let refs = analysis
@@ -2869,7 +2888,7 @@ mod tests {
     /// lived in `ide-diagnostics` and had no caller.
     #[test]
     fn circular_include_is_reported_on_every_file_in_the_cycle() {
-        let mut host = AnalysisHost::new(None);
+        let mut host = AnalysisHost::new();
         let mut files = Files::default();
         let mut vfs = vfs::Vfs::default();
         let a = url::Url::parse("file:///a.sail").unwrap();
@@ -2905,7 +2924,7 @@ mod tests {
     /// in hand.
     #[test]
     fn scattered_completeness_is_judged_across_files() {
-        let mut host = AnalysisHost::new(None);
+        let mut host = AnalysisHost::new();
         let mut files = Files::default();
         let mut vfs = vfs::Vfs::default();
         let a = url::Url::parse("file:///a.sail").unwrap();
@@ -2946,7 +2965,7 @@ mod tests {
 
     #[test]
     fn analysis_snapshot_isolation() {
-        let mut host = AnalysisHost::new(None);
+        let mut host = AnalysisHost::new();
         let mut files = Files::default();
         let mut vfs = vfs::Vfs::default();
         let u = url::Url::parse("file:///test.sail").unwrap();
@@ -2966,7 +2985,7 @@ mod tests {
 
     #[test]
     fn multi_file_workspace() {
-        let mut host = AnalysisHost::new(None);
+        let mut host = AnalysisHost::new();
         let mut files = Files::default();
         let mut vfs = vfs::Vfs::default();
         let prelude = url::Url::parse("file:///prelude.sail").unwrap();
@@ -3007,7 +3026,7 @@ mod tests {
 
     #[test]
     fn content_dedup() {
-        let mut host = AnalysisHost::new(None);
+        let mut host = AnalysisHost::new();
         let mut files = Files::default();
         let mut vfs = vfs::Vfs::default();
         let u = url::Url::parse("file:///test.sail").unwrap();

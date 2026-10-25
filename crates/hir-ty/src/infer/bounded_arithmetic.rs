@@ -153,6 +153,24 @@ fn finite_values(ty: &Ty, facts: &[ConstraintExpr], depth: usize) -> Option<Vec<
     Some((0..count).map(|i| &lo + BigInt::from(i)).collect())
 }
 
+/// Exact finite domain established by positive membership or integer bounds.
+pub(super) fn numeric_domain(
+    value: &NumericExpr,
+    subst: &Subst,
+    facts: &[ConstraintExpr],
+) -> Option<Vec<String>> {
+    let value = super::constraint::subst_numeric_expr(value, subst);
+    let mut flat = Vec::new();
+    conjuncts(facts, &mut flat);
+    let facts = flat
+        .into_iter()
+        .filter(|c| matches!(c, ConstraintExpr::Compare { .. } | ConstraintExpr::InSet { .. }))
+        .map(|c| super::constraint::apply_subst_constraint_expr(c, subst))
+        .collect::<Vec<_>>();
+    finite_values(&Ty::app("atom", vec![TyArg::Nexp(value)], ""), &facts, 0)
+        .map(|values| values.into_iter().map(|value| value.to_string()).collect())
+}
+
 fn powers(exponent: &Ty, facts: &[ConstraintExpr]) -> Option<Vec<BigInt>> {
     finite_values(exponent, facts, 0)?
         .into_iter()

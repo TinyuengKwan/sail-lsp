@@ -48,6 +48,9 @@ pub fn quick_fix_for_diagnostic(
     file: &dyn FileDb,
     diagnostic: &Diagnostic,
 ) -> Option<(String, IdeTextEdit, bool)> {
+    if let Some(fix) = unused_variable_fix(file, diagnostic) {
+        return Some(fix);
+    }
     // C2: Quick-fix for incomplete match — add wildcard arm.
     if diagnostic.code.as_str() == "incomplete-match" {
         return incomplete_match_fix(file, diagnostic);
@@ -121,4 +124,34 @@ pub fn var_to_let_fix(
         IdeTextEdit { range: base_db::text_range(var_start, var_end), new_text: "let".to_string() },
         true,
     ))
+}
+
+#[cfg(test)]
+mod match_fix_tests {
+    use super::*;
+    use hir::diagnostics::DiagnosticCode;
+    use ide_db::test_utils::TestFile;
+
+    #[test]
+    fn wildcard_fix_uses_the_match_token_and_preserves_result_type() {
+        for arm in ["true => 7", "true => 7, /* } */", "true => if false then 7 else 8"] {
+            let source = format!("val f : bool -> int\nfunction f(x) = match x {{ {arm} }}\n");
+            let file = TestFile::new(&source);
+            let root = file.syntax().unwrap();
+            let node =
+                root.descendants().find(|n| n.kind() == syntax::SyntaxKind::MATCH_EXPR).unwrap();
+            let diagnostic = Diagnostic::new(
+                DiagnosticCode::SailError("incomplete-match"),
+                "incomplete match",
+                hir::FileRange { file_id: base_db::FileId::from_raw(0), range: node.text_range() },
+            );
+            let (_, edit, preferred) = quick_fix_for_diagnostic(&file, &diagnostic).unwrap();
+            assert!(!preferred);
+            assert_eq!(usize::from(edit.range.start()), source.rfind('}').unwrap());
+            let mut result = source.clone();
+            result.insert_str(usize::from(edit.range.start()), &edit.new_text);
+            assert!(result.contains("_ => undefined"));
+            assert!(syntax::parse_text(&result).1.is_empty(), "{result}");
+        }
+    }
 }

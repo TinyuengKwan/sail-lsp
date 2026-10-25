@@ -51,6 +51,13 @@ pub(crate) struct DiagnosticCollection {
 }
 
 impl DiagnosticCollection {
+    /// Project loading context changed even when native findings did not.
+    pub(crate) fn mark_all_changed(&mut self) {
+        self.changes.extend(self.native_syntax.keys().copied());
+        self.changes.extend(self.native_semantic.keys().copied());
+        self.changes.extend(self.check.keys().copied());
+    }
+
     /// Clear native diagnostics for a specific file.
     ///
     /// Called when a file *outside the workspace* is closed. A workspace
@@ -63,7 +70,6 @@ impl DiagnosticCollection {
         self.changes.insert(file_id);
     }
 
-    /// Set native diagnostics (syntax or semantic) for a batch of files.
     /// Set native diagnostics for a batch of files.
     /// Accepts a batch of `(FileId, Vec<Diagnostic>)` from a single
     /// diagnostic wave. Only records a change if the diagnostics
@@ -74,6 +80,12 @@ impl DiagnosticCollection {
         generation: DiagnosticsGeneration,
         diagnostics: Vec<(FileId, Vec<lsp_types::Diagnostic>)>,
     ) {
+        // Every wave covers all subscriptions. Once another wave has been
+        // requested, results from the previous snapshot must not be published,
+        // even if the replacement has not finished yet.
+        if generation < self.generation {
+            return;
+        }
         let target = match kind {
             NativeDiagnosticsFetchKind::Syntax => &mut self.native_syntax,
             NativeDiagnosticsFetchKind::Semantic => &mut self.native_semantic,
@@ -82,23 +94,18 @@ impl DiagnosticCollection {
         for (file_id, mut diags) in diagnostics {
             diags.sort_by_key(|it| (it.range.start, it.range.end));
 
-            if let Some((old_gen, existing)) = target.get(&file_id) {
-                if existing.len() == diags.len()
-                    && existing.iter().zip(&diags).all(|(a, b)| are_diagnostics_equal(a, b))
-                {
+            if let Some((old_gen, existing)) = target.get_mut(&file_id) {
+                if generation < *old_gen {
                     continue;
                 }
-                if *old_gen < generation || generation == 0 {
-                    target.insert(file_id, (generation, diags));
-                } else {
-                    // Same or older generation — merge
-                    let existing = &mut target.get_mut(&file_id).unwrap().1;
-                    existing.extend(diags);
-                    existing.sort_by_key(|it| (it.range.start, it.range.end));
+                *old_gen = generation;
+                if *existing == diags {
+                    continue;
                 }
-            } else {
-                target.insert(file_id, (generation, diags));
             }
+            // Unlike macro-expansion batches in RA, our wave already aggregates
+            // every include context for this physical file. Replace, never merge.
+            target.insert(file_id, (generation, diags));
             self.changes.insert(file_id);
         }
     }
@@ -123,10 +130,25 @@ impl DiagnosticCollection {
         &self,
         file_id: FileId,
     ) -> impl Iterator<Item = &lsp_types::Diagnostic> {
-        let syntax = self.native_syntax.get(&file_id).into_iter().flat_map(|(_, d)| d);
-        let semantic = self.native_semantic.get(&file_id).into_iter().flat_map(|(_, d)| d);
+        let syntax = self.native_syntax.get(&file_id);
+        let full = self.native_semantic.get(&file_id);
+        // The second wave calls file_diagnostics: it already contains syntax
+        // findings. Do not duplicate them, or mix new syntax with old types.
+        let native = match (syntax, full) {
+            (Some(syntax), Some(full)) if syntax.0 > full.0 => Some(syntax),
+            (_, Some(full)) => Some(full),
+            (syntax, None) => syntax,
+        };
         let check = self.check.get(&file_id).into_iter().flatten();
-        syntax.chain(semantic).chain(check)
+        native.into_iter().flat_map(|(_, d)| d).chain(check)
+    }
+
+    pub(crate) fn native_diagnostics_are_current(&self, file_id: FileId) -> bool {
+        !self.check.get(&file_id).is_some_and(|diags| !diags.is_empty())
+            && [self.native_syntax.get(&file_id), self.native_semantic.get(&file_id)]
+                .into_iter()
+                .flatten()
+                .any(|(generation, _)| *generation == self.generation)
     }
 
     /// Take the set of files whose diagnostics changed.
@@ -145,12 +167,20 @@ impl DiagnosticCollection {
     }
 }
 
-/// Check if two LSP diagnostics are semantically equal.
-fn are_diagnostics_equal(left: &lsp_types::Diagnostic, right: &lsp_types::Diagnostic) -> bool {
-    left.source == right.source
-        && left.severity == right.severity
-        && left.range == right.range
-        && left.message == right.message
+/// Attach the actual load failure to the otherwise generic detached-file hint.
+/// Called at the LSP boundary so project I/O does not enter semantic queries.
+pub(crate) fn explain_unlinked_file(
+    diagnostics: &mut [lsp_types::Diagnostic],
+    project_error: Option<&str>,
+) {
+    let Some(error) = project_error else { return };
+    for diagnostic in diagnostics {
+        if matches!(&diagnostic.code, Some(lsp_types::NumberOrString::String(code)) if code == "unlinked-file")
+        {
+            diagnostic.message.push_str("\n\n");
+            diagnostic.message.push_str(error);
+        }
+    }
 }
 
 /// Compute native diagnostics for a slice of files.
@@ -195,4 +225,128 @@ pub(crate) fn fetch_native_diagnostics(
             Some((*file_id, lsp_diags))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn diagnostic(message: &str) -> lsp_types::Diagnostic {
+        lsp_types::Diagnostic { message: message.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn full_results_replace_syntax_and_never_mix_revisions() {
+        let mut collection = DiagnosticCollection::default();
+        let file = FileId::from_raw(0);
+        let first = collection.next_generation();
+        collection.set_native_diagnostics(
+            NativeDiagnosticsFetchKind::Syntax,
+            first,
+            vec![(file, vec![diagnostic("syntax")])],
+        );
+        collection.set_native_diagnostics(
+            NativeDiagnosticsFetchKind::Semantic,
+            first,
+            vec![(file, vec![diagnostic("syntax"), diagnostic("type")])],
+        );
+        assert_eq!(collection.diagnostics_for(file).count(), 2);
+        assert!(collection.native_diagnostics_are_current(file));
+        let second = collection.next_generation();
+        assert!(!collection.native_diagnostics_are_current(file));
+        collection.set_native_diagnostics(
+            NativeDiagnosticsFetchKind::Syntax,
+            second,
+            vec![(file, vec![diagnostic("new syntax")])],
+        );
+        let messages: Vec<_> =
+            collection.diagnostics_for(file).map(|d| d.message.as_str()).collect();
+        assert_eq!(messages, ["new syntax"]);
+        assert!(collection.native_diagnostics_are_current(file));
+        collection.set_native_diagnostics(
+            NativeDiagnosticsFetchKind::Semantic,
+            second,
+            vec![(file, vec![])],
+        );
+        assert_eq!(collection.diagnostics_for(file).count(), 0);
+    }
+
+    #[test]
+    fn old_diagnostics_cannot_return_after_a_fix() {
+        let mut collection = DiagnosticCollection::default();
+        let file = FileId::from_raw(0);
+        let old = collection.next_generation();
+        let current = collection.next_generation();
+        collection.set_native_diagnostics(
+            NativeDiagnosticsFetchKind::Semantic,
+            current,
+            vec![(file, vec![])],
+        );
+        collection.take_changes();
+        collection.set_native_diagnostics(
+            NativeDiagnosticsFetchKind::Semantic,
+            old,
+            vec![(file, vec![diagnostic("already fixed")])],
+        );
+        assert_eq!(collection.diagnostics_for(file).count(), 0);
+        assert!(collection.take_changes().is_none());
+    }
+
+    #[test]
+    fn superseded_wave_is_ignored_before_replacement_finishes() {
+        let mut collection = DiagnosticCollection::default();
+        let file = FileId::from_raw(0);
+        let old = collection.next_generation();
+        collection.next_generation();
+        collection.set_native_diagnostics(
+            NativeDiagnosticsFetchKind::Syntax,
+            old,
+            vec![(file, vec![diagnostic("incomplete expression")])],
+        );
+        assert_eq!(collection.diagnostics_for(file).count(), 0);
+        assert!(collection.take_changes().is_none());
+    }
+
+    #[test]
+    fn identical_results_advance_generation_without_republishing() {
+        let mut collection = DiagnosticCollection::default();
+        let file = FileId::from_raw(0);
+        for _ in 0..2 {
+            let generation = collection.next_generation();
+            collection.set_native_diagnostics(
+                NativeDiagnosticsFetchKind::Semantic,
+                generation,
+                vec![(file, vec![diagnostic("unchanged")])],
+            );
+            if generation == 1 {
+                assert!(collection.take_changes().is_some());
+            } else {
+                assert!(collection.take_changes().is_none());
+            }
+        }
+        assert_eq!(collection.native_semantic[&file].0, 2);
+    }
+
+    #[test]
+    fn changed_diagnostic_metadata_is_published() {
+        let mut collection = DiagnosticCollection::default();
+        let file = FileId::from_raw(0);
+        let mut diag = diagnostic("unchanged message");
+        let generation = collection.next_generation();
+        collection.set_native_diagnostics(
+            NativeDiagnosticsFetchKind::Semantic,
+            generation,
+            vec![(file, vec![diag.clone()])],
+        );
+        collection.take_changes();
+        diag.code = Some(lsp_types::NumberOrString::String("new-fix-code".into()));
+        let generation = collection.next_generation();
+        collection.set_native_diagnostics(
+            NativeDiagnosticsFetchKind::Semantic,
+            generation,
+            vec![(file, vec![diag.clone()])],
+        );
+        assert!(collection.take_changes().is_some());
+        assert_eq!(collection.diagnostics_for(file).next(), Some(&diag));
+    }
 }

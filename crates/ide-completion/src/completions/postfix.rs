@@ -10,6 +10,9 @@ use ide_db::defs::CompletionItemKind;
 
 /// Complete postfix templates after `.`, with type-aware filtering.
 pub(crate) fn complete_postfix(acc: &mut Completions, ctx: &CompletionContext<'_>) {
+    if !ctx.config.enable_postfix_completions {
+        return;
+    }
     let mut items = postfix_completions(ctx.text, ctx.offset, ctx.prefix);
 
     // B5-2: Try to determine receiver type for filtering.
@@ -24,8 +27,15 @@ pub(crate) fn complete_postfix(acc: &mut Completions, ctx: &CompletionContext<'_
                 parser::Span::new(dot_pos.saturating_sub(receiver_text.len()), dot_pos);
             let type_text = ctx
                 .file
-                .binding_type_text(receiver_span)
-                .or_else(|| ctx.file.cached_expr_type_text(receiver_span));
+                .file_text()
+                .and_then(|(db, ft)| {
+                    hir::Semantics::new(db).binding_type_text(ft, receiver_span, ctx.file.bodies())
+                })
+                .or_else(|| {
+                    ctx.file.file_text().and_then(|(db, ft)| {
+                        hir::Semantics::new(db).expr_type_text(ft, receiver_span, ctx.file.bodies())
+                    })
+                });
 
             if let Some(ty) = type_text {
                 let ty_lower = ty.to_ascii_lowercase();
@@ -105,16 +115,24 @@ pub(crate) fn postfix_completions(text: &str, offset: usize, prefix: &str) -> Ve
             continue;
         }
 
-        let snippet = template.replace("{}", receiver);
+        // Templates use doubled literal braces. Unescape before inserting the
+        // receiver so braces belonging to the user's expression stay intact.
+        let snippet = template.replace("{{", "{").replace("}}", "}").replace("{}", receiver);
 
-        items.push(
-            CompletionItem::new(CompletionItemKind::Snippet, format!(".{trigger}"))
-                .detail(*detail)
-                .filter_text(*trigger)
-                .insert_text(snippet)
-                // A postfix template is asked for by name, so it sorts first.
-                .sort_text(format!("0000_{trigger}")),
-        );
+        let mut item = CompletionItem::new(CompletionItemKind::Snippet, format!(".{trigger}"))
+            .detail(*detail)
+            .filter_text(*trigger)
+            .insert_text(snippet)
+            // A postfix template is asked for by name, so it sorts first.
+            .sort_text(format!("0000_{trigger}"));
+        let suffix_len = text[offset..]
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .map(char::len_utf8)
+            .sum::<usize>();
+        item.source_range =
+            Some(base_db::text_range(dot_pos - receiver.len(), offset + suffix_len));
+        items.push(item);
     }
     items
 }

@@ -106,10 +106,24 @@ Extension: [TinyuengKwan/sail-zed](https://github.com/TinyuengKwan/sail-zed)
 
 ## Corpus quality
 
-Validated against [sail-riscv](https://github.com/riscv/sail-riscv) (158 files, 30,018 lines): **0 errors, 0 false positives, 0 crashes**.
+The [2026-10-24 P1 baseline](docs/baselines/2026-10-24-p1.json) records
+276/276 accepted and 217/217 rejected upstream typecheck cases, using the suite's
+`--strict-bitvector` mode. The active RISC-V manifest contains 156 source files
+(29,968 lines): 81,543 expressions have no unknown or partially unknown types,
+and project diagnostics contain no errors. Seven false positives remain in the
+separate extended corpora; acceptance/rejection agreement does not imply identical
+diagnostic wording or locations.
+
+The server defaults to ordinary Sail mode. Set `workspace.strictBitvector` for
+projects built with `--strict-bitvector`. Undefined-value and register-default
+checks also apply in ordinary mode; an empty `list(bits(-1))` is permitted there,
+as it is by upstream Sail. The [earlier baseline](docs/baselines/2026-10-24.json)
+and [regression audit](docs/baselines/2026-10-24-regression-audit.json) retain the
+before-fix measurements and compiler-mode investigation.
 
 ```bash
-cargo run --example corpus_check -- /path/to/sail-riscv
+cargo run --release --example analysis_stats -- --diagnostics-only --constraint-report constraints.json /path/to/sail-riscv/model/riscv.sail_project
+cargo run --release --example conformance_check -- --list /path/to/sail/test/typecheck
 ```
 
 ## Development

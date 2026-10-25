@@ -150,9 +150,15 @@ pub fn workspace_edit(
 
     for (&file_id, edits) in &source_change.source_file_edits {
         let Some(url) = file_url(file_id) else {
+            if !source_change.file_creations.is_empty() {
+                return lsp_types::WorkspaceEdit::default();
+            }
             continue;
         };
         let Some(li) = file_line_index(file_id) else {
+            if !source_change.file_creations.is_empty() {
+                return lsp_types::WorkspaceEdit::default();
+            }
             continue;
         };
         let lsp_edits: Vec<lsp_types::TextEdit> = edits
@@ -168,7 +174,47 @@ pub fn workspace_edit(
         changes.insert(url, lsp_edits);
     }
 
-    lsp_types::WorkspaceEdit { changes: Some(changes), ..Default::default() }
+    if source_change.file_creations.is_empty() {
+        return lsp_types::WorkspaceEdit { changes: Some(changes), ..Default::default() };
+    }
+    use lsp_types::{
+        CreateFile, CreateFileOptions, DocumentChangeOperation as Op, DocumentChanges, OneOf,
+        OptionalVersionedTextDocumentIdentifier, ResourceOp, TextDocumentEdit,
+    };
+    let mut operations = Vec::new();
+    for edit in &source_change.file_creations {
+        let ide_db::source_change::FileCreation { anchor, path, contents } = edit;
+        let Some(uri) = file_url(*anchor).and_then(|url| url.join(path).ok()) else {
+            return lsp_types::WorkspaceEdit::default();
+        };
+        operations.push(Op::Op(ResourceOp::Create(CreateFile {
+            uri: uri.clone(),
+            options: Some(CreateFileOptions {
+                overwrite: Some(false),
+                ignore_if_exists: Some(false),
+            }),
+            annotation_id: None,
+        })));
+        operations.push(Op::Edit(TextDocumentEdit {
+            text_document: OptionalVersionedTextDocumentIdentifier { uri, version: None },
+            edits: vec![OneOf::Left(lsp_types::TextEdit {
+                range: lsp_types::Range::default(),
+                new_text: contents.clone(),
+            })],
+        }));
+    }
+    let mut files: Vec<_> = changes.into_iter().collect();
+    files.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+    for (uri, edits) in files {
+        operations.push(Op::Edit(TextDocumentEdit {
+            text_document: OptionalVersionedTextDocumentIdentifier { uri, version: None },
+            edits: edits.into_iter().map(OneOf::Left).collect(),
+        }));
+    }
+    lsp_types::WorkspaceEdit {
+        document_changes: Some(DocumentChanges::Operations(operations)),
+        ..Default::default()
+    }
 }
 
 /// The same change, as the snippet edits a client that opted in can take.
@@ -184,6 +230,7 @@ pub fn snippet_workspace_edit_from_plain(
     edit: &lsp_types::WorkspaceEdit,
 ) -> super::ext::SnippetWorkspaceEdit {
     super::ext::SnippetWorkspaceEdit {
+        document_changes: edit.document_changes.clone(),
         changes: edit.changes.as_ref().map(|changes| {
             changes
                 .iter()
@@ -367,6 +414,12 @@ pub fn completion_item(
             lsp_types::Documentation::MarkupContent(lsp_types::MarkupContent { kind, value })
         }),
         filter_text: item.filter_text.clone(),
+        text_edit: item.source_range.zip(line_index).map(|(source_range, index)| {
+            lsp_types::CompletionTextEdit::Edit(lsp_types::TextEdit {
+                range: range(index, source_range),
+                new_text: insert_text.clone().unwrap_or_else(|| item.label.clone()),
+            })
+        }),
         insert_text,
         insert_text_format,
         sort_text: item.sort_text.clone(),
@@ -553,5 +606,37 @@ pub fn type_hierarchy_item(
         range: range(line_index, item.range),
         selection_range: range(line_index, item.selection_range),
         data: item.data.clone(),
+    }
+}
+
+#[cfg(test)]
+mod workspace_edit_tests {
+    #[test]
+    fn extraction_does_not_emit_partial_edits_when_source_is_unavailable() {
+        use ide_db::source_change::{FileCreation, SourceChange};
+        let id = base_db::FileId::from_raw(1);
+        let mut change = SourceChange::from_file_edit(
+            id,
+            ide_db::text_edit::TextEdit {
+                range: base_db::text_range(0, 10),
+                new_text: "$include \"f.sail\"".into(),
+            },
+        );
+        change.file_creations.push(FileCreation {
+            anchor: id,
+            path: "f.sail".into(),
+            contents: "function f() = 1".into(),
+        });
+        let url = url::Url::parse("file:///project/main.sail").unwrap();
+        for missing_url in [false, true] {
+            let edit = super::workspace_edit(
+                &change,
+                &|_| (!missing_url).then(|| url.clone()),
+                &|_| None,
+                false,
+            );
+            assert!(edit.changes.is_none());
+            assert!(edit.document_changes.is_none());
+        }
     }
 }

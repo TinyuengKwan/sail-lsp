@@ -61,7 +61,7 @@ jobs:
 
       - name: Codegen check
         if: matrix.os == 'ubuntu-latest'
-        run: cargo test -p syntax -- codegen --nocapture 2>&1 | head -20 || true
+        run: cargo test -p syntax -- codegen
 
       - name: Test (default features, z3-solver enabled)
         if: runner.os != 'Windows'

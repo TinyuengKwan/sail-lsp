@@ -331,6 +331,11 @@ impl<'db> InferenceContext<'db> {
         // The constructor-payload arm below already does this for its own
         // argument; it belongs at the door.
         let normalized = self.table.normalize_alias_deep(expected);
+        let normalized = if !mutable && matches!(body.pat(pat_id), Some(Pat::Bind(_))) {
+            self.immutable_boolean_identity(normalized)
+        } else {
+            normalized
+        };
         // Each immutable bounded number has one stable runtime identity.
         // Mutable bindings keep their declared range for subsequent writes.
         // Literal patterns instead filter the scrutinee within their own arm.
@@ -579,14 +584,35 @@ impl<'db> InferenceContext<'db> {
                     locals.define_type_variable(&name);
                 }
                 let mut subst = Subst::default();
-                if !is_type_pattern_syntax(&pattern, 0)
-                    || !self.match_type_pattern(&pattern, expected, &mut subst, 0)
-                {
-                    self.result.record_type_mismatch_at(
-                        hir_def::ExprOrPatId::PatId(pat_id),
-                        expected,
-                        &pattern,
+                if !is_type_pattern_syntax(&pattern, 0) {
+                    self.invalid_pattern(
+                        pat_id,
+                        "Type patterns require binders or wildcards instead of literal arguments",
                     );
+                } else if !self.match_type_pattern(&pattern, expected, &mut subst, 0) {
+                    let actual = self.expand_type_pattern_alias(expected);
+                    let message = if matches!(pattern.kind(), TyKind::Param(_))
+                        && matches!(
+                            actual.kind(),
+                            TyKind::Scalar(
+                                crate::ty::Scalar::String
+                                    | crate::ty::Scalar::Unit
+                                    | crate::ty::Scalar::Real
+                            )
+                        ) {
+                        format!(
+                            "Type {} has no numeric expression to bind {}",
+                            expected.display_text(),
+                            pattern.display_text()
+                        )
+                    } else {
+                        format!(
+                            "Type pattern {} does not match type {}",
+                            pattern.display_text(),
+                            expected.display_text()
+                        )
+                    };
+                    self.invalid_pattern(pat_id, message);
                 } else {
                     // Bind the newly introduced names to their actual rigid
                     // identities; textual aliases must not conflate shadowed witnesses.
@@ -689,7 +715,12 @@ impl<'db> InferenceContext<'db> {
                             // (int, int, int('n), bits('n))}` is destructured
                             // by `Foo(a, b, _, d)` like any other tuple.
                             let only = match only.kind() {
-                                TyKind::Exist { inner, .. } => inner.clone(),
+                                TyKind::Exist { vars, constraint, inner } => {
+                                    let opened =
+                                        self.table.open_existential(vars, constraint, inner);
+                                    locals.add_constraint(opened.constraint);
+                                    opened.inner_ty
+                                }
                                 _ => only,
                             };
                             match only.kind() {
@@ -922,9 +953,17 @@ impl<'db> InferenceContext<'db> {
                     .and_then(|rn| self.env.records.get(rn.as_str()).cloned())
                     .map(|r| (record_name.unwrap().clone(), r));
                 if let Some((rname, record)) = &record_info {
+                    let subst = self
+                        .record_info_for_type(expected)
+                        .filter(|(name, _, _)| name == rname)
+                        .map(|(_, _, subst)| subst)
+                        .unwrap_or_default();
                     for (fname, pid) in fields {
-                        let field_ty =
-                            record.fields.get(fname.as_str()).cloned().unwrap_or_else(|| {
+                        let field_ty = record
+                            .fields
+                            .get(fname.as_str())
+                            .map(|ty| constraint::apply_subst(ty, &subst))
+                            .unwrap_or_else(|| {
                                 // A field the record does not declare. The
                                 // missing-fields check below already reads
                                 // this list; the other direction — a name in
@@ -968,6 +1007,13 @@ impl<'db> InferenceContext<'db> {
                             pat: pat_id,
                             record_name: rname,
                             missing: missing.iter().map(|s| s.to_string()).collect(),
+                            field_types: missing
+                                .iter()
+                                .map(|name| {
+                                    constraint::apply_subst(&record.fields[*name], &subst)
+                                        .display_text()
+                                })
+                                .collect(),
                         });
                     }
                 } else {

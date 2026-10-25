@@ -167,4 +167,78 @@ mod tests {
         }]);
         assert_eq!(doc.data, "new\n");
     }
+    #[test]
+    fn invalid_columns_stay_on_their_line_and_surrogates_do_not_split() {
+        let mut doc = DocumentData::new(1, "é🦀\r\n中文".into());
+        doc.apply_changes(&[change(at(0, u32::MAX, u32::MAX), "!")]);
+        assert_eq!(doc.data, "é🦀!\r\n中文");
+        doc.apply_changes(&[change(at(0, 2, 3), "X")]);
+        assert_eq!(doc.data, "éX!\r\n中文");
+        doc.apply_changes(&[change(at(99, 0, 0), "end")]);
+        assert_eq!(doc.data, "éX!\r\n中文end");
+    }
+
+    #[test]
+    fn randomized_unicode_change_batches_match_independent_byte_edits() {
+        fn position(text: &str, offset: usize) -> Position {
+            let mut p = Position::new(0, 0);
+            let mut chars = text.char_indices().peekable();
+            while let Some((i, c)) = chars.next() {
+                if i >= offset {
+                    break;
+                }
+                if c == '\r' && chars.peek().is_some_and(|(_, c)| *c == '\n') {
+                    continue;
+                }
+                if c == '\r' || c == '\n' {
+                    p = Position::new(p.line + 1, 0);
+                } else {
+                    p.character += c.len_utf16() as u32;
+                }
+            }
+            p
+        }
+        let mut seed = 29u64;
+        let mut next = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (seed >> 32) as usize
+        };
+        let pieces = ["", "a", "é", "🦀", "中文", "\r", "\n", "\r\n", "é\n🦀"];
+        let mut reference = "中文🦀\r\nline\nend".to_string();
+        let mut doc = DocumentData::new(1, reference.clone());
+        for round in 0..500 {
+            let mut changes = Vec::new();
+            if round % 37 == 0 {
+                reference = "🦀 reset\r\n中文".into();
+                changes.push(TextDocumentContentChangeEvent {
+                    range: None,
+                    range_length: None,
+                    text: reference.clone(),
+                });
+            }
+            for _ in 0..4 {
+                let boundaries: Vec<_> = reference
+                    .char_indices()
+                    .map(|(i, _)| i)
+                    .chain(std::iter::once(reference.len()))
+                    .filter(|&i| {
+                        !(i > 0
+                            && reference.as_bytes().get(i) == Some(&b'\n')
+                            && reference.as_bytes()[i - 1] == b'\r')
+                    })
+                    .collect();
+                let a = boundaries[next() % boundaries.len()];
+                let b = boundaries[next() % boundaries.len()];
+                let (a, b) = (a.min(b), a.max(b));
+                let replacement = pieces[next() % pieces.len()];
+                changes.push(change(
+                    Range::new(position(&reference, a), position(&reference, b)),
+                    replacement,
+                ));
+                reference.replace_range(a..b, replacement);
+            }
+            doc.apply_changes(&changes);
+            assert_eq!(doc.data, reference, "batch {round}");
+        }
+    }
 }

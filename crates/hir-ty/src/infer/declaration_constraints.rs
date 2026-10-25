@@ -14,6 +14,8 @@ enum Point {
 #[derive(Clone, PartialEq, Eq)]
 struct Definition {
     is_alias: bool,
+    category: SK,
+    undefined_policy: Option<String>,
     params: Vec<String>,
     kinds: HashMap<String, Kind>,
     constraint: Option<ConstraintExpr>,
@@ -32,7 +34,7 @@ fn is_bitfield(node: &SyntaxNode) -> bool {
     node.kind() == SK::NAMED_DEF && node.children_with_tokens().any(|t| t.kind() == SK::KW_BITFIELD)
 }
 
-fn definition(node: SyntaxNode) -> Option<Definition> {
+fn definition(node: SyntaxNode, strict: bool) -> Option<Definition> {
     if !is_definition(&node) {
         return None;
     }
@@ -44,6 +46,7 @@ fn definition(node: SyntaxNode) -> Option<Definition> {
     let parameters =
         node.children().find(|n| matches!(n.kind(), SK::PARAM_LIST | SK::TYPE_PARAM_LIST));
     let mut params = Vec::new();
+    let mut explicit_naturals = Vec::new();
     let mut kinds = kinds::declared(&node);
     if let Some(parameters) = &parameters {
         let tokens: Vec<_> = parameters
@@ -59,6 +62,9 @@ fn definition(node: SyntaxNode) -> Option<Definition> {
                 group.push(name);
             } else if token.kind() == SK::COLON {
                 if let Some(kind) = tokens.get(i + 1).and_then(|t| Kind::from_name(t.text())) {
+                    if tokens[i + 1].text() == "Nat" {
+                        explicit_naturals.extend(group.iter().cloned());
+                    }
                     for name in group.drain(..) {
                         kinds.insert(name, kind);
                     }
@@ -80,7 +86,8 @@ fn definition(node: SyntaxNode) -> Option<Definition> {
             .map(|t| t.text().to_owned())
             .collect::<Vec<_>>()
             .join(" ");
-        text.split_once(',').map(|(_, c)| parse_constraint_text(c.trim()))
+        text.split_once(',')
+            .map(|(_, c)| parse_constraint_text(c.split("->").next().unwrap_or(c).trim()))
     });
     let bodies = if node.kind() == SK::TYPE_ALIAS_DEF {
         vec![type_from_type_text(&text[eq + 1..])]
@@ -96,18 +103,129 @@ fn definition(node: SyntaxNode) -> Option<Definition> {
             .map(|f| type_from_type_text(&f.type_text))
             .collect()
     };
+    let explicit_kinds = kinds.clone();
     for body in &bodies {
         kinds::infer(body, &mut kinds);
     }
     let bodies = bodies.iter().map(|ty| kinds::normalize(ty, &kinds)).collect();
-    let constraint = constraint.map(|c| kinds::normalize_constraint(&c, &kinds));
+    let mut facts: Vec<_> =
+        constraint.map(|c| kinds::normalize_constraint(&c, &kinds)).into_iter().collect();
+    facts.extend(explicit_naturals.iter().map(|p| parse_constraint_text(&format!("{p} >= 0"))));
+    if strict {
+        // Omitted declaration kinds can be inferred as Nat from a vector
+        // length position. Explicit Int parameters stay Int upstream.
+        let mut inferred = HashSet::new();
+        for body in &bodies {
+            inferred_width_parameters(body, &mut inferred);
+        }
+        for param in &params {
+            if !explicit_kinds.contains_key(param) && inferred.contains(param) {
+                facts.push(parse_constraint_text(&format!("{param} >= 0")));
+            }
+        }
+    }
+    let constraint = (!facts.is_empty()).then_some(ConstraintExpr::And(facts));
     Some(Definition {
         is_alias: node.kind() == SK::TYPE_ALIAS_DEF,
+        category: node
+            .children_with_tokens()
+            .map(|t| t.kind())
+            .find(|k| {
+                matches!(
+                    k,
+                    SK::KW_STRUCT | SK::KW_UNION | SK::KW_ENUM | SK::KW_NEWTYPE | SK::KW_BITFIELD
+                )
+            })
+            .unwrap_or(node.kind()),
+        undefined_policy: attribute(&node, "undefined_gen"),
         params,
         kinds,
         constraint,
         bodies,
     })
+}
+
+fn inferred_width_parameters(ty: &Ty, out: &mut HashSet<String>) {
+    match ty.kind() {
+        TyKind::Named(name, args) | TyKind::App { name, args, .. } => {
+            if matches!(name.as_str(), "bits" | "bitvector" | "vector") {
+                if let Some(arg) = args.first() {
+                    let text = match arg {
+                        TyArg::Type(t) => t.display_text(),
+                        _ => arg.as_value_str().unwrap_or_default(),
+                    };
+                    fn natural_variable(expr: &NumericExpr) -> Option<&str> {
+                        match expr {
+                            NumericExpr::Var(name) => Some(name),
+                            NumericExpr::Mul(a, b) => match (&**a, &**b) {
+                                (NumericExpr::Const(n), value) | (value, NumericExpr::Const(n))
+                                    if *n > 0 =>
+                                {
+                                    natural_variable(value)
+                                }
+                                _ => None,
+                            },
+                            _ => None,
+                        }
+                    }
+                    if let Some(expr) = NumericExpr::parse(&text) {
+                        if let Some(name) = natural_variable(&expr) {
+                            out.insert(name.to_owned());
+                        }
+                    }
+                }
+            }
+            for arg in args {
+                if let TyArg::Type(ty) = arg {
+                    inferred_width_parameters(ty, out);
+                }
+            }
+        }
+        TyKind::Tuple(types) => types.iter().for_each(|t| inferred_width_parameters(t, out)),
+        TyKind::FnPtr(sig) => sig
+            .params
+            .iter()
+            .chain(std::iter::once(&sig.ret))
+            .for_each(|t| inferred_width_parameters(t, out)),
+        TyKind::Exist { vars, inner, .. } => {
+            let mut inner_vars = HashSet::new();
+            inferred_width_parameters(inner, &mut inner_vars);
+            out.extend(inner_vars.into_iter().filter(|n| !vars.contains(n)));
+        }
+        _ => {}
+    }
+}
+
+fn attribute(node: &SyntaxNode, name: &str) -> Option<String> {
+    let mut previous = node.prev_sibling();
+    while let Some(attr) = previous.filter(|n| n.kind() == SK::ATTRIBUTE) {
+        let tokens: Vec<_> =
+            attr.descendants_with_tokens().filter_map(|e| e.into_token()).collect();
+        if tokens.iter().find(|t| t.kind() == SK::IDENT).is_some_and(|t| t.text() == name) {
+            return Some(
+                tokens
+                    .iter()
+                    .find(|t| t.kind() == SK::STRING_LIT)
+                    .map(|t| t.text().trim_matches('"').to_owned())
+                    .unwrap_or_default(),
+            );
+        }
+        previous = attr.prev_sibling();
+    }
+    None
+}
+
+fn all_known(values: impl IntoIterator<Item = Option<bool>>) -> Option<bool> {
+    let mut result = Some(true);
+    for value in values {
+        if value == Some(false) {
+            return Some(false);
+        }
+        if value.is_none() {
+            result = None;
+        }
+    }
+    result
 }
 
 // Project semantic metadata independently of body text and source offsets.
@@ -117,7 +235,11 @@ fn file_metadata(db: &dyn salsa::Database, file: FileText) -> Vec<Option<Definit
     syntax::parse_query::semantic_parse_file(db, file)
         .syntax_node()
         .into_iter()
-        .flat_map(|root| root.children().map(definition).collect::<Vec<_>>())
+        .flat_map(|root| {
+            root.children()
+                .map(|node| definition(node, base_db::strict_bitvector(db)))
+                .collect::<Vec<_>>()
+        })
         .collect()
 }
 
@@ -136,6 +258,7 @@ struct Checker<'a> {
     metadata: HashMap<Point, Option<Definition>>,
     table: InferenceTable,
     numbers: HashMap<(Point, String), Option<num_bigint::BigInt>>,
+    strict_bitvector: bool,
 }
 
 impl Checker<'_> {
@@ -228,7 +351,9 @@ impl Checker<'_> {
         if !self.metadata.contains_key(&point) {
             let value = match point {
                 Point::Ordered(at) => declaration_metadata(self.db?, at.file, at.index).clone(),
-                Point::Local(_) => self.node(point).and_then(definition),
+                Point::Local(_) => {
+                    self.node(point).and_then(|node| definition(node, self.strict_bitvector))
+                }
             };
             self.metadata.insert(point, value);
         }
@@ -367,12 +492,162 @@ impl Checker<'_> {
         }
     }
 
+    fn record_undefined(&mut self, at: Point, def: &Definition, depth: usize) -> Option<bool> {
+        let facts: Vec<_> = def.constraint.clone().into_iter().collect();
+        all_known(def.bodies.iter().map(|body| {
+            let allowed = self.undefined_allowed(at, body, &facts, depth + 1);
+            if allowed != Some(true) {
+                return allowed;
+            }
+            self.inhabited(at, body, &facts, depth + 1, true)
+        }))
+    }
+
+    // Eligibility for a generated undefined function is checked at the
+    // declaration, before concrete type arguments are substituted. In
+    // particular, a record with an unconstrained width does not acquire a
+    // generator merely because a later use instantiates that width to 1.
+    fn undefined_allowed(
+        &mut self,
+        at: Point,
+        ty: &Ty,
+        facts: &[ConstraintExpr],
+        depth: usize,
+    ) -> Option<bool> {
+        if depth > 64 {
+            return None;
+        }
+        match ty.kind() {
+            TyKind::Error | TyKind::Infer(_) => None,
+            TyKind::Exist { .. } | TyKind::Param(_) | TyKind::FnPtr(_) | TyKind::Bidir { .. } => {
+                Some(false)
+            }
+            TyKind::Tuple(types) => {
+                all_known(types.iter().map(|t| self.undefined_allowed(at, t, facts, depth + 1)))
+            }
+            TyKind::App { name, args, .. } | TyKind::Named(name, args) => {
+                let mut parameter_kinds =
+                    kinds::arguments(name, args.len()).map(|k| k.to_vec()).unwrap_or_default();
+                if let Some(origin) = self.resolve(at, name) {
+                    let def = self.metadata(origin)?;
+                    parameter_kinds = def
+                        .params
+                        .iter()
+                        .map(|p| def.kinds.get(p).copied().unwrap_or(Kind::Type))
+                        .collect();
+                    if def.is_alias {
+                        let ty =
+                            substitution::apply_arguments(def.bodies.first()?, &def.params, args)?;
+                        return self.undefined_allowed(origin, &ty, facts, depth + 1);
+                    }
+                    let generated = match def.undefined_policy.as_deref() {
+                        Some("skip") => Some(true),
+                        Some("forbid") => Some(false),
+                        _ => match def.category {
+                            SK::KW_UNION | SK::KW_NEWTYPE => Some(false),
+                            SK::KW_STRUCT => self.record_undefined(origin, &def, depth),
+                            SK::KW_ENUM | SK::KW_BITFIELD => Some(true),
+                            _ => None,
+                        },
+                    };
+                    if generated != Some(true) {
+                        return generated;
+                    }
+                } else if !matches!(
+                    name.as_str(),
+                    "int"
+                        | "nat"
+                        | "bool"
+                        | "real"
+                        | "string"
+                        | "unit"
+                        | "bit"
+                        | "bits"
+                        | "bitvector"
+                        | "vector"
+                        | "range"
+                        | "option"
+                ) {
+                    return None;
+                }
+                all_known(args.iter().enumerate().filter_map(|(i, a)| match a {
+                    TyArg::Type(_) if parameter_kinds.get(i).is_some_and(|k| *k != Kind::Type) => {
+                        None
+                    }
+                    TyArg::Type(t) => Some(self.undefined_allowed(at, t, facts, depth + 1)),
+                    _ => None,
+                }))
+            }
+            _ => Some(true),
+        }
+    }
+
+    fn inhabited(
+        &mut self,
+        at: Point,
+        ty: &Ty,
+        facts: &[ConstraintExpr],
+        depth: usize,
+        require_proof: bool,
+    ) -> Option<bool> {
+        if depth > 64 {
+            return None;
+        }
+        match ty.kind() {
+            TyKind::Error | TyKind::Infer(_) => None,
+            TyKind::Tuple(types) => all_known(
+                types.iter().map(|t| self.inhabited(at, t, facts, depth + 1, require_proof)),
+            ),
+            TyKind::App { name, args, .. } | TyKind::Named(name, args) => {
+                if let Some(origin) = self.resolve(at, name) {
+                    let def = self.metadata(origin)?;
+                    let bodies: Option<Vec<_>> = def
+                        .bodies
+                        .iter()
+                        .map(|body| substitution::apply_arguments(body, &def.params, args))
+                        .collect();
+                    if def.is_alias || def.category == SK::KW_STRUCT {
+                        return all_known(bodies?.iter().map(|body| {
+                            self.inhabited(origin, body, facts, depth + 1, require_proof)
+                        }));
+                    }
+                    return None;
+                }
+                if matches!(name.as_str(), "bits" | "bitvector" | "vector") {
+                    let arg = args.first()?;
+                    let text = match arg {
+                        TyArg::Type(t) => t.display_text(),
+                        _ => arg.as_value_str()?,
+                    };
+                    let width = self
+                        .number(at, &text, 0)
+                        .map(NumericExpr::from_integer)
+                        .or_else(|| NumericExpr::parse(&text))?;
+                    let goal = ConstraintExpr::Compare {
+                        lhs: width,
+                        op: CompareOp::Gte,
+                        rhs: NumericExpr::Const(0),
+                    };
+                    return match solver::solve(&goal, &Subst::default(), facts) {
+                        ConstraintStatus::Satisfied => Some(true),
+                        ConstraintStatus::Failed => Some(false),
+                        ConstraintStatus::Unknown if require_proof => Some(false),
+                        _ => None,
+                    };
+                }
+                Some(true)
+            }
+            _ => Some(true),
+        }
+    }
+
     fn check_type(
         &mut self,
         at: Point,
         ty: &Ty,
         assumptions: &[ConstraintExpr],
         visiting: &mut HashSet<Point>,
+        require_proof: bool,
     ) -> Option<(Point, ConstraintExpr)> {
         if let Some(db) = self.db {
             db.unwind_if_revision_cancelled();
@@ -381,12 +656,44 @@ impl Checker<'_> {
             TyKind::App { name, args, .. } | TyKind::Named(name, args) => {
                 for arg in args {
                     if let TyArg::Type(ty) = arg {
-                        if let Some(failure) = self.check_type(at, ty, assumptions, visiting) {
+                        if let Some(failure) =
+                            self.check_type(at, ty, assumptions, visiting, require_proof)
+                        {
                             return Some(failure);
                         }
                     }
                 }
-                let selected = self.resolve(at, name)?;
+                let selected = self.resolve(at, name);
+                if selected.is_none()
+                    && self.strict_bitvector
+                    && matches!(name.as_str(), "bits" | "bitvector")
+                {
+                    let arg = args.first()?;
+                    let text = match arg {
+                        TyArg::Type(ty) => ty.display_text(),
+                        _ => arg.as_value_str()?,
+                    };
+                    let width = self
+                        .number(at, &text, 0)
+                        .map(NumericExpr::from_integer)
+                        .or_else(|| NumericExpr::parse(&text))?;
+                    let goal = ConstraintExpr::Compare {
+                        lhs: width,
+                        op: CompareOp::Gte,
+                        rhs: NumericExpr::from_integer(0.into()),
+                    };
+                    let status = solver::solve(&goal, &Subst::default(), assumptions);
+                    // A nominal definition's parameters are already fixed by
+                    // its header. Its fields must be well-formed for every
+                    // allowed instantiation, even if no value is constructed.
+                    if status == ConstraintStatus::Failed
+                        || (require_proof && status != ConstraintStatus::Satisfied)
+                    {
+                        return Some((at, goal));
+                    }
+                    return None;
+                }
+                let selected = selected?;
                 let definition = self.metadata(selected)?;
                 if definition.params.len() != args.len() || !visiting.insert(selected) {
                     return None;
@@ -396,11 +703,19 @@ impl Checker<'_> {
                         .iter()
                         .zip(&definition.params)
                         .map(|(arg, param)| {
-                            kinds::argument(
+                            let arg = kinds::argument(
                                 arg,
                                 definition.kinds.get(param).copied(),
                                 &HashMap::new(),
-                            )
+                            );
+                            if definition.kinds.get(param) == Some(&Kind::Int) {
+                                if let Some(n) =
+                                    arg.as_value_str().and_then(|s| self.number(at, &s, 0))
+                                {
+                                    return TyArg::Nexp(NumericExpr::from_integer(n));
+                                }
+                            }
+                            arg
                         })
                         .collect();
                     if let Some(constraint) = &definition.constraint {
@@ -435,9 +750,13 @@ impl Checker<'_> {
                             substitution::apply_arguments(body, &definition.params, &args)?;
                         // The RHS retains its declaration's environment, including
                         // private support types, not the caller's later declarations.
-                        if let Some(failure) =
-                            self.check_type(selected, &instantiated, assumptions, visiting)
-                        {
+                        if let Some(failure) = self.check_type(
+                            selected,
+                            &instantiated,
+                            assumptions,
+                            visiting,
+                            require_proof,
+                        ) {
                             return Some(failure);
                         }
                     }
@@ -450,26 +769,27 @@ impl Checker<'_> {
                 let opened = self.table.open_existential(vars, constraint, inner);
                 let mut assumptions = assumptions.to_vec();
                 assumptions.push(opened.constraint);
-                self.check_type(at, &opened.inner_ty, &assumptions, visiting)
+                self.check_type(at, &opened.inner_ty, &assumptions, visiting, require_proof)
             }
-            TyKind::Tuple(types) => {
-                types.iter().find_map(|ty| self.check_type(at, ty, assumptions, visiting))
-            }
+            TyKind::Tuple(types) => types
+                .iter()
+                .find_map(|ty| self.check_type(at, ty, assumptions, visiting, require_proof)),
             TyKind::FnPtr(sig) => sig
                 .params
                 .iter()
                 .chain(std::iter::once(&sig.ret))
-                .find_map(|ty| self.check_type(at, ty, assumptions, visiting)),
+                .find_map(|ty| self.check_type(at, ty, assumptions, visiting, require_proof)),
             TyKind::Bidir { lhs, rhs } => self
-                .check_type(at, lhs, assumptions, visiting)
-                .or_else(|| self.check_type(at, rhs, assumptions, visiting)),
+                .check_type(at, lhs, assumptions, visiting, require_proof)
+                .or_else(|| self.check_type(at, rhs, assumptions, visiting, require_proof)),
             _ => None,
         }
     }
 }
 
-/// Check explicit type applications and declaration RHSs. Unknown constraints
-/// remain unknown; only a proved contradiction produces an editor error.
+/// Check explicit type applications and declaration RHSs. Default mode reports
+/// refuted constraints; strict bitvector declarations additionally require a
+/// proof of nonnegative width under their declared parameter constraints.
 pub fn check(
     input: Option<(&dyn salsa::Database, FileText)>,
     defs: &[SyntaxNode],
@@ -481,12 +801,22 @@ pub fn check(
         metadata: HashMap::new(),
         table: InferenceTable::new(),
         numbers: HashMap::new(),
+        strict_bitvector: input.is_some_and(|(db, _)| base_db::strict_bitvector(db)),
     };
     for node in defs {
         checker.table.reserve_source_names(&node.text().to_string());
     }
     let mut diagnostics = Vec::new();
+    let mut global_facts = Vec::new();
     for (index, node) in defs.iter().enumerate() {
+        if let Some(previous) = index.checked_sub(1).and_then(|i| defs.get(i)) {
+            if previous.kind() == SK::CONSTRAINT_DEF {
+                let text = previous.text().to_string();
+                global_facts.push(parse_constraint_text(
+                    text.trim().strip_prefix("constraint").unwrap_or(&text).trim(),
+                ));
+            }
+        }
         let at = match ordered {
             Some((db, file)) => {
                 match source_order::at_offset(db, file, usize::from(node.text_range().start())) {
@@ -498,8 +828,45 @@ pub fn check(
         };
         checker.check_bitfield(at, node, &mut diagnostics);
         let metadata = checker.metadata(at);
-        let own_facts: Vec<_> =
-            metadata.as_ref().and_then(|m| m.constraint.clone()).into_iter().collect();
+        let has = |kind| node.children_with_tokens().any(|it| it.kind() == kind);
+        let undefined_error = if has(SK::KW_REGISTER)
+            && !has(SK::EQ)
+            && attribute(node, "initialized_elsewhere").is_none()
+        {
+            node.children().find(|n| n.kind().is_type_node()).and_then(|syntax| {
+                let ty = type_from_cst_node(&syntax);
+                (checker.undefined_allowed(at, &ty, &global_facts, 0) == Some(false)
+                    || checker.inhabited(at, &ty, &global_facts, 0, false) == Some(false))
+                .then(|| {
+                    format!(
+                        "Must provide a default register value for a register of type {}",
+                        syntax.text()
+                    )
+                })
+            })
+        } else if let Some(def) = metadata.as_ref().filter(|def| {
+            def.category == SK::KW_STRUCT && def.undefined_policy.as_deref() == Some("generate")
+        }) {
+            (checker.record_undefined(at, def, 0) == Some(false)).then(|| {
+                format!(
+                    "Cannot generate undefined function for struct {}",
+                    syntax::definition_name(node).unwrap_or_default()
+                )
+            })
+        } else {
+            None
+        };
+        if let Some(message) = undefined_error {
+            diagnostics.push(Diagnostic::new(
+                DiagnosticCode::SailError("type-error"),
+                message,
+                node.text_range(),
+                Severity::Error,
+            ));
+        }
+        let mut own_facts = global_facts.clone();
+        own_facts.extend(metadata.as_ref().and_then(|m| m.constraint.clone()));
+        let definition_site = metadata.is_some();
         let mut checks = Vec::new();
         if let Some(metadata) = metadata {
             if let Some((name, origin)) =
@@ -510,10 +877,20 @@ pub fn check(
                 } else {
                     format!("Types are not well-formed within this type definition. Note that recursive types are forbidden. Type {name} is not available at this declaration")
                 };
+                let range = if origin == at && metadata.is_alias {
+                    node.descendants_with_tokens()
+                        .filter_map(|element| element.into_token())
+                        .skip_while(|token| token.kind() != SK::EQ)
+                        .skip(1)
+                        .find(|token| token.kind() == SK::IDENT && token.text() == name)
+                        .map_or(node.text_range(), |token| token.text_range())
+                } else {
+                    node.text_range()
+                };
                 let mut diagnostic = Diagnostic::new(
                     DiagnosticCode::SailError("ill-formed-type"),
                     message,
-                    node.text_range(),
+                    range,
                     Severity::Error,
                 );
                 checker.related(&mut diagnostic, origin, "type declaration is unavailable here");
@@ -565,7 +942,7 @@ pub fn check(
         let mut reported = HashSet::new();
         for (range, ty, facts) in checks {
             if let Some((origin, constraint)) =
-                checker.check_type(at, &ty, &facts, &mut HashSet::new())
+                checker.check_type(at, &ty, &facts, &mut HashSet::new(), definition_site)
             {
                 if !reported.insert((range, origin)) {
                     continue;
@@ -585,6 +962,42 @@ pub fn check(
         }
     }
     diagnostics
+}
+
+/// Check a typed undefined value in the lexical declaration environment.
+/// Missing external definitions and unresolved inference inputs stay unknown.
+pub fn undefined_error(
+    db: &dyn salsa::Database,
+    file: FileText,
+    offset: usize,
+    ty: &Ty,
+    facts: &[ConstraintExpr],
+) -> Option<String> {
+    let root = syntax::parse_query::semantic_parse_file(db, file).syntax_node()?;
+    let defs: Vec<_> = root.children().collect();
+    let at = if source_order::program(db, file).is_some() {
+        Point::Ordered(source_order::at_offset(db, file, offset)?)
+    } else {
+        Point::Local(defs.iter().position(|n| {
+            usize::from(n.text_range().start()) <= offset
+                && offset < usize::from(n.text_range().end())
+        })?)
+    };
+    let mut checker = Checker {
+        db: Some(db),
+        defs: &defs,
+        metadata: HashMap::new(),
+        table: InferenceTable::new(),
+        numbers: HashMap::new(),
+        strict_bitvector: base_db::strict_bitvector(db),
+    };
+    if checker.undefined_allowed(at, ty, facts, 0) == Some(false) {
+        Some(format!("Type {} cannot be undefined", ty.display_text()))
+    } else if checker.inhabited(at, ty, facts, 0, false) == Some(false) {
+        Some(format!("Type {} could be empty", ty.display_text()))
+    } else {
+        None
+    }
 }
 
 /// Compare closed signature types using each declaration's alias environment.

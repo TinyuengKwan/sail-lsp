@@ -31,11 +31,94 @@ pub(super) fn solve(
     let status = solve_without_smt(expr, subst, assumptions);
     #[cfg(feature = "z3-solver")]
     let status = if matches!(status, ConstraintStatus::Unknown) {
-        super::z3_solver::try_solve(expr, subst, assumptions)
+        // Prove sufficient exponent/quotient conditions before expanding powers
+        // and nonlinear integer products.
+        // A failed premise is not a counterexample to the original goal.
+        if arithmetic_premises(expr).is_some_and(|premises| {
+            super::z3_solver::try_solve(&premises, subst, assumptions)
+                == ConstraintStatus::Satisfied
+        }) {
+            ConstraintStatus::Satisfied
+        } else {
+            super::z3_solver::try_solve(expr, subst, assumptions)
+        }
     } else {
         status
     };
     status
+}
+
+#[cfg(feature = "z3-solver")]
+fn arithmetic_premises(goal: &ConstraintExpr) -> Option<ConstraintExpr> {
+    use crate::ty::NumericExpr as N;
+    let le = |lhs, rhs| ConstraintExpr::Compare { lhs, op: CompareOp::Lte, rhs };
+    match goal {
+        ConstraintExpr::And(items) if !items.is_empty() => {
+            let mut changed = false;
+            let items = items
+                .iter()
+                .map(|item| {
+                    arithmetic_premises(item)
+                        .map(|premise| {
+                            changed = true;
+                            premise
+                        })
+                        .unwrap_or_else(|| item.clone())
+                })
+                .collect();
+            changed.then_some(ConstraintExpr::And(items))
+        }
+        ConstraintExpr::Compare { lhs, op, rhs } => {
+            let (lo, hi) = match op {
+                CompareOp::Lte => (lhs, rhs),
+                CompareOp::Gte => (rhs, lhs),
+                _ => return None,
+            };
+            let quotient = |n: &N| match n {
+                N::Div(a, b) => Some((a.as_ref().clone(), b.as_ref().clone())),
+                N::App { name, args } if name == "div" && args.len() == 2 => {
+                    Some((args[0].clone(), args[1].clone()))
+                }
+                _ => None,
+            };
+            // For positive integer a,d and b >= d, floor(a*b/d) >= 1.
+            if matches!(lo, N::Const(1)) {
+                if let Some((N::Mul(a, b), d)) = quotient(hi) {
+                    return Some(ConstraintExpr::And(vec![
+                        le(N::Const(1), *a),
+                        le(N::Const(1), d.clone()),
+                        le(d, *b),
+                    ]));
+                }
+            }
+            // For b >= 0 and 1 <= d with a <= d, floor(a*b/d) <= b.
+            if let Some((N::Mul(a, b), d)) = quotient(lo) {
+                let factor = if a.as_ref() == hi {
+                    Some(*b)
+                } else if b.as_ref() == hi {
+                    Some(*a)
+                } else {
+                    None
+                };
+                if let Some(factor) = factor {
+                    return Some(ConstraintExpr::And(vec![
+                        le(N::Const(0), hi.clone()),
+                        le(N::Const(1), d.clone()),
+                        le(factor, d),
+                    ]));
+                }
+            }
+            match (lo, hi) {
+                (N::Const(1), N::Exp(b)) => Some(le(N::Const(0), *b.clone())),
+                (N::Exp(a), N::Exp(b)) => Some(ConstraintExpr::And(vec![
+                    le(N::Const(0), *a.clone()),
+                    le(*a.clone(), *b.clone()),
+                ])),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
 }
 
 /// Legacy recovery can put a primitive type name into a numeric slot. It is
@@ -81,6 +164,19 @@ pub(super) fn solve_without_smt(
     subst: &Subst,
     assumptions: &[ConstraintExpr],
 ) -> ConstraintStatus {
+    solve_finite(expr, subst, assumptions, &mut 64)
+}
+
+fn solve_finite(
+    expr: &ConstraintExpr,
+    subst: &Subst,
+    assumptions: &[ConstraintExpr],
+    states: &mut usize,
+) -> ConstraintStatus {
+    if *states == 0 {
+        return ConstraintStatus::Unknown;
+    }
+    *states -= 1;
     if has_erased_inputs(expr, subst, assumptions) {
         return ConstraintStatus::Unknown;
     }
@@ -98,17 +194,6 @@ pub(super) fn solve_without_smt(
     }
     if let Some(value) = super::integer::conditional(expr, subst, assumptions) {
         return if value { ConstraintStatus::Satisfied } else { ConstraintStatus::Failed };
-    }
-    if let ConstraintExpr::Compare { lhs, op, rhs } = expr {
-        let lhs = super::constraint::subst_numeric_expr(lhs, subst);
-        let rhs = super::constraint::subst_numeric_expr(rhs, subst);
-        if let Some(delta) = super::integer::difference(&lhs, &rhs) {
-            return if super::integer::compare(&delta, *op, &0.into()) {
-                ConstraintStatus::Satisfied
-            } else {
-                ConstraintStatus::Failed
-            };
-        }
     }
     // Exact difference constraints can entail a bound by refuting its
     // negation, including symbolic bounds such as `2 ^ 'n - 1`.
@@ -141,7 +226,67 @@ pub(super) fn solve_without_smt(
     if !assumptions.is_empty() && entailed(expr, subst, assumptions) {
         return ConstraintStatus::Satisfied;
     }
+    // Split only domains explicitly supplied by positive membership facts.
+    // Every member must prove the goal; a partial enumeration is never proof.
+    // One shared state budget bounds the entire Cartesian search.
+    if let Some((name, members)) = finite_domain(expr, assumptions, subst) {
+        let mut branch = subst.clone();
+        if members.into_iter().all(|value| {
+            branch.values.insert(name.clone(), value);
+            solve_finite(expr, &branch, assumptions, states) == ConstraintStatus::Satisfied
+        }) {
+            return ConstraintStatus::Satisfied;
+        }
+    }
     fast
+}
+
+fn finite_domain(
+    goal: &ConstraintExpr,
+    assumptions: &[ConstraintExpr],
+    subst: &Subst,
+) -> Option<(String, Vec<String>)> {
+    use crate::ty::NumericExpr;
+    let mut pending = assumptions.iter().collect::<Vec<_>>();
+    let mut names = std::collections::BTreeSet::new();
+    let mut visited = 0;
+    while let Some(fact) = pending.pop() {
+        visited += 1;
+        if visited > 256 {
+            return None;
+        }
+        let mut candidate = |value: &NumericExpr| {
+            if let NumericExpr::Var(name) = super::constraint::subst_numeric_expr(value, subst) {
+                if !subst.values.contains_key(&name) {
+                    names.insert(name);
+                }
+            }
+        };
+        match fact {
+            ConstraintExpr::And(items) => pending.extend(items.iter()),
+            ConstraintExpr::InSet { value, .. } => candidate(value),
+            ConstraintExpr::Compare { lhs, rhs, .. } => {
+                candidate(lhs);
+                candidate(rhs);
+            }
+            _ => {}
+        }
+    }
+    let mut goal_names = std::collections::HashSet::new();
+    super::substitution::constraint_names(goal, &mut goal_names);
+    names
+        .into_iter()
+        .filter_map(|name| {
+            let values = super::bounded_arithmetic::numeric_domain(
+                &NumericExpr::Var(name.clone()),
+                subst,
+                assumptions,
+            )?;
+            let indirect = !goal_names.contains(name.trim_start_matches('\''));
+            Some((indirect, name, values))
+        })
+        .min_by_key(|(indirect, _, values)| (*indirect, values.len()))
+        .map(|(_, name, values)| (name, values))
 }
 
 /// A rigid elimination variable is universally quantified. A concrete
@@ -400,6 +545,135 @@ fn decide_from_ordering(
     None
 }
 
+/// Prove nonnegative/positive arithmetic without spending an SMT check.
+/// Each rule is an implication over mathematical integers; failure to prove
+/// a premise stays unknown, including zero divisors and negative exponents.
+fn arithmetic_lower_bound(
+    value: &crate::ty::NumericExpr,
+    minimum: i64,
+    subst: &Subst,
+    facts: &[ConstraintExpr],
+    depth: usize,
+) -> bool {
+    use crate::ty::NumericExpr as N;
+    if depth > 32 {
+        return false;
+    }
+    if let Some(n) = super::integer::eval(value, subst, facts) {
+        return n >= minimum.into();
+    }
+    let goal =
+        ConstraintExpr::Compare { lhs: value.clone(), op: CompareOp::Gte, rhs: N::Const(minimum) };
+    if constraint_implied_by_assumptions(facts, &goal, subst)
+        || decide_from_membership(&goal, subst, facts) == Some(ConstraintStatus::Satisfied)
+    {
+        return true;
+    }
+    let lower = |v: &N, n| arithmetic_lower_bound(v, n, subst, facts, depth + 1);
+    match value {
+        N::Exp(exponent) if minimum <= 1 => lower(exponent, 0),
+        N::Mul(a, b) if minimum == 0 || minimum == 1 => lower(a, minimum) && lower(b, minimum),
+        N::Add(a, b) if minimum == 0 => lower(a, 0) && lower(b, 0),
+        N::Add(a, b) if minimum == 1 => {
+            (lower(a, 1) && lower(b, 0)) || (lower(a, 0) && lower(b, 1))
+        }
+        N::Div(a, b) if minimum == 0 => lower(a, 0) && lower(b, 1),
+        _ => false,
+    }
+}
+
+fn arithmetic_ordering(
+    lhs: &crate::ty::NumericExpr,
+    op: CompareOp,
+    rhs: &crate::ty::NumericExpr,
+    subst: &Subst,
+    facts: &[ConstraintExpr],
+) -> bool {
+    use crate::ty::NumericExpr as N;
+    let (lo, hi) = match op {
+        CompareOp::Lte => (lhs, rhs),
+        CompareOp::Gte => (rhs, lhs),
+        _ => return false,
+    };
+    let lower = |v: &N, n| arithmetic_lower_bound(v, n, subst, facts, 0);
+    if let N::Const(minimum @ (0 | 1)) = lo {
+        if lower(hi, *minimum) {
+            return true;
+        }
+    }
+    // For natural exponents, powers of two preserve order. Prove the
+    // exponent premises without recursively evaluating either power.
+    if let (N::Exp(a), N::Exp(b)) = (lo, hi) {
+        let nonnegative =
+            ConstraintExpr::Compare { lhs: N::Const(0), op: CompareOp::Lte, rhs: *a.clone() };
+        let ordered =
+            ConstraintExpr::Compare { lhs: *a.clone(), op: CompareOp::Lte, rhs: *b.clone() };
+        if [nonnegative, ordered].iter().all(|goal| {
+            if constraint_implied_by_assumptions(facts, goal, subst) {
+                return true;
+            }
+            let ConstraintExpr::Compare { lhs, rhs, .. } = goal else { unreachable!() };
+            let mut contradiction = facts.to_vec();
+            contradiction.push(ConstraintExpr::Compare {
+                lhs: lhs.clone(),
+                op: CompareOp::Gt,
+                rhs: rhs.clone(),
+            });
+            super::integer::contradictory(&contradiction, subst)
+        }) {
+            return true;
+        }
+    }
+    // A positive integer factor cannot exceed a positive product. The
+    // equality also proves the other factor is positive, without division.
+    {
+        let mut pending: Vec<_> = facts.iter().collect();
+        for _ in 0..256 {
+            let Some(fact) = pending.pop() else { break };
+            if let ConstraintExpr::And(items) = fact {
+                pending.extend(items);
+                continue;
+            }
+            let ConstraintExpr::Compare { lhs, op: CompareOp::Eq, rhs } = fact else { continue };
+            let lhs = super::constraint::subst_numeric_expr(lhs, subst);
+            let rhs = super::constraint::subst_numeric_expr(rhs, subst);
+            for (product, value) in [(&lhs, &rhs), (&rhs, &lhs)] {
+                let N::Mul(a, b) = product else { continue };
+                if a.as_ref() != lo && b.as_ref() != lo {
+                    continue;
+                }
+                let bound = ConstraintExpr::Compare {
+                    lhs: value.clone(),
+                    op: CompareOp::Lte,
+                    rhs: hi.clone(),
+                };
+                if lower(lo, 1)
+                    && lower(value, 1)
+                    && (constraint_implied_by_assumptions(facts, &bound, subst)
+                        || decide_from_membership(&bound, subst, facts)
+                            == Some(ConstraintStatus::Satisfied))
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    if let N::Div(numerator, denominator) = lo {
+        if numerator.as_ref() == hi && lower(hi, 0) && lower(denominator, 1) {
+            return true;
+        }
+    }
+    if let N::Mul(a, b) = hi {
+        if a.as_ref() == lo && lower(lo, 0) && lower(b, 1) {
+            return true;
+        }
+        if b.as_ref() == lo && lower(lo, 0) && lower(a, 1) {
+            return true;
+        }
+    }
+    false
+}
+
 fn solve_inner(
     expr: &ConstraintExpr,
     subst: &Subst,
@@ -419,6 +693,18 @@ fn solve_inner(
         ConstraintExpr::Bool(true) => ConstraintStatus::Satisfied,
         ConstraintExpr::Bool(false) => ConstraintStatus::Failed,
         ConstraintExpr::Compare { lhs, op, rhs } => {
+            let left = super::constraint::subst_numeric_expr(lhs, subst);
+            let right = super::constraint::subst_numeric_expr(rhs, subst);
+            if arithmetic_ordering(&left, *op, &right, subst, assumptions) {
+                return ConstraintStatus::Satisfied;
+            }
+            if let Some(delta) = super::integer::difference(&left, &right) {
+                return if super::integer::compare(&delta, *op, &0.into()) {
+                    ConstraintStatus::Satisfied
+                } else {
+                    ConstraintStatus::Failed
+                };
+            }
             let (Some(lhs_value), Some(rhs_value)) = (
                 eval_numeric_expr(lhs, subst, assumptions),
                 eval_numeric_expr(rhs, subst, assumptions),
@@ -531,6 +817,33 @@ mod tests {
     fn check(goal: &str, assumptions: &[&str]) -> ConstraintStatus {
         let assumptions = assumptions.iter().map(|t| parse_constraint_text(t)).collect::<Vec<_>>();
         solve(&parse_constraint_text(goal), &Subst::default(), &assumptions)
+    }
+
+    #[test]
+    #[cfg(feature = "z3-solver")]
+    fn quotient_premises_are_sufficient_on_signed_integer_domains() {
+        for source in ["1 <= div('a * 'b, 'd)", "div('a * 'b, 'd) <= 'b", "div('b * 'a, 'd) <= 'b"]
+        {
+            let goal = parse_constraint_text(source);
+            let premises = super::arithmetic_premises(&goal).unwrap();
+            for a in -4..=4 {
+                for b in -4..=4 {
+                    for d in -4..=4 {
+                        let mut subst = Subst::default();
+                        subst.values.insert("'a".into(), a.to_string());
+                        subst.values.insert("'b".into(), b.to_string());
+                        subst.values.insert("'d".into(), d.to_string());
+                        if crate::infer::integer::condition(&premises, &subst, &[]) == Some(true) {
+                            assert_eq!(
+                                crate::infer::integer::condition(&goal, &subst, &[]),
+                                Some(true),
+                                "{source}: a={a}, b={b}, d={d}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Neither side is a constant, so only antisymmetry can decide these.

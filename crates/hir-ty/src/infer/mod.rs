@@ -365,6 +365,9 @@ pub(super) enum Expectation {
     None,
     /// The expression should have exactly this type.
     HasType(Ty),
+    /// A source annotation on a local binding. Its names are interpreted
+    /// in each continuation's lexical scope, unlike an instantiated signature.
+    LexicalType(Ty),
 }
 
 impl Expectation {
@@ -372,8 +375,8 @@ impl Expectation {
     pub(super) fn to_option(&self) -> Option<Ty> {
         match self {
             Expectation::None => None,
-            Expectation::HasType(ty) if ty.is_error() => None,
-            Expectation::HasType(ty) => Some(ty.clone()),
+            Expectation::HasType(ty) | Expectation::LexicalType(ty) if ty.is_error() => None,
+            Expectation::HasType(ty) | Expectation::LexicalType(ty) => Some(ty.clone()),
         }
     }
 }
@@ -413,6 +416,9 @@ pub struct InferenceResult {
     pub method_resolutions:
         FxHashMap<hir_def::ExprId, (hir_def::item_id::FunctionId, base_db::FileId)>,
     pub field_resolutions: FxHashMap<hir_def::ExprId, hir_def::DefId>,
+    /// Instantiated missing fields for record-literal editing. Anonymous
+    /// literals can offer an assist without emitting a missing-fields error.
+    pub missing_record_fields: FxHashMap<hir_def::ExprId, Vec<(String, String)>>,
     pub variant_resolutions: FxHashMap<hir_def::ExprOrPatId, hir_def::DefId>,
     pub expr_adjustments: FxHashMap<hir_def::ExprId, Vec<Adjustment>>,
     pub type_mismatches: FxHashMap<hir_def::ExprOrPatId, TypeMismatch>,
@@ -565,6 +571,7 @@ pub enum InferenceDiagnostic {
         expr: hir_def::ExprId,
         record_name: String,
         missing: Vec<String>,
+        field_types: Vec<String>,
     },
     UnusedVariable {
         pat: hir_def::PatId,
@@ -645,6 +652,7 @@ pub enum InferenceDiagnostic {
         pat: hir_def::PatId,
         record_name: String,
         missing: Vec<String>,
+        field_types: Vec<String>,
     },
     /// A struct pattern naming a field the record does not declare.
     UnknownPatternField {
@@ -1147,6 +1155,11 @@ pub(crate) fn type_from_cst_node(node: &syntax::SyntaxNode) -> Ty {
 
     match node.kind() {
         SK::TYPE_NAMED => {
+            // Conditional numeric aliases are TYPE_NAMED nodes too. Their
+            // first identifier is the condition, not the alias's value.
+            if node.first_token().is_some_and(|t| t.kind() == SK::KW_IF) {
+                return Ty::named(node.text().to_string().trim());
+            }
             let text =
                 cst_ident_text(node).unwrap_or_else(|| node.text().to_string().trim().to_string());
             Ty::named(text)
@@ -1300,6 +1313,8 @@ pub(crate) fn type_from_cst_node(node: &syntax::SyntaxNode) -> Ty {
                 let text = node.text().to_string();
                 let items: Option<Vec<_>> = text
                     .trim()
+                    .trim_start_matches("{|")
+                    .trim_end_matches("|}")
                     .trim_start_matches('{')
                     .trim_end_matches('}')
                     .split(',')
@@ -1324,6 +1339,7 @@ pub(crate) fn type_from_cst_node(node: &syntax::SyntaxNode) -> Ty {
             // direct tokens, find the first comparison operator, walk back
             // to the comma before it to decide where the names stopped.
             let mut vars: Vec<String> = Vec::new();
+            let mut kind_constraints = Vec::new();
             let mut constraint = ConstraintExpr::Bool(true);
             let mut children = node.children();
             let param_list = children.next().filter(|n| n.kind() == SK::TYPE_PARAM_LIST);
@@ -1331,6 +1347,8 @@ pub(crate) fn type_from_cst_node(node: &syntax::SyntaxNode) -> Ty {
 
             if let Some(param_list) = &param_list {
                 for param in param_list.children().filter(|n| n.kind() == SK::TYPE_PARAM) {
+                    kind_constraints
+                        .extend(natural_kind_constraints(&param).into_iter().map(|c| c.expr));
                     for name in type_param_names(&param) {
                         if !vars.contains(&name) {
                             vars.push(name);
@@ -1350,6 +1368,10 @@ pub(crate) fn type_from_cst_node(node: &syntax::SyntaxNode) -> Ty {
                 }
             }
 
+            if !kind_constraints.is_empty() {
+                kind_constraints.push(constraint);
+                constraint = ConstraintExpr::And(kind_constraints);
+            }
             // Parse body type
             let inner = node
                 .children()
@@ -1558,6 +1580,7 @@ fn collect_forall_from_cst(
             if type_param_kind(&param).as_deref() == Some("Order") {
                 continue;
             }
+            _constraints.extend(natural_kind_constraints(&param));
             for name in type_param_names(&param) {
                 if !quantifiers.contains(&name) {
                     quantifiers.push(name);
@@ -1642,6 +1665,7 @@ pub(crate) fn callable_typquant(
                     if type_param_kind(&param).as_deref() == Some("Order") {
                         continue;
                     }
+                    constraints.extend(natural_kind_constraints(&param));
                     for name in type_param_names(&param) {
                         if !quantifiers.contains(&name) {
                             quantifiers.push(name);
@@ -1658,6 +1682,26 @@ pub(crate) fn callable_typquant(
         }
     }
     (quantifiers, constraints, Some(end))
+}
+
+/// Nat binders carry the same nonnegative predicate as upstream lowering.
+fn natural_kind_constraints(param: &syntax::SyntaxNode) -> Vec<QuantConstraint> {
+    if type_param_kind(param).as_deref() != Some("Nat") {
+        return Vec::new();
+    }
+    // Upstream lowers Nat to Int together with a nonnegative constraint
+    // (initial_check.ml: parse_kind_constraint).
+    type_param_names(param)
+        .into_iter()
+        .map(|name| {
+            let expr = ConstraintExpr::Compare {
+                lhs: NumericExpr::Var(name.clone()),
+                op: CompareOp::Gte,
+                rhs: NumericExpr::Const(0),
+            };
+            QuantConstraint { text: expr.to_text(), mentions: vec![name], expr }
+        })
+        .collect()
 }
 
 /// The names one `kopt` binds. `('n 'm : Int)` binds two.
@@ -2300,16 +2344,20 @@ fn extract_param_types_from_param_list(def_node: &syntax::SyntaxNode) -> Vec<Ty>
     let Some(param_list) = def_node.children().find(|n| ast::ParamList::can_cast(n.kind())) else {
         return Vec::new();
     };
-    // Collect all TYPE_* descendants inside the PARAM_LIST.
-    // Each corresponds to one param's `: Type` annotation.
+    // Only outer parameter annotations contribute to the function type.
+    // An `as int('n)` inside a constructor introduces a type-level binder;
+    // it is not another parameter or the constructor's argument type.
     param_list
         .descendants()
         .filter(|n| n != &param_list && n.kind().is_type_node())
         // Only take top-level type nodes (not nested children of other type nodes)
         .filter(|n| {
-            // A top-level type node's parent is PARAM_LIST itself
-            // (or a non-TYPE intermediate like BLOCK_ITEM).
-            n.parent().map(|p| !p.kind().is_type_node()).unwrap_or(true)
+            // Flat parameter syntax and parsed outer typed patterns coexist.
+            n.parent().is_some_and(|parent| {
+                parent == param_list
+                    || (parent.kind() == parser::SyntaxKind::TYPED_PAT
+                        && parent.parent().as_ref() == Some(&param_list))
+            })
         })
         .map(|n| type_from_cst_node(&n))
         .collect()

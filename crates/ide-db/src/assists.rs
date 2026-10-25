@@ -159,3 +159,35 @@ impl SnippetCap {
         }
     }
 }
+
+/// Return a sensible default value for a Sail type name.
+///
+/// `false`, `None` etc. based on the type.
+pub fn default_value_for_type(ty: &str) -> String {
+    let ty = ty.trim();
+    match ty {
+        "int" | "nat" => "0".into(),
+        "bool" => "false".into(),
+        "bit" => "bitzero".into(),
+        "unit" => "()".into(),
+        "string" => "\"\"".into(),
+        "real" => "0.0".into(),
+        _ => {
+            // Emit a literal, not a call to a helper that may not be in scope.
+            // Symbolic widths and other refined types need a user-supplied value.
+            let width = ty
+                .strip_prefix("bits(")
+                .or_else(|| ty.strip_prefix("bitvector("))
+                .and_then(|tail| tail.strip_suffix(')'))
+                .and_then(|args| args.split(',').next())
+                .and_then(|width| width.trim().parse::<usize>().ok());
+            match width {
+                Some(width) if (1..=4096).contains(&width) && width % 4 == 0 => {
+                    format!("0x{}", "0".repeat(width / 4))
+                }
+                Some(width) if (1..=4096).contains(&width) => format!("0b{}", "0".repeat(width)),
+                _ => "undefined".into(),
+            }
+        }
+    }
+}

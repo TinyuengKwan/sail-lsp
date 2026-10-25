@@ -8,11 +8,9 @@
 use crate::Diagnostic;
 use hir::diagnostics::DiagnosticCode;
 use hir::display::HirDisplay;
-use hir::TyKind;
 use ide_db::assists::Assist;
 use ide_db::source_change::SourceChange;
 use ide_db::text_edit::TextEdit;
-use syntax::AstNode;
 
 use crate::{DiagnosticsContext, TypeMismatch};
 
@@ -111,105 +109,65 @@ pub(crate) fn type_mismatch(ctx: &DiagnosticsContext<'_>, d: &TypeMismatch) -> O
         None => message,
     };
 
-    // Use adjusted_display_range to narrow the range for if-expressions:
-    // point at the `if` keyword rather than the whole if-expr block.
-    if let Some(if_ptr) = syntax::AstPtr::<syntax::ast::IfExpr>::try_from_raw(d.expr_or_pat.value) {
-        let _narrowed = crate::adjusted_display_range::<syntax::ast::IfExpr>(
-            ctx,
-            hir::InFile { file_id: d.expr_or_pat.file_id, value: if_ptr },
-            &|if_expr| {
-                if_expr.syntax().first_token().map(|t| {
-                    let range: base_db::TextRange = t.text_range();
-                    range
-                })
-            },
-        );
-    }
-    Some(
-        Diagnostic::new_with_syntax_node_ptr(
-            ctx,
-            DiagnosticCode::SailError("type-error"),
-            message,
-            d.expr_or_pat,
-        )
-        .stable()
-        .with_fixes(fixes(d)),
+    // Narrow the display only; fixes keep the complete expression pointer.
+    let mut diagnostic = Diagnostic::new_with_syntax_node_ptr(
+        ctx,
+        DiagnosticCode::SailError("type-error"),
+        message,
+        d.expr_or_pat,
     )
-}
-
-/// Generate type-aware quickfixes for type mismatches.
-///
-/// which dispatches to `add_reference`, `add_missing_ok_or_some`, etc.
-///
-/// Sail-specific fixes based on common Sail type coercions.
-fn fixes(d: &TypeMismatch) -> Option<Vec<Assist>> {
-    let range: ide_db::line_index::TextRange = d.expr_or_pat.value.text_range();
-
-    match (d.expected.kind(), d.actual.kind()) {
-        // bool → bit: suggest bool_to_bits(expr)
-        (TyKind::Scalar(hir::Scalar::Bit), TyKind::Scalar(hir::Scalar::Bool)) => {
-            let edit =
-                TextEdit { range, new_text: format!("bool_to_bits({})", placeholder_text(range)) };
-            Some(vec![crate::fix(
-                "wrap_bool_to_bits",
-                "Wrap with `bool_to_bits(...)`",
-                SourceChange::from_text_edit(edit),
-                range,
-            )])
+    .stable()
+    .with_fixes(fixes(ctx, d));
+    if d.expr_or_pat.value.kind() == syntax::SyntaxKind::IF_EXPR {
+        let keyword = ctx
+            .file
+            .filter(|file| file.file_id(ctx.db()) == d.expr_or_pat.file_id)
+            .and_then(|file| ctx.sema.parse(file))
+            .and_then(|root| d.expr_or_pat.value.try_to_node(&root))
+            .and_then(|node| {
+                node.children_with_tokens()
+                    .filter_map(|it| it.into_token())
+                    .find(|token| token.kind() == syntax::SyntaxKind::KW_IF)
+            });
+        if let Some(keyword) = keyword {
+            diagnostic.range.range = keyword.text_range();
         }
-        // bit → bool: suggest bit_to_bool(expr)
-        (TyKind::Scalar(hir::Scalar::Bool), TyKind::Scalar(hir::Scalar::Bit)) => {
-            let edit =
-                TextEdit { range, new_text: format!("bit_to_bool({})", placeholder_text(range)) };
-            Some(vec![crate::fix(
-                "wrap_bit_to_bool",
-                "Wrap with `bit_to_bool(...)`",
-                SourceChange::from_text_edit(edit),
-                range,
-            )])
-        }
-        // int → nat: suggest unsigned(expr)
-        (TyKind::Scalar(hir::Scalar::Nat), TyKind::Scalar(hir::Scalar::Int)) => {
-            let edit =
-                TextEdit { range, new_text: format!("unsigned({})", placeholder_text(range)) };
-            Some(vec![crate::fix(
-                "wrap_unsigned",
-                "Wrap with `unsigned(...)`",
-                SourceChange::from_text_edit(edit),
-                range,
-            )])
-        }
-        // nat → int: suggest signed(expr)
-        (TyKind::Scalar(hir::Scalar::Int), TyKind::Scalar(hir::Scalar::Nat)) => {
-            let edit = TextEdit { range, new_text: format!("signed({})", placeholder_text(range)) };
-            Some(vec![crate::fix(
-                "wrap_signed",
-                "Wrap with `signed(...)`",
-                SourceChange::from_text_edit(edit),
-                range,
-            )])
-        }
-        // bits → int: suggest sail_unsigned(expr)
-        (TyKind::Scalar(hir::Scalar::Int), TyKind::App { name, .. })
-            if name == "bits" || name == "bitvector" =>
-        {
-            let edit =
-                TextEdit { range, new_text: format!("sail_unsigned({})", placeholder_text(range)) };
-            Some(vec![crate::fix(
-                "wrap_sail_unsigned",
-                "Wrap with `sail_unsigned(...)`",
-                SourceChange::from_text_edit(edit),
-                range,
-            )])
-        }
-        _ => None,
     }
+    Some(diagnostic)
 }
 
-/// Placeholder text for fix — in a real implementation this would read
-/// the actual source text at the range. For now, use a generic placeholder.
-fn placeholder_text(_range: ide_db::line_index::TextRange) -> &'static str {
-    "expr"
+/// Quick fixes for a type mismatch.
+///
+/// Only a conversion the library provides is offered: a bitvector where an
+/// integer is expected, through `unsigned` or `signed` (both
+/// `bits('n) -> range(..)`). The library has no `bool`/`bit` conversion and
+/// no `int -> nat` coercion function, so there is nothing to wrap those in.
+fn fixes(ctx: &DiagnosticsContext<'_>, d: &TypeMismatch) -> Option<Vec<Assist>> {
+    if !(is_integer(&d.expected) && is_bitvector(&d.actual)) {
+        return None;
+    }
+    let range: ide_db::line_index::TextRange = d.expr_or_pat.value.text_range();
+    let file = ctx.file.filter(|file| file.file_id(ctx.db()) == d.expr_or_pat.file_id)?;
+    let root = ctx.sema.parse(file)?;
+    let text = d.expr_or_pat.value.try_to_node(&root)?.text().to_string();
+    let wrap = |func: &'static str| {
+        let edit = TextEdit { range, new_text: format!("{func}({text})") };
+        crate::fix(
+            func,
+            &format!("Wrap with `{func}(...)`"),
+            SourceChange::from_text_edit(edit),
+            range,
+        )
+    };
+    Some(vec![wrap("unsigned"), wrap("signed")])
+}
+
+fn is_integer(ty: &hir::Ty) -> bool {
+    matches!(ty.ctor_name(), Some("int" | "nat" | "atom" | "range" | "implicit"))
+}
+
+fn is_bitvector(ty: &hir::Ty) -> bool {
+    matches!(ty.ctor_name(), Some("bits" | "bitvector"))
 }
 
 /// Check if an expression node needs parentheses when wrapped in a call.
@@ -228,6 +186,59 @@ fn needs_parens_for_wrapping(node: &syntax::SyntaxNode) -> bool {
 mod tests {
     use crate::tests::{check_dispatch, test_node};
     use hir::diagnostics::*;
+
+    #[test]
+    fn if_diagnostic_highlights_keyword_but_keeps_the_full_fix_target() {
+        use syntax::AstNode;
+        let source = "function f() = if true then 0x1 else 0x2\n";
+        let file = ide_db::test_utils::TestFile::new(source);
+        let config = crate::DiagnosticsConfig::new();
+        let mut ctx = crate::tests::test_ctx(file.db(), &config);
+        ctx.file = Some(file.input());
+        let root = ctx.sema.parse(file.input()).unwrap();
+        let node = root.descendants().find_map(syntax::ast::IfExpr::cast).unwrap();
+        let ptr = syntax::SyntaxNodePtr::new(node.syntax());
+        let diagnostic = super::type_mismatch(
+            &ctx,
+            &TypeMismatch {
+                expected: hir::Ty::scalar(hir::Scalar::Int),
+                actual: hir::Ty::named("bits"),
+                expr_or_pat: hir::InFile::new(base_db::FileId::from_raw(0), ptr),
+                expected_source: None,
+            },
+        )
+        .unwrap();
+        let range = diagnostic.range.range;
+        assert_eq!(&source[usize::from(range.start())..usize::from(range.end())], "if");
+        assert_eq!(diagnostic.main_node.unwrap().value.text_range(), ptr.text_range());
+        let fix = diagnostic.fixes.unwrap().remove(0);
+        assert_eq!(
+            fix.source_change.unwrap().source_file_edits.values().next().unwrap()[0].range,
+            ptr.text_range()
+        );
+    }
+
+    #[test]
+    fn synthetic_if_pointer_retains_its_range_without_panicking() {
+        let db = ide_db::root_database::RootDatabase::default();
+        let config = crate::DiagnosticsConfig::new();
+        let ctx = crate::tests::test_ctx(&db, &config);
+        let range = base_db::text_range(50, 90);
+        let diagnostic = super::type_mismatch(
+            &ctx,
+            &TypeMismatch {
+                expected: hir::Ty::scalar(hir::Scalar::Bit),
+                actual: hir::Ty::scalar(hir::Scalar::Bool),
+                expr_or_pat: hir::InFile::new(
+                    base_db::FileId::from_raw(0),
+                    syntax::SyntaxNodePtr::from_range(syntax::SyntaxKind::IF_EXPR, range),
+                ),
+                expected_source: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(diagnostic.range.range, range);
+    }
 
     /// The two sentences, and which one each shape gets.
     ///

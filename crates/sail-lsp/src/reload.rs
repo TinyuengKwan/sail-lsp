@@ -129,6 +129,8 @@ fn find_project_file(
 #[derive(Clone, Debug, Default)]
 pub(crate) struct DiscoveryInputs {
     pub watch_files: Vec<PathBuf>,
+    /// Recoverable source errors. The manifest still defines a usable graph.
+    pub source_errors: Vec<String>,
     /// Manifest contents used to derive membership and module edges. Checking
     /// again at publication also covers delayed OS/client notifications.
     pub manifests: std::collections::BTreeMap<PathBuf, Option<String>>,
@@ -199,7 +201,10 @@ impl GlobalState {
             status.health = crate::lsp_ext::Health::Warning;
             message.push_str("No Sail files loaded. Check workspace folders.\n");
         }
-        if self.workspace_loaded && self.project_manifests.is_empty() {
+        if self.workspace_loaded
+            && self.project_manifests.is_empty()
+            && self.project_error.is_none()
+        {
             status.health = crate::lsp_ext::Health::Warning;
             message.push_str("No Sail project loaded. Set sail-lsp.workspace.projectFile; unlinked files receive syntax diagnostics only.\n");
         }
@@ -220,12 +225,61 @@ impl GlobalState {
         status
     }
 
+    /// Keep the cause in server status and surface it in clients without RA's
+    /// server-status UI. Repeated watcher events must not repeat the same popup.
+    pub(crate) fn report_project_error(&mut self, error: Option<String>) {
+        if self.project_error == error {
+            return;
+        }
+        if let Some(message) = &error {
+            self.log_message(lsp_types::MessageType::ERROR, message.clone());
+            self.send_notification::<lsp_types::notification::ShowMessage>(
+                lsp_types::ShowMessageParams {
+                    typ: lsp_types::MessageType::ERROR,
+                    message: message.clone(),
+                },
+            );
+        } else {
+            self.log_message(lsp_types::MessageType::INFO, "Sail project loading recovered.");
+        }
+        self.project_error = error;
+        self.diagnostics.mark_all_changed();
+    }
+
     /// Apply configuration changes and trigger reload if needed.
     /// Compares old and new config, scheduling a workspace reload if
     /// structural settings (search paths, workspace folders) changed.
+    /// Apply settings as the client sent them, and tell the user about any
+    /// it could not read — once per distinct set, so an unrelated settings
+    /// change does not repeat the popup.
+    pub(crate) fn apply_client_settings(&mut self, settings: &serde_json::Value) {
+        let (config, errors) = SailLspConfig::from_json(settings);
+        self.update_configuration(config);
+        if errors == self.config_errors {
+            return;
+        }
+        if !errors.is_empty() {
+            let message = format!(
+                "sail-lsp: these settings were not understood and use their defaults: {}",
+                errors.join("; ")
+            );
+            self.log_message(lsp_types::MessageType::WARNING, message.clone());
+            self.send_notification::<lsp_types::notification::ShowMessage>(
+                lsp_types::ShowMessageParams { typ: lsp_types::MessageType::WARNING, message },
+            );
+        }
+        self.config_errors = errors;
+    }
+
     pub(crate) fn update_configuration(&mut self, new_config: SailLspConfig) {
         let old_config = std::mem::replace(&mut self.config, new_config);
 
+        if self.config.workspace.strict_bitvector != old_config.workspace.strict_bitvector {
+            let mut change = ide_db::apply_change::Change::new();
+            change.set_strict_bitvector(self.config.workspace.strict_bitvector);
+            self.analysis_host.apply_change(change);
+            self.diagnostics.mark_all_changed();
+        }
         // If workspace-level config changed, trigger reload
         if self.config.workspace != old_config.workspace {
             log::info!("workspace config changed, triggering reload");
@@ -368,8 +422,21 @@ fn scan_workspace_project(
             let source = std::fs::read_to_string(&project_file_path);
             inputs.manifests.insert(project_file_path.clone(), source.as_ref().ok().cloned());
             let source = source.map_err(|e| format!("{}: {e}", project_file_path.display()))?;
+            let mut options = config.project_options();
+            for path in options.virtual_files.values_mut() {
+                *path = syntax::preprocess::normalize_path(&folder_path.join(&*path));
+            }
+            // Upstream's corelib_sail.ml registers this exact embedded source
+            // under corelib.sail. Keep a physical URI for navigation and edits;
+            // other names require an explicit producer-provided source mapping.
+            if let Some(sail_dir) = sail_dir {
+                options
+                    .virtual_files
+                    .entry("corelib.sail".into())
+                    .or_insert_with(|| sail_dir.join("lib/core/corelib.sail"));
+            }
             let project = project_model::ProjectManifest::parse(&source)
-                .and_then(|manifest| manifest.resolve(&config.project_options()))
+                .and_then(|manifest| manifest.resolve(&options))
                 .map_err(|error| format!("{}: {error}", project_file_path.display()))?;
             let project_dir = project_file_path.parent().unwrap_or(&folder_path);
             let offset = modules.len();
@@ -396,9 +463,25 @@ fn scan_workspace_project(
             }
             for relative_path in project.files {
                 let path = project_dir.join(relative_path);
-                inputs.watch_files.push(syntax::preprocess::normalize_path(&path));
-                if !path.is_file() {
-                    return Err(format!("Project source does not exist: {}", path.display()));
+                let normalized = syntax::preprocess::normalize_path(&path);
+                inputs.watch_files.push(normalized.clone());
+                // A bad path is a local project problem, like RA's unresolved
+                // module, not a reason to discard every other source file.
+                // Keep watching it so creating the file repairs the project.
+                if !overlays.contains_key(&normalized) {
+                    let problem = match std::fs::metadata(&path) {
+                        Ok(metadata) if metadata.is_file() => None,
+                        Ok(_) => Some("not a regular file".to_owned()),
+                        Err(error) => Some(error.to_string()),
+                    };
+                    if let Some(problem) = problem {
+                        inputs.source_errors.push(format!(
+                            "{}: cannot load source {}: {problem}",
+                            project_file_path.display(),
+                            path.display(),
+                        ));
+                        continue;
+                    }
                 }
                 if is_sail_file(&path) {
                     let uri = Url::from_file_path(&path)
@@ -808,12 +891,29 @@ mod tests {
     }
 
     #[test]
+    fn corelib_virtual_source_uses_the_effective_standard_library() {
+        let fixture = Fixture::new();
+        fixture.write("sail.proj", "corelib { files __virtual corelib.sail }");
+        fixture.write("toolchain/lib/core/corelib.sail", "type generated_width = 8\n");
+        let folders = HashSet::from([Url::from_directory_path(&fixture.0).unwrap()]);
+        let files = scan_workspace_folders(
+            &folders,
+            Some(&fixture.0.join("toolchain")),
+            &Default::default(),
+        )
+        .unwrap();
+        assert!(files
+            .iter()
+            .any(|(_, path)| path == &fixture.0.join("toolchain/lib/core/corelib.sail")));
+        assert!(!files.iter().any(|(_, path)| path == &fixture.0.join("corelib.sail")));
+    }
+
+    #[test]
     fn invalid_or_ambiguous_projects_never_fall_back_to_directory_scan() {
         let f = Fixture::new();
         f.write("stray.sail", "");
         for source in [
             "M {",
-            "M { files missing.sail }",
             "A { requires B } B { requires A }",
             "M { files if $MISSING then a.sail else b.sail }",
         ] {

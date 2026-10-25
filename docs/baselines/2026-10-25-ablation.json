@@ -1,0 +1,2975 @@
+{
+  "schema_version": 1,
+  "date_utc": "2026-10-25",
+  "scope": "Ablate the changes committed at the start of this task, preserving the preceding simplifications and semantic fixes unless evidence supports removal.",
+  "source": {
+    "checkpoint_commit": "93afc795e5670e183f1de2011e6c04f69666704c",
+    "checkpoint_parent": "6316568cfdb8ee1eee733eb6de4393b2940df4c1",
+    "checkpoint_files": 39,
+    "sail_commit": "ac09f8870b9d85e528e2a3436150b03b9d805d40",
+    "sail_riscv_commit": "20690c8a8d6ccbb0e6adea8e2977efd3adaf8391",
+    "rust_and_cargo_source_sha256": "954ae93ed13421f23dde2d63fd6325f33c0cb96dc0ac3fe7e743f2f96c0a21a7",
+    "hash_method": "SHA256 of sorted rg --files paths (*.rs, Cargo.toml, Cargo.lock, rust-toolchain.toml), each path + NUL + contents + NUL.",
+    "result": "Simplifications remain uncommitted after the requested initial checkpoint."
+  },
+  "method": {
+    "negative_trials": "Five compiled negative controls, each restored. Four use targeted regression tests; saved confirmation substitution is evaluated on the complete model. The model trial includes both positive simplifications; its comparison is the final combined model, not a factorial experiment. Patches are embedded for reproduction.",
+    "positive_trials": "Two cumulative deletions, each passing all 422 hir-ty tests serially, followed by whole-workspace, upstream corpus, complete model and incremental checks.",
+    "initial_parallel_trial": "The first hir-ty run used default test parallelism and had 6 failures, including unrelated direct solver tests reporting Unknown or BudgetExhausted. No semantic conclusion is drawn from it; unchanged code passed all 422 tests with --test-threads=1. Final gates also use serial tests.",
+    "limits": "Passing finite tests is evidence, not a proof of equivalence for all programs. Formal solver limits and diagnostic policy are unchanged."
+  },
+  "review_inventory": {
+    "previous_ablation_simplifications": "Preserved the semantic API removals, consolidated declaration diagnostics, and IDE integration simplifications already audited in 2026-10-24-ablation.json.",
+    "parser_and_type_lowering": "Preserved constructor-pattern lowering, conditional aliases, Nat binder rules and finite-set parsing; exact upstream regression tests remain in the full gate.",
+    "dependent_inference_and_solver": "Five negative controls cover existential joins, supported assumptions, confirmation substitutions, symbolic witness factors and polynomial cancellation. Two duplicate inference paths were removed.",
+    "diagnostic_and_oracle_infrastructure": "Preserved full-call diagnostic ranges, active dependency checks, regenerated oracle, and task-pool deadline polling; whole-workspace and corpus gates cover them.",
+    "tests_and_baselines": "Preserved existing regression coverage and immutable historical reports."
+  },
+  "retained_simplifications": [
+    {
+      "name": "numeric-int-special-case",
+      "removed_lines": 9,
+      "reason": "numeric_value already constructs the identical Int witness and true predicate; reuse the shared path.",
+      "validation": "numeric-int-hir-serial.log: 422 passed"
+    },
+    {
+      "name": "escaping-if-text-reparse",
+      "removed_lines": 10,
+      "reason": "Use the HIR-derived continuing-path predicate without parsing and inserting the same source condition again.",
+      "validation": "if-text-hir.log: 422 passed"
+    }
+  ],
+  "retained_patch": "diff --git a/crates/hir-ty/src/infer/expr.rs b/crates/hir-ty/src/infer/expr.rs\nindex 63b63f0..7ad3a64 100644\n--- a/crates/hir-ty/src/infer/expr.rs\n+++ b/crates/hir-ty/src/infer/expr.rs\n@@ -4221,15 +4221,6 @@ impl<'db> InferenceContext<'db> {\n                 return opened.inner_ty;\n             }\n         }\n-        if matches!(ty.kind(), TyKind::Scalar(Scalar::Int)) {\n-            let var = \"'_argument\".to_owned();\n-            let opened = self.table.open_existential(\n-                &[var.clone()],\n-                &ConstraintExpr::Bool(true),\n-                &Ty::app(\"atom\", vec![TyArg::Nexp(NumericExpr::Var(var))], \"\"),\n-            );\n-            return opened.inner_ty;\n-        }\n         if let Some((var, predicate, inner)) = super::refinement::numeric_value(&ty) {\n             let opened = self.table.open_existential(&[var], &predicate, &inner);\n             locals.add_constraint(opened.constraint);\n@@ -7559,16 +7550,6 @@ impl<'db> InferenceContext<'db> {\n                             &locals.type_substitution(),\n                         )));\n                     }\n-                    if let Some(cond_span) = self.expr_span(body, *cond) {\n-                        if let Some(cond_text) = self.source.get(cond_span.start..cond_span.end) {\n-                            if let Some(constraint) = constraint_expr_from_expr_text(cond_text) {\n-                                locals.add_constraint(constraint::apply_subst_constraint_expr(\n-                                    &continuing(constraint),\n-                                    &locals.type_substitution(),\n-                                ));\n-                            }\n-                        }\n-                    }\n                 }\n             }\n             _ => {}",
+  "restored_experiments": [
+    {
+      "experiment": "conditional-existential-join",
+      "removed_lines": 39,
+      "test": "conditional_join_keeps_existential_branch_values_distinct",
+      "exit_code": 101,
+      "decision": "restore",
+      "patch": "--- a/crates/hir-ty/src/infer/refinement.rs\n+++ b/crates/hir-ty/src/infer/refinement.rs\n@@ -263,45 +263,6 @@\n }\n \n pub(super) fn conditional_join(cond: &ConstraintExpr, a: &Ty, b: &Ty) -> Option<Ty> {\n-    if matches!(a.kind(), TyKind::Exist { .. }) || matches!(b.kind(), TyKind::Exist { .. }) {\n-        let mut used = HashSet::new();\n-        super::substitution::ty_names(a, &mut used, true);\n-        super::substitution::ty_names(b, &mut used, true);\n-        super::substitution::constraint_names(cond, &mut used);\n-        let mut vars = Vec::new();\n-        let mut facts = Vec::new();\n-        let mut unpack = |ty: &Ty, active: ConstraintExpr| {\n-            let mut ty = ty.clone();\n-            while let TyKind::Exist { vars: bound, constraint, inner } = ty.kind() {\n-                let mut subst = Subst::default();\n-                for var in bound {\n-                    let mut index = vars.len();\n-                    let name = loop {\n-                        let name = format!(\"'_branch{index}\");\n-                        if used.insert(name[1..].to_owned()) {\n-                            break name;\n-                        }\n-                        index += 1;\n-                    };\n-                    subst.values.insert(var.clone(), name.clone());\n-                    subst.types.insert(var.clone(), Ty::param(&name));\n-                    vars.push(name);\n-                }\n-                // A branch's witnesses satisfy its predicate only when that\n-                // branch is selected. Do not assume both predicates at once.\n-                facts.push(ConstraintExpr::Or(vec![\n-                    ConstraintExpr::Not(Box::new(active.clone())),\n-                    super::constraint::apply_subst_constraint_expr(constraint, &subst),\n-                ]));\n-                ty = super::constraint::apply_subst(inner, &subst);\n-            }\n-            ty\n-        };\n-        let left = unpack(a, cond.clone());\n-        let right = unpack(b, ConstraintExpr::Not(Box::new(cond.clone())));\n-        let inner = conditional_join(cond, &left, &right)?;\n-        return Some(Ty::exist(vars, ConstraintExpr::And(facts), inner));\n-    }\n     if let (Some(a), Some(b)) = (super::subtype::bool_value(a), super::subtype::bool_value(b)) {\n         return Some(Ty::app(\n             \"bool\",\n",
+      "failure_evidence": "\n\n---- infer::unsupported_audit::conditional_join_keeps_existential_branch_values_distinct stdout ----\n\nthread 'infer::unsupported_audit::conditional_join_keeps_existential_branch_values_distinct' (3838359) panicked at crates/hir-ty/src/infer/unsupported_audit.rs:9:5:\n[ConstraintViolation { expr: Idx::<Expr>(7), constraint: \"div('n, '_sk2__argument) == 'n\", derived_from: [] }]\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    infer::unsupported_audit::conditional_join_keeps_existential_branch_values_distinct\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 421 filtered out; finished in 0.11s\n\nerror: test failed, to rerun pass `-p hir-ty --lib`\n",
+      "command": "cargo +1.97.1 test -p hir-ty --lib conditional_join_keeps_existential_branch_values_distinct -- --test-threads=1"
+    },
+    {
+      "experiment": "supported-assumptions",
+      "removed_lines": 32,
+      "test": "opaque_assumptions_do_not_block_supported_entailment",
+      "exit_code": 101,
+      "decision": "restore",
+      "patch": "--- a/crates/hir-ty/src/infer/z3_solver.rs\n+++ b/crates/hir-ty/src/infer/z3_solver.rs\n@@ -150,37 +150,7 @@\n     if contains_unsupported(expr) || super::solver::has_erased_inputs(expr, subst, assumptions) {\n         return ConstraintStatus::Unknown;\n     }\n-    // Entailment from a subset of assumptions is valid under the full\n-    // assumptions too. Keep supported conjuncts (including !A from !(A|B));\n-    // never extract a disjunct or negate a partially translated formula. This weakening is\n-    // only for entailment, not the counterexample-based quantified checker.\n-    fn supported_conjuncts(c: &ConstraintExpr, negated: bool, out: &mut Vec<ConstraintExpr>) {\n-        match c {\n-            ConstraintExpr::Not(inner) => supported_conjuncts(inner, !negated, out),\n-            ConstraintExpr::And(items) if !negated => {\n-                for item in items {\n-                    supported_conjuncts(item, false, out);\n-                }\n-            }\n-            ConstraintExpr::Or(items) if negated => {\n-                for item in items {\n-                    supported_conjuncts(item, true, out);\n-                }\n-            }\n-            _ if !contains_unsupported(c) => {\n-                out.push(if negated { ConstraintExpr::Not(Box::new(c.clone())) } else { c.clone() })\n-            }\n-            _ => {}\n-        }\n-    }\n-    let supported = assumptions.iter().any(contains_unsupported).then(|| {\n-        let mut facts = Vec::new();\n-        for fact in assumptions {\n-            supported_conjuncts(fact, false, &mut facts);\n-        }\n-        facts\n-    });\n-    let assumptions = supported.as_deref().unwrap_or(assumptions);\n+    if assumptions.iter().any(contains_unsupported) { return ConstraintStatus::Unknown; }\n \n     let key = build_cache_key(expr, subst, assumptions);\n     if let Some(cached) = cache_lookup(&key) {\n",
+      "failure_evidence": "\n\n---- infer::semantic_audit::opaque_assumptions_do_not_block_supported_entailment stdout ----\n\nthread 'infer::semantic_audit::opaque_assumptions_do_not_block_supported_entailment' (3838658) panicked at crates/hir-ty/src/infer/semantic_audit.rs:1046:9:\nassertion `left == right` failed\n  left: Unknown\n right: Satisfied\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    infer::semantic_audit::opaque_assumptions_do_not_block_supported_entailment\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 421 filtered out; finished in 0.00s\n\nerror: test failed, to rerun pass `-p hir-ty --lib`\n",
+      "command": "cargo +1.97.1 test -p hir-ty --lib opaque_assumptions_do_not_block_supported_entailment -- --test-threads=1"
+    },
+    {
+      "experiment": "common-factor-witness",
+      "removed_lines": 12,
+      "test": "common_nonzero_width_factors_preserve_symbolic_witnesses",
+      "exit_code": 101,
+      "decision": "restore",
+      "patch": "--- a/crates/hir-ty/src/infer/unify.rs\n+++ b/crates/hir-ty/src/infer/unify.rs\n@@ -1568,18 +1568,6 @@\n                 TyKind::Infer(_)\n             ) {\n                 return self.bind(id, Ty::param(value.to_string_repr()));\n-            }\n-        }\n-        if let (NumericExpr::Mul(a, b), NumericExpr::Mul(c, d)) = (lhs, rhs) {\n-            for (factor, other, left, right) in\n-                [(a, c, b, d), (a, d, b, c), (b, c, a, d), (b, d, a, c)]\n-            {\n-                if factor == other\n-                    && super::integer::eval(factor, &Subst::default(), &[])\n-                        .is_some_and(|n| n != 0.into())\n-                {\n-                    return self.bind_numeric_equality(left, right);\n-                }\n             }\n         }\n         let Some(Ok((name, value))) = super::integer::witness(lhs, rhs) else {\n",
+      "failure_evidence": "\n\n---- infer::semantic_audit::common_nonzero_width_factors_preserve_symbolic_witnesses stdout ----\n\nthread 'infer::semantic_audit::common_nonzero_width_factors_preserve_symbolic_witnesses' (3842712) panicked at crates/hir-ty/src/infer/semantic_audit.rs:428:5:\nassertion failed: table.bind_numeric_equality(&n(\"'_fv_width * 8\"),\n    &n(\"8 * (if 'mode == 32 then 4 else 8)\"))\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    infer::semantic_audit::common_nonzero_width_factors_preserve_symbolic_witnesses\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 421 filtered out; finished in 0.01s\n\nerror: test failed, to rerun pass `-p hir-ty --lib`\n",
+      "command": "cargo +1.97.1 test -p hir-ty --lib common_nonzero_width_factors_preserve_symbolic_witnesses -- --test-threads=1"
+    },
+    {
+      "experiment": "symbolic-cancellation",
+      "removed_lines": 22,
+      "test": "conditional_equality_cancels_unbounded_common_terms_before_splitting",
+      "exit_code": 101,
+      "decision": "restore",
+      "patch": "--- a/crates/hir-ty/src/infer/integer.rs\n+++ b/crates/hir-ty/src/infer/integer.rs\n@@ -266,27 +266,7 @@\n                         .all(|a| b.iter().all(|b| compare(a, *op, b) == first))\n                         .then_some(first);\n                 }\n-                // Common symbolic terms need not be known numerically. Cancel\n-                // them first, then evaluate the residual under the same branch\n-                // choices used for all occurrences of a conditional.\n-                let terms = polynomial(\n-                    &N::Sub(Box::new(lhs.clone()), Box::new(rhs.clone())),\n-                    &mut self.fuel,\n-                )?;\n-                let mut value = BigInt::zero();\n-                for (factors, mut coefficient) in terms {\n-                    for factor in factors {\n-                        coefficient *= self.number(&factor)?;\n-                        if coefficient.bits() > MAX_BITS {\n-                            return None;\n-                        }\n-                    }\n-                    value += coefficient;\n-                    if value.bits() > MAX_BITS {\n-                        return None;\n-                    }\n-                }\n-                Some(compare(&value, *op, &BigInt::zero()))\n+                None\n             }\n             C::InSet { value, items } => {\n                 let values = self.values(value)?;\n",
+      "failure_evidence": "\n\n---- infer::semantic_audit::conditional_equality_cancels_unbounded_common_terms_before_splitting stdout ----\n\nthread 'infer::semantic_audit::conditional_equality_cancels_unbounded_common_terms_before_splitting' (3843032) panicked at crates/hir-ty/src/infer/semantic_audit.rs:461:5:\nassertion `left == right` failed\n  left: Unknown\n right: Satisfied\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n\n\nfailures:\n    infer::semantic_audit::conditional_equality_cancels_unbounded_common_terms_before_splitting\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 421 filtered out; finished in 0.01s\n\nerror: test failed, to rerun pass `-p hir-ty --lib`\n",
+      "command": "cargo +1.97.1 test -p hir-ty --lib conditional_equality_cancels_unbounded_common_terms_before_splitting -- --test-threads=1"
+    },
+    {
+      "experiment": "confirmation-replay",
+      "decision": "restore",
+      "patch": "--- a/crates/hir-ty/src/infer/expr.rs\n+++ b/crates/hir-ty/src/infer/expr.rs\n@@ -3706,14 +3706,7 @@\n             {\n                 debug_assert_eq!(probed.orig_name, confirmed.orig_name);\n                 let _ = self.table.unify(&probed.infer_ty, &confirmed.infer_ty);\n-                // A successful probe may solve a numeric parameter through\n-                // the result context. Replay that solution as well as the\n-                // argument equations, so deferred goals share its witness.\n-                if let Some(value) = subst.types.get(&probed.fresh_name) {\n-                    let _ = self.table.unify(&confirmed.infer_ty, value);\n-                } else if let Some(value) = subst.values.get(&probed.fresh_name) {\n-                    let _ = self.table.unify(&confirmed.infer_ty, &Ty::param(value));\n-                }\n+\n             }\n             let expected_params: Vec<&Ty> = if arg_types.len() == winner.params.len() {\n                 winner.params.iter().collect()\n",
+      "command": "cargo +1.97.1 build --release -p sail-lsp --example analysis_stats && target/release/examples/analysis_stats --infer-only --constraint-report control.json ../sail-riscv/model/riscv.sail_project",
+      "totals": {
+        "proved": 2879,
+        "refuted": 0,
+        "total": 2933,
+        "unknown": 54
+      },
+      "unknown_by_reason": {
+        "budget_exhausted": 25,
+        "flexible_witness": 29
+      },
+      "explanation": "Without saved probe substitutions, the confirmed overload leaves dependent numeric variables unresolved."
+    }
+  ],
+  "validation": {
+    "workspace_passed": 2256,
+    "workspace_ignored": 4,
+    "workspace_suites": 27,
+    "workspace_command": "cargo +1.97.1 test --workspace --lib -- --test-threads=1",
+    "all_targets_command": "cargo +1.97.1 check --workspace --all-targets",
+    "all_targets_success": true
+  },
+  "conformance": {
+    "strict_pass": [
+      276,
+      276
+    ],
+    "strict_fail": [
+      217,
+      217
+    ],
+    "default_pass": [
+      276,
+      276
+    ],
+    "default_fail": [
+      216,
+      217
+    ],
+    "default_note": "The sole strict-directory disagreement is negative_bits_list.sail, accepted by upstream in default mode.",
+    "extended": [
+      {
+        "corpus": "builtins",
+        "agree": 30,
+        "false_positive": 0,
+        "false_negative": 0,
+        "scope_only": 0
+      },
+      {
+        "corpus": "float",
+        "agree": 19,
+        "false_positive": 0,
+        "false_negative": 0,
+        "scope_only": 1
+      },
+      {
+        "corpus": "lean",
+        "agree": 37,
+        "false_positive": 0,
+        "false_negative": 0,
+        "scope_only": 0
+      },
+      {
+        "corpus": "mono",
+        "agree": 41,
+        "false_positive": 0,
+        "false_negative": 0,
+        "scope_only": 0
+      },
+      {
+        "corpus": "ocaml",
+        "agree": 4,
+        "false_positive": 0,
+        "false_negative": 0,
+        "scope_only": 15
+      },
+      {
+        "corpus": "pattern_completeness",
+        "agree": 43,
+        "false_positive": 0,
+        "false_negative": 0,
+        "scope_only": 0
+      },
+      {
+        "corpus": "rocq",
+        "agree": 59,
+        "false_positive": 0,
+        "false_negative": 0,
+        "scope_only": 1
+      },
+      {
+        "corpus": "smt",
+        "agree": 122,
+        "false_positive": 0,
+        "false_negative": 0,
+        "scope_only": 0
+      }
+    ],
+    "command": "target/release/examples/conformance_check ../sail/test/typecheck"
+  },
+  "model": {
+    "metrics": {
+      "workspace_load": {
+        "value": 702,
+        "unit": "ms"
+      },
+      "parse_all": {
+        "value": 1,
+        "unit": "ms"
+      },
+      "total_lines": {
+        "value": 29968,
+        "unit": "lines"
+      },
+      "item_tree_all": {
+        "value": 13,
+        "unit": "ms"
+      },
+      "body_lowering": {
+        "value": 152,
+        "unit": "ms"
+      },
+      "bodies": {
+        "value": 3318,
+        "unit": "count"
+      },
+      "scattered_type_clauses": {
+        "value": 471,
+        "unit": "count"
+      },
+      "infer_all": {
+        "value": 31802,
+        "unit": "ms"
+      },
+      "callables": {
+        "value": 3318,
+        "unit": "count"
+      },
+      "exprs": {
+        "value": 81543,
+        "unit": "count"
+      },
+      "unknown type": {
+        "value": 0,
+        "unit": "#"
+      },
+      "partially unknown type": {
+        "value": 0,
+        "unit": "#"
+      },
+      "type mismatches": {
+        "value": 0,
+        "unit": "#"
+      },
+      "diagnostics_all": {
+        "value": 3093,
+        "unit": "ms"
+      }
+    },
+    "severity": {
+      "Hint": 6,
+      "Warning": 62
+    },
+    "constraint_report": {
+      "schema_version": 1,
+      "scope": "committed_deferred_obligations",
+      "sites": [
+        {
+          "assumptions": [
+            "3 <= vlen_exp & vlen_exp <= 16",
+            "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+            "xlen in {32, 64}",
+            "'_sk1__set in {8, 16, 32, 64}",
+            "-3 <= '_sk2_LMUL_pow & '_sk2_LMUL_pow <= 3",
+            "1 <= '_sk3_num_elem & '_sk3_num_elem <= vlen",
+            "1 <= '_sk4_SEW_frac_pow & '_sk4_SEW_frac_pow <= 3",
+            "true",
+            "<unsupported>",
+            "true",
+            "'_sk1__set / 2 ^ '_sk4_SEW_frac_pow >= 8",
+            "SEW_div >= 8",
+            "true",
+            "0 <= '_sk11__loop_index & '_sk11__loop_index <= '_sk3_num_elem - 1",
+            "1 <= '_sk3_num_elem & '_sk3_num_elem <= 2 ^ vlen_exp"
+          ],
+          "callable": "execute",
+          "cause": "Compatibility",
+          "clause": 23,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_arith_insts.sail",
+          "goal": "'_sk1__set >= '_sk1__set / 2 ^ '_sk4_SEW_frac_pow",
+          "location": {
+            "column": 23,
+            "end": 76291,
+            "line": 1903,
+            "source": "VEXT8_ZVF8 => zero_extend(vs2_val[i]),",
+            "start": 76268
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk11__loop_index",
+            "'_sk1__set",
+            "'_sk2_LMUL_pow",
+            "'_sk3_num_elem",
+            "'_sk4_SEW_frac_pow"
+          ],
+          "status": "unknown"
+        },
+        {
+          "assumptions": [
+            "3 <= vlen_exp & vlen_exp <= 16",
+            "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+            "xlen in {32, 64}",
+            "'_sk1__set in {8, 16, 32, 64}",
+            "-3 <= '_sk2_LMUL_pow & '_sk2_LMUL_pow <= 3",
+            "1 <= '_sk3_num_elem & '_sk3_num_elem <= vlen",
+            "1 <= '_sk4_SEW_frac_pow & '_sk4_SEW_frac_pow <= 3",
+            "true",
+            "<unsupported>",
+            "true",
+            "'_sk1__set / 2 ^ '_sk4_SEW_frac_pow >= 8",
+            "SEW_div >= 8",
+            "true",
+            "0 <= '_sk11__loop_index & '_sk11__loop_index <= '_sk3_num_elem - 1",
+            "1 <= '_sk3_num_elem & '_sk3_num_elem <= 2 ^ vlen_exp"
+          ],
+          "callable": "execute",
+          "cause": "Compatibility",
+          "clause": 23,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_arith_insts.sail",
+          "goal": "'_sk1__set >= '_sk1__set / 2 ^ '_sk4_SEW_frac_pow",
+          "location": {
+            "column": 23,
+            "end": 76338,
+            "line": 1904,
+            "source": "VEXT8_SVF8 => sign_extend(vs2_val[i]),",
+            "start": 76315
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk11__loop_index",
+            "'_sk1__set",
+            "'_sk2_LMUL_pow",
+            "'_sk3_num_elem",
+            "'_sk4_SEW_frac_pow"
+          ],
+          "status": "unknown"
+        },
+        {
+          "assumptions": [
+            "(0 >= '_sk1_LMUL_pow & '_sk8__sk7__sk6__sk5_z == 0 | 0 < '_sk1_LMUL_pow & '_sk8__sk7__sk6__sk5_z == '_sk1_LMUL_pow)",
+            "3 <= vlen_exp & vlen_exp <= 16",
+            "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+            "-3 <= '_sk1_LMUL_pow & '_sk1_LMUL_pow <= 3",
+            "'_sk2__set in {8, 16, 32, 64}",
+            "'_sk3__set in {8, 16, 32, 64}",
+            "vlen >= '_sk3__set",
+            "vlen >= SEW",
+            "0 >= '_sk1_LMUL_pow & '_sk5_z == 0 | 0 < '_sk1_LMUL_pow & '_sk5_z == '_sk1_LMUL_pow",
+            "(0 >= '_sk1_LMUL_pow & '_sk6__sk5_z == 0 | 0 < '_sk1_LMUL_pow & '_sk6__sk5_z == '_sk1_LMUL_pow)",
+            "(0 >= '_sk1_LMUL_pow & '_sk7__sk6__sk5_z == 0 | 0 < '_sk1_LMUL_pow & '_sk7__sk6__sk5_z == '_sk1_LMUL_pow)",
+            "2 ^ vlen_exp >= '_sk3__set",
+            "2 ^ vlen_exp >= SEW"
+          ],
+          "callable": "get_num_elem",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_control.sail",
+          "goal": "1 <= div(2 ^ '_sk8__sk7__sk6__sk5_z * 2 ^ vlen_exp, '_sk3__set) & div(2 ^ '_sk8__sk7__sk6__sk5_z * 2 ^ vlen_exp, '_sk3__set) <= 2 ^ vlen_exp",
+          "location": {
+            "column": 3,
+            "end": 2723,
+            "line": 39,
+            "source": "(2 ^ max(0, LMUL_pow)) * vlen / SEW",
+            "start": 2688
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk1_LMUL_pow",
+            "'_sk2__set",
+            "'_sk3__set",
+            "'_sk5_z",
+            "'_sk6__sk5_z",
+            "'_sk7__sk6__sk5_z",
+            "'_sk8__sk7__sk6__sk5_z"
+          ],
+          "status": "unknown"
+        },
+        {
+          "assumptions": [
+            "3 <= vlen_exp & vlen_exp <= 16",
+            "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+            "xlen in {32, 64}",
+            "'sew in {8, 16, 32, 64}",
+            "0 <= '_sk1_index",
+            "'sew <= vlen",
+            "EEW <= vlen",
+            "'sew <= 2 ^ vlen_exp",
+            "EEW <= 2 ^ vlen_exp"
+          ],
+          "callable": "read_single_element",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_control.sail",
+          "goal": "2 ^ vlen_exp % 'sew == 0",
+          "location": {
+            "column": 3,
+            "end": 3007,
+            "line": 46,
+            "source": "static_assert(vlen % EEW == 0);",
+            "start": 2977
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk1_index"
+          ],
+          "status": "unknown"
+        },
+        {
+          "assumptions": [
+            "3 <= vlen_exp & vlen_exp <= 16",
+            "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+            "xlen in {32, 64}",
+            "'sew in {8, 16, 32, 64}",
+            "0 <= '_sk1_index",
+            "'sew <= vlen",
+            "EEW <= vlen",
+            "'sew <= 2 ^ vlen_exp",
+            "EEW <= 2 ^ vlen_exp"
+          ],
+          "callable": "write_single_element",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_control.sail",
+          "goal": "2 ^ vlen_exp % 'sew == 0",
+          "location": {
+            "column": 3,
+            "end": 4753,
+            "line": 88,
+            "source": "static_assert(vlen % EEW == 0);",
+            "start": 4723
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk1_index"
+          ],
+          "status": "unknown"
+        },
+        {
+          "assumptions": [
+            "3 <= vlen_exp & vlen_exp <= 16",
+            "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+            "xlen in {32, 64}",
+            "'n >= 0 & 'sew in {8, 16, 32, 64}",
+            "-3 <= '_sk1_LMUL_pow & '_sk1_LMUL_pow <= 3",
+            "'_sk1_LMUL_pow >= 0 & '_sk3_z == '_sk1_LMUL_pow | '_sk1_LMUL_pow < 0 & '_sk3_z == 0",
+            "('_sk1_LMUL_pow >= 0 & '_sk4__sk3_z == '_sk1_LMUL_pow | '_sk1_LMUL_pow < 0 & '_sk4__sk3_z == 0)",
+            "'sew <= vlen",
+            "SEW <= vlen",
+            "'sew <= 2 ^ vlen_exp",
+            "SEW <= 2 ^ vlen_exp"
+          ],
+          "callable": "write_vreg",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_control.sail",
+          "goal": "2 ^ vlen_exp % 'sew == 0",
+          "location": {
+            "column": 3,
+            "end": 6106,
+            "line": 123,
+            "source": "static_assert(vlen % SEW == 0);",
+            "start": 6076
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk1_LMUL_pow",
+            "'_sk3_z",
+            "'_sk4__sk3_z"
+          ],
+          "status": "unknown"
+        },
+        {
+          "assumptions": [
+            "xlen in {32, 64}",
+            "'n > 0",
+            "'_sk1__set in {8, 16, 32, 64}",
+            "0 <= '_sk2_i",
+            "true",
+            "true",
+            "0 <= '_sk5__loop_index & '_sk5__loop_index <= 3",
+            "('_sk5__loop_index + 1) * '_sk1__set <= 'n",
+            "(j + 1) * SEW <= 'n"
+          ],
+          "callable": "write_velem_quad",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_utils_insts.sail",
+          "goal": "0 <= 4 * '_sk2_i + '_sk5__loop_index",
+          "location": {
+            "column": 5,
+            "end": 11195,
+            "line": 244,
+            "source": "write_single_element(SEW, 4 * i + j, vd, input[(j + 1) * SEW - 1 .. j * SEW]);",
+            "start": 11118
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk1__set",
+            "'_sk2_i",
+            "'_sk5__loop_index"
+          ],
+          "status": "unknown"
+        },
+        {
+          "assumptions": [
+            "xlen in {32, 64}",
+            "'n > 0",
+            "'_sk1__set in {8, 16, 32, 64}",
+            "0 <= '_sk2_i",
+            "true",
+            "true",
+            "0 <= '_sk5__loop_index & '_sk5__loop_index <= 3",
+            "('_sk5__loop_index + 1) * '_sk1__set <= 'n",
+            "(j + 1) * SEW <= 'n"
+          ],
+          "callable": "write_velem_quad",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_utils_insts.sail",
+          "goal": "0 <= 4 * '_sk2_i + '_sk5__loop_index",
+          "location": {
+            "column": 5,
+            "end": 11195,
+            "line": 244,
+            "source": "write_single_element(SEW, 4 * i + j, vd, input[(j + 1) * SEW - 1 .. j * SEW]);",
+            "start": 11118
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk1__set",
+            "'_sk2_i",
+            "'_sk5__loop_index"
+          ],
+          "status": "unknown"
+        },
+        {
+          "assumptions": [
+            "xlen in {32, 64}",
+            "'n >= 0 & 'm in {8, 16, 32, 64} & 'q > 0 & 'q <= 8",
+            "true",
+            "true",
+            "true"
+          ],
+          "callable": "read_vreg_seg",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_utils_insts.sail",
+          "goal": "'q * 'm >= 0",
+          "location": {
+            "column": 56,
+            "end": 20658,
+            "line": 480,
+            "source": "var result : vector('n, bits('q * 'm)) = vector_init(zeros());",
+            "start": 20651
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [],
+          "status": "unknown"
+        },
+        {
+          "assumptions": [
+            "xlen in {32, 64}",
+            "'n >= 0 & 'm in {8, 16, 32, 64} & 'q > 0 & 'q <= 8",
+            "true",
+            "true",
+            "true",
+            "true",
+            "true",
+            "0 <= '_sk7__loop_index & '_sk7__loop_index <= 'n - 1"
+          ],
+          "callable": "read_vreg_seg",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_utils_insts.sail",
+          "goal": "'q * 'm >= 0",
+          "location": {
+            "column": 17,
+            "end": 20882,
+            "line": 485,
+            "source": "result[i] = zeros('q * 'm);",
+            "start": 20868
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk7__loop_index"
+          ],
+          "status": "unknown"
+        },
+        {
+          "assumptions": [
+            "xlen in {32, 64}",
+            "'n >= 0 & 'm in {8, 16, 32, 64} & 'q > 0 & 'q <= 8",
+            "true",
+            "true",
+            "true",
+            "true",
+            "true",
+            "0 <= '_sk7__loop_index & '_sk7__loop_index <= 'n - 1",
+            "true",
+            "0 <= '_sk9__loop_index & '_sk9__loop_index <= 'q - 1"
+          ],
+          "callable": "read_vreg_seg",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_utils_insts.sail",
+          "goal": "'q * 'm >= 'm",
+          "location": {
+            "column": 32,
+            "end": 20980,
+            "line": 487,
+            "source": "result[i] = result[i] | (zero_extend(vreg_list[j][i]) << (j * 'm))",
+            "start": 20952
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk7__loop_index",
+            "'_sk9__loop_index"
+          ],
+          "status": "unknown"
+        },
+        {
+          "assumptions": [
+            "xlen in {32, 64}",
+            "3 <= vlen_exp & vlen_exp <= 16",
+            "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+            "true",
+            "true",
+            "<unsupported>",
+            "-4 <= '_sk5_LMUL_pow_new & '_sk5_LMUL_pow_new <= 3",
+            "3 <= '_sk6_SEW_pow_new & '_sk6_SEW_pow_new <= 10",
+            "-9 <= '_sk7_lmul_sew_ratio & '_sk7_lmul_sew_ratio <= 0",
+            "~('_sk6_SEW_pow_new > '_sk5_LMUL_pow_new + elen_exp | '_sk1__flow_bool & <unsupported>)"
+          ],
+          "callable": "execute_vsetvl_type",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_vset_insts.sail",
+          "goal": "1 <= 2 ^ ('_sk5_LMUL_pow_new + vlen_exp - '_sk6_SEW_pow_new) & 2 ^ ('_sk5_LMUL_pow_new + vlen_exp - '_sk6_SEW_pow_new) <= 2 ^ vlen_exp",
+          "location": {
+            "column": 16,
+            "end": 4187,
+            "line": 119,
+            "source": "vl = to_bits(calculate_new_vl(avl, VLMAX));",
+            "start": 4159
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk1__flow_bool",
+            "'_sk5_LMUL_pow_new",
+            "'_sk6_SEW_pow_new",
+            "'_sk7_lmul_sew_ratio"
+          ],
+          "status": "unknown"
+        },
+        {
+          "assumptions": [
+            "3 <= vlen_exp & vlen_exp <= 16",
+            "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+            "xlen in {32, 64}",
+            "'_sk1__set in {8, 16, 32, 64}",
+            "-3 <= '_sk2_LMUL_pow & '_sk2_LMUL_pow <= 3",
+            "1 <= '_sk3_num_elem & '_sk3_num_elem <= vlen",
+            "<unsupported>",
+            "true",
+            "0 <= '_sk5__loop_index & '_sk5__loop_index <= '_sk3_num_elem - 1",
+            "-(2 ^ ('_sk1__set - 1)) <= '_sk7__sk6__argument & '_sk7__sk6__argument <= 2 ^ ('_sk1__set - 1) - 1",
+            "1 <= '_sk3_num_elem & '_sk3_num_elem <= 2 ^ vlen_exp"
+          ],
+          "callable": "execute",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/Zvabd/zvabd_insts.sail",
+          "goal": "'_sk1__set >= 0 & 0 <= abs('_sk7__sk6__argument) & abs('_sk7__sk6__argument) < 2 ^ '_sk1__set",
+          "location": {
+            "column": 19,
+            "end": 2058,
+            "line": 47,
+            "source": "result[i] = to_bits(SEW, abs_int(signed(vs2_val[i])))",
+            "start": 2017
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk1__set",
+            "'_sk2_LMUL_pow",
+            "'_sk3_num_elem",
+            "'_sk5__loop_index",
+            "'_sk7__sk6__argument"
+          ],
+          "status": "unknown"
+        },
+        {
+          "assumptions": [
+            "xlen in {32, 64}",
+            "'v in {32, 39, 48, 57}",
+            "0 <= '_sk1_level & '_sk1_level <= (if 'v == 32 then 1 else (if 'v == 39 then 2 else (if 'v == 48 then 3 else 4)))",
+            "true",
+            "true",
+            "0 <= '_sk4_index & '_sk4_index <= num_tlb_entries - 1",
+            "0 <= '_sk4_index & '_sk4_index <= 2 ^ num_tlb_entries_exp - 1",
+            "0 <= '_sk4_index & '_sk4_index <= 2 ^ 6 - 1"
+          ],
+          "callable": "add_to_TLB",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/sys/vmem_tlb.sail",
+          "goal": "'v - 12 >= '_sk1_level * (if 'v == 32 then 10 else 9)",
+          "location": {
+            "column": 21,
+            "end": 5981,
+            "line": 157,
+            "source": "let vpn = vpn & ~(zero_extend(levelMask));",
+            "start": 5959
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk1_level",
+            "'_sk4_index"
+          ],
+          "status": "unknown"
+        },
+        {
+          "assumptions": [
+            "xlen in {32, 64}",
+            "'v in {32, 39, 48, 57}",
+            "0 <= '_sk1_level & '_sk1_level <= (if 'v == 32 then 1 else (if 'v == 39 then 2 else (if 'v == 48 then 3 else 4)))",
+            "true",
+            "true",
+            "0 <= '_sk4_index & '_sk4_index <= num_tlb_entries - 1",
+            "0 <= '_sk4_index & '_sk4_index <= 2 ^ num_tlb_entries_exp - 1",
+            "0 <= '_sk4_index & '_sk4_index <= 2 ^ 6 - 1"
+          ],
+          "callable": "add_to_TLB",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/sys/vmem_tlb.sail",
+          "goal": "(if 'v == 32 then 22 else 44) >= '_sk1_level * (if 'v == 32 then 10 else 9)",
+          "location": {
+            "column": 21,
+            "end": 6026,
+            "line": 158,
+            "source": "let ppn = ppn & ~(zero_extend(levelMask));",
+            "start": 6004
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk1_level",
+            "'_sk4_index"
+          ],
+          "status": "unknown"
+        },
+        {
+          "assumptions": [
+            "xlen in {32, 64}",
+            "'v in {32, 39, 48, 57}",
+            "0 <= '_sk1_level & '_sk1_level <= (if 'v == 32 then 1 else (if 'v == 39 then 2 else (if 'v == 48 then 3 else 4)))",
+            "true",
+            "true",
+            "0 <= '_sk4_index & '_sk4_index <= num_tlb_entries - 1",
+            "0 <= '_sk4_index & '_sk4_index <= 2 ^ num_tlb_entries_exp - 1",
+            "0 <= '_sk4_index & '_sk4_index <= 2 ^ 6 - 1"
+          ],
+          "callable": "add_to_TLB",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/sys/vmem_tlb.sail",
+          "goal": "57 - 12 >= '_sk1_level * (if 'v == 32 then 10 else 9)",
+          "location": {
+            "column": 46,
+            "end": 6318,
+            "line": 164,
+            "source": "levelMask = zero_extend(levelMask),",
+            "start": 6296
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk1_level",
+            "'_sk4_index"
+          ],
+          "status": "unknown"
+        },
+        {
+          "assumptions": [
+            "xlen in {32, 64}",
+            "'v in {32, 39, 48, 57}",
+            "0 <= '_sk1_level & '_sk1_level <= (if 'v == 32 then 1 else (if 'v == 39 then 2 else (if 'v == 48 then 3 else 4)))",
+            "true",
+            "true",
+            "0 <= '_sk4_index & '_sk4_index <= num_tlb_entries - 1",
+            "0 <= '_sk4_index & '_sk4_index <= 2 ^ num_tlb_entries_exp - 1",
+            "0 <= '_sk4_index & '_sk4_index <= 2 ^ 6 - 1"
+          ],
+          "callable": "add_to_TLB",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/sys/vmem_tlb.sail",
+          "goal": "57 - 12 >= 'v - 12",
+          "location": {
+            "column": 46,
+            "end": 6381,
+            "line": 165,
+            "source": "vpn       = sign_extend(vpn),",
+            "start": 6365
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk1_level",
+            "'_sk4_index"
+          ],
+          "status": "unknown"
+        }
+      ],
+      "smt_enabled": true,
+      "totals": {
+        "proved": 2903,
+        "refuted": 0,
+        "total": 2920,
+        "unknown": 17
+      },
+      "unknown_by_reason": {
+        "budget_exhausted": 17
+      },
+      "workspace": "/home/clair/tinyueng_workplace/sail-riscv/model/riscv.sail_project"
+    },
+    "previous_totals": {
+      "proved": 2904,
+      "refuted": 0,
+      "total": 2919,
+      "unknown": 15
+    },
+    "fresh_checkpoint_control": {
+      "schema_version": 1,
+      "scope": "committed_deferred_obligations",
+      "sites": [
+        {
+          "assumptions": [
+            "3 <= vlen_exp & vlen_exp <= 16",
+            "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+            "xlen in {32, 64}",
+            "'_sk1__set in {8, 16, 32, 64}",
+            "-3 <= '_sk2_LMUL_pow & '_sk2_LMUL_pow <= 3",
+            "1 <= '_sk3_num_elem & '_sk3_num_elem <= vlen",
+            "1 <= '_sk4_SEW_frac_pow & '_sk4_SEW_frac_pow <= 3",
+            "true",
+            "<unsupported>",
+            "~(<unsupported> | ~(valid_reg_overlap(vs2, vd, LMUL_pow_div, LMUL_pow)))",
+            "'_sk1__set / 2 ^ '_sk4_SEW_frac_pow >= 8",
+            "SEW_div >= 8",
+            "0 <= '_sk11__loop_index & '_sk11__loop_index <= '_sk3_num_elem - 1",
+            "1 <= '_sk3_num_elem & '_sk3_num_elem <= 2 ^ vlen_exp"
+          ],
+          "callable": "execute",
+          "cause": "Compatibility",
+          "clause": 23,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_arith_insts.sail",
+          "goal": "'_sk1__set >= '_sk1__set / 2 ^ '_sk4_SEW_frac_pow",
+          "location": {
+            "column": 23,
+            "end": 76244,
+            "line": 1902,
+            "source": "VEXT4_SVF4 => sign_extend(vs2_val[i]),",
+            "start": 76221
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk11__loop_index",
+            "'_sk1__set",
+            "'_sk2_LMUL_pow",
+            "'_sk3_num_elem",
+            "'_sk4_SEW_frac_pow"
+          ],
+          "status": "unknown"
+        },
+        {
+          "assumptions": [
+            "3 <= vlen_exp & vlen_exp <= 16",
+            "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+            "xlen in {32, 64}",
+            "'_sk1__set in {8, 16, 32, 64}",
+            "-3 <= '_sk2_LMUL_pow & '_sk2_LMUL_pow <= 3",
+            "1 <= '_sk3_num_elem & '_sk3_num_elem <= vlen",
+            "1 <= '_sk4_SEW_frac_pow & '_sk4_SEW_frac_pow <= 3",
+            "true",
+            "<unsupported>",
+            "~(<unsupported> | ~(valid_reg_overlap(vs2, vd, LMUL_pow_div, LMUL_pow)))",
+            "'_sk1__set / 2 ^ '_sk4_SEW_frac_pow >= 8",
+            "SEW_div >= 8",
+            "0 <= '_sk11__loop_index & '_sk11__loop_index <= '_sk3_num_elem - 1",
+            "1 <= '_sk3_num_elem & '_sk3_num_elem <= 2 ^ vlen_exp"
+          ],
+          "callable": "execute",
+          "cause": "Compatibility",
+          "clause": 23,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_arith_insts.sail",
+          "goal": "'_sk1__set >= '_sk1__set / 2 ^ '_sk4_SEW_frac_pow",
+          "location": {
+            "column": 23,
+            "end": 76291,
+            "line": 1903,
+            "source": "VEXT8_ZVF8 => zero_extend(vs2_val[i]),",
+            "start": 76268
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk11__loop_index",
+            "'_sk1__set",
+            "'_sk2_LMUL_pow",
+            "'_sk3_num_elem",
+            "'_sk4_SEW_frac_pow"
+          ],
+          "status": "unknown"
+        },
+        {
+          "assumptions": [
+            "3 <= vlen_exp & vlen_exp <= 16",
+            "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+            "xlen in {32, 64}",
+            "'_sk1__set in {8, 16, 32, 64}",
+            "-3 <= '_sk2_LMUL_pow & '_sk2_LMUL_pow <= 3",
+            "1 <= '_sk3_num_elem & '_sk3_num_elem <= vlen",
+            "1 <= '_sk4_SEW_frac_pow & '_sk4_SEW_frac_pow <= 3",
+            "true",
+            "<unsupported>",
+            "~(<unsupported> | ~(valid_reg_overlap(vs2, vd, LMUL_pow_div, LMUL_pow)))",
+            "'_sk1__set / 2 ^ '_sk4_SEW_frac_pow >= 8",
+            "SEW_div >= 8",
+            "0 <= '_sk11__loop_index & '_sk11__loop_index <= '_sk3_num_elem - 1",
+            "1 <= '_sk3_num_elem & '_sk3_num_elem <= 2 ^ vlen_exp"
+          ],
+          "callable": "execute",
+          "cause": "Compatibility",
+          "clause": 23,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_arith_insts.sail",
+          "goal": "'_sk1__set >= '_sk1__set / 2 ^ '_sk4_SEW_frac_pow",
+          "location": {
+            "column": 23,
+            "end": 76338,
+            "line": 1904,
+            "source": "VEXT8_SVF8 => sign_extend(vs2_val[i]),",
+            "start": 76315
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk11__loop_index",
+            "'_sk1__set",
+            "'_sk2_LMUL_pow",
+            "'_sk3_num_elem",
+            "'_sk4_SEW_frac_pow"
+          ],
+          "status": "unknown"
+        },
+        {
+          "assumptions": [
+            "(0 >= '_sk1_LMUL_pow & '_sk8__sk7__sk6__sk5_z == 0 | 0 < '_sk1_LMUL_pow & '_sk8__sk7__sk6__sk5_z == '_sk1_LMUL_pow)",
+            "3 <= vlen_exp & vlen_exp <= 16",
+            "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+            "-3 <= '_sk1_LMUL_pow & '_sk1_LMUL_pow <= 3",
+            "'_sk2__set in {8, 16, 32, 64}",
+            "'_sk3__set in {8, 16, 32, 64}",
+            "vlen >= '_sk3__set",
+            "vlen >= SEW",
+            "0 >= '_sk1_LMUL_pow & '_sk5_z == 0 | 0 < '_sk1_LMUL_pow & '_sk5_z == '_sk1_LMUL_pow",
+            "(0 >= '_sk1_LMUL_pow & '_sk6__sk5_z == 0 | 0 < '_sk1_LMUL_pow & '_sk6__sk5_z == '_sk1_LMUL_pow)",
+            "(0 >= '_sk1_LMUL_pow & '_sk7__sk6__sk5_z == 0 | 0 < '_sk1_LMUL_pow & '_sk7__sk6__sk5_z == '_sk1_LMUL_pow)",
+            "2 ^ vlen_exp >= '_sk3__set",
+            "2 ^ vlen_exp >= SEW"
+          ],
+          "callable": "get_num_elem",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_control.sail",
+          "goal": "1 <= div(2 ^ '_sk8__sk7__sk6__sk5_z * 2 ^ vlen_exp, '_sk3__set) & div(2 ^ '_sk8__sk7__sk6__sk5_z * 2 ^ vlen_exp, '_sk3__set) <= 2 ^ vlen_exp",
+          "location": {
+            "column": 3,
+            "end": 2723,
+            "line": 39,
+            "source": "(2 ^ max(0, LMUL_pow)) * vlen / SEW",
+            "start": 2688
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk1_LMUL_pow",
+            "'_sk2__set",
+            "'_sk3__set",
+            "'_sk5_z",
+            "'_sk6__sk5_z",
+            "'_sk7__sk6__sk5_z",
+            "'_sk8__sk7__sk6__sk5_z"
+          ],
+          "status": "unknown"
+        },
+        {
+          "assumptions": [
+            "3 <= vlen_exp & vlen_exp <= 16",
+            "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+            "xlen in {32, 64}",
+            "'sew in {8, 16, 32, 64}",
+            "0 <= '_sk1_index",
+            "'sew <= vlen",
+            "EEW <= vlen",
+            "'sew <= 2 ^ vlen_exp",
+            "EEW <= 2 ^ vlen_exp"
+          ],
+          "callable": "read_single_element",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_control.sail",
+          "goal": "2 ^ vlen_exp % 'sew == 0",
+          "location": {
+            "column": 3,
+            "end": 3007,
+            "line": 46,
+            "source": "static_assert(vlen % EEW == 0);",
+            "start": 2977
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk1_index"
+          ],
+          "status": "unknown"
+        },
+        {
+          "assumptions": [
+            "3 <= vlen_exp & vlen_exp <= 16",
+            "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+            "xlen in {32, 64}",
+            "'sew in {8, 16, 32, 64}",
+            "0 <= '_sk1_index",
+            "'sew <= vlen",
+            "EEW <= vlen",
+            "'sew <= 2 ^ vlen_exp",
+            "EEW <= 2 ^ vlen_exp"
+          ],
+          "callable": "write_single_element",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_control.sail",
+          "goal": "2 ^ vlen_exp % 'sew == 0",
+          "location": {
+            "column": 3,
+            "end": 4753,
+            "line": 88,
+            "source": "static_assert(vlen % EEW == 0);",
+            "start": 4723
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk1_index"
+          ],
+          "status": "unknown"
+        },
+        {
+          "assumptions": [
+            "3 <= vlen_exp & vlen_exp <= 16",
+            "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+            "xlen in {32, 64}",
+            "'n >= 0 & 'sew in {8, 16, 32, 64}",
+            "-3 <= '_sk1_LMUL_pow & '_sk1_LMUL_pow <= 3",
+            "'_sk1_LMUL_pow >= 0 & '_sk3_z == '_sk1_LMUL_pow | '_sk1_LMUL_pow < 0 & '_sk3_z == 0",
+            "('_sk1_LMUL_pow >= 0 & '_sk4__sk3_z == '_sk1_LMUL_pow | '_sk1_LMUL_pow < 0 & '_sk4__sk3_z == 0)",
+            "'sew <= vlen",
+            "SEW <= vlen",
+            "'sew <= 2 ^ vlen_exp",
+            "SEW <= 2 ^ vlen_exp"
+          ],
+          "callable": "write_vreg",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_control.sail",
+          "goal": "2 ^ vlen_exp % 'sew == 0",
+          "location": {
+            "column": 3,
+            "end": 6106,
+            "line": 123,
+            "source": "static_assert(vlen % SEW == 0);",
+            "start": 6076
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk1_LMUL_pow",
+            "'_sk3_z",
+            "'_sk4__sk3_z"
+          ],
+          "status": "unknown"
+        },
+        {
+          "assumptions": [
+            "xlen in {32, 64}",
+            "'n > 0",
+            "'_sk1__set in {8, 16, 32, 64}",
+            "0 <= '_sk2_i",
+            "0 <= '_sk5__loop_index & '_sk5__loop_index <= 3",
+            "('_sk5__loop_index + 1) * '_sk1__set <= 'n",
+            "(j + 1) * SEW <= 'n"
+          ],
+          "callable": "write_velem_quad",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_utils_insts.sail",
+          "goal": "0 <= 4 * '_sk2_i + '_sk5__loop_index",
+          "location": {
+            "column": 5,
+            "end": 11195,
+            "line": 244,
+            "source": "write_single_element(SEW, 4 * i + j, vd, input[(j + 1) * SEW - 1 .. j * SEW]);",
+            "start": 11118
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk1__set",
+            "'_sk2_i",
+            "'_sk5__loop_index"
+          ],
+          "status": "unknown"
+        },
+        {
+          "assumptions": [
+            "xlen in {32, 64}",
+            "'n > 0",
+            "'_sk1__set in {8, 16, 32, 64}",
+            "0 <= '_sk2_i",
+            "0 <= '_sk5__loop_index & '_sk5__loop_index <= 3",
+            "('_sk5__loop_index + 1) * '_sk1__set <= 'n",
+            "(j + 1) * SEW <= 'n"
+          ],
+          "callable": "write_velem_quad",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_utils_insts.sail",
+          "goal": "0 <= 4 * '_sk2_i + '_sk5__loop_index",
+          "location": {
+            "column": 5,
+            "end": 11195,
+            "line": 244,
+            "source": "write_single_element(SEW, 4 * i + j, vd, input[(j + 1) * SEW - 1 .. j * SEW]);",
+            "start": 11118
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk1__set",
+            "'_sk2_i",
+            "'_sk5__loop_index"
+          ],
+          "status": "unknown"
+        },
+        {
+          "assumptions": [
+            "xlen in {32, 64}",
+            "'n >= 0 & 'm in {8, 16, 32, 64} & 'q > 0 & 'q <= 8",
+            "true",
+            "true"
+          ],
+          "callable": "read_vreg_seg",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_utils_insts.sail",
+          "goal": "'q * 'm >= 0",
+          "location": {
+            "column": 56,
+            "end": 20658,
+            "line": 480,
+            "source": "var result : vector('n, bits('q * 'm)) = vector_init(zeros());",
+            "start": 20651
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [],
+          "status": "unknown"
+        },
+        {
+          "assumptions": [
+            "xlen in {32, 64}",
+            "'n >= 0 & 'm in {8, 16, 32, 64} & 'q > 0 & 'q <= 8",
+            "true",
+            "true",
+            "0 <= '_sk7__loop_index & '_sk7__loop_index <= 'n - 1"
+          ],
+          "callable": "read_vreg_seg",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_utils_insts.sail",
+          "goal": "'q * 'm >= 0",
+          "location": {
+            "column": 17,
+            "end": 20882,
+            "line": 485,
+            "source": "result[i] = zeros('q * 'm);",
+            "start": 20868
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk7__loop_index"
+          ],
+          "status": "unknown"
+        },
+        {
+          "assumptions": [
+            "xlen in {32, 64}",
+            "'n >= 0 & 'm in {8, 16, 32, 64} & 'q > 0 & 'q <= 8",
+            "true",
+            "true",
+            "0 <= '_sk7__loop_index & '_sk7__loop_index <= 'n - 1",
+            "0 <= '_sk9__loop_index & '_sk9__loop_index <= 'q - 1"
+          ],
+          "callable": "read_vreg_seg",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_utils_insts.sail",
+          "goal": "'q * 'm >= 'm",
+          "location": {
+            "column": 32,
+            "end": 20980,
+            "line": 487,
+            "source": "result[i] = result[i] | (zero_extend(vreg_list[j][i]) << (j * 'm))",
+            "start": 20952
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk7__loop_index",
+            "'_sk9__loop_index"
+          ],
+          "status": "unknown"
+        },
+        {
+          "assumptions": [
+            "3 <= vlen_exp & vlen_exp <= 16",
+            "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+            "xlen in {32, 64}",
+            "'_sk1__set in {8, 16, 32, 64}",
+            "-3 <= '_sk2_LMUL_pow & '_sk2_LMUL_pow <= 3",
+            "1 <= '_sk3_num_elem & '_sk3_num_elem <= vlen",
+            "<unsupported>",
+            "~(illegal_normal(vd, vm))",
+            "0 <= '_sk5__loop_index & '_sk5__loop_index <= '_sk3_num_elem - 1",
+            "-(2 ^ ('_sk1__set - 1)) - (2 ^ ('_sk1__set - 1) - 1) <= '_sk7__sk6__argument & '_sk7__sk6__argument <= 2 ^ ('_sk1__set - 1) - 1 - -(2 ^ ('_sk1__set - 1))",
+            "1 <= '_sk3_num_elem & '_sk3_num_elem <= 2 ^ vlen_exp"
+          ],
+          "callable": "execute",
+          "cause": "Compatibility",
+          "clause": 1,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/Zvabd/zvabd_insts.sail",
+          "goal": "'_sk1__set >= 0 & 0 <= abs('_sk7__sk6__argument) & abs('_sk7__sk6__argument) < 2 ^ '_sk1__set",
+          "location": {
+            "column": 21,
+            "end": 3790,
+            "line": 94,
+            "source": "VV_VABD  => to_bits(SEW, abs_int(signed(vs2_val[i]) - signed(vs1_val[i]))),",
+            "start": 3728
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk1__set",
+            "'_sk2_LMUL_pow",
+            "'_sk3_num_elem",
+            "'_sk5__loop_index",
+            "'_sk7__sk6__argument"
+          ],
+          "status": "unknown"
+        },
+        {
+          "assumptions": [
+            "xlen in {32, 64}",
+            "'v in {32, 39, 48, 57}",
+            "0 <= '_sk1_level & '_sk1_level <= (if 'v == 32 then 1 else (if 'v == 39 then 2 else (if 'v == 48 then 3 else 4)))",
+            "true",
+            "0 <= '_sk4_index & '_sk4_index <= num_tlb_entries - 1",
+            "0 <= '_sk4_index & '_sk4_index <= 2 ^ num_tlb_entries_exp - 1",
+            "0 <= '_sk4_index & '_sk4_index <= 2 ^ 6 - 1"
+          ],
+          "callable": "add_to_TLB",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/sys/vmem_tlb.sail",
+          "goal": "'v - 12 >= '_sk1_level * (if 'v == 32 then 10 else 9)",
+          "location": {
+            "column": 21,
+            "end": 5981,
+            "line": 157,
+            "source": "let vpn = vpn & ~(zero_extend(levelMask));",
+            "start": 5959
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk1_level",
+            "'_sk4_index"
+          ],
+          "status": "unknown"
+        },
+        {
+          "assumptions": [
+            "xlen in {32, 64}",
+            "'v in {32, 39, 48, 57}",
+            "0 <= '_sk1_level & '_sk1_level <= (if 'v == 32 then 1 else (if 'v == 39 then 2 else (if 'v == 48 then 3 else 4)))",
+            "true",
+            "0 <= '_sk4_index & '_sk4_index <= num_tlb_entries - 1",
+            "0 <= '_sk4_index & '_sk4_index <= 2 ^ num_tlb_entries_exp - 1",
+            "0 <= '_sk4_index & '_sk4_index <= 2 ^ 6 - 1"
+          ],
+          "callable": "add_to_TLB",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/sys/vmem_tlb.sail",
+          "goal": "(if 'v == 32 then 22 else 44) >= '_sk1_level * (if 'v == 32 then 10 else 9)",
+          "location": {
+            "column": 21,
+            "end": 6026,
+            "line": 158,
+            "source": "let ppn = ppn & ~(zero_extend(levelMask));",
+            "start": 6004
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk1_level",
+            "'_sk4_index"
+          ],
+          "status": "unknown"
+        },
+        {
+          "assumptions": [
+            "xlen in {32, 64}",
+            "'v in {32, 39, 48, 57}",
+            "0 <= '_sk1_level & '_sk1_level <= (if 'v == 32 then 1 else (if 'v == 39 then 2 else (if 'v == 48 then 3 else 4)))",
+            "true",
+            "0 <= '_sk4_index & '_sk4_index <= num_tlb_entries - 1",
+            "0 <= '_sk4_index & '_sk4_index <= 2 ^ num_tlb_entries_exp - 1",
+            "0 <= '_sk4_index & '_sk4_index <= 2 ^ 6 - 1"
+          ],
+          "callable": "add_to_TLB",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/sys/vmem_tlb.sail",
+          "goal": "57 - 12 >= '_sk1_level * (if 'v == 32 then 10 else 9)",
+          "location": {
+            "column": 46,
+            "end": 6318,
+            "line": 164,
+            "source": "levelMask = zero_extend(levelMask),",
+            "start": 6296
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk1_level",
+            "'_sk4_index"
+          ],
+          "status": "unknown"
+        },
+        {
+          "assumptions": [
+            "xlen in {32, 64}",
+            "'v in {32, 39, 48, 57}",
+            "0 <= '_sk1_level & '_sk1_level <= (if 'v == 32 then 1 else (if 'v == 39 then 2 else (if 'v == 48 then 3 else 4)))",
+            "true",
+            "0 <= '_sk4_index & '_sk4_index <= num_tlb_entries - 1",
+            "0 <= '_sk4_index & '_sk4_index <= 2 ^ num_tlb_entries_exp - 1",
+            "0 <= '_sk4_index & '_sk4_index <= 2 ^ 6 - 1"
+          ],
+          "callable": "add_to_TLB",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/sys/vmem_tlb.sail",
+          "goal": "57 - 12 >= 'v - 12",
+          "location": {
+            "column": 46,
+            "end": 6381,
+            "line": 165,
+            "source": "vpn       = sign_extend(vpn),",
+            "start": 6365
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk1_level",
+            "'_sk4_index"
+          ],
+          "status": "unknown"
+        }
+      ],
+      "smt_enabled": true,
+      "totals": {
+        "proved": 2904,
+        "refuted": 0,
+        "total": 2921,
+        "unknown": 17
+      },
+      "unknown_by_reason": {
+        "budget_exhausted": 17
+      },
+      "workspace": "/home/clair/tinyueng_workplace/sail-riscv/model/riscv.sail_project"
+    },
+    "independent_replay": {
+      "limits": {
+        "total_ms": 3000,
+        "per_check_ms": 500,
+        "checks": 128
+      },
+      "results": [
+        [
+          "0",
+          "Satisfied"
+        ],
+        [
+          "1",
+          "Satisfied"
+        ],
+        [
+          "2",
+          "Satisfied"
+        ],
+        [
+          "3",
+          "Satisfied"
+        ],
+        [
+          "4",
+          "Satisfied"
+        ],
+        [
+          "5",
+          "Satisfied"
+        ],
+        [
+          "6",
+          "Satisfied"
+        ],
+        [
+          "7",
+          "Satisfied"
+        ],
+        [
+          "8",
+          "Satisfied"
+        ],
+        [
+          "9",
+          "Satisfied"
+        ],
+        [
+          "10",
+          "Satisfied"
+        ],
+        [
+          "11",
+          "Satisfied"
+        ],
+        [
+          "12",
+          "Satisfied"
+        ],
+        [
+          "13",
+          "Satisfied"
+        ],
+        [
+          "14",
+          "Satisfied"
+        ],
+        [
+          "15",
+          "Satisfied"
+        ],
+        [
+          "16",
+          "Satisfied"
+        ]
+      ],
+      "source": "use super::*;\n#[test]\nfn replay_ablation_remaining_constraints() {\n {\nlet goal=parse_constraint_text(\"'_sk1__set >= '_sk1__set / 2 ^ '_sk4_SEW_frac_pow\");\nlet facts=vec![parse_constraint_text(\"3 <= vlen_exp & vlen_exp <= 16\"),parse_constraint_text(\"3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp\"),parse_constraint_text(\"xlen in {32, 64}\"),parse_constraint_text(\"'_sk1__set in {8, 16, 32, 64}\"),parse_constraint_text(\"-3 <= '_sk2_LMUL_pow & '_sk2_LMUL_pow <= 3\"),parse_constraint_text(\"1 <= '_sk3_num_elem & '_sk3_num_elem <= vlen\"),parse_constraint_text(\"1 <= '_sk4_SEW_frac_pow & '_sk4_SEW_frac_pow <= 3\"),parse_constraint_text(\"true\"),parse_constraint_text(\"<unsupported>\"),parse_constraint_text(\"true\"),parse_constraint_text(\"'_sk1__set / 2 ^ '_sk4_SEW_frac_pow >= 8\"),parse_constraint_text(\"SEW_div >= 8\"),parse_constraint_text(\"true\"),parse_constraint_text(\"0 <= '_sk11__loop_index & '_sk11__loop_index <= '_sk3_num_elem - 1\"),parse_constraint_text(\"1 <= '_sk3_num_elem & '_sk3_num_elem <= 2 ^ vlen_exp\")];\nlet _budget=crate::solver_budget::SolverBudget::enter(crate::CancellationToken::never(), crate::solver_budget::SolverLimits {total:std::time::Duration::from_secs(3),per_check:std::time::Duration::from_millis(500),checks:128});\nlet result=solver::solve(&goal,&Subst::default(),&facts); eprintln!(\"ABLATION_REPLAY 0 {result:?}\"); assert_eq!(result,ConstraintStatus::Satisfied,\"site 0\");\n }\n {\nlet goal=parse_constraint_text(\"'_sk1__set >= '_sk1__set / 2 ^ '_sk4_SEW_frac_pow\");\nlet facts=vec![parse_constraint_text(\"3 <= vlen_exp & vlen_exp <= 16\"),parse_constraint_text(\"3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp\"),parse_constraint_text(\"xlen in {32, 64}\"),parse_constraint_text(\"'_sk1__set in {8, 16, 32, 64}\"),parse_constraint_text(\"-3 <= '_sk2_LMUL_pow & '_sk2_LMUL_pow <= 3\"),parse_constraint_text(\"1 <= '_sk3_num_elem & '_sk3_num_elem <= vlen\"),parse_constraint_text(\"1 <= '_sk4_SEW_frac_pow & '_sk4_SEW_frac_pow <= 3\"),parse_constraint_text(\"true\"),parse_constraint_text(\"<unsupported>\"),parse_constraint_text(\"true\"),parse_constraint_text(\"'_sk1__set / 2 ^ '_sk4_SEW_frac_pow >= 8\"),parse_constraint_text(\"SEW_div >= 8\"),parse_constraint_text(\"true\"),parse_constraint_text(\"0 <= '_sk11__loop_index & '_sk11__loop_index <= '_sk3_num_elem - 1\"),parse_constraint_text(\"1 <= '_sk3_num_elem & '_sk3_num_elem <= 2 ^ vlen_exp\")];\nlet _budget=crate::solver_budget::SolverBudget::enter(crate::CancellationToken::never(), crate::solver_budget::SolverLimits {total:std::time::Duration::from_secs(3),per_check:std::time::Duration::from_millis(500),checks:128});\nlet result=solver::solve(&goal,&Subst::default(),&facts); eprintln!(\"ABLATION_REPLAY 1 {result:?}\"); assert_eq!(result,ConstraintStatus::Satisfied,\"site 1\");\n }\n {\nlet goal=parse_constraint_text(\"1 <= div(2 ^ '_sk8__sk7__sk6__sk5_z * 2 ^ vlen_exp, '_sk3__set) & div(2 ^ '_sk8__sk7__sk6__sk5_z * 2 ^ vlen_exp, '_sk3__set) <= 2 ^ vlen_exp\");\nlet facts=vec![parse_constraint_text(\"(0 >= '_sk1_LMUL_pow & '_sk8__sk7__sk6__sk5_z == 0 | 0 < '_sk1_LMUL_pow & '_sk8__sk7__sk6__sk5_z == '_sk1_LMUL_pow)\"),parse_constraint_text(\"3 <= vlen_exp & vlen_exp <= 16\"),parse_constraint_text(\"3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp\"),parse_constraint_text(\"-3 <= '_sk1_LMUL_pow & '_sk1_LMUL_pow <= 3\"),parse_constraint_text(\"'_sk2__set in {8, 16, 32, 64}\"),parse_constraint_text(\"'_sk3__set in {8, 16, 32, 64}\"),parse_constraint_text(\"vlen >= '_sk3__set\"),parse_constraint_text(\"vlen >= SEW\"),parse_constraint_text(\"0 >= '_sk1_LMUL_pow & '_sk5_z == 0 | 0 < '_sk1_LMUL_pow & '_sk5_z == '_sk1_LMUL_pow\"),parse_constraint_text(\"(0 >= '_sk1_LMUL_pow & '_sk6__sk5_z == 0 | 0 < '_sk1_LMUL_pow & '_sk6__sk5_z == '_sk1_LMUL_pow)\"),parse_constraint_text(\"(0 >= '_sk1_LMUL_pow & '_sk7__sk6__sk5_z == 0 | 0 < '_sk1_LMUL_pow & '_sk7__sk6__sk5_z == '_sk1_LMUL_pow)\"),parse_constraint_text(\"2 ^ vlen_exp >= '_sk3__set\"),parse_constraint_text(\"2 ^ vlen_exp >= SEW\")];\nlet _budget=crate::solver_budget::SolverBudget::enter(crate::CancellationToken::never(), crate::solver_budget::SolverLimits {total:std::time::Duration::from_secs(3),per_check:std::time::Duration::from_millis(500),checks:128});\nlet result=solver::solve(&goal,&Subst::default(),&facts); eprintln!(\"ABLATION_REPLAY 2 {result:?}\"); assert_eq!(result,ConstraintStatus::Satisfied,\"site 2\");\n }\n {\nlet goal=parse_constraint_text(\"2 ^ vlen_exp % 'sew == 0\");\nlet facts=vec![parse_constraint_text(\"3 <= vlen_exp & vlen_exp <= 16\"),parse_constraint_text(\"3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp\"),parse_constraint_text(\"xlen in {32, 64}\"),parse_constraint_text(\"'sew in {8, 16, 32, 64}\"),parse_constraint_text(\"0 <= '_sk1_index\"),parse_constraint_text(\"'sew <= vlen\"),parse_constraint_text(\"EEW <= vlen\"),parse_constraint_text(\"'sew <= 2 ^ vlen_exp\"),parse_constraint_text(\"EEW <= 2 ^ vlen_exp\")];\nlet _budget=crate::solver_budget::SolverBudget::enter(crate::CancellationToken::never(), crate::solver_budget::SolverLimits {total:std::time::Duration::from_secs(3),per_check:std::time::Duration::from_millis(500),checks:128});\nlet result=solver::solve(&goal,&Subst::default(),&facts); eprintln!(\"ABLATION_REPLAY 3 {result:?}\"); assert_eq!(result,ConstraintStatus::Satisfied,\"site 3\");\n }\n {\nlet goal=parse_constraint_text(\"2 ^ vlen_exp % 'sew == 0\");\nlet facts=vec![parse_constraint_text(\"3 <= vlen_exp & vlen_exp <= 16\"),parse_constraint_text(\"3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp\"),parse_constraint_text(\"xlen in {32, 64}\"),parse_constraint_text(\"'sew in {8, 16, 32, 64}\"),parse_constraint_text(\"0 <= '_sk1_index\"),parse_constraint_text(\"'sew <= vlen\"),parse_constraint_text(\"EEW <= vlen\"),parse_constraint_text(\"'sew <= 2 ^ vlen_exp\"),parse_constraint_text(\"EEW <= 2 ^ vlen_exp\")];\nlet _budget=crate::solver_budget::SolverBudget::enter(crate::CancellationToken::never(), crate::solver_budget::SolverLimits {total:std::time::Duration::from_secs(3),per_check:std::time::Duration::from_millis(500),checks:128});\nlet result=solver::solve(&goal,&Subst::default(),&facts); eprintln!(\"ABLATION_REPLAY 4 {result:?}\"); assert_eq!(result,ConstraintStatus::Satisfied,\"site 4\");\n }\n {\nlet goal=parse_constraint_text(\"2 ^ vlen_exp % 'sew == 0\");\nlet facts=vec![parse_constraint_text(\"3 <= vlen_exp & vlen_exp <= 16\"),parse_constraint_text(\"3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp\"),parse_constraint_text(\"xlen in {32, 64}\"),parse_constraint_text(\"'n >= 0 & 'sew in {8, 16, 32, 64}\"),parse_constraint_text(\"-3 <= '_sk1_LMUL_pow & '_sk1_LMUL_pow <= 3\"),parse_constraint_text(\"'_sk1_LMUL_pow >= 0 & '_sk3_z == '_sk1_LMUL_pow | '_sk1_LMUL_pow < 0 & '_sk3_z == 0\"),parse_constraint_text(\"('_sk1_LMUL_pow >= 0 & '_sk4__sk3_z == '_sk1_LMUL_pow | '_sk1_LMUL_pow < 0 & '_sk4__sk3_z == 0)\"),parse_constraint_text(\"'sew <= vlen\"),parse_constraint_text(\"SEW <= vlen\"),parse_constraint_text(\"'sew <= 2 ^ vlen_exp\"),parse_constraint_text(\"SEW <= 2 ^ vlen_exp\")];\nlet _budget=crate::solver_budget::SolverBudget::enter(crate::CancellationToken::never(), crate::solver_budget::SolverLimits {total:std::time::Duration::from_secs(3),per_check:std::time::Duration::from_millis(500),checks:128});\nlet result=solver::solve(&goal,&Subst::default(),&facts); eprintln!(\"ABLATION_REPLAY 5 {result:?}\"); assert_eq!(result,ConstraintStatus::Satisfied,\"site 5\");\n }\n {\nlet goal=parse_constraint_text(\"0 <= 4 * '_sk2_i + '_sk5__loop_index\");\nlet facts=vec![parse_constraint_text(\"xlen in {32, 64}\"),parse_constraint_text(\"'n > 0\"),parse_constraint_text(\"'_sk1__set in {8, 16, 32, 64}\"),parse_constraint_text(\"0 <= '_sk2_i\"),parse_constraint_text(\"true\"),parse_constraint_text(\"true\"),parse_constraint_text(\"0 <= '_sk5__loop_index & '_sk5__loop_index <= 3\"),parse_constraint_text(\"('_sk5__loop_index + 1) * '_sk1__set <= 'n\"),parse_constraint_text(\"(j + 1) * SEW <= 'n\")];\nlet _budget=crate::solver_budget::SolverBudget::enter(crate::CancellationToken::never(), crate::solver_budget::SolverLimits {total:std::time::Duration::from_secs(3),per_check:std::time::Duration::from_millis(500),checks:128});\nlet result=solver::solve(&goal,&Subst::default(),&facts); eprintln!(\"ABLATION_REPLAY 6 {result:?}\"); assert_eq!(result,ConstraintStatus::Satisfied,\"site 6\");\n }\n {\nlet goal=parse_constraint_text(\"0 <= 4 * '_sk2_i + '_sk5__loop_index\");\nlet facts=vec![parse_constraint_text(\"xlen in {32, 64}\"),parse_constraint_text(\"'n > 0\"),parse_constraint_text(\"'_sk1__set in {8, 16, 32, 64}\"),parse_constraint_text(\"0 <= '_sk2_i\"),parse_constraint_text(\"true\"),parse_constraint_text(\"true\"),parse_constraint_text(\"0 <= '_sk5__loop_index & '_sk5__loop_index <= 3\"),parse_constraint_text(\"('_sk5__loop_index + 1) * '_sk1__set <= 'n\"),parse_constraint_text(\"(j + 1) * SEW <= 'n\")];\nlet _budget=crate::solver_budget::SolverBudget::enter(crate::CancellationToken::never(), crate::solver_budget::SolverLimits {total:std::time::Duration::from_secs(3),per_check:std::time::Duration::from_millis(500),checks:128});\nlet result=solver::solve(&goal,&Subst::default(),&facts); eprintln!(\"ABLATION_REPLAY 7 {result:?}\"); assert_eq!(result,ConstraintStatus::Satisfied,\"site 7\");\n }\n {\nlet goal=parse_constraint_text(\"'q * 'm >= 0\");\nlet facts=vec![parse_constraint_text(\"xlen in {32, 64}\"),parse_constraint_text(\"'n >= 0 & 'm in {8, 16, 32, 64} & 'q > 0 & 'q <= 8\"),parse_constraint_text(\"true\"),parse_constraint_text(\"true\"),parse_constraint_text(\"true\")];\nlet _budget=crate::solver_budget::SolverBudget::enter(crate::CancellationToken::never(), crate::solver_budget::SolverLimits {total:std::time::Duration::from_secs(3),per_check:std::time::Duration::from_millis(500),checks:128});\nlet result=solver::solve(&goal,&Subst::default(),&facts); eprintln!(\"ABLATION_REPLAY 8 {result:?}\"); assert_eq!(result,ConstraintStatus::Satisfied,\"site 8\");\n }\n {\nlet goal=parse_constraint_text(\"'q * 'm >= 0\");\nlet facts=vec![parse_constraint_text(\"xlen in {32, 64}\"),parse_constraint_text(\"'n >= 0 & 'm in {8, 16, 32, 64} & 'q > 0 & 'q <= 8\"),parse_constraint_text(\"true\"),parse_constraint_text(\"true\"),parse_constraint_text(\"true\"),parse_constraint_text(\"true\"),parse_constraint_text(\"true\"),parse_constraint_text(\"0 <= '_sk7__loop_index & '_sk7__loop_index <= 'n - 1\")];\nlet _budget=crate::solver_budget::SolverBudget::enter(crate::CancellationToken::never(), crate::solver_budget::SolverLimits {total:std::time::Duration::from_secs(3),per_check:std::time::Duration::from_millis(500),checks:128});\nlet result=solver::solve(&goal,&Subst::default(),&facts); eprintln!(\"ABLATION_REPLAY 9 {result:?}\"); assert_eq!(result,ConstraintStatus::Satisfied,\"site 9\");\n }\n {\nlet goal=parse_constraint_text(\"'q * 'm >= 'm\");\nlet facts=vec![parse_constraint_text(\"xlen in {32, 64}\"),parse_constraint_text(\"'n >= 0 & 'm in {8, 16, 32, 64} & 'q > 0 & 'q <= 8\"),parse_constraint_text(\"true\"),parse_constraint_text(\"true\"),parse_constraint_text(\"true\"),parse_constraint_text(\"true\"),parse_constraint_text(\"true\"),parse_constraint_text(\"0 <= '_sk7__loop_index & '_sk7__loop_index <= 'n - 1\"),parse_constraint_text(\"true\"),parse_constraint_text(\"0 <= '_sk9__loop_index & '_sk9__loop_index <= 'q - 1\")];\nlet _budget=crate::solver_budget::SolverBudget::enter(crate::CancellationToken::never(), crate::solver_budget::SolverLimits {total:std::time::Duration::from_secs(3),per_check:std::time::Duration::from_millis(500),checks:128});\nlet result=solver::solve(&goal,&Subst::default(),&facts); eprintln!(\"ABLATION_REPLAY 10 {result:?}\"); assert_eq!(result,ConstraintStatus::Satisfied,\"site 10\");\n }\n {\nlet goal=parse_constraint_text(\"1 <= 2 ^ ('_sk5_LMUL_pow_new + vlen_exp - '_sk6_SEW_pow_new) & 2 ^ ('_sk5_LMUL_pow_new + vlen_exp - '_sk6_SEW_pow_new) <= 2 ^ vlen_exp\");\nlet facts=vec![parse_constraint_text(\"xlen in {32, 64}\"),parse_constraint_text(\"3 <= vlen_exp & vlen_exp <= 16\"),parse_constraint_text(\"3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp\"),parse_constraint_text(\"true\"),parse_constraint_text(\"true\"),parse_constraint_text(\"<unsupported>\"),parse_constraint_text(\"-4 <= '_sk5_LMUL_pow_new & '_sk5_LMUL_pow_new <= 3\"),parse_constraint_text(\"3 <= '_sk6_SEW_pow_new & '_sk6_SEW_pow_new <= 10\"),parse_constraint_text(\"-9 <= '_sk7_lmul_sew_ratio & '_sk7_lmul_sew_ratio <= 0\"),parse_constraint_text(\"~('_sk6_SEW_pow_new > '_sk5_LMUL_pow_new + elen_exp | '_sk1__flow_bool & <unsupported>)\")];\nlet _budget=crate::solver_budget::SolverBudget::enter(crate::CancellationToken::never(), crate::solver_budget::SolverLimits {total:std::time::Duration::from_secs(3),per_check:std::time::Duration::from_millis(500),checks:128});\nlet result=solver::solve(&goal,&Subst::default(),&facts); eprintln!(\"ABLATION_REPLAY 11 {result:?}\"); assert_eq!(result,ConstraintStatus::Satisfied,\"site 11\");\n }\n {\nlet goal=parse_constraint_text(\"'_sk1__set >= 0 & 0 <= abs('_sk7__sk6__argument) & abs('_sk7__sk6__argument) < 2 ^ '_sk1__set\");\nlet facts=vec![parse_constraint_text(\"3 <= vlen_exp & vlen_exp <= 16\"),parse_constraint_text(\"3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp\"),parse_constraint_text(\"xlen in {32, 64}\"),parse_constraint_text(\"'_sk1__set in {8, 16, 32, 64}\"),parse_constraint_text(\"-3 <= '_sk2_LMUL_pow & '_sk2_LMUL_pow <= 3\"),parse_constraint_text(\"1 <= '_sk3_num_elem & '_sk3_num_elem <= vlen\"),parse_constraint_text(\"<unsupported>\"),parse_constraint_text(\"true\"),parse_constraint_text(\"0 <= '_sk5__loop_index & '_sk5__loop_index <= '_sk3_num_elem - 1\"),parse_constraint_text(\"-(2 ^ ('_sk1__set - 1)) <= '_sk7__sk6__argument & '_sk7__sk6__argument <= 2 ^ ('_sk1__set - 1) - 1\"),parse_constraint_text(\"1 <= '_sk3_num_elem & '_sk3_num_elem <= 2 ^ vlen_exp\")];\nlet _budget=crate::solver_budget::SolverBudget::enter(crate::CancellationToken::never(), crate::solver_budget::SolverLimits {total:std::time::Duration::from_secs(3),per_check:std::time::Duration::from_millis(500),checks:128});\nlet result=solver::solve(&goal,&Subst::default(),&facts); eprintln!(\"ABLATION_REPLAY 12 {result:?}\"); assert_eq!(result,ConstraintStatus::Satisfied,\"site 12\");\n }\n {\nlet goal=parse_constraint_text(\"'v - 12 >= '_sk1_level * (if 'v == 32 then 10 else 9)\");\nlet facts=vec![parse_constraint_text(\"xlen in {32, 64}\"),parse_constraint_text(\"'v in {32, 39, 48, 57}\"),parse_constraint_text(\"0 <= '_sk1_level & '_sk1_level <= (if 'v == 32 then 1 else (if 'v == 39 then 2 else (if 'v == 48 then 3 else 4)))\"),parse_constraint_text(\"true\"),parse_constraint_text(\"true\"),parse_constraint_text(\"0 <= '_sk4_index & '_sk4_index <= num_tlb_entries - 1\"),parse_constraint_text(\"0 <= '_sk4_index & '_sk4_index <= 2 ^ num_tlb_entries_exp - 1\"),parse_constraint_text(\"0 <= '_sk4_index & '_sk4_index <= 2 ^ 6 - 1\")];\nlet _budget=crate::solver_budget::SolverBudget::enter(crate::CancellationToken::never(), crate::solver_budget::SolverLimits {total:std::time::Duration::from_secs(3),per_check:std::time::Duration::from_millis(500),checks:128});\nlet result=solver::solve(&goal,&Subst::default(),&facts); eprintln!(\"ABLATION_REPLAY 13 {result:?}\"); assert_eq!(result,ConstraintStatus::Satisfied,\"site 13\");\n }\n {\nlet goal=parse_constraint_text(\"(if 'v == 32 then 22 else 44) >= '_sk1_level * (if 'v == 32 then 10 else 9)\");\nlet facts=vec![parse_constraint_text(\"xlen in {32, 64}\"),parse_constraint_text(\"'v in {32, 39, 48, 57}\"),parse_constraint_text(\"0 <= '_sk1_level & '_sk1_level <= (if 'v == 32 then 1 else (if 'v == 39 then 2 else (if 'v == 48 then 3 else 4)))\"),parse_constraint_text(\"true\"),parse_constraint_text(\"true\"),parse_constraint_text(\"0 <= '_sk4_index & '_sk4_index <= num_tlb_entries - 1\"),parse_constraint_text(\"0 <= '_sk4_index & '_sk4_index <= 2 ^ num_tlb_entries_exp - 1\"),parse_constraint_text(\"0 <= '_sk4_index & '_sk4_index <= 2 ^ 6 - 1\")];\nlet _budget=crate::solver_budget::SolverBudget::enter(crate::CancellationToken::never(), crate::solver_budget::SolverLimits {total:std::time::Duration::from_secs(3),per_check:std::time::Duration::from_millis(500),checks:128});\nlet result=solver::solve(&goal,&Subst::default(),&facts); eprintln!(\"ABLATION_REPLAY 14 {result:?}\"); assert_eq!(result,ConstraintStatus::Satisfied,\"site 14\");\n }\n {\nlet goal=parse_constraint_text(\"57 - 12 >= '_sk1_level * (if 'v == 32 then 10 else 9)\");\nlet facts=vec![parse_constraint_text(\"xlen in {32, 64}\"),parse_constraint_text(\"'v in {32, 39, 48, 57}\"),parse_constraint_text(\"0 <= '_sk1_level & '_sk1_level <= (if 'v == 32 then 1 else (if 'v == 39 then 2 else (if 'v == 48 then 3 else 4)))\"),parse_constraint_text(\"true\"),parse_constraint_text(\"true\"),parse_constraint_text(\"0 <= '_sk4_index & '_sk4_index <= num_tlb_entries - 1\"),parse_constraint_text(\"0 <= '_sk4_index & '_sk4_index <= 2 ^ num_tlb_entries_exp - 1\"),parse_constraint_text(\"0 <= '_sk4_index & '_sk4_index <= 2 ^ 6 - 1\")];\nlet _budget=crate::solver_budget::SolverBudget::enter(crate::CancellationToken::never(), crate::solver_budget::SolverLimits {total:std::time::Duration::from_secs(3),per_check:std::time::Duration::from_millis(500),checks:128});\nlet result=solver::solve(&goal,&Subst::default(),&facts); eprintln!(\"ABLATION_REPLAY 15 {result:?}\"); assert_eq!(result,ConstraintStatus::Satisfied,\"site 15\");\n }\n {\nlet goal=parse_constraint_text(\"57 - 12 >= 'v - 12\");\nlet facts=vec![parse_constraint_text(\"xlen in {32, 64}\"),parse_constraint_text(\"'v in {32, 39, 48, 57}\"),parse_constraint_text(\"0 <= '_sk1_level & '_sk1_level <= (if 'v == 32 then 1 else (if 'v == 39 then 2 else (if 'v == 48 then 3 else 4)))\"),parse_constraint_text(\"true\"),parse_constraint_text(\"true\"),parse_constraint_text(\"0 <= '_sk4_index & '_sk4_index <= num_tlb_entries - 1\"),parse_constraint_text(\"0 <= '_sk4_index & '_sk4_index <= 2 ^ num_tlb_entries_exp - 1\"),parse_constraint_text(\"0 <= '_sk4_index & '_sk4_index <= 2 ^ 6 - 1\")];\nlet _budget=crate::solver_budget::SolverBudget::enter(crate::CancellationToken::never(), crate::solver_budget::SolverLimits {total:std::time::Duration::from_secs(3),per_check:std::time::Duration::from_millis(500),checks:128});\nlet result=solver::solve(&goal,&Subst::default(),&facts); eprintln!(\"ABLATION_REPLAY 16 {result:?}\"); assert_eq!(result,ConstraintStatus::Satisfied,\"site 16\");\n }\n}\n",
+      "production_limits_unchanged": true,
+      "note": "Replay uses the actual assumptions after simplification. All remaining sites prove under an experimental larger budget; normal runtime results remain Unknown."
+    },
+    "command": "target/release/examples/analysis_stats --diagnostics-only --constraint-report target/ablation/2026-10-25/constraints.json ../sail-riscv/model/riscv.sail_project"
+  },
+  "incremental": {
+    "probes": [
+      {
+        "files": 160,
+        "mode": "body",
+        "edits": 32,
+        "runs": [
+          {
+            "incremental_cold": {
+              "value": 93531,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 320,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 47,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 52,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 59,
+              "unit": "us"
+            },
+            "incremental_body_edit_p50": {
+              "value": 1674,
+              "unit": "us"
+            },
+            "incremental_body_edit_p95": {
+              "value": 1729,
+              "unit": "us"
+            },
+            "incremental_body_edit_p99": {
+              "value": 1861,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1503,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 2170,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 15732,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 1,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 1,
+              "unit": "count"
+            }
+          },
+          {
+            "incremental_cold": {
+              "value": 86662,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 320,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 46,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 60,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 63,
+              "unit": "us"
+            },
+            "incremental_body_edit_p50": {
+              "value": 1684,
+              "unit": "us"
+            },
+            "incremental_body_edit_p95": {
+              "value": 1804,
+              "unit": "us"
+            },
+            "incremental_body_edit_p99": {
+              "value": 1936,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1545,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 1664,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 1745,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 1,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 1,
+              "unit": "count"
+            }
+          },
+          {
+            "incremental_cold": {
+              "value": 63023,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 320,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 47,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 51,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 65,
+              "unit": "us"
+            },
+            "incremental_body_edit_p50": {
+              "value": 1661,
+              "unit": "us"
+            },
+            "incremental_body_edit_p95": {
+              "value": 1706,
+              "unit": "us"
+            },
+            "incremental_body_edit_p99": {
+              "value": 1708,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1510,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 1714,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 1795,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 1,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 1,
+              "unit": "count"
+            }
+          }
+        ],
+        "p95_us": {
+          "min": 1706,
+          "max": 1804,
+          "median": 1729
+        },
+        "previous_p95_us": {
+          "min": 1758,
+          "max": 1758,
+          "median_across_runs": 1758
+        },
+        "command": "target/release/examples/incremental_stats 160 32 body --modules",
+        "checkpoint_runs": [
+          {
+            "incremental_cold": {
+              "value": 90515,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 320,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 46,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 68,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 70,
+              "unit": "us"
+            },
+            "incremental_body_edit_p50": {
+              "value": 1717,
+              "unit": "us"
+            },
+            "incremental_body_edit_p95": {
+              "value": 1780,
+              "unit": "us"
+            },
+            "incremental_body_edit_p99": {
+              "value": 1820,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1555,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 1744,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 2048,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 1,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 1,
+              "unit": "count"
+            }
+          },
+          {
+            "incremental_cold": {
+              "value": 64195,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 320,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 47,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 53,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 69,
+              "unit": "us"
+            },
+            "incremental_body_edit_p50": {
+              "value": 1720,
+              "unit": "us"
+            },
+            "incremental_body_edit_p95": {
+              "value": 1758,
+              "unit": "us"
+            },
+            "incremental_body_edit_p99": {
+              "value": 1851,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1484,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 1637,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 1656,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 1,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 1,
+              "unit": "count"
+            }
+          },
+          {
+            "incremental_cold": {
+              "value": 63224,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 320,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 47,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 72,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 82,
+              "unit": "us"
+            },
+            "incremental_body_edit_p50": {
+              "value": 1701,
+              "unit": "us"
+            },
+            "incremental_body_edit_p95": {
+              "value": 1766,
+              "unit": "us"
+            },
+            "incremental_body_edit_p99": {
+              "value": 1785,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1545,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 1757,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 1788,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 1,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 1,
+              "unit": "count"
+            }
+          }
+        ],
+        "checkpoint_p95_us": {
+          "min": 1758,
+          "max": 1780,
+          "median": 1766
+        },
+        "paired_median_ratio": 0.9790486976217441
+      },
+      {
+        "files": 160,
+        "mode": "signature",
+        "edits": 32,
+        "runs": [
+          {
+            "incremental_cold": {
+              "value": 88045,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 320,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 46,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 63,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 63,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p50": {
+              "value": 2046,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p95": {
+              "value": 2105,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p99": {
+              "value": 2185,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1516,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 1671,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 1704,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 3,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 3,
+              "unit": "count"
+            }
+          },
+          {
+            "incremental_cold": {
+              "value": 91666,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 320,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 47,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 53,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 58,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p50": {
+              "value": 2029,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p95": {
+              "value": 2251,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p99": {
+              "value": 2256,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1490,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 1647,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 1761,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 3,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 3,
+              "unit": "count"
+            }
+          },
+          {
+            "incremental_cold": {
+              "value": 90938,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 320,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 48,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 62,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 65,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p50": {
+              "value": 2164,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p95": {
+              "value": 2394,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p99": {
+              "value": 2438,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1642,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 1752,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 1847,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 3,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 3,
+              "unit": "count"
+            }
+          }
+        ],
+        "p95_us": {
+          "min": 2105,
+          "max": 2394,
+          "median": 2251
+        },
+        "previous_p95_us": {
+          "min": 2107,
+          "max": 2107,
+          "median_across_runs": 2107
+        },
+        "command": "target/release/examples/incremental_stats 160 32 signature --modules",
+        "checkpoint_runs": [
+          {
+            "incremental_cold": {
+              "value": 63764,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 320,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 47,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 76,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 77,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p50": {
+              "value": 2092,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p95": {
+              "value": 2135,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p99": {
+              "value": 2146,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1595,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 1765,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 1794,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 3,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 3,
+              "unit": "count"
+            }
+          },
+          {
+            "incremental_cold": {
+              "value": 63744,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 320,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 48,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 62,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 67,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p50": {
+              "value": 2082,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p95": {
+              "value": 2157,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p99": {
+              "value": 2168,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1597,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 1735,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 1739,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 3,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 3,
+              "unit": "count"
+            }
+          },
+          {
+            "incremental_cold": {
+              "value": 63855,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 320,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 48,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 53,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 69,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p50": {
+              "value": 2090,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p95": {
+              "value": 2131,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p99": {
+              "value": 2132,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1630,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 1759,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 1760,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 3,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 3,
+              "unit": "count"
+            }
+          }
+        ],
+        "checkpoint_p95_us": {
+          "min": 2131,
+          "max": 2157,
+          "median": 2135
+        },
+        "paired_median_ratio": 1.0543325526932084
+      },
+      {
+        "files": 1600,
+        "mode": "body",
+        "edits": 32,
+        "runs": [
+          {
+            "incremental_cold": {
+              "value": 792594,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 3200,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 802,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 891,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 1078,
+              "unit": "us"
+            },
+            "incremental_body_edit_p50": {
+              "value": 13697,
+              "unit": "us"
+            },
+            "incremental_body_edit_p95": {
+              "value": 13882,
+              "unit": "us"
+            },
+            "incremental_body_edit_p99": {
+              "value": 17799,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1552,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 1889,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 2387,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 1,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 2,
+              "unit": "count"
+            }
+          },
+          {
+            "incremental_cold": {
+              "value": 737815,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 3200,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 808,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 853,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 1097,
+              "unit": "us"
+            },
+            "incremental_body_edit_p50": {
+              "value": 13602,
+              "unit": "us"
+            },
+            "incremental_body_edit_p95": {
+              "value": 14363,
+              "unit": "us"
+            },
+            "incremental_body_edit_p99": {
+              "value": 17681,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1701,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 2112,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 2820,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 1,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 2,
+              "unit": "count"
+            }
+          },
+          {
+            "incremental_cold": {
+              "value": 734681,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 3200,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 545,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 743,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 1014,
+              "unit": "us"
+            },
+            "incremental_body_edit_p50": {
+              "value": 9658,
+              "unit": "us"
+            },
+            "incremental_body_edit_p95": {
+              "value": 13809,
+              "unit": "us"
+            },
+            "incremental_body_edit_p99": {
+              "value": 17244,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1253,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 2110,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 3923,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 1,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 2,
+              "unit": "count"
+            }
+          }
+        ],
+        "p95_us": {
+          "min": 13809,
+          "max": 14363,
+          "median": 13882
+        },
+        "previous_p95_us": {
+          "min": 11735,
+          "max": 17904,
+          "median_across_runs": 13670.5
+        },
+        "command": "target/release/examples/incremental_stats 1600 32 body --modules",
+        "checkpoint_runs": [
+          {
+            "incremental_cold": {
+              "value": 748139,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 3200,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 810,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 848,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 1050,
+              "unit": "us"
+            },
+            "incremental_body_edit_p50": {
+              "value": 13954,
+              "unit": "us"
+            },
+            "incremental_body_edit_p95": {
+              "value": 14228,
+              "unit": "us"
+            },
+            "incremental_body_edit_p99": {
+              "value": 17529,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1804,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 2074,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 2930,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 1,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 2,
+              "unit": "count"
+            }
+          },
+          {
+            "incremental_cold": {
+              "value": 533445,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 3200,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 522,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 564,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 781,
+              "unit": "us"
+            },
+            "incremental_body_edit_p50": {
+              "value": 9779,
+              "unit": "us"
+            },
+            "incremental_body_edit_p95": {
+              "value": 11090,
+              "unit": "us"
+            },
+            "incremental_body_edit_p99": {
+              "value": 13737,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1195,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 1606,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 2770,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 1,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 2,
+              "unit": "count"
+            }
+          },
+          {
+            "incremental_cold": {
+              "value": 528357,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 3200,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 552,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 640,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 766,
+              "unit": "us"
+            },
+            "incremental_body_edit_p50": {
+              "value": 11544,
+              "unit": "us"
+            },
+            "incremental_body_edit_p95": {
+              "value": 14623,
+              "unit": "us"
+            },
+            "incremental_body_edit_p99": {
+              "value": 14727,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1347,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 2763,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 2811,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 1,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 2,
+              "unit": "count"
+            }
+          }
+        ],
+        "checkpoint_p95_us": {
+          "min": 11090,
+          "max": 14623,
+          "median": 14228
+        },
+        "paired_median_ratio": 0.9756817542873207
+      },
+      {
+        "files": 1600,
+        "mode": "signature",
+        "edits": 32,
+        "runs": [
+          {
+            "incremental_cold": {
+              "value": 743965,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 3200,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 799,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 852,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 1023,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p50": {
+              "value": 14120,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p95": {
+              "value": 14618,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p99": {
+              "value": 18049,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1928,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 2355,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 2619,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 3,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 3,
+              "unit": "count"
+            }
+          },
+          {
+            "incremental_cold": {
+              "value": 712816,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 3200,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 532,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 610,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 812,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p50": {
+              "value": 9940,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p95": {
+              "value": 11552,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p99": {
+              "value": 14260,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1297,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 1514,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 2634,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 3,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 3,
+              "unit": "count"
+            }
+          },
+          {
+            "incremental_cold": {
+              "value": 751111,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 3200,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 845,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 876,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 1065,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p50": {
+              "value": 14359,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p95": {
+              "value": 14718,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p99": {
+              "value": 18014,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1737,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 2180,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 2905,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 3,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 3,
+              "unit": "count"
+            }
+          }
+        ],
+        "p95_us": {
+          "min": 11552,
+          "max": 14718,
+          "median": 14618
+        },
+        "previous_p95_us": {
+          "min": 12143,
+          "max": 15429,
+          "median_across_runs": 13675.0
+        },
+        "command": "target/release/examples/incremental_stats 1600 32 signature --modules",
+        "checkpoint_runs": [
+          {
+            "incremental_cold": {
+              "value": 543071,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 3200,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 552,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 606,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 841,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p50": {
+              "value": 10401,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p95": {
+              "value": 11630,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p99": {
+              "value": 14056,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1267,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 1853,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 2517,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 3,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 3,
+              "unit": "count"
+            }
+          },
+          {
+            "incremental_cold": {
+              "value": 731926,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 3200,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 774,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 829,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 979,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p50": {
+              "value": 14231,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p95": {
+              "value": 15166,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p99": {
+              "value": 17854,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1759,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 1906,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 2873,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 3,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 3,
+              "unit": "count"
+            }
+          },
+          {
+            "incremental_cold": {
+              "value": 752651,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 3200,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 815,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 945,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 1105,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p50": {
+              "value": 14667,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p95": {
+              "value": 15467,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p99": {
+              "value": 18229,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1945,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 2432,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 3618,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 3,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 3,
+              "unit": "count"
+            }
+          }
+        ],
+        "checkpoint_p95_us": {
+          "min": 11630,
+          "max": 15467,
+          "median": 15166
+        },
+        "paired_median_ratio": 0.9638665435843333
+      }
+    ],
+    "finding": "Reinference scope is unchanged. Median edit-p95 ratios against freshly rebuilt checkpoint samples: 0.979 (160 body), 1.054 (160 signature), 0.976 (1600 body), 0.964 (1600 signature). Samples overlap; these measurements do not establish a statistically significant latency change.",
+    "note": "Serialized after all other verification; machine-local measurements, not a rust-analyzer performance parity claim."
+  },
+  "local_full_artifacts": "target/ablation/2026-10-25/"
+}

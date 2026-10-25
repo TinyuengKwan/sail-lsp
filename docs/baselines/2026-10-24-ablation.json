@@ -1,0 +1,865 @@
+{
+  "schema_version": 1,
+  "date_utc": "2026-10-24",
+  "scope": "Ablation of all work that was uncommitted before this task: project loading, four IDE items and P1 semantics. The initial checkpoint was committed before experiments.",
+  "source": {
+    "checkpoint_commit": "6316568cfdb8ee1eee733eb6de4393b2940df4c1",
+    "checkpoint_parent": "dad440eb98e835deebfb8182022507dc8e31fa61",
+    "checkpoint_changed_files": 64,
+    "result": "Uncommitted simplifications on the checkpoint; historical baselines preserved.",
+    "rust_and_cargo_source_sha256": "0201ac73ebb74dd4f04bcd6be78b31b17be2210becdad8d30fdeaf481aa0771e",
+    "hash_method": "SHA256 of sorted rg --files paths (*.rs, Cargo.toml, Cargo.lock, rust-toolchain.toml), each path + NUL + contents + NUL.",
+    "sail_commit": "ac09f8870b9d85e528e2a3436150b03b9d805d40",
+    "sail_riscv_commit": "20690c8a8d6ccbb0e6adea8e2977efd3adaf8391",
+    "toolchain": "rustc 1.97.1 (8bab26f4f 2026-07-14)"
+  },
+  "method": {
+    "negative_trials": "Six independent mutations of the checkpoint. Each compiled, reached a named failing test, and was restored before the next trial. Patches are embedded for reproduction against the checkpoint.",
+    "positive_trials": "Five cumulative simplifications, one at a time, each with focused checks, followed by combined full-workspace, corpus, model and incremental verification. This is not a factorial experiment or proof of equivalence for all inputs.",
+    "compile_retry": "The first S3 attempt missed a removed public re-export. It was restored and retried with that export adjusted. The compile failure is not counted as semantic ablation evidence; local log: target/ablation/2026-10-24/S3-export-adjustment.log",
+    "reproduction": "Use an isolated checkout at checkpoint_commit for each negative patch and run its recorded command. Positive patches are local artifacts; the retained source diff is the reviewable combined implementation.",
+    "environment": {
+      "SAIL_DIR": "/home/clair/tinyueng_workplace/sail"
+    },
+    "baseline": "docs/baselines/2026-10-24-p1.json"
+  },
+  "restored_experiments": [
+    {
+      "experiment": "N1-erase-lexical-expectation",
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "test",
+        "-p",
+        "ide",
+        "--lib",
+        "upstream_p1",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit_code": 101,
+      "valid_test_run": true,
+      "seconds": 12.61,
+      "decision": "restore",
+      "failures": [
+        "test regression_tests::upstream_p1_shadow_leak_check ... FAILED"
+      ],
+      "reason_to_retain": "Lexical annotation constraints must resolve inside the active shadowing scope; signature expectations have different binding semantics.",
+      "patch": "diff --git a/crates/hir-ty/src/infer/expr.rs b/crates/hir-ty/src/infer/expr.rs\nindex 4c4a555..bd6c30b 100644\n--- a/crates/hir-ty/src/infer/expr.rs\n+++ b/crates/hir-ty/src/infer/expr.rs\n@@ -4351,7 +4351,7 @@ impl<'db> InferenceContext<'db> {\n         // then restores its outer meaning on return (check_exp E_let).\n         // Resolving it before entering a block captures a shadowed numeric\n         // binder too early; resolving it after leaving loses that shadow.\n-        let lexical = matches!(expected, Expectation::LexicalType(_));\n+        let lexical = false;\n         let resolved_expected = expected\n             .to_option()\n             .map(|ty| {\n",
+      "local_log": "target/ablation/2026-10-24/N1-erase-lexical-expectation.log"
+    },
+    {
+      "experiment": "N2-disable-strict-width-check",
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "test",
+        "-p",
+        "ide",
+        "--lib",
+        "upstream_p1",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit_code": 101,
+      "valid_test_run": true,
+      "seconds": 12.45,
+      "decision": "restore",
+      "failures": [
+        "test regression_tests::upstream_p1_negative_widths_have_semantic_reasons ... FAILED",
+        "test regression_tests::upstream_p1_strict_widths_and_register_defaults ... FAILED"
+      ],
+      "reason_to_retain": "Strict bitvector mode must prove nonnegative widths recursively, including list elements and generic declarations.",
+      "patch": "diff --git a/crates/hir-ty/src/infer/declaration_constraints.rs b/crates/hir-ty/src/infer/declaration_constraints.rs\nindex 29dd314..a2daf39 100644\n--- a/crates/hir-ty/src/infer/declaration_constraints.rs\n+++ b/crates/hir-ty/src/infer/declaration_constraints.rs\n@@ -673,7 +673,7 @@ impl Checker<'_> {\n                 }\n                 let selected = self.resolve(at, name);\n                 if selected.is_none()\n-                    && self.strict_bitvector\n+                    && false\n                     && matches!(name.as_str(), \"bits\" | \"bitvector\")\n                 {\n                     let arg = args.first()?;\n",
+      "local_log": "target/ablation/2026-10-24/N2-disable-strict-width-check.log"
+    },
+    {
+      "experiment": "N3-weaken-generic-undefined-proof",
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "test",
+        "-p",
+        "ide",
+        "--lib",
+        "upstream_p1_strict_widths_and_register_defaults",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit_code": 101,
+      "valid_test_run": true,
+      "seconds": 7.49,
+      "decision": "restore",
+      "failures": [
+        "test regression_tests::upstream_p1_strict_widths_and_register_defaults ... FAILED"
+      ],
+      "reason_to_retain": "Undefined generation must be valid for the generic declaration; a concrete register argument cannot rescue an invalid generic generator.",
+      "patch": "diff --git a/crates/hir-ty/src/infer/declaration_constraints.rs b/crates/hir-ty/src/infer/declaration_constraints.rs\nindex 29dd314..b5921a9 100644\n--- a/crates/hir-ty/src/infer/declaration_constraints.rs\n+++ b/crates/hir-ty/src/infer/declaration_constraints.rs\n@@ -551,7 +551,7 @@ impl Checker<'_> {\n                                     if allowed != Some(true) {\n                                         return allowed;\n                                     }\n-                                    self.inhabited(origin, body, &own, depth + 1, true)\n+                                    self.inhabited(origin, body, &own, depth + 1, false)\n                                 }))\n                             }\n                             SK::KW_ENUM | SK::KW_BITFIELD => Some(true),\n",
+      "local_log": "target/ablation/2026-10-24/N3-weaken-generic-undefined-proof.log"
+    },
+    {
+      "experiment": "N4-remove-creation-version",
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "test",
+        "-p",
+        "sail-lsp",
+        "--lib",
+        "extracting_an_include",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit_code": 101,
+      "valid_test_run": true,
+      "seconds": 9.15,
+      "decision": "restore",
+      "failures": [
+        "test server_check::extracting_an_include_creates_a_file_and_keeps_semantic_order ... FAILED"
+      ],
+      "reason_to_retain": "The extraction workspace edit must carry the open source document version. This experiment isolates the version field, not every stale-edit guard.",
+      "patch": "diff --git a/crates/sail-lsp/src/handlers/request.rs b/crates/sail-lsp/src/handlers/request.rs\nindex 4d3afa6..3783c82 100644\n--- a/crates/sail-lsp/src/handlers/request.rs\n+++ b/crates/sail-lsp/src/handlers/request.rs\n@@ -778,7 +778,7 @@ pub(crate) fn handle_code_action(\n                 for operation in operations {\n                     if let DocumentChangeOperation::Edit(edit) = operation {\n                         edit.text_document.version =\n-                            snap.document_versions.get(&edit.text_document.uri).copied();\n+                            None;\n                     }\n                 }\n             }\n",
+      "local_log": "target/ablation/2026-10-24/N4-remove-creation-version.log"
+    },
+    {
+      "experiment": "N5-discard-typed-field-data",
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "test",
+        "-p",
+        "ide-diagnostics",
+        "--lib",
+        "handlers::missing_fields::integration_tests",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit_code": 101,
+      "valid_test_run": true,
+      "seconds": 12.5,
+      "decision": "restore",
+      "failures": [
+        "test handlers::missing_fields::integration_tests::fills_record_fields_with_their_types_including_empty_literals ... FAILED",
+        "test handlers::missing_fields::integration_tests::instantiates_generic_field_types ... FAILED"
+      ],
+      "reason_to_retain": "Typed missing-field metadata enables appropriate defaults and generic field instantiation in fixes.",
+      "patch": "diff --git a/crates/hir/src/diagnostics.rs b/crates/hir/src/diagnostics.rs\nindex f036df3..713e818 100644\n--- a/crates/hir/src/diagnostics.rs\n+++ b/crates/hir/src/diagnostics.rs\n@@ -452,7 +452,7 @@ impl AnyDiagnostic {\n                 Some(AnyDiagnostic::MissingFields(MissingFields {\n                     record_name: record_name.clone(),\n                     missing: missing.clone(),\n-                    field_types: Some(field_types.clone()),\n+                    field_types: None,\n                     node: expr_syntax(*expr)?,\n                 }))\n             }\n",
+      "local_log": "target/ablation/2026-10-24/N5-discard-typed-field-data.log"
+    },
+    {
+      "experiment": "N6-fail-whole-project-on-missing-source",
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "test",
+        "-p",
+        "sail-lsp",
+        "--lib",
+        "missing_project_sources_load_remaining_files",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit_code": 101,
+      "valid_test_run": true,
+      "seconds": 7.34,
+      "decision": "restore",
+      "failures": [
+        "test server_check::missing_project_sources_load_remaining_files_and_recover_when_created ... FAILED"
+      ],
+      "reason_to_retain": "A missing manifest source must not prevent loading existing project files; recovery must observe the missing source when it appears.",
+      "patch": "diff --git a/crates/sail-lsp/src/reload.rs b/crates/sail-lsp/src/reload.rs\nindex eb81800..c07dba8 100644\n--- a/crates/sail-lsp/src/reload.rs\n+++ b/crates/sail-lsp/src/reload.rs\n@@ -445,7 +445,7 @@ fn scan_workspace_project(\n                             project_file_path.display(),\n                             path.display(),\n                         ));\n-                        continue;\n+                        return Err(inputs.source_errors.last().unwrap().clone());\n                     }\n                 }\n                 if is_sail_file(&path) {\n",
+      "local_log": "target/ablation/2026-10-24/N6-fail-whole-project-on-missing-source.log"
+    }
+  ],
+  "retained_simplifications": [
+    {
+      "experiment": "S1-remove-duplicate-nat-scan",
+      "decision": "keep: targeted and combined validation passed",
+      "checks": [
+        {
+          "command": [
+            "cargo",
+            "+1.97.1",
+            "test",
+            "-p",
+            "ide",
+            "--lib",
+            "upstream_p1",
+            "--",
+            "--test-threads=1"
+          ],
+          "exit_code": 0,
+          "valid_test_run": true,
+          "local_log": "target/ablation/2026-10-24/S1-remove-duplicate-nat-scan-0.log"
+        },
+        {
+          "command": [
+            "cargo",
+            "+1.97.1",
+            "test",
+            "-p",
+            "ide",
+            "--lib",
+            "record_undefined_eligibility_tracks_provider_constraints",
+            "--",
+            "--test-threads=1"
+          ],
+          "exit_code": 0,
+          "valid_test_run": true,
+          "local_log": "target/ablation/2026-10-24/S1-remove-duplicate-nat-scan-1.log"
+        }
+      ],
+      "change": "Remove the duplicate descendant TYPE_PARAM Nat-fact scan; declaration-header parameter collection already supplies those facts.",
+      "local_patch": "target/ablation/2026-10-24/S1-remove-duplicate-nat-scan.patch"
+    },
+    {
+      "experiment": "S2-replace-single-variant-file-operation",
+      "decision": "keep: targeted and combined validation passed",
+      "checks": [
+        {
+          "command": [
+            "cargo",
+            "+1.97.1",
+            "test",
+            "-p",
+            "ide-assists",
+            "--lib",
+            "extract_to_include",
+            "--",
+            "--test-threads=1"
+          ],
+          "exit_code": 0,
+          "valid_test_run": true,
+          "local_log": "target/ablation/2026-10-24/S2-replace-single-variant-file-operation-0.log"
+        },
+        {
+          "command": [
+            "cargo",
+            "+1.97.1",
+            "test",
+            "-p",
+            "sail-lsp",
+            "--lib",
+            "extracting_an_include",
+            "--",
+            "--test-threads=1"
+          ],
+          "exit_code": 0,
+          "valid_test_run": true,
+          "local_log": "target/ablation/2026-10-24/S2-replace-single-variant-file-operation-1.log"
+        },
+        {
+          "command": [
+            "cargo",
+            "+1.97.1",
+            "test",
+            "-p",
+            "sail-lsp",
+            "--lib",
+            "workspace_edit_tests",
+            "--",
+            "--test-threads=1"
+          ],
+          "exit_code": 0,
+          "valid_test_run": true,
+          "local_log": "target/ablation/2026-10-24/S2-replace-single-variant-file-operation-2.log"
+        }
+      ],
+      "change": "Replace the single-variant FileSystemEdit enum with FileCreation and file_creations. Preserve create/fill/source-edit ordering, capabilities, collision checks and document versions.",
+      "local_patch": "target/ablation/2026-10-24/S2-replace-single-variant-file-operation.patch"
+    },
+    {
+      "experiment": "S3-remove-unused-count-query-layer",
+      "decision": "keep: targeted and combined validation passed",
+      "checks": [
+        {
+          "command": [
+            "cargo",
+            "+1.97.1",
+            "test",
+            "-p",
+            "ide-db",
+            "--lib",
+            "signature",
+            "--",
+            "--test-threads=1"
+          ],
+          "exit_code": 0,
+          "valid_test_run": true,
+          "local_log": "target/ablation/2026-10-24/S3-remove-unused-count-query-layer-0.log"
+        },
+        {
+          "command": [
+            "cargo",
+            "+1.97.1",
+            "test",
+            "-p",
+            "sail-lsp",
+            "--lib",
+            "lens",
+            "--",
+            "--test-threads=1"
+          ],
+          "exit_code": 0,
+          "valid_test_run": true,
+          "local_log": "target/ablation/2026-10-24/S3-remove-unused-count-query-layer-1.log"
+        }
+      ],
+      "change": "Remove unused reference/implementation count query nodes and forwarding APIs. Production code lenses already use SymbolIndex; compatibility collectors use cached callgraph/item_tree. Keep the cached signature query and remove its redundant syntax-only public wrapper.",
+      "local_patch": "target/ablation/2026-10-24/S3-remove-unused-count-query-layer.patch"
+    },
+    {
+      "experiment": "S4-inline-single-use-range-adapter",
+      "decision": "keep: targeted and combined validation passed",
+      "checks": [
+        {
+          "command": [
+            "cargo",
+            "+1.97.1",
+            "test",
+            "-p",
+            "ide-diagnostics",
+            "--lib",
+            "handlers::type_mismatch",
+            "--",
+            "--test-threads=1"
+          ],
+          "exit_code": 0,
+          "valid_test_run": true,
+          "local_log": "target/ablation/2026-10-24/S4-inline-single-use-range-adapter-0.log"
+        }
+      ],
+      "change": "Inline the single-use diagnostic range adapter into type_mismatch. Keep the full expression pointer for fixes and preserve the original display range when a pointer cannot resolve.",
+      "local_patch": "target/ablation/2026-10-24/S4-inline-single-use-range-adapter.patch"
+    },
+    {
+      "experiment": "S5-unify-undefined-declaration-checks",
+      "decision": "keep: targeted and combined validation passed",
+      "checks": [
+        {
+          "command": [
+            "cargo",
+            "+1.97.1",
+            "test",
+            "-p",
+            "ide-diagnostics",
+            "--lib",
+            "",
+            "--",
+            "--test-threads=1"
+          ],
+          "exit_code": 0,
+          "valid_test_run": true,
+          "local_log": "target/ablation/2026-10-24/S5-unify-undefined-declaration-checks-0.log"
+        },
+        {
+          "command": [
+            "cargo",
+            "+1.97.1",
+            "test",
+            "-p",
+            "ide",
+            "--lib",
+            "upstream_p1",
+            "--",
+            "--test-threads=1"
+          ],
+          "exit_code": 0,
+          "valid_test_run": true,
+          "local_log": "target/ablation/2026-10-24/S5-unify-undefined-declaration-checks-1.log"
+        },
+        {
+          "command": [
+            "cargo",
+            "+1.97.1",
+            "test",
+            "-p",
+            "ide",
+            "--lib",
+            "record_undefined_eligibility_tracks_provider_constraints",
+            "--",
+            "--test-threads=1"
+          ],
+          "exit_code": 0,
+          "valid_test_run": true,
+          "local_log": "target/ablation/2026-10-24/S5-unify-undefined-declaration-checks-2.log"
+        }
+      ],
+      "change": "Move register defaults and explicit struct undefined generation into the existing typed declaration checker. Share record eligibility and inhabitedness rules; remove the second CST checker and string-to-type adapter.",
+      "local_patch": "target/ablation/2026-10-24/S5-unify-undefined-declaration-checks.patch"
+    }
+  ],
+  "coverage_inventory": [
+    {
+      "area": "Project loading and missing-source recovery",
+      "evidence": "N6 and full server tests; retained recovery/watch/error state."
+    },
+    {
+      "area": "Extract to include and workspace file creation",
+      "evidence": "N4, S2, extraction/serialization/full server tests; retained version/collision/capability/staleness logic."
+    },
+    {
+      "area": "Diagnostic token ranges",
+      "evidence": "S4 handler tests and full diagnostic suite; tests now invoke the actual handler."
+    },
+    {
+      "area": "Typed missing-field repairs",
+      "evidence": "N5 and full diagnostics suite; retained field types."
+    },
+    {
+      "area": "Semantic query boundaries and code lenses",
+      "evidence": "S3 signature/lens tests, caller inspection and full workspace tests; retained live signature cache."
+    },
+    {
+      "area": "P1 polymorphism, lexical shadowing, short-circuit facts, recursive widths and undefined generation",
+      "evidence": "N1-N3, S1, S5, P1 regression tests, provider invalidation tests and full strict/default conformance. Polymorphic/short-circuit fixes and strict-mode input invalidation were regression-tested, not independently ablated."
+    },
+    {
+      "area": "Documentation and baselines",
+      "evidence": "Architecture updated for retained implementation; prior baseline files unchanged."
+    }
+  ],
+  "diff": {
+    "rust_files": 16,
+    "rust_added": 98,
+    "rust_deleted": 323,
+    "rust_net": -225,
+    "no_tests_deleted": true
+  },
+  "validation": {
+    "workspace": {
+      "command": "cargo +1.97.1 test --workspace --lib -- --test-threads=1",
+      "suites": 27,
+      "passed": 2216,
+      "failed": 0,
+      "ignored": 4,
+      "local_log": "target/ablation/2026-10-24/final-workspace-tests.log",
+      "note": "Run before deleting two unused imports. Final all-targets check and release build were rebuilt after import-only cleanup."
+    },
+    "all_targets": {
+      "command": "cargo +1.97.1 check --workspace --all-targets",
+      "exit_code": 0,
+      "warnings": 0,
+      "local_log": "target/ablation/2026-10-24/final-all-targets.log"
+    },
+    "release_examples": {
+      "exit_code": 0,
+      "warnings": 0,
+      "local_log": "target/ablation/2026-10-24/final-build.log"
+    }
+  },
+  "conformance": {
+    "strict": {
+      "command": "target/release/examples/conformance_check --list --fail-detail ../sail/test/typecheck",
+      "pass_clean": 276,
+      "pass_total": 276,
+      "fail_rejected": 217,
+      "fail_total": 217,
+      "exit_code": 1,
+      "exit_explanation": "The command also checks extended corpora; seven preexisting false-positive files keep its exit code at 1. The requested strict typecheck suite has zero acceptance/rejection disagreements.",
+      "local_log": "target/ablation/2026-10-24/final-conformance.log",
+      "diagnostic_location_agreement": {
+        "matched": 183,
+        "compared": 216
+      },
+      "diagnostic_wording_agreement": {
+        "matched": 119,
+        "compared": 216
+      }
+    },
+    "default": {
+      "command": "target/release/examples/conformance_check --list --typecheck-only --default-bitvector ../sail/test/typecheck",
+      "pass_clean": 276,
+      "fail_rejected": 216,
+      "strict_only_rejection": "negative_bits_list.sail",
+      "note": "The directory expectations are strict-mode expectations. The live default-mode compiler also accepts negative_bits_list; all other six targeted cases are rejected in both modes.",
+      "exit_code": 1,
+      "local_log": "target/ablation/2026-10-24/final-default-conformance.log"
+    },
+    "extended": {
+      "mode": "default",
+      "false_positive_files": 7,
+      "false_negative_files": 0,
+      "scope_only_files": 18,
+      "note": "Unchanged from the preceding baseline. The full conformance command exits 1 for these existing extended-corpus errors; the requested typecheck suite has no acceptance/rejection disagreement.",
+      "false_positive_file_names": [
+        "ast_with_dep_tuple.sail",
+        "bitvec_operation.sail",
+        "enummatch.sail",
+        "existentials2.sail",
+        "mem_builtins.unsat.sail",
+        "splitreturn.sail",
+        "store_load_scattered.sat.sail"
+      ]
+    }
+  },
+  "riscv": {
+    "command": "target/release/examples/analysis_stats --diagnostics-only -v --constraint-report target/ablation/2026-10-24/final-constraints.json ../sail-riscv/model/riscv.sail_project",
+    "mode": "default",
+    "root_files": 156,
+    "active_include_library_files": 40,
+    "expressions": 81543,
+    "unknown_expressions": 0,
+    "partially_unknown_expressions": 0,
+    "type_mismatches": 0,
+    "diagnostics": {
+      "error": 0,
+      "warning": 62,
+      "hint": 6
+    },
+    "metrics": {
+      "workspace_load": {
+        "value": 671,
+        "unit": "ms"
+      },
+      "parse_all": {
+        "value": 1,
+        "unit": "ms"
+      },
+      "total_lines": {
+        "value": 29968,
+        "unit": "lines"
+      },
+      "item_tree_all": {
+        "value": 13,
+        "unit": "ms"
+      },
+      "body_lowering": {
+        "value": 156,
+        "unit": "ms"
+      },
+      "bodies": {
+        "value": 3318,
+        "unit": "count"
+      },
+      "scattered_type_clauses": {
+        "value": 471,
+        "unit": "count"
+      },
+      "infer_all": {
+        "value": 17686,
+        "unit": "ms"
+      },
+      "callables": {
+        "value": 3318,
+        "unit": "count"
+      },
+      "exprs": {
+        "value": 81543,
+        "unit": "count"
+      },
+      "unknown type": {
+        "value": 0,
+        "unit": "#"
+      },
+      "partially unknown type": {
+        "value": 0,
+        "unit": "#"
+      },
+      "type mismatches": {
+        "value": 0,
+        "unit": "#"
+      },
+      "diagnostics_all": {
+        "value": 3272,
+        "unit": "ms"
+      }
+    },
+    "constraint_totals": {
+      "proved": 2719,
+      "refuted": 0,
+      "total": 3295,
+      "unknown": 576
+    },
+    "unknown_by_reason": {
+      "budget_exhausted": 16,
+      "flexible_witness": 30,
+      "not_established": 486,
+      "type_recovery": 26,
+      "unsupported_goal": 18
+    },
+    "note": "Expression, diagnostic and deferred-constraint totals match the checkpoint baseline. Wall times were collected concurrently with corpus validation and do not isolate performance changes.",
+    "exit_code": 0,
+    "local_log": "target/ablation/2026-10-24/final-riscv.log"
+  },
+  "incremental": {
+    "method": "Four serialized probes after corpus validation, one run per size/mode, 32 edits each.",
+    "probes": [
+      {
+        "files": 160,
+        "mode": "body",
+        "edits": 32,
+        "command": "target/release/examples/incremental_stats 160 32 body --modules",
+        "exit_code": 0,
+        "local_log": "target/ablation/2026-10-24/incremental-160-body.log",
+        "metrics": {
+          "incremental_cold": {
+            "value": 90077,
+            "unit": "us"
+          },
+          "incremental_callables": {
+            "value": 320,
+            "unit": "count"
+          },
+          "incremental_warm_p50": {
+            "value": 48,
+            "unit": "us"
+          },
+          "incremental_warm_p95": {
+            "value": 64,
+            "unit": "us"
+          },
+          "incremental_warm_p99": {
+            "value": 65,
+            "unit": "us"
+          },
+          "incremental_body_edit_p50": {
+            "value": 1686,
+            "unit": "us"
+          },
+          "incremental_body_edit_p95": {
+            "value": 1715,
+            "unit": "us"
+          },
+          "incremental_body_edit_p99": {
+            "value": 1762,
+            "unit": "us"
+          },
+          "incremental_snapshot_p50": {
+            "value": 1379,
+            "unit": "ns"
+          },
+          "incremental_snapshot_p95": {
+            "value": 1616,
+            "unit": "ns"
+          },
+          "incremental_snapshot_p99": {
+            "value": 1846,
+            "unit": "ns"
+          },
+          "incremental_reinferred_min": {
+            "value": 1,
+            "unit": "count"
+          },
+          "incremental_reinferred_max": {
+            "value": 1,
+            "unit": "count"
+          }
+        },
+        "checkpoint_edit_p95_us": {
+          "min": 1743,
+          "max": 1743,
+          "median_across_runs": 1743
+        }
+      },
+      {
+        "files": 160,
+        "mode": "signature",
+        "edits": 32,
+        "command": "target/release/examples/incremental_stats 160 32 signature --modules",
+        "exit_code": 0,
+        "local_log": "target/ablation/2026-10-24/incremental-160-signature.log",
+        "metrics": {
+          "incremental_cold": {
+            "value": 91945,
+            "unit": "us"
+          },
+          "incremental_callables": {
+            "value": 320,
+            "unit": "count"
+          },
+          "incremental_warm_p50": {
+            "value": 47,
+            "unit": "us"
+          },
+          "incremental_warm_p95": {
+            "value": 58,
+            "unit": "us"
+          },
+          "incremental_warm_p99": {
+            "value": 76,
+            "unit": "us"
+          },
+          "incremental_signature_edit_p50": {
+            "value": 2055,
+            "unit": "us"
+          },
+          "incremental_signature_edit_p95": {
+            "value": 2275,
+            "unit": "us"
+          },
+          "incremental_signature_edit_p99": {
+            "value": 2275,
+            "unit": "us"
+          },
+          "incremental_snapshot_p50": {
+            "value": 1393,
+            "unit": "ns"
+          },
+          "incremental_snapshot_p95": {
+            "value": 1556,
+            "unit": "ns"
+          },
+          "incremental_snapshot_p99": {
+            "value": 1772,
+            "unit": "ns"
+          },
+          "incremental_reinferred_min": {
+            "value": 3,
+            "unit": "count"
+          },
+          "incremental_reinferred_max": {
+            "value": 3,
+            "unit": "count"
+          }
+        },
+        "checkpoint_edit_p95_us": {
+          "min": 2169,
+          "max": 2169,
+          "median_across_runs": 2169
+        }
+      },
+      {
+        "files": 1600,
+        "mode": "body",
+        "edits": 32,
+        "command": "target/release/examples/incremental_stats 1600 32 body --modules",
+        "exit_code": 0,
+        "local_log": "target/ablation/2026-10-24/incremental-1600-body.log",
+        "metrics": {
+          "incremental_cold": {
+            "value": 746728,
+            "unit": "us"
+          },
+          "incremental_callables": {
+            "value": 3200,
+            "unit": "count"
+          },
+          "incremental_warm_p50": {
+            "value": 751,
+            "unit": "us"
+          },
+          "incremental_warm_p95": {
+            "value": 794,
+            "unit": "us"
+          },
+          "incremental_warm_p99": {
+            "value": 1145,
+            "unit": "us"
+          },
+          "incremental_body_edit_p50": {
+            "value": 13801,
+            "unit": "us"
+          },
+          "incremental_body_edit_p95": {
+            "value": 14991,
+            "unit": "us"
+          },
+          "incremental_body_edit_p99": {
+            "value": 19472,
+            "unit": "us"
+          },
+          "incremental_snapshot_p50": {
+            "value": 1624,
+            "unit": "ns"
+          },
+          "incremental_snapshot_p95": {
+            "value": 2006,
+            "unit": "ns"
+          },
+          "incremental_snapshot_p99": {
+            "value": 2544,
+            "unit": "ns"
+          },
+          "incremental_reinferred_min": {
+            "value": 1,
+            "unit": "count"
+          },
+          "incremental_reinferred_max": {
+            "value": 2,
+            "unit": "count"
+          }
+        },
+        "checkpoint_edit_p95_us": {
+          "min": 14204,
+          "max": 31419,
+          "median_across_runs": 14345.0
+        }
+      },
+      {
+        "files": 1600,
+        "mode": "signature",
+        "edits": 32,
+        "command": "target/release/examples/incremental_stats 1600 32 signature --modules",
+        "exit_code": 0,
+        "local_log": "target/ablation/2026-10-24/incremental-1600-signature.log",
+        "metrics": {
+          "incremental_cold": {
+            "value": 741396,
+            "unit": "us"
+          },
+          "incremental_callables": {
+            "value": 3200,
+            "unit": "count"
+          },
+          "incremental_warm_p50": {
+            "value": 725,
+            "unit": "us"
+          },
+          "incremental_warm_p95": {
+            "value": 757,
+            "unit": "us"
+          },
+          "incremental_warm_p99": {
+            "value": 1033,
+            "unit": "us"
+          },
+          "incremental_signature_edit_p50": {
+            "value": 14122,
+            "unit": "us"
+          },
+          "incremental_signature_edit_p95": {
+            "value": 15080,
+            "unit": "us"
+          },
+          "incremental_signature_edit_p99": {
+            "value": 18718,
+            "unit": "us"
+          },
+          "incremental_snapshot_p50": {
+            "value": 1560,
+            "unit": "ns"
+          },
+          "incremental_snapshot_p95": {
+            "value": 2018,
+            "unit": "ns"
+          },
+          "incremental_snapshot_p99": {
+            "value": 2440,
+            "unit": "ns"
+          },
+          "incremental_reinferred_min": {
+            "value": 3,
+            "unit": "count"
+          },
+          "incremental_reinferred_max": {
+            "value": 3,
+            "unit": "count"
+          }
+        },
+        "checkpoint_edit_p95_us": {
+          "min": 14335,
+          "max": 23666,
+          "median_across_runs": 14665.0
+        }
+      }
+    ],
+    "finding": "Reinference scope unchanged: body edits 1 at 160 files and 1-2 at 1600 files; signature edits 3. Large-case edit p95 was 14.991 ms body and 15.080 ms signature. No large regression observed; single-run noise does not establish a speedup or rust-analyzer performance parity."
+  },
+  "remaining_limitations": [
+    "Seven false positives in the separate extended upstream corpora.",
+    "Diagnostic location/wording parity is tracked separately from acceptance/rejection.",
+    "576 unknown deferred constraints remain on the pinned RISC-V manifest; they are not unknown expression types."
+  ],
+  "local_full_artifacts": "target/ablation/2026-10-24"
+}

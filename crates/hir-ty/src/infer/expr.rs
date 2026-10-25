@@ -731,8 +731,12 @@ impl<'db> InferenceContext<'db> {
                 }
             }
             ob.substitution = substitution;
-            let goal =
-                constraint::apply_subst_constraint_expr(&ob.goal.constraint(), &ob.substitution);
+            let goal = constraint::expand_constraint_synonyms(
+                &ob.goal.constraint(),
+                &self.env.constraint_synonyms,
+                0,
+            );
+            let goal = constraint::apply_subst_constraint_expr(&goal, &ob.substitution);
             let goal = constraint::numeric_alias_unfoldings(&goal, &self.env.alias_schemes)
                 .pop()
                 .unwrap_or(goal);
@@ -742,7 +746,12 @@ impl<'db> InferenceContext<'db> {
                 .assumptions
                 .iter()
                 .map(|assumption| {
-                    let (resolved, flexible) = self.table.resolve_deferred_constraint(assumption);
+                    let assumption = constraint::expand_constraint_synonyms(
+                        assumption,
+                        &self.env.constraint_synonyms,
+                        0,
+                    );
+                    let (resolved, flexible) = self.table.resolve_deferred_constraint(&assumption);
                     has_flexible_witness |= flexible;
                     resolved
                 })
@@ -1229,17 +1238,6 @@ impl<'db> InferenceContext<'db> {
                 subst.types.insert(name.clone(), actual.clone());
                 subst.values.insert(name.clone(), actual.display_text());
             }
-            (TyKind::App { args: exp_args, name, .. }, TyKind::Scalar(s))
-                if matches!(name.as_str(), "int" | "atom" | "nat" | "range") =>
-            {
-                for ea in exp_args {
-                    if let Some(e) = ea.as_value_str() {
-                        if !subst.values.contains_key(&e) {
-                            subst.values.insert(e, s.name().to_string());
-                        }
-                    }
-                }
-            }
             (TyKind::Tuple(et), TyKind::Tuple(at)) if et.len() == at.len() => {
                 for (e, a) in et.iter().zip(at.iter()) {
                     self.extract_value_bindings(e, a, subst);
@@ -1524,7 +1522,7 @@ impl<'db> InferenceContext<'db> {
 
     // add_expr_constraint + propagate_post_expr_constraints removed — used core_ast types.
 
-    fn record_info_for_type(&self, ty: &Ty) -> Option<(String, RecordInfo, Subst)> {
+    pub(super) fn record_info_for_type(&self, ty: &Ty) -> Option<(String, RecordInfo, Subst)> {
         let ty = self.table.normalize_alias_deep(ty);
         match ty.kind() {
             TyKind::Named(name, _) => self
@@ -2162,6 +2160,7 @@ impl<'db> InferenceContext<'db> {
     fn infer_call_hir(
         &mut self,
         body: &hir_def::Body,
+        call_id: hir_def::ExprId,
         callee_id: hir_def::ExprId,
         args: &[hir_def::ExprId],
         expectation: &Expectation,
@@ -2176,7 +2175,7 @@ impl<'db> InferenceContext<'db> {
         } else {
             args
         };
-        let out = self.infer_call_hir_inner(body, callee_id, args, expectation, locals);
+        let out = self.infer_call_hir_inner(body, call_id, callee_id, args, expectation, locals);
         if !out.is_error() {
             if let Some(name) = self.unavailable_nominal_type(
                 self.result.type_of_expr.get(callee_id).into_iter().chain(std::iter::once(&out)),
@@ -2209,6 +2208,7 @@ impl<'db> InferenceContext<'db> {
     fn infer_call_hir_inner(
         &mut self,
         body: &hir_def::Body,
+        call_id: hir_def::ExprId,
         callee_id: hir_def::ExprId,
         args: &[hir_def::ExprId],
         expectation: &Expectation,
@@ -2375,7 +2375,9 @@ impl<'db> InferenceContext<'db> {
                     ty
                 };
                 let ty = self.boolean_operand(ty, locals);
-                let ty = if constraint::is_numeric_scalar_ty(&ty) {
+                let ty = if constraint::is_numeric_scalar_ty(&ty)
+                    || self.env.constructors.contains_key(&callee_name)
+                {
                     literal_evidence(body, a, &ty)
                 } else {
                     ty
@@ -3402,7 +3404,17 @@ impl<'db> InferenceContext<'db> {
                 .enumerate()
                 .zip(&params_owned)
                 .map(|((index, actual), expected)| {
+                    // A type quantifier chooses a type, not the numeric index
+                    // of a literal. Keep singleton evidence for dependent
+                    // numeric parameters, but infer `int` for a bare `'a`.
                     if !packed_constructor
+                        && args
+                            .get(index)
+                            .is_some_and(|id| integer_literal_value(body, *id).is_some())
+                        && matches!(self.table.shallow_resolve(expected).kind(), TyKind::Infer(_))
+                    {
+                        Ty::scalar(Scalar::Int)
+                    } else if !packed_constructor
                         && matches!(
                             self.table.normalize_alias_deep(expected).kind(),
                             TyKind::Exist { .. }
@@ -3484,14 +3496,22 @@ impl<'db> InferenceContext<'db> {
                     && !candidate.ret.is_error()
                     && !self.table.unify(exp_ret, &candidate.ret)
                 {
-                    // The context asked for something this candidate
-                    // cannot produce. Remember it: the candidate is
-                    // about to be dropped for having an unresolved
-                    // quantifier — which is true, and is a consequence
-                    // of this, not a separate fact — and the call would
-                    // otherwise come back `error()` with nothing said.
-                    ret_conflict
-                        .get_or_insert((exp_ret.clone(), self.table.deep_resolve(&candidate.ret)));
+                    // Reject a candidate that cannot produce the requested
+                    // result. Keep its source parameter names for the error
+                    // if no other candidate matches.
+                    let actual = self.table.deep_resolve(&candidate.ret);
+                    let mut source_names = Subst::default();
+                    for entry in &freshen_info.entries {
+                        source_names
+                            .values
+                            .insert(entry.fresh_name.clone(), entry.orig_name.clone());
+                    }
+                    ret_conflict.get_or_insert((
+                        exp_ret.clone(),
+                        constraint::apply_subst(&actual, &source_names),
+                    ));
+                    self.table.rollback_to(snap);
+                    continue;
                 }
             }
 
@@ -3652,7 +3672,7 @@ impl<'db> InferenceContext<'db> {
                 scored.sort_by_key(|b| std::cmp::Reverse(b.1)); // most specific first
                 scored[0].0
             };
-            let (ci, ret_ty, _subst, deferred, freshening) = &viable[best];
+            let (ci, ret_ty, subst, deferred, freshening) = &viable[best];
             for goal in deferred {
                 self.table.push_subtype_obligation(Obligation::NumericConstraint(goal.clone()));
             }
@@ -3686,6 +3706,14 @@ impl<'db> InferenceContext<'db> {
             {
                 debug_assert_eq!(probed.orig_name, confirmed.orig_name);
                 let _ = self.table.unify(&probed.infer_ty, &confirmed.infer_ty);
+                // A successful probe may solve a numeric parameter through
+                // the result context. Replay that solution as well as the
+                // argument equations, so deferred goals share its witness.
+                if let Some(value) = subst.types.get(&probed.fresh_name) {
+                    let _ = self.table.unify(&confirmed.infer_ty, value);
+                } else if let Some(value) = subst.values.get(&probed.fresh_name) {
+                    let _ = self.table.unify(&confirmed.infer_ty, &Ty::param(value));
+                }
             }
             let expected_params: Vec<&Ty> = if arg_types.len() == winner.params.len() {
                 winner.params.iter().collect()
@@ -3697,8 +3725,18 @@ impl<'db> InferenceContext<'db> {
                     .filter_map(|(param, is_implicit)| (!is_implicit).then_some(param))
                     .collect()
             };
-            for (expected, actual) in expected_params.iter().zip(arg_types.iter()) {
-                let _ = self.table.unify(expected, actual);
+            for (index, (expected, actual)) in
+                expected_params.iter().zip(arg_types.iter()).enumerate()
+            {
+                let actual = if !packed_constructor
+                    && args.get(index).is_some_and(|id| integer_literal_value(body, *id).is_some())
+                    && matches!(self.table.shallow_resolve(expected).kind(), TyKind::Infer(_))
+                {
+                    Ty::scalar(Scalar::Int)
+                } else {
+                    actual.clone()
+                };
+                let _ = self.table.unify(expected, &actual);
             }
             // The context may determine an argument through the return type,
             // e.g. fill(zeros()) : vector(4, bits(8)). The resolved probe
@@ -3746,7 +3784,7 @@ impl<'db> InferenceContext<'db> {
         // no parameter to name.
         if let Some((expected, actual)) = ret_conflict.take() {
             if !is_partial_overload {
-                self.result.record_type_mismatch(callee_id, &expected, &actual);
+                self.result.record_type_mismatch(call_id, &expected, &actual);
                 return Ty::error();
             }
         }
@@ -4183,15 +4221,6 @@ impl<'db> InferenceContext<'db> {
                 return opened.inner_ty;
             }
         }
-        if matches!(ty.kind(), TyKind::Scalar(Scalar::Int)) {
-            let var = "'_argument".to_owned();
-            let opened = self.table.open_existential(
-                &[var.clone()],
-                &ConstraintExpr::Bool(true),
-                &Ty::app("atom", vec![TyArg::Nexp(NumericExpr::Var(var))], ""),
-            );
-            return opened.inner_ty;
-        }
         if let Some((var, predicate, inner)) = super::refinement::numeric_value(&ty) {
             let opened = self.table.open_existential(&[var], &predicate, &inner);
             locals.add_constraint(opened.constraint);
@@ -4215,6 +4244,27 @@ impl<'db> InferenceContext<'db> {
             }
         }
         ty
+    }
+
+    fn conditional_boolean_rhs(&self, lhs: &Ty, op: &hir_def::hir::LogicOp) -> bool {
+        fn is_bool(ty: &Ty) -> bool {
+            match ty.kind() {
+                TyKind::Scalar(Scalar::Bool) => true,
+                TyKind::Exist { inner, .. } => is_bool(inner),
+                _ => super::subtype::bool_value(ty).is_some(),
+            }
+        }
+        let lhs = self.table.normalize_alias_deep(lhs);
+        if !is_bool(&lhs) {
+            return false;
+        }
+        // These two cases always evaluate the RHS, so its facts are valid
+        // after the complete expression, just as for an ordinary operand.
+        !matches!(
+            (op, super::subtype::bool_value(&lhs)),
+            (hir_def::hir::LogicOp::Or, Some(ConstraintExpr::Bool(false)))
+                | (hir_def::hir::LogicOp::And, Some(ConstraintExpr::Bool(true)))
+        )
     }
 
     fn boolean_guard(
@@ -4306,13 +4356,44 @@ impl<'db> InferenceContext<'db> {
         // The expectation flows *into* inference as well as being checked
         // afterwards: a call in tail position needs it to resolve its
         // quantifiers, which it cannot do once the type is already built.
+        // Sail checks a scoped continuation with the lexical annotation,
+        // then restores its outer meaning on return (check_exp E_let).
+        // Resolving it before entering a block captures a shadowed numeric
+        // binder too early; resolving it after leaving loses that shadow.
+        let lexical = matches!(expected, Expectation::LexicalType(_));
+        let resolved_expected = expected
+            .to_option()
+            .map(|ty| {
+                Expectation::HasType(if lexical {
+                    constraint::apply_subst(&ty, &locals.type_substitution())
+                } else {
+                    ty
+                })
+            })
+            .unwrap_or(Expectation::None);
+        let scoped = matches!(
+            body.expr(id),
+            Some(
+                hir_def::Expr::Block(_)
+                    | hir_def::Expr::Let { .. }
+                    | hir_def::Expr::Var { .. }
+                    | hir_def::Expr::If { .. }
+            )
+        );
         let unreachable = locals.is_contradictory();
         let ty = self.infer_expr_expecting(
             body,
             id,
-            if unreachable { &Expectation::None } else { expected },
+            if unreachable {
+                &Expectation::None
+            } else if lexical && scoped {
+                expected
+            } else {
+                &resolved_expected
+            },
             locals,
         );
+        let expected = &resolved_expected;
 
         // Write inferred type to InferenceResult.
         self.result.write_expr_ty(id, ty.clone());
@@ -4533,9 +4614,12 @@ impl<'db> InferenceContext<'db> {
             _ => None,
         };
         let val_ty = match annotated_ty {
-            Some(ref ann_ty) => {
-                self.infer_expr_hir_with(body, value, &Expectation::HasType(ann_ty.clone()), locals)
-            }
+            Some(ref ann_ty) => self.infer_expr_hir_with(
+                body,
+                value,
+                &Expectation::LexicalType(ann_ty.clone()),
+                locals,
+            ),
             None => {
                 if matches!(body.expr(value), Some(hir_def::Expr::Struct { name: None, .. })) {
                     self.invalid_expression(value, "Cannot infer type of struct literal");
@@ -4642,7 +4726,22 @@ impl<'db> InferenceContext<'db> {
             // bits('n) = undefined` left the initialiser untyped — seven of
             // sail-riscv's remaining untyped expressions, all one line.
             Expr::Literal(hir_def::hir::Literal::Undefined) => match expectation.to_option() {
-                Some(expected) if !expected.is_error() => expected,
+                Some(expected) if !expected.is_error() => {
+                    if let (Some(db), Some(owner)) = (self.db, self.owner) {
+                        let mut facts = Vec::new();
+                        self.fill_assumptions(locals, &mut facts);
+                        if let Some(message) = declaration_constraints::undefined_error(
+                            db,
+                            owner.file(db),
+                            expr_span.start,
+                            &expected,
+                            &facts,
+                        ) {
+                            self.invalid_expression(id, message);
+                        }
+                    }
+                    expected
+                }
                 _ => Ty::error(),
             },
 
@@ -4769,7 +4868,17 @@ impl<'db> InferenceContext<'db> {
                     let lhs_ty = self.infer_expr_hir(body, *lhs, locals);
                     let same_bit_width = matches!(op.as_str(), "&" | "|" | "^")
                         && self.table.normalize_alias_deep(&lhs_ty).is_bits();
-                    let rhs_ty = if (equality && empty_list(*rhs)) || same_bit_width {
+                    // Boolean operators evaluate their RHS conditionally. Facts
+                    // learned there cannot become unconditional caller facts.
+                    let short_circuit = matches!(op, HirBinaryOp::Known(BinaryOp::LogicOp(logic))
+                        if self.conditional_boolean_rhs(&lhs_ty, logic));
+                    let rhs_ty = if short_circuit {
+                        let mut branch = locals.clone();
+                        // Sail checks the RHS under the incoming facts;
+                        // short-circuit evaluation does not grant a new
+                        // type-level assumption about the left operand.
+                        self.infer_expr_hir(body, *rhs, &mut branch)
+                    } else if (equality && empty_list(*rhs)) || same_bit_width {
                         self.infer_expr_hir_with(
                             body,
                             *rhs,
@@ -4797,16 +4906,29 @@ impl<'db> InferenceContext<'db> {
                     body.expr(*lhs),
                     Some(Expr::Literal(hir_def::hir::Literal::Number(n))) if n == "2"
                 ) {
-                    return super::bounded_arithmetic::infer(
+                    if let Some(ty) = super::bounded_arithmetic::infer(
                         &hir_def::hir::ArithOp::BitXor,
                         &literal_evidence(body, *lhs, &lhs_ty),
                         &self.table.normalize_alias_deep(&rhs_ty),
                         &locals.constraints,
-                    )
-                    .unwrap_or_else(|| Ty::named("int"));
+                    ) {
+                        return ty;
+                    }
+                    // The finite-domain fast path has an enumeration budget;
+                    // exceeding it does not erase the exact symbolic value.
+                    let exponent = self.numeric_operand(rhs_ty, locals);
+                    return super::refinement::singleton(&exponent)
+                        .map(|n| {
+                            Ty::app("atom", vec![TyArg::Nexp(NumericExpr::Exp(Box::new(n)))], "")
+                        })
+                        .unwrap_or_else(|| Ty::named("int"));
                 }
                 match op {
                     HirBinaryOp::Known(BinaryOp::CmpOp(_)) => {
+                        // Evaluated numeric operands bring their returned range
+                        // bounds into scope, including contradictory bounds.
+                        let lhs_ty = self.numeric_operand(lhs_ty, locals);
+                        let rhs_ty = self.numeric_operand(rhs_ty, locals);
                         // Equality couples bitvector widths in both operand
                         // orders, including a width still inferred by a nested
                         // call. Merely comparing two literal widths left
@@ -4904,8 +5026,13 @@ impl<'db> InferenceContext<'db> {
                         Ty::named("bool".to_string())
                     }
                     HirBinaryOp::Known(BinaryOp::LogicOp(logic_op)) => {
+                        let conditional = self.conditional_boolean_rhs(&lhs_ty, logic_op);
                         let lhs_ty = self.boolean_operand(lhs_ty, locals);
-                        let rhs_ty = self.boolean_operand(rhs_ty, locals);
+                        let rhs_ty = if conditional {
+                            self.boolean_operand(rhs_ty, &mut locals.clone())
+                        } else {
+                            self.boolean_operand(rhs_ty, locals)
+                        };
                         let op_str = match logic_op {
                             hir_def::hir::LogicOp::Or => "|",
                             hir_def::hir::LogicOp::And => "&",
@@ -5078,6 +5205,11 @@ impl<'db> InferenceContext<'db> {
                                 return ty;
                             }
                         }
+                        // Each evaluated numeric operand has a runtime value.
+                        // Open its range/existential before freshening an
+                        // operator's dependent parameters, as for ordinary calls.
+                        let lhs_evidence = self.numeric_operand(lhs_evidence, locals);
+                        let rhs_evidence = self.numeric_operand(rhs_evidence, locals);
                         // Preserve nominal operand types for overload selection.
                         if let Some(ret_ty) =
                             self.resolve_overloaded_binop(op_str, &lhs_evidence, &rhs_evidence)
@@ -5090,17 +5222,28 @@ impl<'db> InferenceContext<'db> {
                             } else {
                                 rhs_ty
                             }
-                        } else if constraint::is_numeric_scalar_ty(&lhs_ty)
-                            && constraint::is_numeric_scalar_ty(&rhs_ty)
+                        } else if constraint::is_numeric_scalar_ty(&lhs_evidence)
+                            && constraint::is_numeric_scalar_ty(&rhs_evidence)
                         {
                             // A missing overload must not turn `n + 3` into
                             // the singleton type of `n`. Retain the operation
                             // when its operands have numeric identities.
-                            super::refinement::number(body, id, &|n| {
-                                self.refinement_value(locals, n)
-                            })
-                            .map(|n| Ty::app("atom", vec![TyArg::Nexp(n)], ""))
-                            .unwrap_or_else(|| Ty::named("int"))
+                            super::refinement::singleton(&lhs_evidence)
+                                .zip(super::refinement::singleton(&rhs_evidence))
+                                .and_then(|(a, b)| {
+                                    use hir_def::hir::ArithOp;
+                                    let (a, b) = (Box::new(a), Box::new(b));
+                                    Some(match arith_op {
+                                        ArithOp::Add => NumericExpr::Add(a, b),
+                                        ArithOp::Sub => NumericExpr::Sub(a, b),
+                                        ArithOp::Mul => NumericExpr::Mul(a, b),
+                                        ArithOp::Div => NumericExpr::Div(a, b),
+                                        ArithOp::Rem => NumericExpr::Mod(a, b),
+                                        _ => return None,
+                                    })
+                                })
+                                .map(|n| Ty::app("atom", vec![TyArg::Nexp(n)], ""))
+                                .unwrap_or_else(|| Ty::named("int"))
                         } else if !lhs_ty.is_error() {
                             lhs_ty
                         } else {
@@ -5195,7 +5338,7 @@ impl<'db> InferenceContext<'db> {
                 let universe = self.table.universe();
                 locals.push_scope();
                 let start = self.table.obligation_count();
-                let ty = self.infer_call_hir(body, *callee, args, expectation, locals);
+                let ty = self.infer_call_hir(body, id, *callee, args, expectation, locals);
                 let ty = if self.table.universe() != universe {
                     self.scope_obligations(start, id, locals);
                     self.table.close_universe(&ty, universe)
@@ -5295,8 +5438,12 @@ impl<'db> InferenceContext<'db> {
                     self.diverges = saved_diverges | (then_diverges & else_diverges);
                     // Each branch has already been checked against this target.
                     // Their inferred types need not be subtypes of each other.
-                    if let Expectation::HasType(target) = expectation {
-                        return target.clone();
+                    if let Some(target) = expectation.to_option() {
+                        return if matches!(expectation, Expectation::LexicalType(_)) {
+                            constraint::apply_subst(&target, &locals.type_substitution())
+                        } else {
+                            target
+                        };
                     }
                     if then_diverges.is_always() {
                         return else_ty;
@@ -5560,10 +5707,7 @@ impl<'db> InferenceContext<'db> {
                             // Extract type annotation from Typed pattern
                             let annotated_ty = match body.pat(*pat) {
                                 Some(hir_def::Pat::Typed { ty: ty_text, .. }) => {
-                                    let ty = constraint::apply_subst(
-                                        &type_from_type_text(ty_text),
-                                        &locals.type_substitution(),
-                                    );
+                                    let ty = type_from_type_text(ty_text);
                                     if !ty.is_error() {
                                         Some(ty)
                                     } else {
@@ -5582,7 +5726,7 @@ impl<'db> InferenceContext<'db> {
                                 Some(ref ann_ty) => self.infer_expr_hir_with(
                                     body,
                                     *value,
-                                    &Expectation::HasType(ann_ty.clone()),
+                                    &Expectation::LexicalType(ann_ty.clone()),
                                     locals,
                                 ),
                                 None => {
@@ -5604,8 +5748,9 @@ impl<'db> InferenceContext<'db> {
                             // recorded and what hover then showed —
                             // `let other : _` for something inference knows
                             // is a `Cfg`.
-                            let bind_ty =
-                                annotated_ty.unwrap_or_else(|| self.table.deep_resolve(&val_ty));
+                            let bind_ty = annotated_ty
+                                .map(|ty| constraint::apply_subst(&ty, &locals.type_substitution()))
+                                .unwrap_or_else(|| self.table.deep_resolve(&val_ty));
                             let bind_ty =
                                 self.immutable_value_identity(body, *pat, *value, bind_ty, locals);
                             self.bind_pattern_hir(body, *pat, &bind_ty, locals);
@@ -5634,14 +5779,19 @@ impl<'db> InferenceContext<'db> {
                     .to_option()
                     .filter(|_| matches!(stmts.last(), Some(hir_def::Statement::Expr(_))))
                 {
-                    // The target belongs to the caller's scope. A local type
-                    // binder with the same spelling must not rewrite it.
+                    // Return the caller's target after checking the tail.
+                    // Local annotations retain their lexical spelling until
+                    // the caller's scope is restored; signature types already
+                    // denote their original binders.
                     last_ty = target;
                 } else {
                     last_ty = constraint::apply_subst(&last_ty, &locals.type_substitution());
                     last_ty = self.table.close_universe(&last_ty, outer_universe);
                 }
                 locals.pop_scope();
+                if matches!(expectation, Expectation::LexicalType(_)) {
+                    last_ty = constraint::apply_subst(&last_ty, &locals.type_substitution());
+                }
                 let block_diverges = self.diverges;
                 self.diverges = block_diverges | saved_diverges;
                 // If block unconditionally diverges (return/throw/exit),
@@ -5664,10 +5814,7 @@ impl<'db> InferenceContext<'db> {
             Expr::Let { pat, value, body: let_body } => {
                 let annotated_ty = match body.pat(*pat) {
                     Some(hir_def::Pat::Typed { ty: ty_text, .. }) => {
-                        let ty = constraint::apply_subst(
-                            &type_from_type_text(ty_text),
-                            &locals.type_substitution(),
-                        );
+                        let ty = type_from_type_text(ty_text);
                         if !ty.is_error() {
                             Some(ty)
                         } else {
@@ -5680,7 +5827,7 @@ impl<'db> InferenceContext<'db> {
                     Some(ref ann_ty) => self.infer_expr_hir_with(
                         body,
                         *value,
-                        &Expectation::HasType(ann_ty.clone()),
+                        &Expectation::LexicalType(ann_ty.clone()),
                         locals,
                     ),
                     None => {
@@ -5690,7 +5837,9 @@ impl<'db> InferenceContext<'db> {
                         self.infer_expr_hir(body, *value, locals)
                     }
                 };
-                let bind_ty = annotated_ty.unwrap_or_else(|| self.table.deep_resolve(&val_ty));
+                let bind_ty = annotated_ty
+                    .map(|ty| constraint::apply_subst(&ty, &locals.type_substitution()))
+                    .unwrap_or_else(|| self.table.deep_resolve(&val_ty));
                 let bind_ty = self.immutable_value_identity(body, *pat, *value, bind_ty, locals);
                 let outer_universe = self.table.universe();
                 locals.push_scope();
@@ -5708,7 +5857,11 @@ impl<'db> InferenceContext<'db> {
                     self.table.close_universe(&ty, outer_universe)
                 };
                 locals.pop_scope();
-                ty
+                if matches!(expectation, Expectation::LexicalType(_)) {
+                    constraint::apply_subst(&ty, &locals.type_substitution())
+                } else {
+                    ty
+                }
             }
 
             Expr::Var { pat, value, body: var_body } => {
@@ -5851,26 +6004,44 @@ impl<'db> InferenceContext<'db> {
             }
 
             Expr::Array(items) => {
-                // Unify all element types against the first non-error
-                // element type.
-                let mut elem_ty: Option<Ty> = None;
+                let expected_elem = expectation
+                    .to_option()
+                    .map(|ty| self.table.normalize_alias_deep(&ty))
+                    .and_then(|ty| self.collection_element_type(&ty));
+                let mut elem_ty = expected_elem.clone();
                 for &i in items {
-                    let ty = self.infer_expr_hir(body, i, locals);
-                    if ty.is_error() {
+                    let ty = if let Some(expected) = &expected_elem {
+                        self.infer_expr_hir_with(
+                            body,
+                            i,
+                            &Expectation::HasType(expected.clone()),
+                            locals,
+                        )
+                    } else {
+                        self.infer_expr_hir(body, i, locals)
+                    };
+                    if ty.is_error() || expected_elem.is_some() {
                         continue;
                     }
-                    match elem_ty {
-                        None => {
-                            elem_ty = Some(ty);
-                        }
-                        Some(ref expected) => {
-                            if !self.table.unify(expected, &ty) {
-                                self.result.record_type_mismatch(i, expected, &ty);
+                    // Independent singleton values need a common element type,
+                    // not an equality between the values of different elements.
+                    elem_ty = Some(match elem_ty {
+                        None => ty,
+                        Some(expected) => {
+                            let expected = self.table.resolve(&expected);
+                            let ty = self.table.resolve(&ty);
+                            if let Some(joined) = super::refinement::join(&expected, &ty) {
+                                joined
+                            } else {
+                                if !self.table.unify(&expected, &ty) {
+                                    self.result.record_type_mismatch(i, &expected, &ty);
+                                }
+                                expected
                             }
                         }
-                    }
+                    });
                 }
-                let elem = elem_ty.unwrap_or(Ty::error());
+                let elem = elem_ty.unwrap_or_else(|| self.table.new_type_var());
                 let len = items.len();
                 let text = format!("vector({len}, {})", elem.display_text());
                 Ty::app("vector", vec![TyArg::numeric(len.to_string()), TyArg::Type(elem)], text)
@@ -6093,6 +6264,8 @@ impl<'db> InferenceContext<'db> {
                 let saved_diverges = self.diverges;
                 let start_ty = self.infer_expr_hir(body, *start, locals);
                 let end_ty = self.infer_expr_hir(body, *end, locals);
+                let start_ty = self.numeric_operand(start_ty, locals);
+                let end_ty = self.numeric_operand(end_ty, locals);
                 let (positive_step, unit_step) = if let Some(step_id) = step {
                     let step_ty = self.infer_expr_hir(body, *step_id, locals);
                     let value =
@@ -6391,6 +6564,26 @@ impl<'db> InferenceContext<'db> {
                     unique(true).or_else(|| unique(false))
                 });
                 if let Some((sname, record, type_subst)) = record_resolved {
+                    // A parameter absent from every field cannot be inferred
+                    // from a literal. An expected record type may supply it;
+                    // merely mentioning the record elsewhere supplies nothing.
+                    let mut field_params = Vec::new();
+                    for field_ty in record.fields.values() {
+                        collect_type_vars(
+                            &self.table.normalize_alias_deep(field_ty),
+                            &mut field_params,
+                        );
+                    }
+                    for param in &record.params {
+                        if !field_params.contains(param)
+                            && type_subst.types.get(param).is_none()
+                            && type_subst.values.get(param).is_none()
+                        {
+                            self.invalid_expression(id, format!(
+                                "Failed to instantiate {param} when inferring struct literal of type {sname}"
+                            ));
+                        }
+                    }
                     // Check each field with instantiated types
                     for (fname, field_expr) in fields {
                         let value_ty = self.infer_expr_hir(body, *field_expr, locals);
@@ -6417,13 +6610,26 @@ impl<'db> InferenceContext<'db> {
                         .filter(|k| !provided.contains(k.as_str()))
                         .map(|s| s.to_string())
                         .collect();
-                    if !missing.is_empty() && named_record {
+                    if !missing.is_empty() {
                         missing.sort();
-                        self.push_inference_diagnostic(InferenceDiagnostic::MissingFields {
-                            expr: id,
-                            record_name: sname.clone(),
-                            missing,
-                        });
+                        let field_types: Vec<String> = missing
+                            .iter()
+                            .map(|name| {
+                                apply_subst(&record.fields[name], &type_subst).display_text()
+                            })
+                            .collect();
+                        self.result.missing_record_fields.insert(
+                            id,
+                            missing.iter().cloned().zip(field_types.iter().cloned()).collect(),
+                        );
+                        if named_record {
+                            self.push_inference_diagnostic(InferenceDiagnostic::MissingFields {
+                                expr: id,
+                                record_name: sname.clone(),
+                                missing,
+                                field_types,
+                            });
+                        }
                     }
                     expected_ret
                         .filter(|t| {
@@ -6634,8 +6840,10 @@ impl<'db> InferenceContext<'db> {
                 {
                     self.invalid_expression(id, "Cannot assign slice of non vector type");
                 }
-                let _hi_ty = self.infer_expr_hir(body, *hi, locals);
-                let _lo_ty = self.infer_expr_hir(body, *lo, locals);
+                let hi_ty = self.infer_expr_hir(body, *hi, locals);
+                let _hi_ty = self.numeric_operand(hi_ty, locals);
+                let lo_ty = self.infer_expr_hir(body, *lo, locals);
+                let _lo_ty = self.numeric_operand(lo_ty, locals);
                 // A symbolic slice has a known expression for its length.
                 // Keep endpoint identities rather than inventing a flexible
                 // width that can be chosen from the expected result type.
@@ -7125,6 +7333,19 @@ impl<'db> InferenceContext<'db> {
                         locals.add_constraint(identity.clone());
                         backwards.add_constraint(identity);
                     }
+                    if let (Some(a), Some(b)) =
+                        (super::subtype::bool_value(&lhs), super::subtype::bool_value(&rhs))
+                    {
+                        let identity = ConstraintExpr::And(vec![
+                            ConstraintExpr::Or(vec![
+                                ConstraintExpr::Not(Box::new(a.clone())),
+                                b.clone(),
+                            ]),
+                            ConstraintExpr::Or(vec![ConstraintExpr::Not(Box::new(b)), a]),
+                        ]);
+                        locals.add_constraint(identity.clone());
+                        backwards.add_constraint(identity);
+                    }
                     if !lhs.is_error()
                         && !rhs.is_error()
                         && (!self.constructor_types_plausible(&lhs, &rhs)
@@ -7325,14 +7546,21 @@ impl<'db> InferenceContext<'db> {
                     }
                 }
             }
-            Expr::If { cond, then_branch, else_branch: None } => {
-                // if cond then throw/exit — negate the condition
-                let is_diverging = self.result.diverging_exprs.contains(then_branch)
-                    || matches!(
-                        body.expr(*then_branch),
-                        Some(Expr::Throw(_) | Expr::Exit(_) | Expr::Return(_))
-                    );
-                if is_diverging {
+            Expr::If { cond, then_branch, else_branch } => {
+                // Only a continuing branch contributes facts after an if.
+                // An explicit else does not erase the fact established by
+                // an escaping then branch (or vice versa).
+                let diverges = |id: &hir_def::ExprId| {
+                    self.result.diverging_exprs.contains(id)
+                        || matches!(
+                            body.expr(*id),
+                            Some(Expr::Throw(_) | Expr::Exit(_) | Expr::Return(_))
+                        )
+                };
+                let then_diverges = diverges(then_branch);
+                let else_diverges = else_branch.as_ref().is_some_and(diverges);
+                if then_diverges != else_diverges {
+                    let continuing = |c| if then_diverges { negate_constraint(c) } else { c };
                     let predicate = super::refinement::guard(body, *cond, &|n| {
                         self.refinement_value(locals, n)
                     });
@@ -7343,22 +7571,10 @@ impl<'db> InferenceContext<'db> {
                         locals.add_constraint(ConstraintExpr::Unsupported);
                     }
                     if let Some(c) = predicate {
-                        locals.add_constraint(negate_constraint(
-                            constraint::apply_subst_constraint_expr(
-                                &c,
-                                &locals.type_substitution(),
-                            ),
-                        ));
-                    }
-                    if let Some(cond_span) = self.expr_span(body, *cond) {
-                        if let Some(cond_text) = self.source.get(cond_span.start..cond_span.end) {
-                            if let Some(constraint) = constraint_expr_from_expr_text(cond_text) {
-                                locals.add_constraint(constraint::apply_subst_constraint_expr(
-                                    &negate_constraint(constraint),
-                                    &locals.type_substitution(),
-                                ));
-                            }
-                        }
+                        locals.add_constraint(continuing(constraint::apply_subst_constraint_expr(
+                            &c,
+                            &locals.type_substitution(),
+                        )));
                     }
                 }
             }

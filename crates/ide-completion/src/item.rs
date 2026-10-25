@@ -155,6 +155,8 @@ pub struct CompletionItem {
     pub detail: Option<String>,
     pub documentation: Option<String>,
     pub insert_text: Option<String>,
+    /// Physical source range replaced by the primary completion edit.
+    pub source_range: Option<ide_db::line_index::TextRange>,
     pub sort_text: Option<String>,
     pub filter_text: Option<String>,
     pub deprecated: bool,
@@ -188,6 +190,7 @@ impl CompletionItem {
             detail: None,
             documentation: None,
             insert_text: None,
+            source_range: None,
             sort_text: None,
             filter_text: None,
             deprecated: false,
@@ -256,11 +259,9 @@ pub(crate) fn deduplicate_and_sort(items: &mut Vec<CompletionItem>, _prefix: &st
         b.relevance.score().cmp(&a.relevance.score()).then_with(|| a.label.cmp(&b.label))
     });
 
-    // Truncate
-    const MAX_COMPLETIONS: usize = 200;
-    if items.len() > MAX_COMPLETIONS {
-        items.truncate(MAX_COMPLETIONS);
-    }
+    // No truncation here: `CompletionConfig::limit` is the one cut, so a
+    // client that sets it to 0 gets every candidate, and the server can
+    // tell the client when a list was cut.
 
     // Assign sort_text: invert the score so that higher scores sort first
     // in lexicographic order (`score ^ 0xFFFFFFFF` -> lower hex = better).

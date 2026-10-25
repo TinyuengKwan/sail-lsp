@@ -66,6 +66,9 @@ pub fn workspace_default_order(
 /// Preprocessor symbols in effect for the whole workspace.
 fn workspace_symbols(db: &dyn salsa::Database) -> std::collections::HashSet<String> {
     let mut symbols = syntax::preprocess::default_symbols();
+    if base_db::strict_bitvector(db) {
+        symbols.insert("STRICT_BITVECTOR".into());
+    }
     if let Some(ws) = base_db::WorkspaceFiles::try_get(db) {
         if let Some(order) = workspace_default_order(db, ws) {
             order.apply(&mut symbols);

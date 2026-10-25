@@ -402,10 +402,11 @@ pub(crate) fn handle_document_diagnostic(
         return Ok(empty_report());
     };
     let line_index = ide_db::line_index::LineIndex::new(sf.text());
-    let items: Vec<Diagnostic> = ide_diags
+    let mut items: Vec<Diagnostic> = ide_diags
         .iter()
         .map(|d| crate::to_proto::diagnostic_with_analysis(&snap.analysis, &line_index, uri, d))
         .collect();
+    crate::diagnostics::explain_unlinked_file(&mut items, snap.project_error.as_deref());
 
     // Related documents — files that $include this file.
     // When this file's types change, dependent files may get new errors.
@@ -419,7 +420,7 @@ pub(crate) fn handle_document_diagnostic(
                 let dep_diags = snap.analysis.file_diagnostics(dep_fid, &diag_config)?;
                 if let Some(dep_sf) = snap.analysis.file(dep_url) {
                     let dep_li = ide_db::line_index::LineIndex::new(dep_sf.text());
-                    let dep_items: Vec<Diagnostic> = dep_diags
+                    let mut dep_items: Vec<Diagnostic> = dep_diags
                         .iter()
                         .map(|d| {
                             crate::to_proto::diagnostic_with_analysis(
@@ -430,6 +431,10 @@ pub(crate) fn handle_document_diagnostic(
                             )
                         })
                         .collect();
+                    crate::diagnostics::explain_unlinked_file(
+                        &mut dep_items,
+                        snap.project_error.as_deref(),
+                    );
                     related_documents.insert(
                         dep_url.clone(),
                         DocumentDiagnosticReportKind::Full(FullDocumentDiagnosticReport {
@@ -445,7 +450,8 @@ pub(crate) fn handle_document_diagnostic(
     let result_id = {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        items.len().hash(&mut hasher);
+        // A changed loading cause can keep the same diagnostic count.
+        serde_json::to_vec(&items)?.hash(&mut hasher);
         format!("{:x}", hasher.finish())
     };
 
@@ -715,9 +721,11 @@ pub(crate) fn handle_code_action(
     // whether completion items expand, which answers a different question
     // and is not the client's answer to any.
     let assists = ide_assists::AssistConfig {
+        file_creation: snap.client_caps.file_creation_support(),
         snippet_cap: ide_assists::SnippetCap::new(snap.client_caps.snippet_text_edit_support()),
         ..Default::default()
     };
+    let source_fingerprint = crate::code_action_helpers::source_fingerprint(sf.text());
     let fix_all_kind = crate::code_action_helpers::sail_source_fix_all_kind();
     let actions: Vec<crate::lsp::ext::CodeAction> = snap
         .analysis
@@ -739,8 +747,18 @@ pub(crate) fn handle_code_action(
             let url = |fid| snap.analysis.url_for_file_id(fid).cloned();
             let line_index =
                 |fid| snap.analysis.url_for_file_id(fid).map(|uri| line_index_for(&snap, uri));
-            let edit = if snap.client_caps.snippet_text_edit_support() {
+            let creates_files = !action.source_change.file_creations.is_empty();
+            for creation in &action.source_change.file_creations {
+                let ide_db::source_change::FileCreation { anchor, path, .. } = creation;
+                let target = url(*anchor)?.join(path).ok()?;
+                if snap.analysis.file_id(&target).is_some() || target.to_file_path().ok()?.exists()
+                {
+                    return None;
+                }
+            }
+            let mut edit = if snap.client_caps.snippet_text_edit_support() && !creates_files {
                 crate::lsp::ext::SnippetWorkspaceEdit {
+                    document_changes: None,
                     changes: Some(crate::to_proto::snippet_workspace_edit(
                         &action.source_change,
                         &url,
@@ -756,6 +774,14 @@ pub(crate) fn handle_code_action(
                 );
                 crate::to_proto::snippet_workspace_edit_from_plain(&plain)
             };
+            if let Some(DocumentChanges::Operations(operations)) = &mut edit.document_changes {
+                for operation in operations {
+                    if let DocumentChangeOperation::Edit(edit) = operation {
+                        edit.text_document.version =
+                            snap.document_versions.get(&edit.text_document.uri).copied();
+                    }
+                }
+            }
             Some(crate::lsp::ext::CodeAction {
                 title: action.title,
                 kind: Some(kind),
@@ -765,10 +791,18 @@ pub(crate) fn handle_code_action(
                     .map(|d| vec![d.clone()]),
                 edit: None,
                 is_preferred: action.is_preferred,
-                data: Some(if let Some(request) = action.import {
-                    serde_json::json!({"autoInclude": crate::to_proto::import_request(&request)})
-                } else {
-                    crate::code_action_helpers::lazy_code_action_data(&edit)
+                data: Some({
+                    let mut data = if let Some(request) = action.import {
+                        serde_json::json!({"autoInclude": crate::to_proto::import_request(&request)})
+                    } else {
+                        let mut data = crate::code_action_helpers::lazy_code_action_data(&edit);
+                        if creates_files {
+                            data["extractionSource"] = serde_json::json!({"uri": uri, "text": sf.text()});
+                        }
+                        data
+                    };
+                    data["sourceState"] = serde_json::json!({"uri": uri, "fingerprint": source_fingerprint});
+                    data
                 }),
             })
         })
@@ -797,6 +831,39 @@ pub(crate) fn handle_code_action_resolve(
     snap: GlobalStateSnapshot,
     mut params: crate::lsp::ext::CodeAction,
 ) -> anyhow::Result<crate::lsp::ext::CodeAction> {
+    if let Some(source) = params.data.as_ref().and_then(|data| data.get("sourceState")) {
+        let valid = source
+            .get("uri")
+            .and_then(|uri| serde_json::from_value::<Url>(uri.clone()).ok())
+            .and_then(|uri| snap.analysis.file(&uri))
+            .is_some_and(|file| {
+                source.get("fingerprint").and_then(|value| value.as_str())
+                    == Some(crate::code_action_helpers::source_fingerprint(file.text()).as_str())
+            });
+        if !valid {
+            return Err(super::dispatch::RequestError {
+                code: lsp_server::ErrorCode::ContentModified,
+                message: "The source changed since the code action was requested",
+            }
+            .into());
+        }
+    }
+    if let Some(source) = params.data.as_ref().and_then(|data| data.get("extractionSource")) {
+        let valid = source
+            .get("uri")
+            .and_then(|uri| serde_json::from_value::<Url>(uri.clone()).ok())
+            .and_then(|uri| snap.analysis.file(&uri))
+            .is_some_and(|file| {
+                source.get("text").and_then(|text| text.as_str()) == Some(file.text())
+            });
+        if !valid {
+            return Err(super::dispatch::RequestError {
+                code: lsp_server::ErrorCode::ContentModified,
+                message: "The source changed since the extraction was requested",
+            }
+            .into());
+        }
+    }
     if let Some(request) = params
         .data
         .as_ref()
@@ -824,6 +891,23 @@ pub(crate) fn handle_code_action_resolve(
             params.edit = crate::code_action_helpers::resolve_code_action_edit_from_data(data);
         }
     }
+    if let Some(DocumentChanges::Operations(operations)) =
+        params.edit.as_ref().and_then(|edit| edit.document_changes.as_ref())
+    {
+        for operation in operations {
+            if let DocumentChangeOperation::Op(ResourceOp::Create(create)) = operation {
+                if snap.analysis.file_id(&create.uri).is_some()
+                    || create.uri.to_file_path().map_or(true, |path| path.exists())
+                {
+                    return Err(super::dispatch::RequestError {
+                        code: lsp_server::ErrorCode::ContentModified,
+                        message: "The extraction destination already exists",
+                    }
+                    .into());
+                }
+            }
+        }
+    }
     Ok(params)
 }
 
@@ -840,22 +924,36 @@ pub(crate) fn handle_completion(
     if !snap.config.completion.enable {
         return Ok(None);
     }
-    let ide_items = snap.analysis.completions(file_id, line_col)?;
+    let config = snap.config.completion.to_ide_config();
+    let ide_items = snap.analysis.completions(file_id, line_col, &config)?;
+    let line_index = line_index_for(&snap, uri);
     if ide_items.is_empty() {
         return Ok(None);
     }
+    // A list cut at `completion.limit` is only the best of the names
+    // matching what is typed so far, so the client must ask again as the
+    // prefix grows instead of filtering what it was given.
+    let truncated = config.limit.is_some_and(|limit| ide_items.len() >= limit);
     let lsp_items: Vec<CompletionItem> = {
         let markdown = snap.client_caps.completion_markdown_support();
-        let snippets = snap.client_caps.completion_snippet_support();
+        let snippets =
+            snap.config.completion.snippets && snap.client_caps.completion_snippet_support();
         ide_items
             .iter()
             .filter(|it| {
                 it.import.is_none() || snap.client_caps.completion_import_resolve_support()
             })
-            .map(|it| crate::to_proto::completion_item(it, snippets, markdown, None))
+            .map(|it| crate::to_proto::completion_item(it, snippets, markdown, Some(&line_index)))
             .collect()
     };
-    Ok(Some(CompletionResponse::Array(lsp_items)))
+    Ok(Some(if truncated {
+        CompletionResponse::List(lsp_types::CompletionList {
+            is_incomplete: true,
+            items: lsp_items,
+        })
+    } else {
+        CompletionResponse::Array(lsp_items)
+    }))
 }
 
 pub(crate) fn handle_resolve_completion_item(
@@ -875,12 +973,18 @@ pub(crate) fn handle_resolve_completion_item(
         .scope_file
         .and_then(|id| snap.analysis.url_for_file_id(id))
         .map(|uri| line_index_for(&snap, uri));
-    Ok(crate::to_proto::completion_item(
+    let mut resolved = crate::to_proto::completion_item(
         &ide_item,
         snap.client_caps.completion_snippet_support(),
         snap.client_caps.completion_markdown_support(),
         index.as_ref(),
-    ))
+    );
+    // Completion resolve supplies details and additional edits, not a newly
+    // calculated replacement range against a possibly changed document.
+    resolved.text_edit = item.text_edit;
+    resolved.insert_text = item.insert_text;
+    resolved.insert_text_format = item.insert_text_format;
+    Ok(resolved)
 }
 
 pub(crate) fn handle_inlay_hint(
@@ -1019,11 +1123,11 @@ pub(crate) fn handle_references(
                             uri: decl_url.clone(),
                             range: Range::new(
                                 crate::to_proto::position_from_line_col(
-                                    &line_index_for(&snap, uri),
+                                    &line_index_for(&snap, decl_url),
                                     decl_file.position_at(base_db::range_start(decl.range)),
                                 ),
                                 crate::to_proto::position_from_line_col(
-                                    &line_index_for(&snap, uri),
+                                    &line_index_for(&snap, decl_url),
                                     decl_file.position_at(base_db::range_end(decl.range)),
                                 ),
                             ),
@@ -1042,11 +1146,11 @@ pub(crate) fn handle_references(
                             uri: ref_url.clone(),
                             range: Range::new(
                                 crate::to_proto::position_from_line_col(
-                                    &line_index_for(&snap, uri),
+                                    &line_index_for(&snap, ref_url),
                                     ref_file.position_at(base_db::range_start(*range)),
                                 ),
                                 crate::to_proto::position_from_line_col(
-                                    &line_index_for(&snap, uri),
+                                    &line_index_for(&snap, ref_url),
                                     ref_file.position_at(base_db::range_end(*range)),
                                 ),
                             ),
@@ -1105,7 +1209,13 @@ pub(crate) fn handle_code_lens(
     if !snap.config.code_lens.enable {
         return Ok(None);
     }
-    let Some(ide_lenses) = snap.analysis.code_lenses(file_id).ok() else {
+    let config = ide::annotations::AnnotationConfig {
+        annotate_references: snap.config.code_lens.references,
+        annotate_impls: snap.config.code_lens.implementations,
+        annotate_runnables: snap.config.code_lens.runnables,
+        ..Default::default()
+    };
+    let Some(ide_lenses) = snap.analysis.code_lenses(file_id, &config).ok() else {
         return Ok(None);
     };
     if ide_lenses.is_empty() {
@@ -1487,6 +1597,11 @@ pub(crate) fn handle_sail_lsp_status(
     stdx::format_to!(status, "  files loaded:     {}\n", counts.files);
     stdx::format_to!(status, "  index symbols:    {}\n", counts.symbols);
     stdx::format_to!(status, "  include graph:    {} nodes\n", counts.include_nodes);
+    stdx::format_to!(
+        status,
+        "  allocator heap:   {} MiB (estimate)\n",
+        profile::MemoryUsage::now().allocated.megabytes()
+    );
     Ok(status)
 }
 

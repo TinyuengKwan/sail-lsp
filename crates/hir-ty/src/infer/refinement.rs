@@ -263,6 +263,45 @@ pub(super) fn join(a: &Ty, b: &Ty) -> Option<Ty> {
 }
 
 pub(super) fn conditional_join(cond: &ConstraintExpr, a: &Ty, b: &Ty) -> Option<Ty> {
+    if matches!(a.kind(), TyKind::Exist { .. }) || matches!(b.kind(), TyKind::Exist { .. }) {
+        let mut used = HashSet::new();
+        super::substitution::ty_names(a, &mut used, true);
+        super::substitution::ty_names(b, &mut used, true);
+        super::substitution::constraint_names(cond, &mut used);
+        let mut vars = Vec::new();
+        let mut facts = Vec::new();
+        let mut unpack = |ty: &Ty, active: ConstraintExpr| {
+            let mut ty = ty.clone();
+            while let TyKind::Exist { vars: bound, constraint, inner } = ty.kind() {
+                let mut subst = Subst::default();
+                for var in bound {
+                    let mut index = vars.len();
+                    let name = loop {
+                        let name = format!("'_branch{index}");
+                        if used.insert(name[1..].to_owned()) {
+                            break name;
+                        }
+                        index += 1;
+                    };
+                    subst.values.insert(var.clone(), name.clone());
+                    subst.types.insert(var.clone(), Ty::param(&name));
+                    vars.push(name);
+                }
+                // A branch's witnesses satisfy its predicate only when that
+                // branch is selected. Do not assume both predicates at once.
+                facts.push(ConstraintExpr::Or(vec![
+                    ConstraintExpr::Not(Box::new(active.clone())),
+                    super::constraint::apply_subst_constraint_expr(constraint, &subst),
+                ]));
+                ty = super::constraint::apply_subst(inner, &subst);
+            }
+            ty
+        };
+        let left = unpack(a, cond.clone());
+        let right = unpack(b, ConstraintExpr::Not(Box::new(cond.clone())));
+        let inner = conditional_join(cond, &left, &right)?;
+        return Some(Ty::exist(vars, ConstraintExpr::And(facts), inner));
+    }
     if let (Some(a), Some(b)) = (super::subtype::bool_value(a), super::subtype::bool_value(b)) {
         return Some(Ty::app(
             "bool",

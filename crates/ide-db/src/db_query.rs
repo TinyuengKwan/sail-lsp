@@ -5,14 +5,10 @@
 //!
 //! Created in stage a.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use base_db::FileText;
 use syntax::parse_query::parsed_file;
-
-use crate::signatures::build_signature_index_from_parsed;
-use crate::CallableSignature;
 
 /// The file's `ParsedFile`, with the local bindings the CST lowering does not
 /// record.
@@ -38,66 +34,6 @@ pub fn enriched_parsed_file(
     Some(Arc::new(parsed))
 }
 
-/// Salsa tracked function: build the per-file signature index.
-///
-/// Maps callable name → CallableSignature. Used by completion,
-/// hover, signature help, and many other IDE features.
-///
-/// RA-1: This query depends on `parsed_file` (which captures
-/// callable heads from CST). Body changes don't affect signatures
-/// because `parsed_file` only changes when the CST structure
-/// changes (not when expression bodies change — that's handled by
-/// `infer` separately).
-#[salsa::tracked(returns(ref))]
-pub fn signature_index(
-    db: &dyn salsa::Database,
-    input: FileText,
-) -> Arc<HashMap<String, CallableSignature>> {
-    let pf = parsed_file(db, input);
-    let text = input.text(db);
-    match pf.as_ref() {
-        Some(pf) => Arc::new(build_signature_index_from_parsed(&pf.0, text.as_ref())),
-        None => Arc::new(HashMap::new()),
-    }
-}
-
-/// How many times each name is called in this file.
-///
-/// From the callgraph, which is built out of the lowered bodies. Counting
-/// every value-position name in the flat scrape instead meant a shadowing
-/// local and the top-level function it hides were one number.
-#[salsa::tracked(returns(ref))]
-pub fn ref_counts(db: &dyn salsa::Database, input: FileText) -> Arc<HashMap<String, usize>> {
-    let mut counts = HashMap::new();
-    if let Some(bodies) = hir::def_query::callable_bodies(db, input).as_ref() {
-        let graph = hir::callgraph::CallGraph::from_callable_bodies(&bodies.0);
-        for site in graph.call_sites_in_file() {
-            *counts.entry(site.callee.clone()).or_insert(0) += 1;
-        }
-    }
-    Arc::new(counts)
-}
-
-/// How many definitions each name has in this file.
-///
-/// A `function clause` of a scattered definition counts: it is one of the
-/// implementations the code lens is reporting.
-#[salsa::tracked(returns(ref))]
-pub fn impl_counts(db: &dyn salsa::Database, input: FileText) -> Arc<HashMap<String, usize>> {
-    let mut counts = HashMap::new();
-    if let Some(tree) = hir::def_query::file_item_tree(db, input).as_ref() {
-        for &id in tree.top_level_items() {
-            if matches!(
-                id.def_kind(tree),
-                hir::DefKind::Function | hir::DefKind::Mapping | hir::DefKind::ScatteredClause
-            ) {
-                *counts.entry(id.name(tree).to_string()).or_insert(0) += 1;
-            }
-        }
-    }
-    Arc::new(counts)
-}
-
 /// Per-file line index — maps byte offsets to line/column positions.
 ///
 /// Salsa ensures this is only recomputed when file text changes.
@@ -111,6 +47,7 @@ pub fn line_index(db: &dyn salsa::Database, input: FileText) -> Arc<crate::line_
 mod tests {
     use super::*;
     use base_db::FileId;
+    use hir::semantic_queries::signature_index;
 
     #[salsa::db]
     #[derive(Default, Clone)]

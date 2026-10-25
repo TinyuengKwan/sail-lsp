@@ -1703,10 +1703,21 @@ fn preserve_global_numeric_binders(node: &syntax::SyntaxNode, env: &mut TopLevel
         let Some(ty) = env.values.get(&name) else {
             continue;
         };
-        if !super::constraint::is_numeric_scalar_ty(ty) {
+        let variable = NumericExpr::Var(triple[2].text().to_string());
+        if let TyKind::Exist { vars, constraint, inner } = ty.kind() {
+            let Some(NumericExpr::Var(index)) = super::refinement::singleton(inner) else {
+                continue;
+            };
+            if vars.len() != 1 || vars[0] != index {
+                continue;
+            }
+            let mut subst = Subst::default();
+            subst.values.insert(index, variable.to_string_repr());
+            env.global_constraints
+                .push(super::constraint::apply_subst_constraint_expr(constraint, &subst));
+        } else if !super::constraint::is_numeric_scalar_ty(ty) {
             continue;
         }
-        let variable = NumericExpr::Var(triple[2].text().to_string());
         if let Some((lo, hi)) = super::expr::concrete_range_bounds(ty) {
             if let (Ok(lo), Ok(hi)) = (i64::try_from(lo), i64::try_from(hi)) {
                 env.global_constraints.push(ConstraintExpr::And(vec![

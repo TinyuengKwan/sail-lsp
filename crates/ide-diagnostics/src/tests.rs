@@ -71,7 +71,7 @@ pub(crate) fn test_ctx<'a>(
     use ide_db::assists::AssistResolveStrategy;
     static RESOLVE: AssistResolveStrategy = AssistResolveStrategy::All;
     let sema = hir::Semantics::new(db);
-    DiagnosticsContext { config, sema, resolve: &RESOLVE }
+    DiagnosticsContext { file: None, config, sema, resolve: &RESOLVE }
 }
 
 /// Create a test `InFile<SyntaxNodePtr>` from a byte range.
@@ -563,6 +563,11 @@ fn configured_global_constraints_follow_configuration() {
             should_fail,
             "{diagnostics:?}"
         );
+        if let Some(diagnostic) =
+            diagnostics.iter().find(|d| d.code.as_str() == "config-constraint-violated")
+        {
+            assert_eq!(usize::from(diagnostic.range.start()), source.find("0 < maskmax").unwrap());
+        }
     }
     let diagnostics = crate::semantic::compute_semantic_diagnostics_with_names(
         &file,
@@ -594,7 +599,7 @@ fn upstream_invalid_declaration_forms() {
             "union U = { A : int, B : bool }\n$[undefined_gen \"generate\"]\nstruct S = { a : U }",
             "Cannot generate undefined",
         ),
-        ("enum clause Missing = A", "no scattered declaration"),
+        ("enum clause Missing = A", "Enumeration Missing does not exist"),
         ("union clause Missing = A : int", "no scattered declaration"),
     ] {
         let result = check_diagnostics(source);
@@ -656,5 +661,170 @@ fn valid_patterns_declarations_and_type_scopes() {
         );
         let errors: Vec<_> = diagnostics.iter().filter(|d| d.severity == Severity::Error).collect();
         assert!(errors.is_empty(), "{source}\n{errors:?}");
+    }
+}
+
+#[test]
+fn declaration_errors_point_at_the_invalid_token_or_guard() {
+    for (source, message, target) in [
+        ("default Order dec\ndefault Order inc", "Cannot change default order", "inc"),
+        ("impl f() = ()", "outside of an outcome", "f"),
+        ("enum clause Missing = A", "does not exist", "Missing"),
+        ("function f(x) -> int = x", "unannotated parameter", "x"),
+        ("function f(a : int, b) -> int = b", "unannotated parameter", "b"),
+        ("mapping m : int <-> bool = { forwards x if x > 0 => true when x < 5, backwards _ => 0 }", "both a 'when'", "x < 5"),
+        ("scattered union U\nend U\nend U", "already been ended", "end U"),
+    ] {
+        let file = TestFile::new(source);
+        let diagnostics = compute_semantic_diagnostics(&file);
+        let diagnostic = diagnostics.iter().find(|d| d.message.contains(message))
+            .unwrap_or_else(|| panic!("{source}: {diagnostics:?}"));
+        let expected = if message == "already been ended" { source.rfind(target).unwrap() } else { source.find(target).unwrap() };
+        assert_eq!(usize::from(diagnostic.range.start()), expected, "{source}");
+    }
+}
+
+#[test]
+fn type_pattern_errors_distinguish_invalid_syntax_from_matching() {
+    let diagnose = |source: &str| {
+        let file = TestFile::new(source);
+        let (db, ft) = ide_db::FileDb::file_text(&file).unwrap();
+        crate::semantic_diagnostics(
+            db,
+            &crate::DiagnosticsConfig::new(),
+            &crate::AssistResolveStrategy::None,
+            &file,
+            ft,
+            None,
+        )
+    };
+    for (source, message) in [
+        ("function f(x : bits(4)) -> unit = match x { y as bits(4) => () }", "binders or wildcards instead of literal"),
+        ("function f(x : string) -> unit = match x { y as 'n => () }", "has no numeric expression to bind"),
+        ("function f(x : bits(4)) -> unit = match x { y as bits(int('n)) => () }", "Type pattern"),
+        ("type bytes('n : Int) = bits(8 * 'n)\nfunction f(x : bits(33)) -> unit = match x { y as bytes('n) => () }", "does not match type"),
+    ] {
+        let source = format!("default Order dec\n{source}");
+        let diagnostics = diagnose(&source);
+        assert!(diagnostics.iter().any(|d| d.severity == Severity::Error && d.message.contains(message)), "{source}: {diagnostics:?}");
+        assert!(!diagnostics.iter().any(|d| d.message.contains("not a subtype")), "{diagnostics:?}");
+    }
+    for source in [
+        "function f(x : bits(4)) -> unit = match x { y as bits('n) => () }",
+        "type bytes('n : Int) = bits(8 * 'n)\nfunction f(x : bits(32)) -> unit = match x { y as bytes('n) => () }",
+    ] {
+        let source = format!("default Order dec\n{source}");
+        let diagnostics = diagnose(&source);
+        assert!(!diagnostics.iter().any(|d| d.severity == Severity::Error), "{source}: {diagnostics:?}");
+    }
+}
+
+#[test]
+fn record_field_errors_highlight_keys_instead_of_receivers_or_values() {
+    for (source, message, target) in [
+        ("struct S = { a : int }\nfunction f(s : S) -> int = s.missing", "no field", "missing"),
+        ("struct S = { a : int }\nfunction f(s : S) -> unit = match s { struct { a = x, a = y } => () }", "Duplicate field", "a = y"),
+    ] {
+        let file = TestFile::new(source);
+        let (db, ft) = ide_db::FileDb::file_text(&file).unwrap();
+        let diagnostics = crate::semantic_diagnostics(db, &crate::DiagnosticsConfig::new(),
+            &crate::AssistResolveStrategy::None, &file, ft, None);
+        let diagnostic = diagnostics.iter().find(|d| d.message.contains(message)).unwrap_or_else(|| panic!("{diagnostics:?}"));
+        let start = source.find(target).unwrap();
+        let len = target.split_whitespace().next().unwrap().len();
+        assert_eq!(usize::from(diagnostic.range.range.start()), start, "{diagnostics:?}");
+        assert_eq!(usize::from(diagnostic.range.range.end()), start + len, "{diagnostics:?}");
+    }
+}
+
+#[test]
+fn conflicting_config_paths_report_both_uses_in_either_order() {
+    for accesses in [
+        "let x : bool = config foo.bar; let y : bool = config foo;",
+        "let y : bool = config foo; let x : bool = config foo.bar;",
+    ] {
+        let source = format!("function f() -> unit = {{ {accesses} () }}");
+        let file = TestFile::new(&source);
+        let diagnostics = compute_semantic_diagnostics(&file);
+        let diagnostic = diagnostics
+            .iter()
+            .find(|d| d.code.as_str() == "config-key-conflict")
+            .unwrap_or_else(|| panic!("{diagnostics:?}"));
+        assert!(diagnostic.message.contains("both a value and an object"));
+        assert_eq!(&source[diagnostic.range], "config foo");
+        assert_eq!(diagnostic.related.len(), 1);
+        assert_eq!(&source[diagnostic.related[0].0], "config foo.bar");
+    }
+}
+
+#[test]
+fn phantom_record_parameters_require_evidence_at_the_construction_site() {
+    let declaration = "struct S('a : Type) = { x : int }";
+    for (body, fails) in [
+        ("function f() -> unit = { let s = struct S { x = 1 }; () }", true),
+        ("function f() -> unit = { let s : S(bool) = struct S { x = 1 }; () }", false),
+        ("val f : S(bool) -> unit\nfunction f(s) = ()", false),
+        ("function f() -> S(bool) = struct S { x = 1 }", false),
+    ] {
+        let source = format!("{declaration}\n{body}");
+        let file = TestFile::new(&source);
+        let (db, ft) = ide_db::FileDb::file_text(&file).unwrap();
+        let diagnostics = crate::semantic_diagnostics(
+            db,
+            &crate::DiagnosticsConfig::new(),
+            &crate::AssistResolveStrategy::None,
+            &file,
+            ft,
+            None,
+        );
+        let errors: Vec<_> = diagnostics.iter().filter(|d| d.severity == Severity::Error).collect();
+        if fails {
+            let diagnostic = errors
+                .iter()
+                .find(|d| d.message.contains("Failed to instantiate"))
+                .unwrap_or_else(|| panic!("{source}: {diagnostics:?}"));
+            assert_eq!(&source[diagnostic.range.range], "struct S { x = 1 }");
+        } else {
+            assert!(errors.is_empty(), "{source}: {diagnostics:?}");
+        }
+    }
+}
+
+#[test]
+fn type_pattern_and_constraint_errors_highlight_the_invalid_type_or_constraint() {
+    for (source, message, target) in [
+        (
+            "default Order dec\nfunction f(x : bits(4)) -> unit = match x { y as bits(4) => () }",
+            "binders or wildcards",
+            "bits(4) =>",
+        ),
+        (
+            "type q : Bool = missing_constraint",
+            "Well-formedness check failed for constraint",
+            "missing_constraint",
+        ),
+        ("type T = list(T)", "Failed to infer kind", "T)"),
+    ] {
+        let file = TestFile::new(source);
+        let (db, ft) = ide_db::FileDb::file_text(&file).unwrap();
+        let mut workspace = crate::WorkspaceNames::default();
+        workspace.type_names.insert("bool".into());
+        let diagnostics = crate::semantic_diagnostics(
+            db,
+            &crate::DiagnosticsConfig::new(),
+            &crate::AssistResolveStrategy::None,
+            &file,
+            ft,
+            Some(&workspace),
+        );
+        let diagnostic = diagnostics
+            .iter()
+            .find(|d| d.message.contains(message))
+            .unwrap_or_else(|| panic!("{source}: {diagnostics:?}"));
+        assert_eq!(
+            usize::from(diagnostic.range.range.start()),
+            source.find(target).unwrap(),
+            "{diagnostics:?}"
+        );
     }
 }

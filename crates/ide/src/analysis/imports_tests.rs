@@ -71,7 +71,11 @@ fn completion_include_is_lazy_and_keeps_ambiguous_origins_separate() {
     let a = snapshot(&host, &map);
     let file = a.file(&urls[0]).unwrap();
     let items = a
-        .completions(FileId::from_raw(0), file.position_at(main.find("hel(").unwrap() + 3))
+        .completions(
+            FileId::from_raw(0),
+            file.position_at(main.find("hel(").unwrap() + 3),
+            &Default::default(),
+        )
         .unwrap();
     let mut imports: Vec<_> = items.into_iter().filter(|i| i.import.is_some()).collect();
     assert_eq!(imports.len(), 2, "{imports:?}");
@@ -160,7 +164,11 @@ fn include_completion_rejects_stale_source_and_target() {
         let a = snapshot(&host, &map);
         let f = a.file(&urls[0]).unwrap();
         let mut item = a
-            .completions(FileId::from_raw(0), f.position_at(main.find("hel(").unwrap() + 3))
+            .completions(
+                FileId::from_raw(0),
+                f.position_at(main.find("hel(").unwrap() + 3),
+                &Default::default(),
+            )
             .unwrap()
             .into_iter()
             .find(|i| i.import.is_some())
@@ -239,7 +247,11 @@ fn include_completion_docs_follow_the_activated_branch() {
     let a = snapshot(&host, &map);
     let file = a.file(&urls[0]).unwrap();
     let mut item = a
-        .completions(FileId::from_raw(0), file.position_at(main.find("hel(").unwrap() + 3))
+        .completions(
+            FileId::from_raw(0),
+            file.position_at(main.find("hel(").unwrap() + 3),
+            &Default::default(),
+        )
         .unwrap()
         .into_iter()
         .find(|i| i.import.is_some())
@@ -270,7 +282,11 @@ fn include_completion_revalidates_context_after_configuration_changes() {
     let a = snapshot(&host, &map);
     let file = a.file(&urls[0]).unwrap();
     let mut item = a
-        .completions(FileId::from_raw(0), file.position_at(main.find("hel(").unwrap() + 3))
+        .completions(
+            FileId::from_raw(0),
+            file.position_at(main.find("hel(").unwrap() + 3),
+            &Default::default(),
+        )
         .unwrap()
         .into_iter()
         .find(|i| i.import.is_some())
@@ -313,7 +329,11 @@ fn include_resolve_rejects_out_of_bounds_client_offsets() {
     let a = snapshot(&host, &map);
     let file = a.file(&urls[0]).unwrap();
     let item = a
-        .completions(FileId::from_raw(0), file.position_at(main.find("hel(").unwrap() + 3))
+        .completions(
+            FileId::from_raw(0),
+            file.position_at(main.find("hel(").unwrap() + 3),
+            &Default::default(),
+        )
         .unwrap()
         .into_iter()
         .find(|i| i.import.is_some())
@@ -455,6 +475,7 @@ fn include_preview_checks_duplicate_declarations_across_module_owners() {
             .completions(
                 FileId::from_raw(1),
                 file.position_at(main.find(name).unwrap() + name.len()),
+                &Default::default(),
             )
             .unwrap()
             .into_iter()
@@ -502,7 +523,7 @@ fn include_outcome_target_uses_its_own_namespace() {
         assert_eq!(edits[0].new_text, "$include \"outcome.sail\"\n");
         let file = a.file(&urls[0]).unwrap();
         let mut imports: Vec<_> = a
-            .completions(FileId::from_raw(0), file.position_at(offset + 5))
+            .completions(FileId::from_raw(0), file.position_at(offset + 5), &Default::default())
             .unwrap()
             .into_iter()
             .filter(|item| item.import.is_some())
@@ -894,7 +915,7 @@ fn instantiation_rhs_auto_include_preserves_the_replacement_namespace() {
         );
         let file = a.file(&urls[0]).unwrap();
         let mut items: Vec<_> = a
-            .completions(FileId::from_raw(0), file.position_at(offset + 5))
+            .completions(FileId::from_raw(0), file.position_at(offset + 5), &Default::default())
             .unwrap()
             .into_iter()
             .filter(|item| item.import.is_some())

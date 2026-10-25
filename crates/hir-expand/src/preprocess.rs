@@ -105,7 +105,13 @@ fn plan_with_overlay(
         overlay,
         paths,
         reverse,
-        symbols: syntax::preprocess::default_symbols(),
+        symbols: {
+            let mut symbols = syntax::preprocess::default_symbols();
+            if base_db::strict_bitvector(db) {
+                symbols.insert("STRICT_BITVECTOR".into());
+            }
+            symbols
+        },
         targets: HashMap::new(),
         stack: Vec::new(),
         owners: HashMap::new(),

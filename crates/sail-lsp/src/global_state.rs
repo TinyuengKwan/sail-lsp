@@ -99,6 +99,8 @@ pub(crate) struct GlobalState {
         Option<(crate::config::WorkspaceConfig, std::collections::HashSet<Url>, u64)>,
     pub(crate) loading_project_inputs: crate::reload::DiscoveryInputs,
     pub(crate) project_error: Option<String>,
+    /// Settings the client sent that could not be read, last reported.
+    pub(crate) config_errors: Vec<String>,
     pub(crate) project_manifests: Vec<std::path::PathBuf>,
     pub(crate) loading_module_graph: Option<base_db::module_graph::ModuleGraph>,
     pub(crate) loading_source_project: Option<base_db::preprocess::SourceProject>,
@@ -176,7 +178,7 @@ impl GlobalState {
         Self {
             pending_change: ide_db::apply_change::Change::new(),
             mem_docs: crate::mem_docs::MemDocs::default(),
-            analysis_host: ide::analysis::AnalysisHost::new(None),
+            analysis_host: ide::analysis::AnalysisHost::new(),
             vfs: vfs::Vfs::default(),
             include_graph: hir::include_graph::IncludeGraph::new(),
             local_root: base_db::SourceRoot::new_local(base_db::FileSet::default()),
@@ -195,6 +197,7 @@ impl GlobalState {
             loading_project_config: None,
             loading_project_inputs: Default::default(),
             project_error: None,
+            config_errors: Vec::new(),
             project_manifests: Vec::new(),
             loading_module_graph: None,
             loading_source_project: None,
@@ -524,6 +527,12 @@ impl GlobalState {
             client_caps: self.client_caps.clone(),
             last_format_options: self.last_format_options.clone(),
             library_files: Arc::new(self.library_root.clone()),
+            project_error: self.project_error.as_deref().map(Arc::from),
+            document_versions: self
+                .mem_docs
+                .iter()
+                .filter_map(|uri| self.mem_docs.get(uri).map(|doc| (uri.clone(), doc.version)))
+                .collect(),
         }
     }
 
@@ -559,6 +568,8 @@ impl GlobalState {
 /// mutating shared state. Clone is cheap (salsa Arc + index Arc).
 #[derive(Clone)]
 pub(crate) struct GlobalStateSnapshot {
+    pub(crate) document_versions: std::collections::HashMap<Url, i32>,
+    pub(crate) project_error: Option<Arc<str>>,
     /// Immutable Analysis snapshot (salsa db + Files).
     pub analysis: Analysis,
     /// Server configuration.

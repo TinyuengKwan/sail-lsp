@@ -295,21 +295,6 @@ impl ide_db::FileDb for ScipFile {
     fn parsed(&self) -> Option<&syntax::parser_lower::ParsedFile> {
         self.parsed.as_ref()
     }
-    fn signature_index(
-        &self,
-    ) -> Option<&std::collections::HashMap<String, ide_db::CallableSignature>> {
-        None
-    }
-    fn ref_counts(&self) -> &std::collections::HashMap<String, usize> {
-        static EMPTY: std::sync::OnceLock<std::collections::HashMap<String, usize>> =
-            std::sync::OnceLock::new();
-        EMPTY.get_or_init(std::collections::HashMap::new)
-    }
-    fn impl_counts(&self) -> &std::collections::HashMap<String, usize> {
-        static EMPTY: std::sync::OnceLock<std::collections::HashMap<String, usize>> =
-            std::sync::OnceLock::new();
-        EMPTY.get_or_init(std::collections::HashMap::new)
-    }
     fn bodies(&self) -> Option<&hir::CallableBodies> {
         self.bodies.as_deref()
     }
@@ -342,7 +327,7 @@ pub fn cmd_analysis_stats(dir: &Path, verbose: bool) -> Result<(), String> {
     }
 
     let t0 = Instant::now();
-    let mut host = AnalysisHost::new(None);
+    let mut host = AnalysisHost::new();
     let mut change = ide_db::apply_change::Change::new();
     let mut vfs = vfs::Vfs::default();
     let mut url_fids = Vec::new();

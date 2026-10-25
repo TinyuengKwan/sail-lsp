@@ -54,8 +54,38 @@ pub fn completions(
     keywords: &[&str],
     builtins: &[&str],
 ) -> Vec<CompletionItem> {
-    let (ctx, analysis) =
+    completions_with_config(
+        db,
+        file_text,
+        all_files,
+        current_uri,
+        file,
+        text,
+        offset,
+        prefix,
+        keywords,
+        builtins,
+        &CompletionConfig::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn completions_with_config(
+    db: &dyn salsa::Database,
+    file_text: Option<base_db::FileText>,
+    all_files: &[(&Url, &dyn FileDb)],
+    current_uri: &Url,
+    file: &dyn FileDb,
+    text: &str,
+    offset: usize,
+    prefix: &str,
+    keywords: &[&str],
+    builtins: &[&str],
+    config: &CompletionConfig,
+) -> Vec<CompletionItem> {
+    let (mut ctx, analysis) =
         context::CompletionContext::new(db, file, file_text, text, offset, prefix);
+    ctx.config = config.clone();
     let mut completions = Completions::default();
 
     {
@@ -88,7 +118,14 @@ pub fn completions(
     }
 
     let mut items: Vec<CompletionItem> = completions.into();
+    let suffix_len = text[offset..]
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '\'')
+        .map(char::len_utf8)
+        .sum::<usize>();
+    let replacement = base_db::text_range(offset.saturating_sub(prefix.len()), offset + suffix_len);
     for item in &mut items {
+        item.source_range.get_or_insert(replacement);
         item.scope_file = file_text.map(|ft| ft.file_id(db));
         if item.import.is_none()
             && !item.relevance.is_local
@@ -146,6 +183,9 @@ pub fn completions(
         }
     }
     crate::item::deduplicate_and_sort(&mut items, prefix);
+    if let Some(limit) = config.limit {
+        items.truncate(limit);
+    }
     items
 }
 

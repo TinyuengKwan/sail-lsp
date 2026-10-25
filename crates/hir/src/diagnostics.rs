@@ -121,7 +121,7 @@ pub struct IncompleteMatch {
 pub struct MissingFields {
     pub record_name: String,
     pub missing: Vec<String>,
-    /// Type names of the missing fields (for smart-fill defaults). .
+    /// Instantiated types, in the same order as `missing`.
     pub field_types: Option<Vec<String>>,
     pub node: InFile<SyntaxNodePtr>,
 }
@@ -448,11 +448,11 @@ impl AnyDiagnostic {
                     node: expr_syntax(*expr)?,
                 }))
             }
-            InferenceDiagnostic::MissingFields { expr, record_name, missing } => {
+            InferenceDiagnostic::MissingFields { expr, record_name, missing, field_types } => {
                 Some(AnyDiagnostic::MissingFields(MissingFields {
                     record_name: record_name.clone(),
                     missing: missing.clone(),
-                    field_types: None, // TODO: populate from struct definition
+                    field_types: Some(field_types.clone()),
                     node: expr_syntax(*expr)?,
                 }))
             }
@@ -539,14 +539,17 @@ impl AnyDiagnostic {
                     in_struct_pattern: *in_struct_pattern,
                 }))
             }
-            InferenceDiagnostic::MissingPatternFields { pat, record_name, missing } => {
-                Some(AnyDiagnostic::MissingFields(MissingFields {
-                    record_name: record_name.clone(),
-                    missing: missing.clone(),
-                    field_types: None,
-                    node: pat_syntax(*pat)?,
-                }))
-            }
+            InferenceDiagnostic::MissingPatternFields {
+                pat,
+                record_name,
+                missing,
+                field_types,
+            } => Some(AnyDiagnostic::MissingFields(MissingFields {
+                record_name: record_name.clone(),
+                missing: missing.clone(),
+                field_types: Some(field_types.clone()),
+                node: pat_syntax(*pat)?,
+            })),
             // The same fact as a field access that does not resolve, and it
             // reads the same way: "no field `zzz` on type `Record`". The
             // record's declaration is what `Pat::Struct` looked the fields

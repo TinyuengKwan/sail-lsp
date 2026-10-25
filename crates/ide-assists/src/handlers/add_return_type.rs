@@ -33,10 +33,20 @@ pub(crate) fn add_return_type(acc: &mut Assists, ctx: &AssistContext<'_>) -> Opt
     // after the parameter list.
     let body = def.children().filter(|n| n.kind() != SK::PARAM_LIST).last()?;
     let range = body.text_range();
-    let ty = ctx
-        .file
-        .cached_expr_type_text(parser::Span::new(range.start().into(), range.end().into()))?;
+    let ty = ctx.file.file_text().and_then(|(db, ft)| {
+        hir::Semantics::new(db).expr_type_text(
+            ft,
+            parser::Span::new(range.start().into(), range.end().into()),
+            ctx.file.bodies(),
+        )
+    })?;
     if ty == "unknown" || ty == "error" {
+        return None;
+    }
+
+    // Inference can contain internal constraints with no source spelling.
+    // Never offer an annotation that would introduce a syntax error.
+    if !syntax::parse_text(&format!("val __annotation : unit -> {ty}\n")).1.is_empty() {
         return None;
     }
 

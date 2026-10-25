@@ -70,6 +70,9 @@ fn split_fixture(fixture: &str) -> (bool, Vec<(String, String)>) {
 
     for line in fixture.lines() {
         let trimmed = line.trim();
+        if trimmed == "//- strict-bitvector" {
+            continue;
+        }
         if trimmed == PRELUDE_MARKER {
             with_prelude = true;
             continue;
@@ -110,8 +113,9 @@ pub fn analysis(fixture: &str) -> (Analysis, Vec<(FileId, String)>) {
     let fixture_start = all.len();
     all.extend(fixture_files);
 
-    let mut host = AnalysisHost::new(None);
+    let mut host = AnalysisHost::new();
     let mut change = ide_db::apply_change::Change::new();
+    change.set_strict_bitvector(fixture.lines().any(|l| l.trim() == "//- strict-bitvector"));
     let mut vfs = vfs::Vfs::default();
     let urls: Vec<Url> = all
         .iter()

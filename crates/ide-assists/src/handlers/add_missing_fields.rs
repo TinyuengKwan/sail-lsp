@@ -12,71 +12,47 @@ pub(crate) fn add_missing_fields(acc: &mut Assists, ctx: &AssistContext<'_>) -> 
     let cst_root = ctx.source_file()?.clone();
 
     // Find STRUCT_EXPR at cursor
-    let struct_expr = cst_root.descendants().find(|node| {
-        node.kind() == SK::STRUCT_EXPR && {
-            let range = node.text_range();
-            usize::from(range.start()) <= offset && offset <= usize::from(range.end())
-        }
-    })?;
-
-    // The fields already written.
-    let initialized_fields: std::collections::HashSet<String> = struct_expr
-        .children()
-        .filter(|c| c.kind() == SK::FIELD_INIT)
-        .filter_map(|fi| {
-            fi.descendants_with_tokens()
-                .filter_map(|el| el.into_token())
-                .find(|t| t.kind() == SK::IDENT)
-                .map(|t| t.text().to_string())
+    let struct_expr = cst_root
+        .descendants()
+        .filter(|node| {
+            matches!(node.kind(), SK::STRUCT_EXPR | SK::STRUCT_PAT) && {
+                let range = node.text_range();
+                usize::from(range.start()) <= offset && offset <= usize::from(range.end())
+            }
         })
-        .collect();
+        .min_by_key(|node| node.text_range().len())?;
 
-    // Which struct this literal builds.
-    //
-    // Sail's struct literal is `struct { f = v, … }` — it does not name
-    // its type. This used to take the first `IDENT` inside the literal as
-    // the struct's name, which is the first *field's* name, so it looked
-    // for a definition called `x` and found none: the assist could not
-    // fire at all. The type is the one struct that declares every field
-    // written so far; if two do, there is nothing to go on and this
-    // declines rather than guessing.
-    let item_tree = ctx.file.item_tree()?;
-    let mut candidates = item_tree
-        .top_level_items()
-        .iter()
-        .filter(|&&id| matches!(id.def_kind(item_tree), hir::DefKind::Struct))
-        .map(|&id| {
-            let fields: Vec<String> =
-                id.fields(item_tree).iter().map(|f| f.name.to_string()).collect();
-            fields
-        })
-        .filter(|fields| {
-            !fields.is_empty() && initialized_fields.iter().all(|f| fields.iter().any(|d| d == f))
-        });
-    let all_fields = candidates.next()?;
-    if candidates.next().is_some() {
-        return None;
-    }
+    let is_pattern = struct_expr.kind() == SK::STRUCT_PAT;
 
-    // Find missing fields
-    let missing: Vec<&String> =
-        all_fields.iter().filter(|f| !initialized_fields.contains(f.as_str())).collect();
-
+    // Use the same instantiated field types as the diagnostic quick fix.
+    // Matching declarations by their written field names guesses incorrectly
+    // when records share fields, and cannot handle cross-file/generic records.
+    let (sema, _, file) = ctx.sema()?;
+    let missing = sema.missing_record_fields(file, struct_expr.text_range())?;
     if missing.is_empty() {
         return None;
     }
+    let names = missing.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>();
 
     // Each field's value is what has to be typed, so it is a tabstop for
     // a client that can expand snippets.
-    let missing_text = match ctx.config.snippet_cap {
-        Some(_) => missing
-            .iter()
-            .enumerate()
-            .map(|(i, f)| format!("{f} = ${{{}:()}}", i + 1))
-            .collect::<Vec<_>>()
-            .join(", "),
-        None => missing.iter().map(|f| format!("{f} = ()")).collect::<Vec<_>>().join(", "),
-    };
+    let missing_text = missing
+        .iter()
+        .enumerate()
+        .map(|(i, (field, ty))| {
+            let value = if is_pattern {
+                "_".to_string()
+            } else {
+                ide_db::assists::default_value_for_type(ty)
+            };
+            if ctx.config.snippet_cap.is_some() {
+                format!("{field} = ${{{}:{value}}}", i + 1)
+            } else {
+                format!("{field} = {value}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
 
     // Find insertion point: before the closing `}`
     let close_brace = struct_expr
@@ -86,20 +62,27 @@ pub(crate) fn add_missing_fields(acc: &mut Assists, ctx: &AssistContext<'_>) -> 
         .last()?;
 
     // Replacing the space before the `}` rather than inserting at it, so
-    // the result reads `{ x = 1, y = () }` and not `{ x = 1 , y = ()}`.
+    // the result reads `{ x = 1, y = 0 }` and not `{ x = 1 , y = 0}`.
     let insert_offset = usize::from(close_brace.text_range().start());
     let file_text = ctx.file.text();
     let before = file_text.get(..insert_offset)?.trim_end();
-    let comma = if initialized_fields.is_empty() { "" } else { ", " };
+    let mut previous = close_brace.prev_token()?;
+    while previous.kind().is_trivia() {
+        previous = previous.prev_token()?;
+    }
+    let comma = if previous.text() == "{" {
+        ""
+    } else if previous.text() == "," {
+        " "
+    } else {
+        ", "
+    };
     let text = format!("{comma}{missing_text} ");
     let range = base_db::text_range(before.len(), insert_offset);
 
     acc.add(
         AssistId("add_missing_fields", AssistKind::QuickFix),
-        format!(
-            "Add missing field(s): {}",
-            missing.iter().map(|f| f.as_str()).collect::<Vec<_>>().join(", ")
-        ),
+        format!("Add missing field(s): {}", names.join(", ")),
         ctx.range,
         |builder| match ctx.config.snippet_cap {
             Some(_) => builder.replace_snippet(range, text),
@@ -123,7 +106,20 @@ mod tests {
             expect![[r#"
                 struct P = { x : int, y : int }
                 val f : unit -> P
-                function f() = struct { x = 1, y = () }
+                function f() = struct { x = 1, y = 0 }
+            "#]],
+        );
+    }
+
+    #[test]
+    fn missing_pattern_fields_do_not_constrain_the_match() {
+        check_assist(
+            add_missing_fields,
+            "struct P = { x : int, y : bool }\nval f : P -> int\nfunction f(p) = match p { struct { x$0 = n } => n }\n",
+            expect![[r#"
+                struct P = { x : int, y : bool }
+                val f : P -> int
+                function f(p) = match p { struct { x = n, y = _ } => n }
             "#]],
         );
     }
@@ -137,7 +133,7 @@ mod tests {
             expect![[r#"
                 struct P = { x : int, y : int }
                 val f : unit -> P
-                function f() = struct { x = 1, y = ${1:()} }
+                function f() = struct { x = 1, y = ${1:0} }
             "#]],
         );
     }

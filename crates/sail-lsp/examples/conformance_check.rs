@@ -1,7 +1,7 @@
 //! Conformance check: differential-test sail-lsp against upstream Sail's own
 //! typecheck test suite (`sail/test/typecheck/{pass,fail}`).
 //!
-//! Upstream contract (see `sail/test/typecheck/run_tests.py`):
+//! Upstream contract (see `sail/test/suites/typecheck.py`):
 //!   - every file in `pass/` must typecheck cleanly
 //!     (`sail --just-check --strict-bitvector`)
 //!   - every file in `fail/` must be rejected with the error text in the
@@ -15,6 +15,11 @@
 //! Each test file gets a fresh `AnalysisHost` preloaded with the bundled
 //! sail-lib, so `$include <prelude.sail>` resolves and test files cannot
 //! collide with one another.
+//!
+//! The typecheck suite enables strict-bitvector on both sides. Extended corpora
+//! retain the default mode used to produce their oracle. `--default-bitvector`
+//! is a diagnostic comparison only: the typecheck directory expectations were
+//! generated in strict mode and do not change when this switch is used.
 //!
 //! ## Usage
 //!
@@ -73,12 +78,14 @@ fn find_sail_lib() -> Option<PathBuf> {
 fn analysis_for(
     lib_files: &[(Url, PathBuf, String)],
     test: &(Url, PathBuf, String),
-) -> (Analysis, FileId) {
+    strict_bitvector: bool,
+) -> (Analysis, FileId, std::collections::HashSet<FileId>) {
     let mut all: Vec<&(Url, PathBuf, String)> = lib_files.iter().collect();
     all.push(test);
 
-    let mut host = AnalysisHost::new(None);
+    let mut host = AnalysisHost::new();
     let mut change = ide_db::apply_change::Change::new();
+    change.set_strict_bitvector(strict_bitvector);
     let mut vfs = vfs::Vfs::default();
 
     for (url, _p, text) in &all {
@@ -121,6 +128,7 @@ fn analysis_for(
         &url_to_fid,
         find_sail_lib().as_deref(),
     );
+    let included = graph.transitive_includes(test_fid);
     let analysis = Analysis::with_include_graph(
         host.raw_database().clone(),
         files.clone(),
@@ -128,7 +136,7 @@ fn analysis_for(
         std::sync::Arc::new(graph),
     );
 
-    (analysis, test_fid)
+    (analysis, test_fid, included)
 }
 
 struct Outcome {
@@ -136,7 +144,7 @@ struct Outcome {
     errors: Vec<(String, String)>, // (code, message)
     /// Byte offset each error starts at, so it can be compared with the
     /// caret in upstream's `.expect`.
-    starts: Vec<usize>,
+    starts: Vec<Option<usize>>,
     crashed: bool,
 }
 
@@ -217,11 +225,27 @@ fn strip_ansi(text: &str) -> String {
 }
 
 fn read_expectation(path: &Path, stem: &str) -> Option<Expectation> {
-    let text = strip_ansi(&std::fs::read_to_string(path.with_extension("expect")).ok()?);
+    let text = std::fs::read_to_string(path.with_extension("expect")).ok()?;
+    parse_expectation(&text, stem)
+}
+
+fn parse_expectation(text: &str, stem: &str) -> Option<Expectation> {
+    let text = strip_ansi(text);
     let needle = format!("{stem}.sail:");
 
     let mut loc: Option<(usize, usize)> = None;
+    let mut warning = false;
     for line in text.lines() {
+        if line.starts_with("Warning:") {
+            warning = true;
+            loc = None;
+        } else if line.starts_with("Type error:") || line.starts_with("Error:") {
+            warning = false;
+            loc = None;
+        }
+        if warning {
+            continue;
+        }
         if let Some(at) = line.find(&needle) {
             // A location line. It may be a secondary one — upstream prints
             // "Previous definition" and "Has type Foo" *before* the finding
@@ -293,24 +317,58 @@ fn run_one(
     lib_files: &[(Url, PathBuf, String)],
     test: &(Url, PathBuf, String),
     config: &ide_diagnostics::DiagnosticsConfig,
+    strict_bitvector: bool,
 ) -> Outcome {
     let name = test.1.file_name().unwrap_or_default().to_string_lossy().to_string();
     let mut scope = lib_files.to_vec();
-    scope.extend(relative_includes(&test.1));
+    let local_includes = relative_includes(&test.1);
+    scope.extend(local_includes.iter().cloned());
     let lib_files = &scope[..];
     let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let (analysis, fid) = analysis_for(lib_files, test);
-        analysis.file_diagnostics(fid, config).expect("no other thread is here to cancel it")
+        let (analysis, fid, included) = analysis_for(lib_files, test, strict_bitvector);
+        let mut diagnostics: Vec<_> = analysis
+            .file_diagnostics(fid, config)
+            .expect("no other thread is here to cancel it")
+            .into_iter()
+            .map(|d| (None, d))
+            .collect();
+        // Upstream checks the complete included program. A clean entry file
+        // does not imply acceptance when a relative dependency has errors.
+        // Use active graph edges, not just the disk discovery superset.
+        for (url, path, _) in &local_includes {
+            let Some(id) = analysis.file_id(url).filter(|id| *id != fid && included.contains(id))
+            else {
+                continue;
+            };
+            diagnostics.extend(
+                analysis
+                    .file_diagnostics(id, config)
+                    .expect("no other thread is here to cancel it")
+                    .into_iter()
+                    .map(|d| (Some(path.display().to_string()), d)),
+            );
+        }
+        diagnostics
     }));
     match res {
         Ok(diags) => {
             let errs: Vec<_> = diags
                 .iter()
-                .filter(|d| matches!(d.severity, ide_diagnostics::Severity::Error))
+                .filter(|(_, d)| matches!(d.severity, ide_diagnostics::Severity::Error))
                 .collect();
-            let starts = errs.iter().map(|d| usize::from(d.range.range.start())).collect();
-            let errors =
-                errs.iter().map(|d| (d.code.as_str().to_string(), d.message.clone())).collect();
+            let starts = errs
+                .iter()
+                .map(|(file, d)| file.is_none().then(|| usize::from(d.range.range.start())))
+                .collect();
+            let errors = errs
+                .iter()
+                .map(|(file, d)| {
+                    let message = file
+                        .as_ref()
+                        .map_or_else(|| d.message.clone(), |file| format!("{file}: {}", d.message));
+                    (d.code.as_str().to_string(), message)
+                })
+                .collect();
             Outcome { name, errors, starts, crashed: false }
         }
         Err(_) => Outcome { name, errors: Vec::new(), starts: Vec::new(), crashed: true },
@@ -322,6 +380,7 @@ fn main() {
     let list = args.iter().any(|a| a == "--list");
     let detail = args.iter().any(|a| a == "--fail-detail");
     let typecheck_only = args.iter().any(|a| a == "--typecheck-only");
+    let strict_bitvector = !args.iter().any(|a| a == "--default-bitvector");
     let only = args
         .iter()
         .position(|a| a == "--only")
@@ -336,7 +395,7 @@ fn main() {
         .cloned()
         .unwrap_or_else(|| {
             eprintln!(
-                "Usage: conformance_check [--list] [--only SUBSTR] [--fail-detail] [--typecheck-only] \
+                "Usage: conformance_check [--list] [--only SUBSTR] [--fail-detail] [--typecheck-only] [--default-bitvector] \
                  /path/to/sail/test/typecheck"
             );
             std::process::exit(2);
@@ -356,12 +415,19 @@ fn main() {
     let handle = std::thread::Builder::new()
         .name("conformance".into())
         .stack_size(512 * 1024 * 1024)
-        .spawn(move || run(&root, list, only.as_deref(), detail, typecheck_only))
+        .spawn(move || run(&root, list, only.as_deref(), detail, typecheck_only, strict_bitvector))
         .expect("spawn");
     std::process::exit(handle.join().unwrap());
 }
 
-fn run(root: &Path, list: bool, only: Option<&str>, detail: bool, typecheck_only: bool) -> i32 {
+fn run(
+    root: &Path,
+    list: bool,
+    only: Option<&str>,
+    detail: bool,
+    typecheck_only: bool,
+    strict_bitvector: bool,
+) -> i32 {
     let lib_dir = match find_sail_lib() {
         Some(d) => d,
         None => {
@@ -372,6 +438,7 @@ fn run(root: &Path, list: bool, only: Option<&str>, detail: bool, typecheck_only
     let lib_files = discover_sail_files(&lib_dir);
     eprintln!("prelude: {} files from {}", lib_files.len(), lib_dir.display());
 
+    println!("Typecheck mode: strict-bitvector={strict_bitvector}; extended corpora: default");
     let config = ide_diagnostics::DiagnosticsConfig::new();
 
     let mut pass_files: Vec<_> = std::fs::read_dir(root.join("pass"))
@@ -411,7 +478,7 @@ fn run(root: &Path, list: bool, only: Option<&str>, detail: bool, typecheck_only
     for p in pass_files.iter().filter(|p| keep(p)) {
         let Some(t) = load(p) else { continue };
         pass_n += 1;
-        let out = run_one(&lib_files, &t, &config);
+        let out = run_one(&lib_files, &t, &config, strict_bitvector);
         if out.crashed {
             crashes.push(out.name.clone());
         }
@@ -441,7 +508,7 @@ fn run(root: &Path, list: bool, only: Option<&str>, detail: bool, typecheck_only
     for p in fail_files.iter().filter(|p| keep(p)) {
         let Some(t) = load(p) else { continue };
         fail_n += 1;
-        let out = run_one(&lib_files, &t, &config);
+        let out = run_one(&lib_files, &t, &config, strict_bitvector);
         if out.crashed {
             crashes.push(out.name.clone());
         } else if out.errors.is_empty() {
@@ -453,7 +520,21 @@ fn run(root: &Path, list: bool, only: Option<&str>, detail: bool, typecheck_only
         if let Some(want) = read_expectation(p, &stem) {
             with_expect += 1;
             let at = offset_of(&t.2, want.line, want.col);
-            let hit = out.starts.iter().position(|s| *s == at);
+            let hit = out.starts.iter().position(|s| *s == Some(at));
+            if detail {
+                println!(
+                    "DIAGNOSTIC_AUDIT {}",
+                    serde_json::json!({
+                        "file": out.name,
+                        "expected_offset": at,
+                        "expected_message": want.message,
+                        "upstream_gensym": has_gensym(&want.message),
+                        "actual": out.errors.iter().zip(&out.starts).map(|((code, message), start)| {
+                            serde_json::json!({"code": code, "message": message, "start": start})
+                        }).collect::<Vec<_>>()
+                    })
+                );
+            }
             if hit.is_some() {
                 located += 1;
             }
@@ -469,8 +550,10 @@ fn run(root: &Path, list: bool, only: Option<&str>, detail: bool, typecheck_only
             if hit.is_none() {
                 if let Some(i) = out.errors.iter().position(|(_, m)| first_line(m) == want.message)
                 {
-                    misplaced += 1;
-                    misplaced_at.push((out.name.clone(), want.message.clone(), at, out.starts[i]));
+                    if let Some(start) = out.starts[i] {
+                        misplaced += 1;
+                        misplaced_at.push((out.name.clone(), want.message.clone(), at, start));
+                    }
                 }
             }
             if said.as_deref() == Some(want.message.as_str()) {
@@ -529,7 +612,7 @@ fn run(root: &Path, list: bool, only: Option<&str>, detail: bool, typecheck_only
                 continue;
             }
             let Some(t) = load(&path) else { continue };
-            let out = run_one(&lib_files, &t, &config);
+            let out = run_one(&lib_files, &t, &config, false);
             if out.crashed {
                 crashes.push(out.name.clone());
                 continue;
@@ -608,8 +691,8 @@ fn run(root: &Path, list: bool, only: Option<&str>, detail: bool, typecheck_only
     );
     println!("         {misplaced} say upstream's words somewhere else");
     println!(
-        "         {unmatchable} name an existential witness (`'ex1#`) no other process can \
-         reproduce"
+        "         {unmatchable} upstream messages contain process-local witnesses (`'ex1#`); \
+         excluded from literal wording comparison"
     );
     if detail {
         for (file, msg, want, got) in &misplaced_at {
@@ -750,4 +833,22 @@ fn read_accepts_manifest() -> Vec<(String, Vec<(PathBuf, Verdict)>)> {
         by_corpus.entry(corpus).or_default().push((file, accepted));
     }
     by_corpus.into_iter().collect()
+}
+
+#[cfg(test)]
+mod expectation_tests {
+    use super::parse_expectation;
+
+    #[test]
+    fn warnings_before_errors_do_not_change_error_location_or_message() {
+        let text = "Warning: deprecated\nfail/example.sail:2.4-8:\n | warning detail\nType error:\nfail/example.sail:9.7-12:\n | ^----^\n | Type mismatch between int and string\n";
+        let expected = parse_expectation(text, "example").unwrap();
+        assert_eq!((expected.line, expected.col), (9, 7));
+        assert_eq!(expected.message, "Type mismatch between int and string");
+        assert!(parse_expectation(
+            "Warning: deprecated\nfail/example.sail:2.4-8:\n | warning detail\n",
+            "example"
+        )
+        .is_none());
+    }
 }

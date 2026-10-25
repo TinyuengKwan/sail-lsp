@@ -11,7 +11,7 @@ pub(crate) fn organize_imports(acc: &mut Assists, ctx: &AssistContext<'_>) -> Op
     let te = edits.into_iter().map(|e| TextEdit { range: e.range, new_text: e.new_text }).collect();
     acc.add_with_edits(
         AssistId("organize_imports", AssistKind::Source),
-        "Organize imports",
+        "Normalize include formatting",
         ctx.range,
         te,
     );
@@ -78,8 +78,8 @@ pub fn organize_imports_edits(file: &dyn FileDb) -> Option<Vec<IdeTextEdit>> {
         return None;
     }
 
-    directives.sort_unstable();
-    directives.dedup();
+    // Sail includes execute in source order and can change preprocessor state.
+    // Preserve both order and repetition; only normalize whitespace.
 
     let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
     let old_range_start = lines[first_code].0;
@@ -111,10 +111,10 @@ mod tests {
     fn applies() {
         check_assist(
             organize_imports,
-            "$include \"b.sail\"\n$include \"a.sail\"\n$0val f : int -> int\n",
+            "  $include \"b.sail\"  \n$include \"a.sail\"\n$0val f : int -> int\n",
             expect![[r#"
-            $include "a.sail"
             $include "b.sail"
+            $include "a.sail"
             val f : int -> int
         "#]],
         );

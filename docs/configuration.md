@@ -2,7 +2,8 @@
 
 **Source:** [`crates/sail-lsp/src/config.rs`](../crates/sail-lsp/src/config.rs)
 
-sail-lsp is configured via LSP `workspace/didChangeConfiguration` messages.
+sail-lsp accepts LSP `initialize.initializationOptions` before project discovery
+and `workspace/didChangeConfiguration` messages for subsequent updates.
 The exact format depends on your editor. Configuration is a JSON object under
 the `sail-lsp` key; missing fields retain defaults.
 
@@ -89,6 +90,9 @@ lspconfig.sail_lsp.setup({
 | `docs` | `bool` | `true` | Show documentation in hover |
 | `keywords` | `bool` | `true` | Show keyword documentation |
 | `actions` | `bool` | `true` | Hover actions (go-to-definition, etc.) |
+| `maxFieldsCount` | `integer or null` | `10` | Maximum struct/union members shown; `null` shows all |
+| `maxEnumVariantsCount` | `integer or null` | `10` | Maximum enum variants shown; `null` shows all |
+| `maxOverloadsCount` | `integer or null` | `10` | Maximum overload alternatives shown; `null` shows all |
 
 ### `semanticTokens`
 
@@ -106,12 +110,14 @@ lspconfig.sail_lsp.setup({
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
+| `strictBitvector` | `boolean` | `false` | Enable strict bitvector width well-formedness checks and the `STRICT_BITVECTOR` preprocessor symbol; use with projects compiled using `--strict-bitvector`. Changes invalidate analysis without editing source files. |
 | `maxFiles` | `number` | `10000` | Maximum files to scan in workspace |
 | `target` | `string?` | `null` | Compilation target for `$iftarget` directives |
 | `includePaths` | `string[]` | `[]` | Fallback include search paths, absolute or relative to workspace roots. |
 | `projectFile` | `string?` | `null` | Manifest path relative to each workspace folder, or absolute. Auto-detection prefers root `sail.proj`, then a single root `*.sail_project`; otherwise checks immediate child directories for a unique project. |
 | `projectVariables` | `object` | `{}` | Boolean/string overrides for manifest variables. |
 | `projectModules` | `string[]` | `[]` | Select root modules, their descendants and transitive requirements. Empty means all modules. |
+| `generatedFiles` | `object` | `{}` | Map manifest `__virtual` filenames to generated Sail source paths, absolute or relative to each workspace root. |
 
 For example, VS Code can select the RMEM configuration with:
 
@@ -155,8 +161,29 @@ Unresolved active includes are diagnosed, while missing inactive includes are
 ignored. Unsaved include edits trigger discovery using editor contents.
 
 Like the current Sail compiler, manifest `directory` expressions are evaluated
-but do not prefix file paths; use explicit path expressions instead. Generated
-`virtual` files are not supported and produce an explicit project error.
+but do not prefix file paths; use explicit path expressions instead.
+
+Manifest `__virtual` references use a registered source, just as the compiler
+registers embedded contents. The standard `__virtual corelib.sail` resolves to
+the effective Sail library's `core/corelib.sail`. For project-generated sources,
+provide their producer's output explicitly:
+
+```json
+{
+  "sail-lsp.workspace.generatedFiles": {
+    "defs.sail": "build/generated_defs.sail"
+  }
+}
+```
+
+A manifest can then use `files __virtual defs.sail`. The LSP watches the mapped
+file, accepts unsaved editor overlays, and uses its physical URI and source
+ranges for diagnostics and navigation. Locations refer to the generated Sail
+source, not the generator's templates. Mapping changes reload the project.
+The producer must write the generated source; the LSP does not run generators.
+An unregistered virtual name is a project error. A registered source missing on
+disk follows the same partial-load and recovery behavior as other missing files.
+
 The module graph controls selection, ordering and symbol visibility. A file
 can use its own module and the public declarations of its direct `requires`,
 plus the global scope. Requirements select dependencies transitively but do

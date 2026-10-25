@@ -30,6 +30,8 @@ pub enum ExprFillDefaultMode {
 /// Configuration for assist generation.
 #[derive(Clone, Debug)]
 pub struct AssistConfig {
+    /// Whether the client can create files through a workspace edit.
+    pub file_creation: bool,
     /// If set, only assists of these kinds are returned.
     pub allowed: Option<Vec<AssistKind>>,
     /// Configuration for `$include` insertion.
@@ -45,6 +47,7 @@ pub struct AssistConfig {
 impl Default for AssistConfig {
     fn default() -> Self {
         Self {
+            file_creation: true,
             allowed: None,
             insert_use: Default::default(),
             snippet_cap: None,

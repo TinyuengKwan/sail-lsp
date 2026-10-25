@@ -5,6 +5,57 @@ pub mod support;
 use self::support::{binding_type_hint, infer_call_arg_types_at_position};
 use crate::markdown_remove::remove_markdown;
 
+/// Limit only top-level members; commas in dependent types and tuples do not
+/// separate fields. Tokenization also keeps braces in strings/comments inert.
+fn truncate_members(text: &str, limit: Option<usize>) -> String {
+    let Some(limit) = limit else { return text.to_owned() };
+    let tokens = parser::tokenize(text);
+    let mut nesting = 0usize;
+    let Some(open) = tokens.iter().position(|(_, span)| {
+        match &text[span.start..span.end] {
+            "{" if nesting == 0 => return true,
+            "(" | "[" | "{" => nesting += 1,
+            ")" | "]" | "}" => nesting = nesting.saturating_sub(1),
+            _ => {}
+        }
+        false
+    }) else {
+        return text.to_owned();
+    };
+    let mut depth = 0usize;
+    let mut starts = Vec::new();
+    let mut next_member = true;
+    for (_, span) in &tokens[open + 1..] {
+        let token = &text[span.start..span.end];
+        if token == "}" && depth == 0 {
+            if starts.len() <= limit {
+                return text.to_owned();
+            }
+            let cut = starts[limit];
+            return format!(
+                "{}... (+{} more) {}",
+                &text[..cut],
+                starts.len() - limit,
+                &text[span.start..]
+            );
+        }
+        if depth == 0 && token == "," {
+            next_member = true;
+            continue;
+        }
+        if next_member {
+            starts.push(span.start);
+            next_member = false;
+        }
+        match token {
+            "(" | "[" | "{" => depth += 1,
+            ")" | "]" | "}" => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    text.to_owned()
+}
+
 /// Get plain-text version of a documentation string (for inlay hints etc).
 #[allow(unused)] // will be wired into inlay hints / plain-text hover fallback
 /// Documentation with its Markdown removed, for a client that takes no
@@ -117,6 +168,13 @@ where
             let rendered = def.display(db).to_string();
             (!rendered.trim().is_empty()).then_some(rendered)
         });
+        let member_limit = match decl_ref.decl.kind {
+            DeclKind::Struct | DeclKind::Union => config.max_fields_count,
+            DeclKind::Enum => config.max_enum_variants_count,
+            DeclKind::Overload => config.max_overloads_count,
+            _ => None,
+        };
+        let hir_rendered = hir_rendered.map(|text| truncate_members(&text, member_limit));
         let header = hir_rendered
             .as_deref()
             .map(|rendered| format!("**{rendered}**"))
@@ -214,7 +272,7 @@ where
         }
 
         markdown.push("___".to_string());
-        markdown.push(fenced_sail(&headline));
+        markdown.push(fenced_sail(&truncate_members(&headline, member_limit)));
 
         // Show inferred type for local bindings (let/var)
         if matches!(decl_ref.decl.kind, DeclKind::Let | DeclKind::Var) {
@@ -225,33 +283,62 @@ where
 
         // Overload inspection
         if decl_ref.decl.kind == DeclKind::Overload {
-            let members = overload_members(decl_ref.file, &decl_ref.decl);
+            let members = current_file
+                .file_text()
+                .and_then(|(db, file)| {
+                    ide_db::signatures::callable_signatures_at(db, file, current_offset, name)
+                })
+                .map(|signatures| signatures.into_iter().map(|sig| sig.label).collect::<Vec<_>>())
+                .unwrap_or_else(|| {
+                    overload_members(decl_ref.file, &decl_ref.decl)
+                        .into_iter()
+                        .map(|member| {
+                            find_callable_signature(files.iter().copied(), current_uri, &member)
+                                .map(|sig| sig.label)
+                                .unwrap_or(member)
+                        })
+                        .collect()
+                });
             if !members.is_empty() {
                 markdown.push("___".to_string());
-                markdown.push("**members:**".to_string());
-                for member in members {
-                    if let Some(sig) =
-                        find_callable_signature(files.iter().copied(), current_uri, &member)
-                    {
-                        markdown.push(fenced_sail(&sig.label));
-                    } else {
-                        markdown.push(format!("- `{member}`"));
-                    }
+                markdown.push(format!("**{} overloads:**", members.len()));
+                let limit = config.max_overloads_count.unwrap_or(members.len());
+                for member in members.iter().take(limit) {
+                    markdown.push(fenced_sail(member));
+                }
+                if members.len() > limit {
+                    markdown.push(format!("… (+{} more)", members.len() - limit));
                 }
             }
         }
 
-        // Show all workspace signatures for functions with multiple val specs
+        // Respect the callable identity visible at this program point.
         if matches!(decl_ref.decl.kind, DeclKind::Function | DeclKind::Value | DeclKind::Mapping) {
-            let all_sigs = ide_db::signatures::find_all_callable_signatures(
-                files.iter().copied(),
-                &decl_ref.decl.name,
-            );
+            let all_sigs = current_file
+                .file_text()
+                .and_then(|(db, file)| {
+                    ide_db::signatures::callable_signatures_at(
+                        db,
+                        file,
+                        current_offset,
+                        &decl_ref.decl.name,
+                    )
+                })
+                .unwrap_or_else(|| {
+                    ide_db::signatures::find_all_callable_signatures(
+                        files.iter().copied(),
+                        &decl_ref.decl.name,
+                    )
+                });
             if all_sigs.len() > 1 {
                 markdown.push("___".to_string());
                 markdown.push(format!("**{} overloads:**", all_sigs.len()));
-                for sig in &all_sigs {
+                let limit = config.max_overloads_count.unwrap_or(all_sigs.len());
+                for sig in all_sigs.iter().take(limit) {
                     markdown.push(fenced_sail(&sig.label));
+                }
+                if all_sigs.len() > limit {
+                    markdown.push(format!("… (+{} more)", all_sigs.len() - limit));
                 }
             }
         }
@@ -323,14 +410,15 @@ where
             if !variants.is_empty() {
                 markdown.push("___".to_string());
                 let count = variants.len();
-                if count <= 10 {
+                let limit = member_limit.unwrap_or(count);
+                if count <= limit {
                     markdown.push(format!("**{count} variants:** {}", variants.join(", ")));
                 } else {
-                    let shown: Vec<_> = variants.iter().take(8).map(|s| s.as_str()).collect();
+                    let shown: Vec<_> = variants.iter().take(limit).map(|s| s.as_str()).collect();
                     markdown.push(format!(
                         "**{count} variants:** {}, ... (+{} more)",
                         shown.join(", "),
-                        count - 8
+                        count - limit
                     ));
                 }
             }
@@ -498,10 +586,16 @@ where
             }
         } else {
             // Try showing inferred expression type even without a resolved decl
-            if let Some(ty) = current_file.cached_expr_type_text(parser::Span::new(
-                base_db::range_start(hover_range),
-                base_db::range_end(hover_range),
-            )) {
+            if let Some(ty) = current_file.file_text().and_then(|(db, ft)| {
+                hir::Semantics::new(db).expr_type_text(
+                    ft,
+                    parser::Span::new(
+                        base_db::range_start(hover_range),
+                        base_db::range_end(hover_range),
+                    ),
+                    current_file.bodies(),
+                )
+            }) {
                 markdown.push(fenced_sail(symbol_key));
                 markdown.push(format!("**type:** `{ty}`"));
             } else {
@@ -1482,7 +1576,7 @@ overload op = {add, sub}
         .expect("hover");
         let markdown = hover_markdown(hover);
         assert!(markdown.contains("**overload op"));
-        assert!(markdown.contains("**members:**"));
+        assert!(markdown.contains("**2 overloads:**"), "{markdown}");
         assert!(markdown.contains("```sail\nval add : int -> int\n```"));
         assert!(markdown.contains("```sail\nval sub : int -> int\n```"));
     }
@@ -1609,6 +1703,30 @@ overload op = {add, sub}
         assert!(md.contains("layout"), "should contain layout table: {md}");
         assert!(md.contains("carry"), "should list carry field: {md}");
         assert!(md.contains("zero"), "should list zero field: {md}");
+    }
+
+    #[test]
+    fn member_limits_preserve_nested_types_and_report_omissions() {
+        let source =
+            "struct S = { first : vector(2, bits(8)), second : (int, bool), third : string }";
+        assert_eq!(
+            truncate_members(source, Some(1)),
+            "struct S = { first : vector(2, bits(8)), ... (+2 more) }"
+        );
+        assert_eq!(truncate_members(source, Some(0)), "struct S = { ... (+3 more) }");
+        assert_eq!(truncate_members(source, Some(3)), source);
+        assert_eq!(truncate_members(source, None), source);
+        assert_eq!(
+            truncate_members(
+                "struct S ('n : Int, 'n in {1, 2}) = { a : bits('n), b : int }",
+                Some(1)
+            ),
+            "struct S ('n : Int, 'n in {1, 2}) = { a : bits('n), ... (+1 more) }"
+        );
+        assert_eq!(
+            truncate_members("struct S = { a : string /* , } */, b : int }", Some(1)),
+            "struct S = { a : string /* , } */, ... (+1 more) }"
+        );
     }
 
     #[test]

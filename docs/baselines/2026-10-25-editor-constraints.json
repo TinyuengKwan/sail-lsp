@@ -1,0 +1,272 @@
+{
+  "scope": "editor experience solver optimization",
+  "production_limits_changed": false,
+  "runs": [
+    {
+      "source_report": "target/editor-current-constraints.json",
+      "totals": {
+        "proved": 3763,
+        "refuted": 0,
+        "total": 3803,
+        "unknown": 40
+      },
+      "unknown_by_reason": {
+        "budget_exhausted": 3,
+        "erased_numeric": 12,
+        "flexible_witness": 21,
+        "not_established": 4
+      },
+      "budget_exhausted_sites": [
+        {
+          "assumptions": [
+            "(0 >= '_sk1_LMUL_pow & '_sk7__sk6__sk5__sk4_z == 0 | 0 < '_sk1_LMUL_pow & '_sk7__sk6__sk5__sk4_z == '_sk1_LMUL_pow)",
+            "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+            "3 <= vlen_exp & vlen_exp <= 16",
+            "xlen in {32, 64}",
+            "-3 <= '_sk1_LMUL_pow & '_sk1_LMUL_pow <= 3",
+            "'_sk2__set in {8, 16, 32, 64}",
+            "'_sk3__set in {8, 16, 32, 64}",
+            "vlen >= '_sk3__set",
+            "vlen >= SEW",
+            "0 >= '_sk1_LMUL_pow & '_sk4_z == 0 | 0 < '_sk1_LMUL_pow & '_sk4_z == '_sk1_LMUL_pow",
+            "(0 >= '_sk1_LMUL_pow & '_sk5__sk4_z == 0 | 0 < '_sk1_LMUL_pow & '_sk5__sk4_z == '_sk1_LMUL_pow)",
+            "(0 >= '_sk1_LMUL_pow & '_sk6__sk5__sk4_z == 0 | 0 < '_sk1_LMUL_pow & '_sk6__sk5__sk4_z == '_sk1_LMUL_pow)",
+            "2 ^ vlen_exp >= '_sk3__set",
+            "2 ^ vlen_exp >= SEW"
+          ],
+          "callable": "get_num_elem",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "model/extensions/V/vext_control.sail",
+          "goal": "1 <= div(2 ^ '_sk7__sk6__sk5__sk4_z * 2 ^ vlen_exp, '_sk3__set) & div(2 ^ '_sk7__sk6__sk5__sk4_z * 2 ^ vlen_exp, '_sk3__set) <= 2 ^ vlen_exp",
+          "location": {
+            "column": 3,
+            "end": 2723,
+            "line": 39,
+            "source": "(2 ^ max(0, LMUL_pow)) * vlen / SEW",
+            "start": 2688
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk1_LMUL_pow",
+            "'_sk2__set",
+            "'_sk3__set",
+            "'_sk4_z",
+            "'_sk5__sk4_z",
+            "'_sk6__sk5__sk4_z",
+            "'_sk7__sk6__sk5__sk4_z"
+          ],
+          "status": "unknown"
+        },
+        {
+          "assumptions": [
+            "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+            "3 <= vlen_exp & vlen_exp <= 16",
+            "xlen in {32, 64}",
+            "true",
+            "true",
+            "<unsupported>",
+            "-4 <= '_sk5_LMUL_pow_new & '_sk5_LMUL_pow_new <= 3",
+            "3 <= '_sk6_SEW_pow_new & '_sk6_SEW_pow_new <= 10",
+            "-9 <= '_sk7_lmul_sew_ratio & '_sk7_lmul_sew_ratio <= 0",
+            "~('_sk6_SEW_pow_new > '_sk5_LMUL_pow_new + elen_exp | '_sk1__flow_bool & <unsupported>)"
+          ],
+          "callable": "execute_vsetvl_type",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "model/extensions/V/vext_vset_insts.sail",
+          "goal": "1 <= 2 ^ ('_sk5_LMUL_pow_new + vlen_exp - '_sk6_SEW_pow_new) & 2 ^ ('_sk5_LMUL_pow_new + vlen_exp - '_sk6_SEW_pow_new) <= 2 ^ vlen_exp",
+          "location": {
+            "column": 16,
+            "end": 4187,
+            "line": 119,
+            "source": "vl = to_bits(calculate_new_vl(avl, VLMAX));",
+            "start": 4159
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk1__flow_bool",
+            "'_sk5_LMUL_pow_new",
+            "'_sk6_SEW_pow_new",
+            "'_sk7_lmul_sew_ratio"
+          ],
+          "status": "unknown"
+        },
+        {
+          "assumptions": [
+            "xlen in {32, 64}",
+            "'width in {1, 2, 4, 8}",
+            "true",
+            "true",
+            "true",
+            "'width == '_sk7_n * '_sk7_bytes & '_sk7_bytes > 0",
+            "'_sk9_first == 0 & '_sk9_last == '_sk7_n - 1 & '_sk9_step == 1 | '_sk9_first == '_sk7_n - 1 & '_sk9_last == 0 & '_sk9_step == -1",
+            "0 <= '_sk10__argument & '_sk10__argument <= '_sk7_n - 1"
+          ],
+          "callable": "vmem_read_addr",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "model/sys/vmem_utils.sail",
+          "goal": "0 < '_sk7_bytes & '_sk7_bytes <= 4096",
+          "location": {
+            "column": 35,
+            "end": 7036,
+            "line": 156,
+            "source": "Ok(paddr, pbmt, _) => match mem_read(access, pbmt, paddr, bytes, aq, rl, res) {",
+            "start": 6987
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk10__argument",
+            "'_sk7_bytes",
+            "'_sk7_n",
+            "'_sk9_first",
+            "'_sk9_last",
+            "'_sk9_step"
+          ],
+          "status": "unknown"
+        }
+      ]
+    },
+    {
+      "source_report": "target/editor-quotient-constraints.json",
+      "totals": {
+        "proved": 3766,
+        "refuted": 0,
+        "total": 3803,
+        "unknown": 37
+      },
+      "unknown_by_reason": {
+        "erased_numeric": 12,
+        "flexible_witness": 21,
+        "not_established": 4
+      },
+      "budget_exhausted_sites": []
+    },
+    {
+      "source_report": "target/editor-final-constraints-1.json",
+      "report_sha256": "081d0d1d94dda1df19bd2edff232fd862f81db60b3ec0ac94b080a249d71c5d8",
+      "totals": {
+        "proved": 3765,
+        "refuted": 0,
+        "total": 3802,
+        "unknown": 37
+      },
+      "unknown_by_reason": {
+        "erased_numeric": 12,
+        "flexible_witness": 21,
+        "not_established": 4
+      },
+      "budget_exhausted_sites": [],
+      "notes": "Pre-interval-domain checkpoint; second repeat exposed a budget-exhausted site"
+    },
+    {
+      "source_report": "target/editor-final-constraints-2.json",
+      "report_sha256": "a5c1fa45f223725f0456cdd4bce449315ca203afd373384193f4b717a87dcba9",
+      "totals": {
+        "proved": 3764,
+        "refuted": 0,
+        "total": 3802,
+        "unknown": 38
+      },
+      "unknown_by_reason": {
+        "budget_exhausted": 1,
+        "erased_numeric": 12,
+        "flexible_witness": 21,
+        "not_established": 4
+      },
+      "budget_exhausted_sites": [
+        {
+          "assumptions": [
+            "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+            "3 <= vlen_exp & vlen_exp <= 16",
+            "xlen in {32, 64}",
+            "'_sk1__set in {8, 16, 32, 64}",
+            "-3 <= '_sk2_LMUL_pow & '_sk2_LMUL_pow <= 3",
+            "1 <= '_sk3_num_elem & '_sk3_num_elem <= vlen",
+            "1 <= '_sk4_SEW_frac_pow & '_sk4_SEW_frac_pow <= 3",
+            "true",
+            "<unsupported>",
+            "true",
+            "'_sk1__set / 2 ^ '_sk4_SEW_frac_pow >= 8",
+            "SEW_div >= 8",
+            "1 <= '_sk3_num_elem & '_sk3_num_elem <= 2 ^ vlen_exp"
+          ],
+          "callable": "execute",
+          "cause": "Compatibility",
+          "clause": 23,
+          "compatibility_types": null,
+          "file": "model/extensions/V/vext_arith_insts.sail",
+          "goal": "'_sk3_num_elem >= 0 & '_sk1__set / 2 ^ '_sk4_SEW_frac_pow in {8, 16, 32, 64}",
+          "location": {
+            "column": 40,
+            "end": 75719,
+            "line": 1888,
+            "source": "let vs2_val : vector('n, bits('o)) = read_vreg(num_elem, SEW_div, LMUL_pow_div, vs2);",
+            "start": 75672
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk1__set",
+            "'_sk2_LMUL_pow",
+            "'_sk3_num_elem",
+            "'_sk4_SEW_frac_pow"
+          ],
+          "status": "unknown"
+        }
+      ],
+      "notes": "Pre-interval-domain checkpoint; second repeat exposed a budget-exhausted site"
+    },
+    {
+      "source_report": "target/editor-round9-constraints-1.json",
+      "report_sha256": "081d0d1d94dda1df19bd2edff232fd862f81db60b3ec0ac94b080a249d71c5d8",
+      "totals": {
+        "proved": 3765,
+        "refuted": 0,
+        "total": 3802,
+        "unknown": 37
+      },
+      "unknown_by_reason": {
+        "erased_numeric": 12,
+        "flexible_witness": 21,
+        "not_established": 4
+      },
+      "budget_exhausted_sites": [],
+      "notes": "Isolated current-source repeat"
+    },
+    {
+      "source_report": "target/editor-round9-constraints-2.json",
+      "report_sha256": "081d0d1d94dda1df19bd2edff232fd862f81db60b3ec0ac94b080a249d71c5d8",
+      "totals": {
+        "proved": 3765,
+        "refuted": 0,
+        "total": 3802,
+        "unknown": 37
+      },
+      "unknown_by_reason": {
+        "erased_numeric": 12,
+        "flexible_witness": 21,
+        "not_established": 4
+      },
+      "budget_exhausted_sites": [],
+      "notes": "Isolated current-source repeat"
+    }
+  ],
+  "limitations": [
+    "Final isolated repeats agree: 3765 proved, 0 refuted, 37 unknown; zero budget_exhausted. Strict/default/no-SMT gates passed.",
+    "Unknown obligations remain: erased_numeric=12, flexible_witness=21, not_established=4. Completion of the budget-exhaustion work does not mean every obligation is proved.",
+    "Deferred totals fell from 3803 to 3802 as a goal was discharged before deferral."
+  ],
+  "status": "complete"
+}

@@ -7,6 +7,23 @@ use hir::display::HirDisplay;
 use crate::{DiagnosticsContext, UnresolvedField};
 
 pub(crate) fn unresolved_field(ctx: &DiagnosticsContext<'_>, d: &UnresolvedField) -> Diagnostic {
+    let mut range = crate::node_file_range(&d.node);
+    if !d.receiver_is_not_a_record {
+        let field = ctx
+            .file
+            .filter(|file| file.file_id(ctx.db()) == d.node.file_id)
+            .and_then(|file| ctx.sema.parse(file))
+            .and_then(|root| d.node.value.try_to_node(&root))
+            .filter(|node| node.kind() == syntax::SyntaxKind::FIELD_ACCESS_EXPR)
+            .and_then(|node| {
+                node.children_with_tokens().filter_map(|it| it.into_token()).find(|token| {
+                    token.kind() == syntax::SyntaxKind::IDENT && token.text() == d.name
+                })
+            });
+        if let Some(field) = field {
+            range.range = field.text_range();
+        }
+    }
     Diagnostic::new(
         DiagnosticCode::SailError("unresolved-field"),
         // Two findings, and upstream words them apart. A record without
@@ -25,7 +42,7 @@ pub(crate) fn unresolved_field(ctx: &DiagnosticsContext<'_>, d: &UnresolvedField
         } else {
             format!("no field `{}` on type `{}`", d.name, d.receiver.display_to_string(ctx.db()))
         },
-        crate::node_file_range(&d.node),
+        range,
     )
 }
 

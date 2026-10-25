@@ -20,6 +20,14 @@ impl<'t> Parser<'t> {
             self.bump_any();
             pm.complete(self, SK::PARAM_LIST);
         }
+        // Constructor heads contain full patterns, including nested tuples
+        // and `as` type binders. Keep their CST instead of flattening tokens.
+        if self.at(SK::IDENT) && self.nth(1) == T!['('] && self.pos() < end_pos {
+            let pm = self.start();
+            self.parse_pattern(PARAM_RECOVERY_SET.remove(T!['{']));
+            pm.complete(self, SK::PARAM_LIST);
+            return;
+        }
         // Handle bare IDENT (or IDENT(args)) as a param.
         // Covers: `function f value_name = { ... }`
         //         `function f BAR(x) = x`
@@ -193,6 +201,10 @@ impl<'t> Parser<'t> {
                         self.bump_any();
                         break;
                     }
+                }
+                if depth == 1 && self.at(SK::IDENT) && self.nth(1) == T!['('] {
+                    self.parse_pattern(PARAM_RECOVERY_SET.remove(T!['{']));
+                    continue;
                 }
                 // At depth 1: `:` signals a param type annotation.
                 // Remove `{` from recovery so existential

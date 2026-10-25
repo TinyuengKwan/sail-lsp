@@ -34,7 +34,6 @@
 // text()/item_tree() without depending on ide-db.
 pub use hir::callgraph::SourceFileInfo;
 use parser::{Span, Token};
-use std::collections::HashMap;
 use syntax::parser_lower::ParsedFile;
 use url::Url;
 
@@ -96,9 +95,8 @@ pub use span::{file_location_from_span, text_range_from_span};
 pub use helpers::{builtin_docs, function_snippet, inlay_param_name, CallableSignature, Parameter};
 pub use prime_caches::ParallelPrimeCachesProgress;
 pub use signatures::{
-    add_definitions, build_signature_index, collect_callable_signatures,
-    collect_callable_signatures_from, extract_symbol_decls, find_callable_signature,
-    instantiate_signature, SymbolDecl,
+    add_definitions, collect_callable_signatures, collect_callable_signatures_from,
+    extract_symbol_decls, find_callable_signature, instantiate_signature, SymbolDecl,
 };
 pub use symbol_index::{Query, SearchMode};
 pub use text_document::{TextChange, TextChangeRange, TextDocument};
@@ -273,40 +271,6 @@ pub trait FileDb: hir::callgraph::SourceFileInfo {
                 })
             })
         })
-    }
-
-    // TODO(I): These perform semantic analysis or aggregate workspace
-    // data. New code should prefer Semantics methods; these remain
-    // on FileDb for backwards compatibility until all consumers are
-    // migrated.
-
-    /// Per-file signature index keyed by callable name. Returns
-    /// `None` for files where the signature index hasn't been
-    /// built yet.
-    fn signature_index(&self) -> Option<&HashMap<String, CallableSignature>>;
-
-    /// Per-file find-references count map keyed by symbol name.
-    fn ref_counts(&self) -> &HashMap<String, usize>;
-
-    /// Per-file find-implementations count map keyed by symbol name.
-    fn impl_counts(&self) -> &HashMap<String, usize>;
-
-    /// Type-text for the binding declared at `span`, when typecheck
-    /// information is available. Default impl returns `None`, so
-    /// feature crates that don't care about typed bindings (and
-    /// in-test stand-ins) get the right answer for free; only
-    /// `sail_server::state::File` overrides it to forward to the
-    /// real typechecker output.
-    fn binding_type_text(&self, _span: Span) -> Option<String> {
-        None
-    }
-
-    /// Cached type-text for the expression at `span`, if a previous
-    /// typecheck pass produced type information for this file.
-    /// Default impl returns `None`; sail_server overrides with a
-    /// lookup into `TypeCheckResult::expr_type_text`.
-    fn cached_expr_type_text(&self, _span: Span) -> Option<String> {
-        None
     }
 }
 

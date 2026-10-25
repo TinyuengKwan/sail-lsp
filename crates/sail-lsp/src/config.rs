@@ -1,6 +1,7 @@
 //! User configuration system.
 //!
-//! Receives settings via `workspace/didChangeConfiguration` and
+//! Receives settings via `initialize.initializationOptions` and
+//! `workspace/didChangeConfiguration` and
 //! controls feature behavior per workspace.
 //!
 //! Config is structured into sub-configs that are passed
@@ -30,8 +31,6 @@ pub struct SailLspConfig {
     pub hover: HoverConfig,
     /// Semantic tokens configuration.
     pub semantic_tokens: SemanticTokensConfig,
-    /// Z3 solver configuration (Sail-specific).
-    pub z3: Z3Config,
     /// Workspace configuration.
     pub workspace: WorkspaceConfig,
     /// Running upstream Sail beside the server's own analysis.
@@ -65,7 +64,8 @@ impl Default for FlycheckConfig {
 pub struct DiagnosticsConfig {
     /// Master enable/disable for diagnostics.
     pub enable: bool,
-    /// Enable effect mismatch warnings.
+    /// Report effect mismatches (`effect-violation`, `effect-mismatch`,
+    /// `missing-effect-annotation`); `false` disables all three codes.
     pub effect_mismatch: bool,
     /// Diagnostic codes to disable (e.g., "unused-variable").
     pub disabled: HashSet<String>,
@@ -75,8 +75,6 @@ pub struct DiagnosticsConfig {
     pub warnings_as_hint: Vec<String>,
     /// Diagnostic codes to show as info instead of warnings.
     pub warnings_as_info: Vec<String>,
-    /// Path prefix remapping for diagnostics.
-    pub remap_prefix: std::collections::HashMap<String, String>,
     /// Maximum diagnostics per file (0 = unlimited).
     pub max_diagnostics_per_file: usize,
 }
@@ -117,8 +115,6 @@ pub struct CompletionConfig {
     pub limit: usize,
     /// Show full function signatures in completions.
     pub full_function_signatures: bool,
-    /// Enable private/editable symbol completions.
-    pub private_editable: bool,
 }
 
 /// Code lens settings.
@@ -141,10 +137,12 @@ pub struct CodeLensConfig {
 pub struct HoverConfig {
     /// Show documentation in hover.
     pub docs: bool,
-    /// Show keyword documentation in hover.
-    pub keywords: bool,
-    /// Hover actions (go-to-definition, etc.).
-    pub actions: bool,
+    /// Maximum fields/union members; null shows all.
+    pub max_fields_count: Option<usize>,
+    /// Maximum enum variants; null shows all.
+    pub max_enum_variants_count: Option<usize>,
+    /// Maximum overload alternatives; null shows all.
+    pub max_overloads_count: Option<usize>,
 }
 
 /// Semantic tokens settings.
@@ -152,14 +150,6 @@ pub struct HoverConfig {
 #[serde(rename_all = "camelCase", default)]
 pub struct SemanticTokensConfig {
     pub enable: bool,
-}
-
-/// Z3 SMT solver settings (Sail-specific).
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-pub struct Z3Config {
-    /// Timeout in milliseconds (0 = no timeout).
-    pub timeout_ms: u32,
 }
 
 /// Project variables have the same boolean/string values as Sail assignments.
@@ -171,17 +161,20 @@ pub enum ProjectVariableValue {
 }
 
 /// Workspace settings.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct WorkspaceConfig {
+    /// Match Sail's --strict-bitvector mode (natural-number vector lengths).
+    pub strict_bitvector: bool,
     /// Manifest relative to each workspace root; discovery is used when absent.
     pub project_file: Option<String>,
     /// Overrides for declarations in the Sail project file.
     pub project_variables: std::collections::BTreeMap<String, ProjectVariableValue>,
     /// Selected root modules; empty selects all modules.
     pub project_modules: Vec<String>,
-    /// Maximum number of files to scan.
-    pub max_files: usize,
+    /// Virtual Sail filenames mapped to generated source paths, relative to
+    /// each workspace root (or absolute). The producer owns their contents.
+    pub generated_files: std::collections::BTreeMap<String, String>,
     /// Compilation target for `$iftarget` directives.
     pub target: Option<String>,
     /// Additional include paths for `$include` resolution.
@@ -215,6 +208,11 @@ impl WorkspaceConfig {
                 })
                 .collect(),
             roots: self.project_modules.clone(),
+            virtual_files: self
+                .generated_files
+                .iter()
+                .map(|(name, path)| (name.clone(), std::path::PathBuf::from(path)))
+                .collect(),
         }
     }
 }
@@ -228,7 +226,6 @@ impl Default for DiagnosticsConfig {
             disable_experimental: false,
             warnings_as_hint: Vec::new(),
             warnings_as_info: Vec::new(),
-            remap_prefix: std::collections::HashMap::new(),
             max_diagnostics_per_file: 128,
         }
     }
@@ -243,9 +240,14 @@ impl DiagnosticsConfig {
         ide_config.disable_experimental = self.disable_experimental;
         // Merge user-disabled codes with defaults.
         ide_config.disabled.extend(self.disabled.iter().cloned());
+        if !self.effect_mismatch {
+            ide_config.disabled.extend(
+                ["effect-violation", "effect-mismatch", "missing-effect-annotation"]
+                    .map(String::from),
+            );
+        }
         ide_config.warnings_as_hint = self.warnings_as_hint.iter().cloned().collect();
         ide_config.warnings_as_info = self.warnings_as_info.iter().cloned().collect();
-        ide_config.remap_prefix = self.remap_prefix.clone();
         ide_config.max_diagnostics_per_file = if self.max_diagnostics_per_file == 0 {
             None
         } else {
@@ -266,7 +268,9 @@ impl CompletionConfig {
             limit: if self.limit == 0 { None } else { Some(self.limit) },
             snippet_cap: if self.snippets { ide::completion::SnippetCap::new(true) } else { None },
             full_function_signatures: self.full_function_signatures,
-            callable: Some(ide::completion::CallableSnippets::FillArguments),
+            callable: self
+                .add_call_parenthesis
+                .then_some(ide::completion::CallableSnippets::FillArguments),
             add_semicolon_to_unit: false,
             fields_to_resolve: ide::completion::CompletionFieldsToResolve::default(),
         }
@@ -290,6 +294,7 @@ impl InlayHintsConfig {
     /// Convert LSP-level config to ide inlay hints config.
     pub fn to_ide_config(&self) -> ide::inlay_hints::InlayHintsConfig {
         ide::inlay_hints::InlayHintsConfig {
+            max_length: self.max_length,
             type_hints: self.type_hints,
             parameter_hints: self.parameter_hints,
             closing_brace_hints_min_lines: self.closing_brace_hints_min_lines,
@@ -311,7 +316,6 @@ impl Default for CompletionConfig {
             autoimport: false,
             limit: 200,
             full_function_signatures: false,
-            private_editable: false,
         }
     }
 }
@@ -324,7 +328,12 @@ impl Default for CodeLensConfig {
 
 impl Default for HoverConfig {
     fn default() -> Self {
-        Self { docs: true, keywords: true, actions: true }
+        Self {
+            docs: true,
+            max_fields_count: Some(10),
+            max_enum_variants_count: Some(10),
+            max_overloads_count: Some(10),
+        }
     }
 }
 
@@ -333,7 +342,9 @@ impl HoverConfig {
     pub fn to_ide_config(&self) -> ide::hover::HoverConfig {
         ide::hover::HoverConfig {
             documentation: self.docs,
-            keywords: self.keywords,
+            max_fields_count: self.max_fields_count,
+            max_enum_variants_count: self.max_enum_variants_count,
+            max_overloads_count: self.max_overloads_count,
             ..Default::default()
         }
     }
@@ -342,26 +353,6 @@ impl HoverConfig {
 impl Default for SemanticTokensConfig {
     fn default() -> Self {
         Self { enable: true }
-    }
-}
-
-impl Default for Z3Config {
-    fn default() -> Self {
-        Self { timeout_ms: 1000 }
-    }
-}
-
-impl Default for WorkspaceConfig {
-    fn default() -> Self {
-        Self {
-            project_file: None,
-            project_variables: Default::default(),
-            project_modules: Vec::new(),
-            max_files: 10000,
-            target: None,
-            include_paths: Vec::new(),
-            prime_caches_num_threads: 0,
-        }
     }
 }
 
@@ -395,29 +386,56 @@ impl SailLspConfig {
     pub fn semantic_tokens_enable(&self) -> bool {
         self.semantic_tokens.enable
     }
-    pub fn z3_timeout_ms(&self) -> u32 {
-        self.z3.timeout_ms
-    }
-    pub fn max_workspace_files(&self) -> usize {
-        self.workspace.max_files
-    }
 }
 
 impl SailLspConfig {
-    /// Parse configuration from a JSON value (from didChangeConfiguration).
-    /// flat JSON. Missing keys retain defaults via serde.
-    pub fn from_json(value: &serde_json::Value) -> Self {
+    /// Parse initialization options or didChangeConfiguration settings,
+    /// and name the settings it could not read. Missing keys retain
+    /// defaults via serde.
+    ///
+    /// A setting of the wrong type falls back to its default alone, and is
+    /// named in the second element as `section.key: why`. Deserializing the
+    /// whole object at once, which this used to do, turned one bad value
+    /// into every setting's default, with nothing but a log line to say so.
+    pub fn from_json(value: &serde_json::Value) -> (Self, Vec<String>) {
         // Try nested "sail-lsp" section first, then "sail", then raw value.
         let settings = value.get("sail-lsp").or_else(|| value.get("sail")).unwrap_or(value);
-
-        // Deserialize with serde — missing fields get defaults.
-        match serde_json::from_value::<SailLspConfig>(settings.clone()) {
-            Ok(config) => config,
-            Err(err) => {
-                log::warn!("failed to parse config, using defaults: {err}");
-                SailLspConfig::default()
+        let mut errors = Vec::new();
+        let Some(sections) = settings.as_object() else {
+            if !settings.is_null() {
+                errors.push(format!("settings must be an object, found {settings}"));
             }
+            return (Self::default(), errors);
+        };
+        // Each key is tried on its own, inside its section, so a failure
+        // names the one setting it belongs to.
+        let accepts = |section: &str, value: serde_json::Value| {
+            serde_json::from_value::<Self>(serde_json::json!({ section: value })).err()
+        };
+        let mut kept = serde_json::Map::new();
+        for (section, value) in sections {
+            let Some(fields) = value.as_object() else {
+                match accepts(section, value.clone()) {
+                    None => drop(kept.insert(section.clone(), value.clone())),
+                    Some(err) => errors.push(format!("{section}: {err}")),
+                }
+                continue;
+            };
+            let mut good = serde_json::Map::new();
+            for (key, value) in fields {
+                match accepts(section, serde_json::json!({ key: value })) {
+                    None => drop(good.insert(key.clone(), value.clone())),
+                    Some(err) => errors.push(format!("{section}.{key}: {err}")),
+                }
+            }
+            kept.insert(section.clone(), serde_json::Value::Object(good));
         }
+        let config =
+            serde_json::from_value(serde_json::Value::Object(kept)).unwrap_or_else(|err| {
+                errors.push(err.to_string());
+                Self::default()
+            });
+        (config, errors)
     }
 }
 
@@ -432,7 +450,6 @@ mod tests {
         assert!(config.inlay_hints.enable);
         assert!(config.inlay_hints.type_hints);
         assert!(config.completion.add_call_parenthesis);
-        assert_eq!(config.z3.timeout_ms, 1000);
     }
 
     #[test]
@@ -440,19 +457,19 @@ mod tests {
         let json = serde_json::json!({
             "sail-lsp": {
                 "diagnostics": { "enable": false },
-                "z3": { "timeoutMs": 5000 }
+                "completion": { "limit": 5 }
             }
         });
-        let config = SailLspConfig::from_json(&json);
+        let config = SailLspConfig::from_json(&json).0;
         assert!(!config.diagnostics.enable);
-        assert_eq!(config.z3.timeout_ms, 5000);
+        assert_eq!(config.completion.limit, 5);
         // Unset fields retain defaults
         assert!(config.inlay_hints.enable);
     }
 
     #[test]
     fn parse_empty_json() {
-        let config = SailLspConfig::from_json(&serde_json::json!({}));
+        let config = SailLspConfig::from_json(&serde_json::json!({})).0;
         assert!(config.diagnostics.enable); // default
     }
 
@@ -465,7 +482,7 @@ mod tests {
                 }
             }
         });
-        let config = SailLspConfig::from_json(&json);
+        let config = SailLspConfig::from_json(&json).0;
         assert!(config.diagnostics.disabled.contains("unused-variable"));
         assert!(config.diagnostics.disabled.contains("type-mismatch"));
         assert!(!config.diagnostics.disabled.contains("other"));
@@ -481,7 +498,7 @@ mod tests {
                 }
             }
         });
-        let config = SailLspConfig::from_json(&json);
+        let config = SailLspConfig::from_json(&json).0;
         assert!(!config.completion.add_call_parenthesis);
         assert!(!config.completion.postfix);
         assert!(config.completion.snippets); // default
@@ -497,7 +514,7 @@ mod tests {
                 }
             }
         });
-        let config = SailLspConfig::from_json(&json);
+        let config = SailLspConfig::from_json(&json).0;
         assert!(config.inlay_hints.enable); // default
         assert!(!config.inlay_hints.type_hints);
         assert!(config.inlay_hints.parameter_hints); // default
@@ -514,7 +531,7 @@ mod tests {
                 }
             }
         });
-        let config = SailLspConfig::from_json(&json);
+        let config = SailLspConfig::from_json(&json).0;
         assert_eq!(config.workspace.include_paths, vec!["/usr/local/share/sail"]);
         assert_eq!(config.workspace.target, Some("c".to_string()));
     }
@@ -529,14 +546,41 @@ mod tests {
         assert!(config.code_lenses_enable());
         assert!(config.hover_docs_enable());
         assert!(config.semantic_tokens_enable());
-        assert_eq!(config.z3_timeout_ms(), 1000);
-        assert_eq!(config.max_workspace_files(), 10000);
+    }
+
+    /// One setting of the wrong type costs that setting, not the rest, and
+    /// is reported by name.
+    #[test]
+    fn a_bad_setting_falls_back_alone() {
+        let json = serde_json::json!({
+            "sail-lsp": {
+                "diagnostics": { "enable": false, "disabled": "unused-variable" },
+                "completion": { "limit": "many", "snippets": false },
+                "hover": 3
+            }
+        });
+        let (config, errors) = SailLspConfig::from_json(&json);
+        assert!(!config.diagnostics.enable, "the good key beside a bad one is kept");
+        assert!(!config.completion.snippets);
+        assert_eq!(config.completion.limit, 200);
+        let mut named: Vec<_> = errors.iter().map(|e| e.split(':').next().unwrap()).collect();
+        named.sort_unstable();
+        assert_eq!(named, ["completion.limit", "diagnostics.disabled", "hover"], "{errors:?}");
+    }
+
+    #[test]
+    fn effect_mismatch_false_disables_its_codes() {
+        let json = serde_json::json!({ "diagnostics": { "effectMismatch": false } });
+        let ide_config = SailLspConfig::from_json(&json).0.diagnostics.to_ide_config();
+        assert!(ide_config.disabled.contains("effect-violation"));
+        assert!(ide_config.disabled.contains("effect-mismatch"));
+        assert!(ide_config.disabled.contains("missing-effect-annotation"));
     }
 
     #[test]
     fn invalid_json_falls_back_to_defaults() {
         let json = serde_json::json!({ "sail-lsp": "not an object" });
-        let config = SailLspConfig::from_json(&json);
+        let config = SailLspConfig::from_json(&json).0;
         assert!(config.diagnostics.enable); // default
     }
 
@@ -553,13 +597,10 @@ mod tests {
         assert!(!config.completion.autoimport);
         assert_eq!(config.completion.limit, 200);
         assert!(!config.completion.full_function_signatures);
-        assert!(!config.completion.private_editable);
         // Inlay hints
         assert_eq!(config.inlay_hints.max_length, Some(25));
         assert_eq!(config.inlay_hints.closing_brace_hints_min_lines, Some(6));
         // Hover
-        assert!(config.hover.keywords);
-        assert!(config.hover.actions);
         // Code lens
         assert!(config.code_lens.references);
         assert!(config.code_lens.implementations);
@@ -577,7 +618,7 @@ mod tests {
                 }
             }
         });
-        let config = SailLspConfig::from_json(&json);
+        let config = SailLspConfig::from_json(&json).0;
         assert!(config.diagnostics.disable_experimental);
         assert_eq!(config.diagnostics.warnings_as_hint, vec!["unused-variable"]);
         assert_eq!(config.diagnostics.warnings_as_info, vec!["type-mismatch"]);
@@ -596,7 +637,7 @@ mod tests {
                 }
             }
         });
-        let config = SailLspConfig::from_json(&json);
+        let config = SailLspConfig::from_json(&json).0;
         assert!(!config.completion.enable);
         assert!(config.completion.autoimport);
         assert_eq!(config.completion.limit, 100);
@@ -613,7 +654,7 @@ mod tests {
                 }
             }
         });
-        let config = SailLspConfig::from_json(&json);
+        let config = SailLspConfig::from_json(&json).0;
         assert_eq!(config.inlay_hints.max_length, Some(40));
         assert_eq!(config.inlay_hints.closing_brace_hints_min_lines, Some(10));
     }
@@ -623,16 +664,14 @@ mod tests {
         let json = serde_json::json!({
             "sail-lsp": {
                 "hover": {
-                    "docs": true,
-                    "keywords": false,
-                    "actions": false
+                    "docs": false,
+                    "maxFieldsCount": 3
                 }
             }
         });
-        let config = SailLspConfig::from_json(&json);
-        assert!(config.hover.docs);
-        assert!(!config.hover.keywords);
-        assert!(!config.hover.actions);
+        let config = SailLspConfig::from_json(&json).0;
+        assert!(!config.hover.docs);
+        assert_eq!(config.hover.max_fields_count, Some(3));
     }
 
     #[test]
@@ -645,7 +684,7 @@ mod tests {
                 }
             }
         });
-        let config = SailLspConfig::from_json(&json);
+        let config = SailLspConfig::from_json(&json).0;
         assert!(config.code_lens.enable); // default
         assert!(!config.code_lens.references);
         assert!(!config.code_lens.implementations);
@@ -664,7 +703,7 @@ mod tests {
                 }
             }
         });
-        let config = SailLspConfig::from_json(&json);
+        let config = SailLspConfig::from_json(&json).0;
         let ide_config = config.diagnostics.to_ide_config();
         assert!(ide_config.enabled);
         assert!(ide_config.disable_experimental);
@@ -683,7 +722,6 @@ mod tests {
             autoimport: true,
             limit: 50,
             full_function_signatures: true,
-            private_editable: false,
         };
         let ide_config = config.to_ide_config();
         assert!(!ide_config.enable_postfix_completions);

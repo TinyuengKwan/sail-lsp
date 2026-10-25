@@ -370,10 +370,19 @@ RA pattern: `AssistContext` -> `handlers::all()` -> `Assists` accumulator.
 
 51 handlers registered in `handlers/mod.rs` via `all()` static array.
 
+`extract_to_include` moves a selection of complete top-level declarations into a
+sibling file. `SourceChange` carries file creation separately from source edits;
+the server emits ordered LSP `documentChanges` only when the client supports
+`CreateFile`. Existing targets and stale extraction requests are rejected.
+
 ### Diagnostic handler architecture (ide-diagnostics)
 
 40 handlers with `err_recover` pattern. `DiagnosticsContext` holds `sema: Semantics`.
 Handlers import `AnyDiagnostic` from `hir::diagnostics`. Parse errors via firewall query.
+The context also carries the current `FileText`, allowing display ranges to resolve
+AST pointers through `Semantics::parse` while retaining full syntax targets for
+fixes. Missing-field diagnostics carry instantiated field types; expression fixes
+use type-specific defaults and pattern fixes use wildcards.
 
 ### SSR engine (ide-ssr)
 
@@ -389,8 +398,19 @@ Full structural search-replace pipeline:
 
 Every IDE feature module takes `&dyn FileDb` instead of depending on the binary
 crate. Methods: `text()`, `position_at()`, `offset_at()`, `tokens()`, `token_at()`,
-`parsed()`, `item_tree()`, `bodies()`, `signature_index()`, `ref_counts()`,
-`impl_counts()`, `diagnostics()`.
+`parsed()`, `item_tree()`, `bodies()` and the `file_text()` database bridge.
+
+Semantic queries live on `hir::Semantics`: `signature_index()`,
+`binding_type_text()` and `expr_type_text()`. The signature index is tracked in
+`hir::semantic_queries`; pure signature extraction lives in `hir-def`. The IDE
+signature adapter retains a syntax-only fallback for text fixtures without a
+database. Code lens counts use the existing symbol index; compatibility collectors
+read the cached call graph and item tree without separate count queries.
+
+Register defaults, explicit undefined generation and `undefined` expressions share
+the typed eligibility and inhabitedness checks in `hir-ty`. Declaration checks
+reuse the current declaration environment instead of reparsing the file through a
+second CST-based eligibility checker.
 
 `SalsaFile` implements `FileDb` by delegating to salsa tracked queries -- automatically
 memoized and invalidated when `FileText` changes.

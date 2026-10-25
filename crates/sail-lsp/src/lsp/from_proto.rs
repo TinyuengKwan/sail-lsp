@@ -73,6 +73,7 @@ pub fn completion_item(item: &lsp_types::CompletionItem) -> CompletionItem {
         _ => CompletionItemKind::Text,
     };
     CompletionItem {
+        source_range: None, // The handler preserves the client's original primary edit.
         additional_text_edits: Vec::new(), // Resolve recomputes edits from current inputs.
         import: item
             .data

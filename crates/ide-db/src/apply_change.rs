@@ -26,6 +26,7 @@ pub struct Change {
     workspace_file_ids: Option<Vec<FileId>>,
     module_graph: Option<base_db::module_graph::ModuleGraph>,
     source_project: Option<base_db::preprocess::SourceProject>,
+    strict_bitvector: Option<bool>,
 }
 
 impl Change {
@@ -60,11 +61,16 @@ impl Change {
         self.source_project = Some(project);
     }
 
+    pub fn set_strict_bitvector(&mut self, enabled: bool) {
+        self.strict_bitvector = Some(enabled);
+    }
+
     pub fn is_empty(&self) -> bool {
         self.source_change.is_empty()
             && self.workspace_file_ids.is_none()
             && self.module_graph.is_none()
             && self.source_project.is_none()
+            && self.strict_bitvector.is_none()
     }
 }
 
@@ -81,6 +87,14 @@ impl RootDatabase {
         use salsa::Database as _;
         self.trigger_cancellation();
 
+        if let Some(enabled) = change.strict_bitvector {
+            use salsa::Setter;
+            if let Some(options) = base_db::LanguageOptions::try_get(self) {
+                if options.strict_bitvector(self) != enabled {
+                    options.set_strict_bitvector(self).to(enabled);
+                }
+            }
+        }
         let anything_written = !change.source_change.is_empty();
         change.source_change.apply(self);
         // A change happened, and the nonce is how the server's main loop

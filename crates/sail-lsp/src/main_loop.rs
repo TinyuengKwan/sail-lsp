@@ -34,7 +34,7 @@ pub(crate) enum Task {
 pub(crate) enum PrimeCachesProgress {
     Begin,
     Report(ide_db::prime_caches::ParallelPrimeCachesProgress),
-    End { cancelled: bool },
+    End { cancelled: bool, failed: bool },
 }
 
 pub(crate) use crate::diagnostics::NativeDiagnosticsFetchKind;
@@ -104,12 +104,13 @@ impl GlobalState {
     /// files, sending batch results via `Task::Diagnostics(DiagnosticsTaskKind)`.
     #[allow(clippy::print_stderr)]
     fn update_diagnostics(&mut self) {
+        // Closing the last buffer must invalidate an in-flight wave too.
+        let generation = self.diagnostics.next_generation();
         let subscribed = self.subscribed_files();
         if subscribed.is_empty() {
             return;
         }
 
-        let generation = self.diagnostics.next_generation();
         let analysis = self.analysis_snapshot();
         let diag_config = self.config.diagnostics.to_ide_config();
 
@@ -188,7 +189,12 @@ impl GlobalState {
                 return;
             }
         }
-        self.project_error = None;
+        self.report_project_error((!inputs.source_errors.is_empty()).then(|| {
+            format!(
+                "Sail project loaded with source file errors; analysis is incomplete.\n{}\nCheck the manifest paths or restore the missing files. The project will reload when they change.",
+                inputs.source_errors.join("\n"),
+            )
+        }));
         self.project_manifests = inputs.manifests.into_keys().collect();
         if self.project_manifests.is_empty() {
             self.log_message(MessageType::WARNING,
@@ -443,6 +449,11 @@ pub fn run_server(connection: Connection) {
     // Background task channel
     let (task_sender, task_receiver) = crossbeam_channel::unbounded();
     let mut state = GlobalState::new(connection.sender.clone(), task_sender);
+    // Like RA, apply initialization settings before discovering projects.
+    // Clients need not send a later didChangeConfiguration notification.
+    if let Some(options) = init_params.initialization_options {
+        state.apply_client_settings(&options);
+    }
 
     // A running editor always has an explicit project model, even while it
     // is empty/loading. Otherwise detached files enter legacy whole-program
@@ -613,6 +624,18 @@ fn main_loop(
                 state.send_request::<lsp_types::request::CodeLensRefresh>((), noop_response);
                 state
                     .send_request::<lsp_types::request::InlayHintRefreshRequest>((), noop_response);
+                // A pulling client is told to pull again rather than sent
+                // the answer: what changed may be a file that `$include`s
+                // the edited one. Sent without checking `refreshSupport`,
+                // like the three above: lsp-types 0.94 reads it from
+                // `workspace.diagnostic`, where the protocol (and VS Code)
+                // put it at `workspace.diagnostics`, so it never reads true.
+                if state.client_caps.pull_diagnostics_support() {
+                    state.send_request::<lsp_types::request::WorkspaceDiagnosticRefresh>(
+                        (),
+                        noop_response,
+                    );
+                }
             }
 
             // Eviction takes `&mut` on the database and cancels every live
@@ -638,7 +661,12 @@ fn main_loop(
                 state.last_gc_revision = current_nonce;
             }
 
-            if project_or_mem_docs_changed {
+            // A client that pulls gets the server's own findings from
+            // `textDocument/diagnostic`; pushing them as well shows each
+            // twice. Only flycheck's, which no pull returns, are published
+            // to it — rust-analyzer's rule (`main_loop.rs`,
+            // `!self.config.text_document_diagnostic()`).
+            if project_or_mem_docs_changed && !state.client_caps.pull_diagnostics_support() {
                 state.update_diagnostics();
             }
         }
@@ -658,11 +686,19 @@ fn main_loop(
                 // literal `2` and `&|_| {}` stood here, and the phase that
                 // dominates startup reported nothing while it ran.
                 let report = sender.clone();
-                let _ = analysis.parallel_prime_caches(num_worker_threads, &cancel, move |p| {
-                    let _ = report.send(Task::PrimeCaches(PrimeCachesProgress::Report(p)));
-                });
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    analysis.parallel_prime_caches(num_worker_threads, &cancel, move |p| {
+                        let _ = report.send(Task::PrimeCaches(PrimeCachesProgress::Report(p)));
+                    })
+                }));
+                // Priming's temporary workers and solver contexts are gone.
+                // Reclaim free allocator pages on this worker, never on the
+                // event loop or on each interactive request.
+                drop(analysis);
+                profile::release_unused_memory();
                 let _ = sender.send(Task::PrimeCaches(PrimeCachesProgress::End {
-                    cancelled: cancel.is_cancelled(),
+                    cancelled: cancel.is_cancelled() || matches!(&outcome, Ok(Err(_))),
+                    failed: outcome.is_err(),
                 }));
             });
         }
@@ -670,14 +706,22 @@ fn main_loop(
         if let Some(diagnostic_changes) = state.diagnostics.take_changes() {
             for file_id in diagnostic_changes {
                 if let Some(url) = state.vfs.lookup_url(file_id) {
-                    let diagnostics: Vec<lsp_types::Diagnostic> =
+                    let mut diagnostics: Vec<lsp_types::Diagnostic> =
                         state.diagnostics.diagnostics_for(file_id).cloned().collect();
+                    crate::diagnostics::explain_unlinked_file(
+                        &mut diagnostics,
+                        state.project_error.as_deref(),
+                    );
                     // The version of the buffer these are about, so a client
                     // can drop what it already knows is stale. `None` says
                     // "no idea", which is the one answer it cannot act on —
                     // and `MemDocs::get`, the only way to answer, carried an
                     // `#[expect(dead_code)]`.
-                    let version = state.mem_docs.get(url).map(|doc| doc.version);
+                    let version = state
+                        .diagnostics
+                        .native_diagnostics_are_current(file_id)
+                        .then(|| state.mem_docs.get(url).map(|doc| doc.version))
+                        .flatten();
                     state.send_notification::<lsp_types::notification::PublishDiagnostics>(
                         lsp_types::PublishDiagnosticsParams {
                             uri: url.clone(),
@@ -723,8 +767,14 @@ fn on_task(state: &mut GlobalState, task: Task) {
                     state.discovery_watch_files.sort();
                     state.discovery_watch_files.dedup();
                     state.request_workspace_load(&[]);
-                    state.log_message(MessageType::ERROR, error.clone());
-                    state.project_error = Some(error);
+                    let context = if state.project_manifests.is_empty() {
+                        "No project model is available; unlinked files receive syntax diagnostics only."
+                    } else {
+                        "Keeping the previous project model; project configuration may be out of date."
+                    };
+                    state.report_project_error(Some(format!(
+                        "Failed to load Sail project: {error}\n{context}\nFix the manifest or workspace.projectFile/projectVariables/projectModules settings and reload."
+                    )));
                     if state.fetch_workspaces_queue.op_in_progress() {
                         state.fetch_workspaces_queue.op_completed(());
                     }
@@ -868,9 +918,15 @@ fn on_task(state: &mut GlobalState, task: Task) {
                     );
                 }
             }
-            PrimeCachesProgress::End { cancelled } => {
+            PrimeCachesProgress::End { cancelled, failed } => {
                 if let Some(reporter) = state.prime_caches_progress.take() {
-                    reporter.end(if cancelled { "cancelled" } else { "done" });
+                    reporter.end(if failed {
+                        "failed"
+                    } else if cancelled {
+                        "cancelled"
+                    } else {
+                        "done"
+                    });
                 }
                 state.cancellable_progress = None;
                 // No eviction here. It was the *second* call site, and the
@@ -880,7 +936,10 @@ fn on_task(state: &mut GlobalState, task: Task) {
                 // one guarded call is enough — it fires as soon as the pool
                 // is idle and the nonce has moved.
                 state.prime_caches_queue.op_completed(());
-                if cancelled {
+                if failed {
+                    state.log_message(lsp_types::MessageType::ERROR,
+                        "Cache priming failed; analysis remains available on demand. Reload the workspace to retry.");
+                } else if cancelled {
                     state.prime_caches_queue.request_op("restart after cancellation".into(), ());
                 }
             }
@@ -1038,6 +1097,35 @@ fn noop_response(_state: &mut GlobalState, response: lsp_server::Response) {
 #[cfg(test)]
 mod project_reload_tests {
     use super::*;
+
+    #[test]
+    fn failed_cache_priming_ends_progress_and_allows_a_later_reload() {
+        let (sender, messages) = crossbeam_channel::unbounded();
+        let (task_sender, _tasks) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender, task_sender);
+        state.supports_progress = true;
+        state.prime_caches_queue.request_op("test".into(), ());
+        assert!(state.prime_caches_queue.should_start_op().is_some());
+        on_task(&mut state, Task::PrimeCaches(PrimeCachesProgress::Begin));
+        assert!(state.prime_caches_progress.is_some());
+        on_task(
+            &mut state,
+            Task::PrimeCaches(PrimeCachesProgress::End { cancelled: false, failed: true }),
+        );
+        assert!(state.prime_caches_progress.is_none());
+        assert!(state.cancellable_progress.is_none());
+        assert!(!state.prime_caches_queue.op_in_progress());
+        assert!(!state.prime_caches_queue.op_requested(), "a panic must not cause a restart loop");
+        let messages: Vec<_> =
+            messages.try_iter().map(|message| serde_json::to_value(message).unwrap()).collect();
+        assert!(
+            messages.iter().any(|message| message["params"]["value"]["kind"] == "end"
+                && message["params"]["value"]["message"] == "failed"),
+            "{messages:?}"
+        );
+        state.prime_caches_queue.request_op("reload".into(), ());
+        assert!(state.prime_caches_queue.should_start_op().is_some());
+    }
 
     #[track_caller]
     fn pump_until(
@@ -1356,6 +1444,7 @@ mod project_reload_tests {
             let inputs = crate::reload::DiscoveryInputs {
                 watch_files: vec![path.clone()],
                 manifests: std::collections::BTreeMap::from([(path.clone(), Some("A {}".into()))]),
+                ..Default::default()
             };
             std::fs::write(&path, "B {}").unwrap();
             // No watcher notification has been dispatched yet.

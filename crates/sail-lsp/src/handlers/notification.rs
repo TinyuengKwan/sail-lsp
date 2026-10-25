@@ -195,7 +195,7 @@ pub(crate) fn handle_did_change_configuration(
     // caller, so the request went out either way and a client without the
     // capability would answer with an error and keep its old settings.
     if !state.client_caps.workspace_configuration_support() {
-        state.update_configuration(crate::config::SailLspConfig::from_json(&params.settings));
+        state.apply_client_settings(&params.settings);
         return Ok(());
     }
     // Otherwise the parameters are meaningless — the protocol says so
@@ -218,13 +218,12 @@ pub(crate) fn handle_did_change_configuration(
                 (None, Some(json)) => {
                     // One item asked for, one item back.
                     let settings = json.get(0).cloned().unwrap_or(json);
-                    let new_config = crate::config::SailLspConfig::from_json(&settings);
-                    state.update_configuration(new_config);
+                    state.apply_client_settings(&settings);
                     state.log_message(
                         MessageType::INFO,
                         format!(
-                            "Configuration updated: diagnostics={}, z3_timeout={}ms",
-                            state.config.diagnostics.enable, state.config.z3.timeout_ms
+                            "Configuration updated: diagnostics={}",
+                            state.config.diagnostics.enable
                         ),
                     );
                 }

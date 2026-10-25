@@ -12,6 +12,9 @@ pub(crate) fn complete_keywords(
     ctx: &CompletionContext<'_>,
     keywords: &[&str],
 ) {
+    if !ctx.config.enable_keyword_completions {
+        return;
+    }
     let prefix_lower = ctx.prefix_lower();
 
     for keyword in keywords {
@@ -68,7 +71,11 @@ pub(crate) fn complete_keywords(
             continue;
         }
 
-        let snippet = keyword_snippet(keyword, ctx.is_top_level);
+        let snippet = ctx
+            .config
+            .enable_snippets
+            .then(|| keyword_snippet(keyword, ctx.is_top_level))
+            .flatten();
 
         acc.add(crate::render::render_keyword_snippet(keyword, snippet));
     }

@@ -52,12 +52,36 @@ also accepts folders added through `workspace/didChangeWorkspaceFolders` after
 initialization. This is important for clients that attach roots later.
 
 If the root is correct but no project loads, inspect the load error (for
-example, ambiguous manifests or a missing source file). Discovery checks the
+example, ambiguous manifests or an unknown project variable). Discovery checks the
 root and its immediate children; deeper projects require `workspace.projectFile`.
 If a manifest loads but a file remains unlinked, check that the selected
 modules/include branches reach it and that the document URI matches the loaded
 path. Do not hide `unlinked-file` to diagnose a loading failure: disabling the
 warning does not enable type checking.
+
+## Project loading errors
+
+Project failures are sent through `window/showMessage` as well as
+`window/logMessage` and server status. The notification names the manifest,
+the failing path or configuration, and whether analysis is incomplete or still
+uses the previous project model. Identical failures are not repeatedly shown
+during reloads.
+
+* A missing source listed in a valid manifest does not discard the entire
+  project. Available files remain linked in manifest order. The error lists
+  the missing paths and their manifest; analysis may produce further errors
+  where declarations from those files are needed. Missing paths stay watched,
+  so restoring a file triggers another load.
+* An invalid manifest, unknown project variable/module, or nonexistent
+  `workspace.projectFile` prevents constructing a new project model. An
+  existing model is retained. On initial failure, files remain unlinked and
+  their `unlinked-file` diagnostics also include the actual loading error.
+* Correcting the manifest or changing workspace settings triggers a reload.
+  A successful load clears the failure from status and diagnostics and logs
+  `Sail project loading recovered.`
+
+`Loaded Sail project` and `ready` indicate that loading finished; check for
+source file errors as well before treating the analysis as complete.
 
 ## Batch analysis
 

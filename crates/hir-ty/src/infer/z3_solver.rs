@@ -10,7 +10,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Mutex, OnceLock};
 
-use z3::ast::{Ast, Bool, Int};
+use z3::ast::{Bool, Int};
 use z3::SatResult;
 
 use super::{
@@ -150,11 +150,37 @@ pub fn try_solve(
     if contains_unsupported(expr) || super::solver::has_erased_inputs(expr, subst, assumptions) {
         return ConstraintStatus::Unknown;
     }
-    for assumption in assumptions {
-        if contains_unsupported(assumption) {
-            return ConstraintStatus::Unknown;
+    // Entailment from a subset of assumptions is valid under the full
+    // assumptions too. Keep supported conjuncts (including !A from !(A|B));
+    // never extract a disjunct or negate a partially translated formula. This weakening is
+    // only for entailment, not the counterexample-based quantified checker.
+    fn supported_conjuncts(c: &ConstraintExpr, negated: bool, out: &mut Vec<ConstraintExpr>) {
+        match c {
+            ConstraintExpr::Not(inner) => supported_conjuncts(inner, !negated, out),
+            ConstraintExpr::And(items) if !negated => {
+                for item in items {
+                    supported_conjuncts(item, false, out);
+                }
+            }
+            ConstraintExpr::Or(items) if negated => {
+                for item in items {
+                    supported_conjuncts(item, true, out);
+                }
+            }
+            _ if !contains_unsupported(c) => {
+                out.push(if negated { ConstraintExpr::Not(Box::new(c.clone())) } else { c.clone() })
+            }
+            _ => {}
         }
     }
+    let supported = assumptions.iter().any(contains_unsupported).then(|| {
+        let mut facts = Vec::new();
+        for fact in assumptions {
+            supported_conjuncts(fact, false, &mut facts);
+        }
+        facts
+    });
+    let assumptions = supported.as_deref().unwrap_or(assumptions);
 
     let key = build_cache_key(expr, subst, assumptions);
     if let Some(cached) = cache_lookup(&key) {
@@ -263,16 +289,17 @@ fn solve_with_z3_bounded_exp(
     let mut exp_bounds: Vec<Bool> = Vec::new();
     let zero = Int::from_i64(0);
     let one = Int::from_i64(1);
-    let two = Int::from_i64(2);
     for (pow2_name, pow2_var) in &pow2_vars {
         let Some(exponent) = env.get(&format!("pow2arg:{}", &pow2_name[5..])) else {
             continue;
         };
         exp_bounds.push(exponent.ge(&zero).implies(pow2_var.ge(&one)));
-        let mut value = one.clone();
         for k in 0..=128i64 {
+            let value = (num_bigint::BigInt::from(1) << k as usize)
+                .to_string()
+                .parse::<Int>()
+                .expect("positive integer numeral");
             exp_bounds.push(exponent.eq(Int::from_i64(k)).implies(pow2_var.eq(&value)));
-            value = Int::mul(&[&value, &two]).simplify();
         }
     }
 
@@ -579,15 +606,14 @@ fn translate_numeric(
         }
         NumericExpr::Exp(inner) => {
             let exponent = translate_numeric(inner, subst, env)?;
-            if let Some(n) = exponent.simplify().as_i64() {
-                if (0..=1024).contains(&n) {
-                    let mut value = Int::from_i64(1);
-                    let two = Int::from_i64(2);
-                    for _ in 0..n {
-                        value = Int::mul(&[&value, &two]).simplify();
-                    }
-                    return Some(value);
-                }
+            // A previously interrupted context can make Z3_simplify return
+            // null. Fold concrete exponents in Rust, so constructing the next
+            // query never runs an interruptible Z3 simplification tactic.
+            if let Some(n) = super::integer::eval(inner, subst, &[])
+                .and_then(|n| num_traits::ToPrimitive::to_usize(&n))
+                .filter(|n| *n <= 1024)
+            {
+                return (num_bigint::BigInt::from(1) << n).to_string().parse::<Int>().ok();
             }
             let value = uninterpreted_numeric("pow2", &[exponent.clone()]);
             // AST text is after substitution, unlike source text. Equal
@@ -791,5 +817,12 @@ mod cancellation_tests {
             "cancellation should interrupt native checking"
         );
         assert!(SolverBudget::incomplete_count() > 0);
+        // Translation of the next query must remain usable after the native
+        // interrupt, including concrete and symbolic exponential nodes.
+        let mut env = HashMap::new();
+        for source in ["2 ^ 16", "2 ^ ('n + 1)"] {
+            let expr = parse_numeric_expr_text(source).unwrap();
+            assert!(translate_numeric(&expr, &Subst::default(), &mut env).is_some());
+        }
     }
 }

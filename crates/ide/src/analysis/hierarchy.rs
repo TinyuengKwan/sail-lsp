@@ -454,7 +454,7 @@ pub(super) mod tests {
             urls.iter().cloned().zip(ids.iter().copied()).collect(),
             ids.iter().copied().zip(urls.iter().cloned()).collect(),
         );
-        let mut host = AnalysisHost::new(None);
+        let mut host = AnalysisHost::new();
         let mut change = Change::new();
         for (&id, (_, text)) in ids.iter().zip(sources) {
             change.change_file(id, *text);

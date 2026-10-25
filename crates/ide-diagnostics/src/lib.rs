@@ -103,8 +103,6 @@ pub struct DiagnosticsConfig {
     pub warnings_as_hint: std::collections::HashSet<String>,
     /// Diagnostic codes to show as info instead of warnings.
     pub warnings_as_info: std::collections::HashSet<String>,
-    /// Path prefix remapping for diagnostics (e.g., to strip workspace root).
-    pub remap_prefix: std::collections::HashMap<String, String>,
     /// Enable style/lint diagnostics.
     pub style_lints: bool,
     /// Maximum number of diagnostics to report per file.
@@ -126,7 +124,6 @@ impl DiagnosticsConfig {
             disable_experimental: false,
             warnings_as_hint: std::collections::HashSet::new(),
             warnings_as_info: std::collections::HashSet::new(),
-            remap_prefix: std::collections::HashMap::new(),
             style_lints: true,
             max_diagnostics_per_file: Some(128),
             snippet_cap: None,
@@ -267,6 +264,7 @@ impl Diagnostic {
 ///
 /// Private struct -- visible to handlers via Rust module hierarchy.
 struct DiagnosticsContext<'a> {
+    file: Option<base_db::FileText>,
     config: &'a DiagnosticsConfig,
     sema: hir::Semantics<'a>,
     /// Whether a fix's edit is built now or left for
@@ -340,6 +338,9 @@ pub fn full_diagnostics(
 ) -> Vec<Diagnostic> {
     let mut res = syntax_diagnostics(db, config, file, ft);
     res.extend(semantic_diagnostics(db, config, resolve, file, ft, workspace_names));
+    if let Some(max) = config.max_diagnostics_per_file {
+        res.truncate(max);
+    }
     res
 }
 
@@ -361,7 +362,7 @@ pub fn syntax_diagnostics(
     // when parse changed but errors didn't.
     let errors = syntax::parse_query::parse_errors(db, ft);
     if let Some(errors) = errors {
-        for err in errors.iter().take(128) {
+        for err in errors.iter().take(config.max_diagnostics_per_file.unwrap_or(usize::MAX)) {
             res.push(Diagnostic::new(
                 hir::diagnostics::DiagnosticCode::SyntaxError,
                 format!("Syntax Error: {err}"),
@@ -380,7 +381,10 @@ pub fn syntax_diagnostics(
     // Phase 3: ItemTree checks (Sail-specific). Bracket matching moved to
     // `syntax::validation`, so it arrives through phase 1.
     let parse_diags = compute_parse_diagnostics(file);
-    res.extend(parse_diags.into_iter().take(128).map(|d| hir_diag_to_ide(&d, ft.file_id(db))));
+    res.extend(parse_diags.into_iter().map(|d| hir_diag_to_ide(&d, ft.file_id(db))));
+    if let Some(max) = config.max_diagnostics_per_file {
+        res.truncate(max);
+    }
 
     // Config-based filtering for syntax pipeline.
     res.retain(|d| {
@@ -421,7 +425,7 @@ pub fn semantic_diagnostics(
         };
     }
     let sema = hir::Semantics::new(db);
-    let ctx = DiagnosticsContext { config, sema, resolve };
+    let ctx = DiagnosticsContext { file: Some(ft), config, sema, resolve };
     let mut res = Vec::new();
     // `ctx.resolve` is read at the end of this function, once, over every
     // fix — see `drop_unresolved_fixes`.
@@ -661,7 +665,7 @@ pub fn semantic_diagnostics(
                 handlers::remove_unnecessary_else::remove_unnecessary_else(&ctx, d),
             AnyDiagnostic::ConcatTypeMismatch(d) =>
                 handlers::concat_type_mismatch::concat_type_mismatch(&ctx, d),
-            AnyDiagnostic::InvalidTypeUse(d) => invalid_type_use(d),
+            AnyDiagnostic::InvalidTypeUse(d) => invalid_type_use(&ctx, d),
             AnyDiagnostic::UnrecoverableImplicit(d) => unrecoverable_implicit(d),
             AnyDiagnostic::NoOverloading(d) =>
                 handlers::no_overloading::no_overloading(&ctx, d),
@@ -817,11 +821,27 @@ fn hir_diag_to_ide(d: &hir::diagnostics::Diagnostic, file: base_db::FileId) -> D
 
 // Kept for unit tests that need to dispatch a single AnyDiagnostic.
 
-fn invalid_type_use(d: &hir::diagnostics::InvalidTypeUse) -> Diagnostic {
+fn invalid_type_use(
+    ctx: &DiagnosticsContext<'_>,
+    d: &hir::diagnostics::InvalidTypeUse,
+) -> Diagnostic {
+    let mut range = node_file_range(&d.node);
+    // `p as typ` errors concern the type pattern, not the value binder.
+    if d.node.value.kind() == syntax::SyntaxKind::AS_PAT {
+        let pattern = ctx
+            .file
+            .filter(|file| file.file_id(ctx.db()) == d.node.file_id)
+            .and_then(|file| ctx.sema.parse(file))
+            .and_then(|root| d.node.value.try_to_node(&root))
+            .and_then(|node| node.children().last());
+        if let Some(pattern) = pattern {
+            range.range = pattern.text_range();
+        }
+    }
     Diagnostic::new(
         hir::diagnostics::DiagnosticCode::SailError("type-error"),
         d.message.clone(),
-        node_file_range(&d.node),
+        range,
     )
 }
 
@@ -866,7 +886,7 @@ pub(crate) fn dispatch_one(ctx: &DiagnosticsContext<'_>, d: &AnyDiagnostic) -> O
         AnyDiagnostic::ConcatTypeMismatch(d) => {
             handlers::concat_type_mismatch::concat_type_mismatch(ctx, d)
         }
-        AnyDiagnostic::InvalidTypeUse(d) => invalid_type_use(d),
+        AnyDiagnostic::InvalidTypeUse(d) => invalid_type_use(ctx, d),
         AnyDiagnostic::UnrecoverableImplicit(d) => unrecoverable_implicit(d),
         AnyDiagnostic::NoOverloading(d) => handlers::no_overloading::no_overloading(ctx, d),
         AnyDiagnostic::NotAFunction(d) => handlers::not_a_function::not_a_function(ctx, d),
@@ -971,25 +991,6 @@ fn handle_lints(config: &DiagnosticsConfig, diagnostics: &mut Vec<Diagnostic>) {
             true
         }
     });
-}
-
-/// Narrow a diagnostic's display range to a salient token.
-///
-/// The adjustment function extracts sub-ranges from complex expressions
-/// (e.g., the `if` keyword from an IfExpr, or the `}` from a BlockExpr)
-/// to make diagnostics point at the most relevant token.
-///
-/// When `Semantics::parse(file_id)` is available, this function will
-/// resolve the `AstPtr` to a concrete node and call `adj` on it.
-/// For now, falls back to the full pointer range.
-fn adjusted_display_range<N: syntax::ast::AstNode>(
-    _ctx: &DiagnosticsContext<'_>,
-    diag_ptr: hir::InFile<syntax::AstPtr<N>>,
-    _adj: &dyn Fn(N) -> Option<base_db::TextRange>,
-) -> hir::FileRange {
-    // TODO: resolve AstPtr via ctx.sema.parse(file_id) when available.
-    // For now, use the full pointer range as fallback.
-    hir::FileRange { file_id: diag_ptr.file_id, range: diag_ptr.value.text_range() }
 }
 
 // Minimal re-exports for public API.

@@ -19,6 +19,7 @@ pub mod has_source;
 // RA exposes call_hierarchy in the ide crate, not hir. Sail needs it in
 // hir so that ide-db can build the WorkspaceCallGraph without importing ide.
 pub mod hir_query;
+pub mod semantic_queries;
 pub mod semantics;
 pub(crate) mod source_analyzer;
 pub mod symbols;

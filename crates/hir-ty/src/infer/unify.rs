@@ -1557,6 +1557,44 @@ impl InferenceTable {
         self.placeholder_to_infer.get(name).copied()
     }
 
+    /// Solve an exact, single-variable integer equation only when that
+    /// variable belongs to inference. Caller-owned indices remain rigid.
+    pub(super) fn bind_numeric_equality(&mut self, lhs: &NumericExpr, rhs: &NumericExpr) -> bool {
+        for (variable, value) in [(lhs, rhs), (rhs, lhs)] {
+            let NumericExpr::Var(name) = variable else { continue };
+            let Some(id) = self.placeholder_infer_id(name) else { continue };
+            if matches!(
+                self.resolve(&Ty::new(TyKind::Infer(crate::ty::InferTy(id)))).kind(),
+                TyKind::Infer(_)
+            ) {
+                return self.bind(id, Ty::param(value.to_string_repr()));
+            }
+        }
+        if let (NumericExpr::Mul(a, b), NumericExpr::Mul(c, d)) = (lhs, rhs) {
+            for (factor, other, left, right) in
+                [(a, c, b, d), (a, d, b, c), (b, c, a, d), (b, d, a, c)]
+            {
+                if factor == other
+                    && super::integer::eval(factor, &Subst::default(), &[])
+                        .is_some_and(|n| n != 0.into())
+                {
+                    return self.bind_numeric_equality(left, right);
+                }
+            }
+        }
+        let Some(Ok((name, value))) = super::integer::witness(lhs, rhs) else {
+            return false;
+        };
+        let Some(id) = self.placeholder_infer_id(&name) else { return false };
+        if !matches!(
+            self.resolve(&Ty::new(TyKind::Infer(crate::ty::InferTy(id)))).kind(),
+            TyKind::Infer(_)
+        ) {
+            return false;
+        }
+        self.bind(id, Ty::param(value.to_string()))
+    }
+
     /// Deep-resolve a type, following all InferTy bindings recursively.
     pub fn deep_resolve(&mut self, ty: &Ty) -> Ty {
         let resolved = self.resolve(ty);

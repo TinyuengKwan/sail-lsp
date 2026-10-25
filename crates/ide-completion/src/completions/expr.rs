@@ -184,10 +184,14 @@ fn complete_unqualified(
     // from the DefMap scope chain (local bindings, block scope, workspace).
     if let Some(file_text) = ctx.file_text {
         {
+            // The cursor may sit exactly at the exclusive end of a body.
+            // Resolve at the identifier being completed, which is still inside
+            // that body's scope, rather than losing all local candidates.
+            let scope_offset = ctx.offset.saturating_sub(ctx.prefix.len());
             let scope_names = if hir::source_order::declarations_for(ctx.db, file_text).is_some() {
-                ctx.sema.local_names_in_scope(file_text, ctx.offset)
+                ctx.sema.local_names_in_scope(file_text, scope_offset)
             } else {
-                ctx.sema.names_in_scope(file_text, ctx.offset)
+                ctx.sema.names_in_scope(file_text, scope_offset)
             };
             for name in &scope_names {
                 let name_str: &str = name.as_str();
@@ -255,13 +259,13 @@ fn complete_unqualified(
                         _ => continue,
                     };
                     for field in id.fields(tree) {
-                        if !ctx.can_see_member(*candidate_file, field) {
-                            continue;
-                        }
                         let member = field.name.to_string();
                         if !prefix_lower.is_empty()
                             && !member.to_ascii_lowercase().starts_with(&prefix_lower)
                         {
+                            continue;
+                        }
+                        if !ctx.can_see_member(*candidate_file, field) {
                             continue;
                         }
                         if !seen.insert((member.clone(), false)) {
@@ -277,12 +281,14 @@ fn complete_unqualified(
             }
             for &id in tree.top_level_items() {
                 let decl = DeclLike { name: id.name(tree).to_string() };
-                if !ctx.can_see_item(*candidate_file, tree, id) {
-                    continue;
-                }
                 if !prefix_lower.is_empty()
                     && !decl.name.to_ascii_lowercase().starts_with(&prefix_lower)
                 {
+                    continue;
+                }
+                // Prefix rejection is cheap and independent of visibility.
+                // Resolve only candidates that can actually enter the list.
+                if !ctx.can_see_item(*candidate_file, tree, id) {
                     continue;
                 }
                 // Filter by context: type position → only types
@@ -321,17 +327,28 @@ fn complete_unqualified(
                 let selected_sigs = ctx.file_text.and_then(|ft| {
                     ide_db::signatures::callable_signatures_at(ctx.db, ft, ctx.offset, &decl.name)
                 });
+                let signature_index = (matches!(kind, CompletionItemKind::Function)
+                    && selected_sigs.is_none())
+                .then(|| ide_db::signatures::signature_index(*candidate_file));
                 let sig_info = if matches!(kind, CompletionItemKind::Function) {
                     match &selected_sigs {
                         Some(sigs) => sigs.first(),
-                        None => {
-                            candidate_file.signature_index().and_then(|idx| idx.get(&decl.name))
-                        }
+                        None => signature_index.as_ref().and_then(|index| index.get(&decl.name)),
                     }
                 } else {
                     None
                 };
-                let snippet = sig_info.map(|sig| ide_db::function_snippet(&decl.name, &sig.params));
+                // Completing the name of an existing call must preserve its
+                // argument list, including when the cursor is inside the name.
+                let suffix = ctx.text[ctx.offset..]
+                    .trim_start_matches(|c: char| c.is_alphanumeric() || c == '_' || c == '\'');
+                let has_parens = suffix.trim_start().starts_with('(');
+                let snippet = ctx
+                    .config
+                    .callable
+                    .filter(|_| !has_parens)
+                    .and_then(|_| sig_info)
+                    .map(|sig| ide_db::function_snippet(&decl.name, &sig.params));
                 // Populate CompletionRelevanceFn for functions + type_match.
                 let type_match = compute_fn_type_match(ctx, sig_info);
                 let relevance = if let Some(sig) = sig_info {
@@ -353,7 +370,7 @@ fn complete_unqualified(
                 };
                 acc.add(
                     CompletionItem::new(kind, decl.name.clone())
-                        .detail(if selected_sigs.is_some() {
+                        .detail(if selected_sigs.is_some() || ctx.config.full_function_signatures {
                             sig_info.map(|s| s.label.clone()).unwrap_or(detail)
                         } else {
                             detail

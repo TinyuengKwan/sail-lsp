@@ -13,7 +13,7 @@
 use crate::assist_context::{AssistContext, AssistId, AssistKind, Assists};
 
 /// Triggers when cursor is on a `let`/`var` binding name that has no
-/// type annotation. Uses `FileDb::binding_type_text()` to get the
+/// type annotation. Uses `hir::Semantics::binding_type_text()` to get the
 /// inferred type from the salsa query.
 pub(crate) fn add_explicit_type(acc: &mut Assists, ctx: &AssistContext<'_>) -> Option<()> {
     use parser::SyntaxKind as SK;
@@ -49,8 +49,16 @@ pub(crate) fn add_explicit_type(acc: &mut Assists, ctx: &AssistContext<'_>) -> O
     }
 
     // The inferred type, from the salsa query.
-    let ty_text = ctx.file.binding_type_text(name_span)?;
+    let ty_text = ctx.file.file_text().and_then(|(db, ft)| {
+        hir::Semantics::new(db).binding_type_text(ft, name_span, ctx.file.bodies())
+    })?;
     if ty_text == "unknown" || ty_text == "error" || ty_text == "unit" {
+        return None;
+    }
+
+    // Inference can contain internal constraints with no source spelling.
+    // Never offer an annotation that would introduce a syntax error.
+    if !syntax::parse_text(&format!("val __annotation : unit -> {ty_text}\n")).1.is_empty() {
         return None;
     }
 

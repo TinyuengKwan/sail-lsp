@@ -6,6 +6,9 @@ use crate::item::CompletionItem;
 
 /// Complete code snippet templates (funcdecl, scattered, enumdef, etc.).
 pub(crate) fn complete_snippet(acc: &mut Completions, ctx: &CompletionContext<'_>) {
+    if !ctx.config.enable_snippets {
+        return;
+    }
     let items = snippet_completions(ctx.prefix, ctx.is_top_level);
     acc.add_many(items);
 }

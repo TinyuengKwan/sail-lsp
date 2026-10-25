@@ -144,7 +144,7 @@
         "sail-lsp.diagnostics.effectMismatch": {
           "type": "boolean",
           "default": true,
-          "description": "Report effect mismatch diagnostics (e.g., impure call in pure function)."
+          "description": "Report effect diagnostics: an impure call in a pure function (effect-violation), effect-mismatch and missing-effect-annotation."
         },
         "sail-lsp.diagnostics.disabled": {
           "type": "array",
@@ -273,27 +273,28 @@
           "default": true,
           "description": "Show documentation in hover."
         },
-        "sail-lsp.hover.keywords": {
-          "type": "boolean",
-          "default": true,
-          "description": "Show keyword documentation in hover."
+        "sail-lsp.hover.maxFieldsCount": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "default": 10,
+          "description": "Maximum struct or union members in hover; null shows all."
         },
-        "sail-lsp.hover.actions": {
-          "type": "boolean",
-          "default": true,
-          "description": "Show hover actions (go-to-definition, etc.)."
+        "sail-lsp.hover.maxEnumVariantsCount": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "default": 10,
+          "description": "Maximum enum variants in hover; null shows all."
+        },
+        "sail-lsp.hover.maxOverloadsCount": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "default": 10,
+          "description": "Maximum overload alternatives in hover; null shows all."
         },
         "sail-lsp.semanticTokens.enable": {
           "type": "boolean",
           "default": true,
           "description": "Enable semantic syntax highlighting."
-        },
-        "sail-lsp.z3.timeoutMs": {
-          "type": "integer",
-          "default": 1000,
-          "minimum": 100,
-          "maximum": 30000,
-          "description": "Z3 solver timeout in milliseconds for constraint checking."
         },
         "sail-lsp.workspace.projectFile": {
           "type": ["null", "string"],
@@ -312,10 +313,11 @@
           "default": [],
           "description": "Root modules to load with their children and required modules. Empty selects all modules."
         },
-        "sail-lsp.workspace.maxFiles": {
-          "type": "integer",
-          "default": 10000,
-          "description": "Maximum number of .sail files to index in the workspace."
+        "sail-lsp.workspace.generatedFiles": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "default": {},
+          "description": "Map manifest __virtual filenames to generated Sail files. Paths are absolute or relative to the workspace root. The producer owns the contents."
         },
         "sail-lsp.workspace.target": {
           "type": [
@@ -332,6 +334,35 @@
           },
           "default": [],
           "description": "Additional include paths for $include resolution."
+        },
+        "sail-lsp.workspace.strictBitvector": {
+          "type": "boolean",
+          "default": false,
+          "description": "Match Sail's --strict-bitvector mode: vector lengths must be natural numbers."
+        },
+        "sail-lsp.workspace.primeCachesNumThreads": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Threads used to pre-warm caches after loading. 0 uses half of the machine's cores."
+        },
+        "sail-lsp.flycheck.enable": {
+          "type": "boolean",
+          "default": false,
+          "description": "Run the upstream Sail compiler (--just-check) on save and show its errors beside the server's own."
+        },
+        "sail-lsp.flycheck.command": {
+          "type": "string",
+          "default": "sail",
+          "description": "The Sail compiler binary flycheck runs."
+        },
+        "sail-lsp.flycheck.extraArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Arguments passed to the Sail compiler before the file list (for example --config or -D)."
         }
       }
     },

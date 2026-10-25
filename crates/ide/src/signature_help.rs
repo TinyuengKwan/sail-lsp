@@ -131,6 +131,22 @@ pub use crate::calls::CallInfo;
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn nested_calls_select_the_innermost_argument_and_return_to_outer_call() {
+        for (call, name, parameter) in
+            [("outer(1, inner(2, $03), 4)", "inner", 1), ("outer(1, inner(2, 3), $04)", "outer", 2)]
+        {
+            let fixture = format!(
+                "//- /main.sail\nval inner : (int, int) -> int\nval outer : (int, int, int) -> int\nlet result = {call}\n"
+            );
+            let (analysis, file, position) = crate::fixture::position(&fixture);
+            let help = analysis.signature_help(file, position).unwrap().expect("signature help");
+            let selected = &help.signatures[help.active_signature.unwrap()];
+            assert!(selected.label.contains(name), "{selected:?}");
+            assert_eq!(help.active_parameter, Some(parameter));
+        }
+    }
+
     /// Signature help at a call in a top-level initializer.
     ///
     /// Moved here from the *server's* test file, which reached into

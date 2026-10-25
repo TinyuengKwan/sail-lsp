@@ -1033,10 +1033,14 @@ mod tests {
             let ids = hir_def::def_query::file_def_with_body_ids(&db, file);
             let result = infer(&db, ids[0]);
             assert_eq!(
-                result.0.type_mismatches.is_empty(),
+                result.0.type_mismatches.is_empty()
+                    && !result.0.inference_diagnostics().iter().any(|d| matches!(
+                        d,
+                        crate::infer::InferenceDiagnostic::InvalidTypeUse { .. }
+                    )),
                 valid,
                 "{source}\n{:?}",
-                result.0.type_mismatches
+                result.0.inference_diagnostics()
             );
         }
     }

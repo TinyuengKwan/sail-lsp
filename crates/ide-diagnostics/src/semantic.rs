@@ -146,7 +146,6 @@ pub fn compute_semantic_diagnostics_with_names(
         check_signature_agreement,
         &mut diagnostics,
     );
-    check_phantom_type_params(&live_defs, &mut diagnostics);
     check_config_key_prefixes(&live_defs, &mut diagnostics);
     check_overload_call_arity(&live_defs, workspace, scope.as_ref(), &mut diagnostics);
     check_mapping_call_arity(&live_defs, scope.as_ref(), &mut diagnostics);
@@ -900,6 +899,14 @@ fn check_scattered_end_markers(
             }
             SK::END_DEF => {
                 let Some((name, range)) = def_name(node) else { continue };
+                if let Some(&previous) = ended.get(&name) {
+                    diagnostics.push(module_diagnostic(
+                        "scattered-double-end",
+                        format!("Cannot end scattered definition {name} as it has already been ended"),
+                        node.text_range(),
+                    ).with_related(vec![(previous, "previously ended here".into())]));
+                    continue;
+                }
                 ended.insert(
                     name.clone(),
                     base_db::text_range(
@@ -2469,6 +2476,37 @@ fn well_formedness_diagnostic(node: &syntax::SyntaxNode, cause: String) -> Diagn
             "Well-formedness check failed for numeric type expression".to_string(),
             at,
         );
+    }
+
+    // Boolean synonyms contain a constraint, not a type. Keep the
+    // unresolved constraint at its own location, with its specific cause.
+    let boolean_synonym = def.as_ref().is_some_and(|d| {
+        d.kind() == SK::TYPE_ALIAS_DEF
+            && d.children_with_tokens().filter_map(|el| el.into_token()).any(|t| t.text() == "Bool")
+    });
+    if boolean_synonym {
+        let range = def
+            .as_ref()
+            .and_then(|definition| {
+                let tokens: Vec<_> = definition
+                    .descendants_with_tokens()
+                    .filter_map(|el| el.into_token())
+                    .skip_while(|t| t.kind() != SK::EQ)
+                    .skip(1)
+                    .filter(|t| !t.kind().is_trivia())
+                    .collect();
+                Some(syntax::TextRange::new(
+                    tokens.first()?.text_range().start(),
+                    tokens.last()?.text_range().end(),
+                ))
+            })
+            .unwrap_or(inner);
+        return module_diagnostic(
+            "ill-formed-type",
+            "Well-formedness check failed for constraint".into(),
+            range,
+        )
+        .with_related(vec![(range, cause)]);
     }
 
     let (range, message) = if is_type_def {
@@ -4639,90 +4677,6 @@ fn normalised_type_text(node: &syntax::SyntaxNode) -> String {
         .collect()
 }
 
-/// A `Type`-kinded struct parameter that no field mentions can never be
-/// instantiated from a struct literal.
-fn check_phantom_type_params(defs: &[syntax::SyntaxNode], diagnostics: &mut Vec<Diagnostic>) {
-    use parser::SyntaxKind as SK;
-
-    for def in defs.iter().filter(|d| d.kind() == SK::NAMED_DEF) {
-        let is_struct = def
-            .children_with_tokens()
-            .filter_map(|el| el.into_token())
-            .find(|t| !t.kind().is_trivia() && t.kind() != SK::KW_PRIVATE)
-            .is_some_and(|t| t.kind() == SK::KW_STRUCT);
-        if !is_struct {
-            continue;
-        }
-        let Some((name, _)) = def_name(def) else { continue };
-
-        // Parameters explicitly kinded `: Type`.
-        let params: Vec<(String, syntax::TextRange)> = def
-            .children()
-            .filter(|c| c.kind() == SK::PARAM_LIST)
-            .flat_map(|pl| {
-                let toks: Vec<_> =
-                    pl.descendants_with_tokens().filter_map(|el| el.into_token()).collect();
-                let mut out = Vec::new();
-                for (i, t) in toks.iter().enumerate() {
-                    if t.kind() != SK::TY_VAR {
-                        continue;
-                    }
-                    let kinded_type = toks[i + 1..]
-                        .iter()
-                        .take_while(|n| !matches!(n.kind(), SK::COMMA | SK::R_PAREN))
-                        .any(|n| n.kind() == SK::KW_TYPE_UPPER);
-                    if kinded_type {
-                        out.push((t.text().to_string(), t.text_range()));
-                    }
-                }
-                out
-            })
-            .collect();
-        if params.is_empty() {
-            continue;
-        }
-
-        // Upstream reports this "when inferring struct literal" — that is,
-        // at a construction site that cannot pin the parameter down. A
-        // struct nobody builds never gets there, so a phantom parameter on
-        // a declaration alone is not an error.
-        let constructed = defs.iter().any(|other| {
-            if other.text_range() == def.text_range() {
-                return false;
-            }
-            other
-                .descendants_with_tokens()
-                .filter_map(|el| el.into_token())
-                .any(|t| t.kind() == SK::IDENT && t.text() == name)
-        });
-        if !constructed {
-            continue;
-        }
-
-        let body_vars: std::collections::HashSet<String> = member_type_texts(def)
-            .iter()
-            .flat_map(|t| {
-                t.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '\''))
-                    .filter(|w| w.starts_with('\''))
-                    .map(|w| w.to_string())
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-
-        for (param, range) in params {
-            if !body_vars.contains(&param) {
-                diagnostics.push(module_diagnostic(
-                    "phantom-type-parameter",
-                    format!(
-                        "Failed to instantiate ({param} : Type) when inferring struct literal of type {name}"
-                    ),
-                    range,
-                ));
-            }
-        }
-    }
-}
-
 /// A `config` key may not also be a prefix of another key used in the same
 /// file: `config a.b` and `config a.b.c` describe the same JSON node as both
 /// a value and an object.
@@ -4767,20 +4721,16 @@ fn check_config_key_prefixes(defs: &[syntax::SyntaxNode], diagnostics: &mut Vec<
     }
 
     for (i, (key, range)) in keys.iter().enumerate() {
-        for (j, (other, _)) in keys.iter().enumerate() {
+        for (j, (other, other_range)) in keys.iter().enumerate() {
             if i == j {
                 continue;
             }
             if other.starts_with(&format!("{key}.")) {
                 diagnostics.push(module_diagnostic(
                     "config-key-conflict",
-                    // `config.ml:448`
-                    format!(
-                        "Attempting to access key {key}, but various subkeys have already \
-                         been used"
-                    ),
+                    format!("Configuration key {key} is used as both a value and an object (subkey {other})"),
                     *range,
-                ));
+                ).with_related(vec![(*other_range, format!("Subkey {other} is accessed here"))]));
                 break;
             }
         }
@@ -5952,7 +5902,14 @@ fn check_configured_constraints(
         if hir::infer::configured_constraint_status(body, &values)
             == hir::infer::ConstraintStatus::Failed
         {
-            let range = def.children().next().map_or(def.text_range(), |n| n.text_range());
+            let range = def
+                .children_with_tokens()
+                .skip_while(|element| element.kind() != SK::KW_CONSTRAINT)
+                .skip(1)
+                .find(|element| !element.kind().is_trivia())
+                .map_or(def.text_range(), |element| {
+                    syntax::TextRange::new(element.text_range().start(), def.text_range().end())
+                });
             diagnostics.push(module_diagnostic(
                 "config-constraint-violated",
                 format!("Constraint {} does not hold after instantiating abstract types from configuration", body.trim()),

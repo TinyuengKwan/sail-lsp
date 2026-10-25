@@ -113,7 +113,7 @@ fn load_workspace(root: &Path) -> (AnalysisHost, Files, LoadedFiles, LoadedFiles
     let project_start = all_sail_files.len();
     all_sail_files.extend(discover_sail_files(root));
 
-    let mut host = AnalysisHost::new(None);
+    let mut host = AnalysisHost::new();
     let mut change = ide_db::apply_change::Change::new();
     let mut vfs = vfs::Vfs::default();
     for (url, _path, text) in &all_sail_files {
@@ -297,7 +297,8 @@ fn main() {
 
             asked += 1;
             let t = Instant::now();
-            let items = analysis.completions(*fid, pos).expect("nothing cancels this");
+            let items =
+                analysis.completions(*fid, pos, &Default::default()).expect("nothing cancels this");
             times.push(t.elapsed().as_micros());
             sizes.push(items.len());
 

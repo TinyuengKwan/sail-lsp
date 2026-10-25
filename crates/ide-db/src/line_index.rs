@@ -51,6 +51,8 @@ struct WideChar {
 pub struct LineIndex {
     /// Byte offset of the start of each line. `line_starts[0] == 0`.
     line_starts: Vec<usize>,
+    /// End of each line, excluding its line terminator.
+    line_ends: Vec<usize>,
     /// Total length of the text in bytes.
     len: usize,
     /// Per line, the characters wider than one byte, in column order. Empty
@@ -63,9 +65,18 @@ impl LineIndex {
     /// Build a `LineIndex` from source text.
     pub fn new(text: &str) -> Self {
         let mut line_starts = vec![0usize];
+        let mut line_ends = Vec::new();
         let mut wide: Vec<Vec<WideChar>> = vec![Vec::new()];
         for (i, ch) in text.char_indices() {
-            if ch == '\n' {
+            if ch == '\r' && text.as_bytes().get(i + 1) == Some(&b'\n') {
+                continue;
+            }
+            if ch == '\n' || ch == '\r' {
+                line_ends.push(if ch == '\n' && i > 0 && text.as_bytes()[i - 1] == b'\r' {
+                    i - 1
+                } else {
+                    i
+                });
                 line_starts.push(i + 1);
                 wide.push(Vec::new());
                 continue;
@@ -80,7 +91,8 @@ impl LineIndex {
                 });
             }
         }
-        Self { line_starts, len: text.len(), wide }
+        line_ends.push(text.len());
+        Self { line_starts, line_ends, len: text.len(), wide }
     }
 
     /// The byte column a UTF-16 column names, on the given line.
@@ -91,7 +103,9 @@ impl LineIndex {
     /// — the bundled prelude's own licence header has several — every
     /// position from the client was wrong, and slicing at one panicked.
     pub fn utf16_col_to_byte(&self, line: LineNr, utf16_col: ColNr) -> ColNr {
-        let Some(chars) = self.wide.get(line as usize) else { return utf16_col };
+        let Some(chars) = self.wide.get(line as usize) else { return 0 };
+        let line_len = self.line_ends[line as usize] - self.line_starts[line as usize];
+        let utf16_col = (utf16_col as usize).min(line_len) as ColNr;
         if chars.is_empty() {
             return utf16_col;
         }
@@ -116,7 +130,7 @@ impl LineIndex {
                 return wc.col as ColNr;
             }
         }
-        (byte + (utf16_col as usize - wide)) as ColNr
+        (byte + (utf16_col as usize - wide)).min(line_len) as ColNr
     }
 
     /// Convert a byte offset to a line/col position.
@@ -135,18 +149,20 @@ impl LineIndex {
     /// column put every diagnostic, hint and navigation range on a
     /// non-ASCII line at the wrong place.
     pub fn byte_col_to_utf16(&self, line: LineNr, byte_col: ColNr) -> ColNr {
-        let Some(chars) = self.wide.get(line as usize) else { return byte_col };
-        if chars.is_empty() {
-            return byte_col;
-        }
-        let mut col = byte_col as usize;
+        let Some(chars) = self.wide.get(line as usize) else { return 0 };
+        let col = (byte_col as usize)
+            .min(self.line_ends[line as usize] - self.line_starts[line as usize]);
+        let mut adjustment = 0;
         for wc in chars {
-            if wc.col >= byte_col as usize {
+            if col <= wc.col {
                 break;
             }
-            col = col + wc.utf16 - wc.bytes;
+            if col < wc.col + wc.bytes {
+                return (wc.col - adjustment) as ColNr;
+            }
+            adjustment += wc.bytes - wc.utf16;
         }
-        col as ColNr
+        (col - adjustment) as ColNr
     }
 
     /// The byte offset a `LineCol` names, always on a character boundary.
@@ -165,9 +181,9 @@ impl LineIndex {
     /// Snapping is containment, not the fix. The fix is to agree with the
     /// client on an encoding, which `positionEncoding` negotiation does.
     pub fn offset(&self, pos: LineCol) -> usize {
-        let line = (pos.line as usize).min(self.line_starts.len() - 1);
-        let line_start = self.line_starts[line];
-        let raw = (line_start + pos.col as usize).min(self.len);
+        let line = pos.line as usize;
+        let Some(&line_start) = self.line_starts.get(line) else { return self.len };
+        let raw = (line_start + pos.col as usize).min(self.line_ends[line]);
         // Inside a wide character? Only if the caller handed us a column in
         // an encoding this line does not use.
         let inside = self.wide.get(line).is_some_and(|chars| {

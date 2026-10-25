@@ -130,7 +130,7 @@ fn load_workspace(root: &Path) -> (AnalysisHost, Files, LoadedFiles, LoadedFiles
     let project_start = all_sail_files.len();
     all_sail_files.extend(project_files);
 
-    let mut host = AnalysisHost::new(None);
+    let mut host = AnalysisHost::new();
     let mut change = ide_db::apply_change::Change::new();
     let mut vfs = vfs::Vfs::default();
 
@@ -1102,7 +1102,7 @@ fn run_ide_things(analysis: &Analysis, url_fids: &[(Url, FileId)], _files: &File
     let mut completion_count = 0usize;
     let pos = ide_db::LineCol { line: 3, col: 5 };
     for (_url, fid) in url_fids {
-        if let Ok(items) = analysis.completions(*fid, pos) {
+        if let Ok(items) = analysis.completions(*fid, pos, &Default::default()) {
             completion_count += items.len();
         }
     }
@@ -1117,7 +1117,7 @@ fn run_ide_things(analysis: &Analysis, url_fids: &[(Url, FileId)], _files: &File
     let t0 = Instant::now();
     let mut lens_count = 0usize;
     for (_url, fid) in url_fids {
-        if let Ok(lenses) = analysis.code_lenses(*fid) {
+        if let Ok(lenses) = analysis.code_lenses(*fid, &Default::default()) {
             lens_count += lenses.len();
         }
     }

@@ -92,24 +92,24 @@ pub enum HoverDocFormat {
 pub struct HoverConfig {
     /// Show documentation in hover.
     pub documentation: bool,
-    /// Show keyword documentation.
-    pub keywords: bool,
     /// Documentation format.
     pub format: HoverDocFormat,
     /// Max struct/union fields to show.
     pub max_fields_count: Option<usize>,
     /// Max enum variants to show.
     pub max_enum_variants_count: Option<usize>,
+    /// Maximum overload alternatives to display; None shows all.
+    pub max_overloads_count: Option<usize>,
 }
 
 impl Default for HoverConfig {
     fn default() -> Self {
         Self {
             documentation: true,
-            keywords: true,
             format: HoverDocFormat::Markdown,
-            max_fields_count: None,
-            max_enum_variants_count: None,
+            max_fields_count: Some(10),
+            max_enum_variants_count: Some(10),
+            max_overloads_count: Some(10),
         }
     }
 }

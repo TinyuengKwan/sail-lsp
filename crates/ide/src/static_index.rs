@@ -147,10 +147,8 @@ impl StaticIndex {
             let kind = def_kind_to_symbol_kind(id.def_kind(tree));
 
             // Build hover text from signature index
-            let hover = file
-                .signature_index()
-                .and_then(|idx| idx.get(&decl_name))
-                .map(|sig| sig.label.clone());
+            let signature_index = ide_db::signatures::signature_index(file);
+            let hover = signature_index.get(&decl_name).map(|sig| sig.label.clone());
 
             let token_id = self.tokens.insert(TokenStaticData {
                 hover,

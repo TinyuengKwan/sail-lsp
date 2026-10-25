@@ -236,6 +236,14 @@ fn check(table: &mut InferenceTable, sub: &Ty, sup: &Ty, depth: usize) -> Subtyp
     if sub == sup {
         return SubtypeResult::Ok;
     }
+    // Existential introduction chooses a witness for each source value.
+    // Comparing a whole range against one singleton instead would require
+    // its lower and upper endpoints to equal the same witness.
+    if matches!(sup.kind(), TyKind::Exist { .. }) {
+        if let Some((var, predicate, inner)) = super::refinement::numeric_value(&sub) {
+            return check(table, &Ty::exist(vec![var], predicate, inner), &sup, depth + 1);
+        }
+    }
     if let TyKind::Exist { vars, constraint, inner } = sub.kind() {
         let universe = table.universe();
         let opened = table.open_existential_avoiding(vars, constraint, inner, &sup);
@@ -429,7 +437,13 @@ fn check(table: &mut InferenceTable, sub: &Ty, sup: &Ty, depth: usize) -> Subtyp
                     | (TyArg::Nexp(_), TyArg::Order(_)) => SubtypeResult::Fail,
                     (TyArg::Type(x), TyArg::Type(y)) => check(table, x, y, depth + 1),
                     _ => match (nexp(&x), nexp(&y)) {
-                        (Some(x), Some(y)) => goal(comparison(x, CompareOp::Eq, y)),
+                        (Some(x), Some(y)) => {
+                            if numeric && table.bind_numeric_equality(&x, &y) {
+                                SubtypeResult::Ok
+                            } else {
+                                goal(comparison(x, CompareOp::Eq, y))
+                            }
+                        }
                         _ => undecided(),
                     },
                 }

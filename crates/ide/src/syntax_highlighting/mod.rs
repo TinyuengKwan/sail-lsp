@@ -122,21 +122,6 @@ mod tests {
         fn parsed(&self) -> Option<&syntax::parser_lower::ParsedFile> {
             None
         }
-        fn signature_index(
-            &self,
-        ) -> Option<&std::collections::HashMap<String, ide_db::CallableSignature>> {
-            None
-        }
-        fn ref_counts(&self) -> &std::collections::HashMap<String, usize> {
-            static EMPTY: std::sync::OnceLock<std::collections::HashMap<String, usize>> =
-                std::sync::OnceLock::new();
-            EMPTY.get_or_init(std::collections::HashMap::new)
-        }
-        fn impl_counts(&self) -> &std::collections::HashMap<String, usize> {
-            static EMPTY: std::sync::OnceLock<std::collections::HashMap<String, usize>> =
-                std::sync::OnceLock::new();
-            EMPTY.get_or_init(std::collections::HashMap::new)
-        }
     }
 
     #[test]
@@ -171,6 +156,39 @@ mod tests {
         let full = compute_semantic_tokens(&file);
         let range = compute_semantic_tokens_range(&file, &base_db::text_range(0, 10));
         assert!(range.data.len() < full.data.len());
+    }
+
+    /// A name is classed by what it names, not as a variable because no
+    /// declaring keyword precedes it.
+    #[test]
+    fn a_use_is_classed_by_its_definition() {
+        let source = "enum E = { A, B }\nregister R : E\nfunction g() -> E = A\nfunction f() -> E = { R = g(); R }\n";
+        let (analysis, files) = crate::fixture::analysis(&format!("//- /main.sail\n{source}"));
+        let tokens = analysis.semantic_tokens(files[0].0).unwrap();
+        let (mut line, mut col) = (0u32, 0u32);
+        let mut at = std::collections::HashMap::new();
+        for t in &tokens.data {
+            if t.delta_line > 0 {
+                line += t.delta_line;
+                col = t.delta_start;
+            } else {
+                col += t.delta_start;
+            }
+            at.insert((line, col), t.token_type);
+        }
+        let type_of = |line: u32, needle: &str| {
+            let col = source.lines().nth(line as usize).unwrap().rfind(needle).unwrap() as u32;
+            at.get(&(line, col)).copied()
+        };
+        assert_eq!(type_of(2, "A"), Some(10), "enum member");
+        assert_eq!(type_of(3, "g"), Some(1), "function");
+        assert_eq!(type_of(3, "R"), Some(13), "register");
+        assert_eq!(type_of(3, "E"), Some(3), "enum");
+        // And a declaration is classed the same way as its uses.
+        assert_eq!(type_of(0, "E"), Some(3), "enum declaration");
+        assert_eq!(type_of(0, "B"), Some(10), "enum member declaration");
+        assert_eq!(type_of(1, "R"), Some(13), "register declaration");
+        assert_eq!(type_of(2, "g"), Some(1), "function declaration");
     }
 
     #[test]

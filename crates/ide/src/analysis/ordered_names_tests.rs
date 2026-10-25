@@ -778,7 +778,9 @@ fn ordered_overload_groups_are_global_but_members_keep_their_scope() {
         let targets = a.goto_definition(&urls[2], file.position_at(offset)).unwrap();
         assert_eq!(targets.len(), 1, "{targets:?}");
         assert_eq!(targets[0].file_id, Some(FileId::from_raw(1)));
-        let completions = a.completions(FileId::from_raw(2), file.position_at(offset + 1)).unwrap();
+        let completions = a
+            .completions(FileId::from_raw(2), file.position_at(offset + 1), &Default::default())
+            .unwrap();
         assert!(completions.iter().any(|item| item.label == "g"), "{completions:?}");
     }
 }
@@ -1262,7 +1264,11 @@ fn ordered_completion_excludes_future_declarations() {
     let a = snapshot(&host, &map);
     let file = a.file(&urls[0]).unwrap();
     let items = a
-        .completions(FileId::from_raw(0), file.position_at(text.find("= lat").unwrap() + 5))
+        .completions(
+            FileId::from_raw(0),
+            file.position_at(text.find("= lat").unwrap() + 5),
+            &Default::default(),
+        )
         .unwrap();
     assert!(!items.iter().any(|i| i.label == "later"), "{items:?}");
 }
@@ -1317,7 +1323,11 @@ fn ordered_completion_keeps_the_current_signature_and_local_binding() {
     let a = snapshot(&host, &map);
     let file = a.file(&urls[0]).unwrap();
     let items = a
-        .completions(FileId::from_raw(0), file.position_at(text.find("pick(local)").unwrap() + 4))
+        .completions(
+            FileId::from_raw(0),
+            file.position_at(text.find("pick(local)").unwrap() + 4),
+            &Default::default(),
+        )
         .unwrap();
     let picks: Vec<_> = items.iter().filter(|i| i.label == "pick").collect();
     assert_eq!(picks.len(), 1, "{items:?}");
@@ -1327,7 +1337,11 @@ fn ordered_completion_keeps_the_current_signature_and_local_binding() {
     let docs = resolved.documentation.as_deref().unwrap();
     assert!(docs.contains("int -> int") && !docs.contains("bool"), "{docs}");
     let locals = a
-        .completions(FileId::from_raw(0), file.position_at(text.find("; local").unwrap() + 7))
+        .completions(
+            FileId::from_raw(0),
+            file.position_at(text.find("; local").unwrap() + 7),
+            &Default::default(),
+        )
         .unwrap();
     assert!(locals.iter().any(|i| i.label == "local"), "{locals:?}");
 }
@@ -1617,7 +1631,7 @@ fn inline_bitfield_field_rename_refreshes_selected_overloads_after_edits() {
     let id = FileId::from_raw(0);
     let url = url::Url::parse("file:///project/inline.sail").unwrap();
     let map = UrlMap::new([(url.clone(), id)].into(), [(id, url.clone())].into());
-    let mut host = AnalysisHost::new(None);
+    let mut host = AnalysisHost::new();
     for receiver in ["A", "B", "A"] {
         let text = format!("$project# A {{}} B {{}} C {{ requires A, B }}\n$start_module# A\ndefault Order dec\nbitfield A : bits(8) = {{ part : 3 .. 0 }}\n$end_module#\n$start_module# B\nbitfield B : bits(8) = {{ part : 3 .. 0 }}\n$end_module#\n$start_module# C\nfunction use(x : {receiver}) -> {receiver} = update_part(x, 0x0)\n$end_module#\n");
         let mut update = ide_db::apply_change::Change::new();
@@ -1954,7 +1968,7 @@ fn ordered_generated_helpers_share_signature_completion_and_reference_identity()
     assert_eq!(help.signatures.len(), 1, "{help:?}");
     assert!(help.signatures[0].label.contains("'n > 0"), "{help:?}");
     let mut item = a
-        .completions(FileId::from_raw(1), file.position_at(offset + 10))
+        .completions(FileId::from_raw(1), file.position_at(offset + 10), &Default::default())
         .unwrap()
         .into_iter()
         .find(|i| i.label == "m_forwards" && i.import.is_none())
@@ -2086,7 +2100,11 @@ fn ordered_completion_resolve_rejects_removed_include_origins() {
     let a = snapshot(&host, &map);
     let file = a.file(&urls[0]).unwrap();
     let mut item = a
-        .completions(FileId::from_raw(0), file.position_at(text.find("helper(x)").unwrap() + 6))
+        .completions(
+            FileId::from_raw(0),
+            file.position_at(text.find("helper(x)").unwrap() + 6),
+            &Default::default(),
+        )
         .unwrap()
         .into_iter()
         .find(|i| i.label == "helper")
@@ -2121,7 +2139,7 @@ fn inline_program_ide_requests_share_declaration_identity() {
     let id = FileId::from_raw(0);
     let url = url::Url::parse("file:///project/inline.sail").unwrap();
     let map = UrlMap::new([(url.clone(), id)].into(), [(id, url.clone())].into());
-    let mut host = AnalysisHost::new(None);
+    let mut host = AnalysisHost::new();
     let mut change = ide_db::apply_change::Change::new();
     change.change_file(id, text);
     change.set_workspace_files(vec![id]);
@@ -2145,7 +2163,7 @@ fn inline_program_ide_requests_share_declaration_identity() {
     let hover = a.hover(id, file.position_at(early), &Default::default()).unwrap().unwrap();
     assert!(hover.markup.contains("int") && !hover.markup.contains("bool"), "{hover:?}");
     for (offset, visible) in [(early, true), (late, false)] {
-        let items = a.completions(id, file.position_at(offset + 3)).unwrap();
+        let items = a.completions(id, file.position_at(offset + 3), &Default::default()).unwrap();
         assert_eq!(items.iter().any(|i| i.label == "chosen"), visible, "{items:?}");
     }
     let edit = a.rename(&url, file.position_at(early), "renamed").unwrap().unwrap().unwrap();
@@ -2215,7 +2233,7 @@ fn inline_program_external_navigation_and_hierarchy_keep_workspace_support() {
         urls.iter().cloned().zip(ids).collect(),
         ids.into_iter().zip(urls.iter().cloned()).collect(),
     );
-    let mut host = AnalysisHost::new(None);
+    let mut host = AnalysisHost::new();
     let mut change = ide_db::apply_change::Change::new();
     change.change_file(ids[0], text);
     change.change_file(ids[1], "val external : bool -> int\n");
@@ -2233,7 +2251,7 @@ fn inline_program_external_navigation_and_hierarchy_keep_workspace_support() {
     let help = a.signature_help(ids[0], file.position_at(offset + 9)).unwrap().unwrap();
     assert_eq!(help.signatures.len(), 1);
     assert!(help.signatures[0].label.contains("bool"), "{help:?}");
-    let items = a.completions(ids[0], file.position_at(offset + 3)).unwrap();
+    let items = a.completions(ids[0], file.position_at(offset + 3), &Default::default()).unwrap();
     assert!(items.iter().any(|i| i.label == "external"), "{items:?}");
 }
 
@@ -2249,7 +2267,7 @@ fn individual_constructor_privacy_is_shared_by_ide_requests() {
             let id = FileId::from_raw(0);
             let url = url::Url::parse("file:///project/inline.sail").unwrap();
             let map = UrlMap::new([(url.clone(), id)].into(), [(id, url.clone())].into());
-            let mut host = AnalysisHost::new(None);
+            let mut host = AnalysisHost::new();
             let mut change = ide_db::apply_change::Change::new();
             change.change_file(id, &combined);
             change.set_workspace_files(vec![id]);
@@ -2281,7 +2299,8 @@ fn individual_constructor_privacy_is_shared_by_ide_requests() {
                     declaration.find("Public :").unwrap()
                 );
             }
-            let items = a.completions(id, file.position_at(offset + 3)).unwrap();
+            let items =
+                a.completions(id, file.position_at(offset + 3), &Default::default()).unwrap();
             assert_eq!(
                 items.iter().any(|i| i.label == name && i.import.is_none()),
                 visible,
@@ -2325,7 +2344,7 @@ fn private_enum_helpers_keep_public_identity_and_private_type_checks() {
                 let id = FileId::from_raw(0);
                 let url = url::Url::parse("file:///project/inline.sail").unwrap();
                 let map = UrlMap::new([(url.clone(), id)].into(), [(id, url.clone())].into());
-                let mut host = AnalysisHost::new(None);
+                let mut host = AnalysisHost::new();
                 let mut change = ide_db::apply_change::Change::new();
                 change.change_file(id, &combined);
                 change.set_workspace_files(vec![id]);
@@ -2344,7 +2363,8 @@ fn private_enum_helpers_keep_public_identity_and_private_type_checks() {
                 let visible = same_module || name != "all_E";
                 let targets = a.goto_definition(use_url, file.position_at(at)).unwrap();
                 assert_eq!(!targets.is_empty(), visible, "{name}: {targets:?}");
-                let items = a.completions(use_id, file.position_at(at + 3)).unwrap();
+                let items =
+                    a.completions(use_id, file.position_at(at + 3), &Default::default()).unwrap();
                 assert_eq!(
                     items.iter().any(|i| i.label == name && i.import.is_none()),
                     visible,
@@ -2424,7 +2444,9 @@ fn scattered_members_keep_clause_identity_and_kind_specific_scope() {
                     clause.find("Member").unwrap()
                 );
             }
-            let items = a.completions(FileId::from_raw(3), file.position_at(use_at + 3)).unwrap();
+            let items = a
+                .completions(FileId::from_raw(3), file.position_at(use_at + 3), &Default::default())
+                .unwrap();
             assert_eq!(
                 items.iter().any(|i| i.label == "Member" && i.import.is_none()),
                 visible,
@@ -2437,8 +2459,13 @@ fn scattered_members_keep_clause_identity_and_kind_specific_scope() {
                 "{kind}: {diagnostics:?}"
             );
             let type_at = body.find("E =").unwrap();
-            let type_items =
-                a.completions(FileId::from_raw(3), file.position_at(type_at + 1)).unwrap();
+            let type_items = a
+                .completions(
+                    FileId::from_raw(3),
+                    file.position_at(type_at + 1),
+                    &Default::default(),
+                )
+                .unwrap();
             assert!(type_items.iter().any(|i| i.label == "E"), "{type_items:?}");
             let renamed =
                 a.rename(&urls[3], file.position_at(type_at), "Renamed").unwrap().unwrap().unwrap();
@@ -2473,7 +2500,7 @@ fn inline_scattered_enum_members_inherit_head_scope_and_privacy() {
         let id = FileId::from_raw(0);
         let url = url::Url::parse("file:///project/inline.sail").unwrap();
         let map = UrlMap::new([(url.clone(), id)].into(), [(id, url.clone())].into());
-        let mut host = AnalysisHost::new(None);
+        let mut host = AnalysisHost::new();
         let mut change = ide_db::apply_change::Change::new();
         change.change_file(id, text);
         change.set_workspace_files(vec![id]);
@@ -2483,7 +2510,7 @@ fn inline_scattered_enum_members_inherit_head_scope_and_privacy() {
         let at = text.rfind("Member").unwrap();
         let targets = a.goto_definition(&url, file.position_at(at)).unwrap();
         assert_eq!(!targets.is_empty(), !private, "{targets:?}");
-        let items = a.completions(id, file.position_at(at + 3)).unwrap();
+        let items = a.completions(id, file.position_at(at + 3), &Default::default()).unwrap();
         assert_eq!(items.iter().any(|i| i.label == "Member"), !private, "{items:?}");
         let diagnostics = a.file_diagnostics(id, &Default::default()).unwrap();
         assert_eq!(
@@ -2544,7 +2571,9 @@ fn scattered_enum_vectors_are_available_at_end_with_exact_length() {
                 .unwrap();
             assert!(format!("{hover:?}").contains("vector(2, E)"), "{hover:?}");
         }
-        let items = a.completions(FileId::from_raw(3), file.position_at(at + 3)).unwrap();
+        let items = a
+            .completions(FileId::from_raw(3), file.position_at(at + 3), &Default::default())
+            .unwrap();
         assert_eq!(
             items.iter().any(|i| i.label == "all_E" && i.import.is_none()),
             ended,
@@ -2582,7 +2611,9 @@ fn scattered_enum_vectors_keep_local_binding_scope_and_nominal_type_checks() {
             let targets = a.goto_definition(&urls[2], file.position_at(at)).unwrap();
             assert_eq!(targets.len(), 1, "private={private} requires={requires:?}: {targets:?}");
             assert_eq!(targets[0].url, urls[0]);
-            let items = a.completions(FileId::from_raw(2), file.position_at(at + 3)).unwrap();
+            let items = a
+                .completions(FileId::from_raw(2), file.position_at(at + 3), &Default::default())
+                .unwrap();
             assert!(
                 items.iter().any(|i| i.label == "all_E" && i.import.is_none()),
                 "private={private} requires={requires:?}: {items:?}"
@@ -2624,7 +2655,9 @@ fn scattered_member_availability_and_private_union_clauses() {
             let at = text.find(&body).unwrap() + body.find("Member").unwrap();
             let targets = a.goto_definition(&urls[0], file.position_at(at)).unwrap();
             assert_eq!(!targets.is_empty(), after, "{text}{targets:?}");
-            let items = a.completions(FileId::from_raw(0), file.position_at(at + 3)).unwrap();
+            let items = a
+                .completions(FileId::from_raw(0), file.position_at(at + 3), &Default::default())
+                .unwrap();
             assert_eq!(
                 items.iter().any(|i| i.label == "Member" && i.import.is_none()),
                 after,
@@ -2686,7 +2719,7 @@ fn inline_scattered_vectors_resolve_after_end_and_check_element_scope() {
         let id = FileId::from_raw(0);
         let url = url::Url::parse("file:///project/inline.sail").unwrap();
         let map = UrlMap::new([(url.clone(), id)].into(), [(id, url.clone())].into());
-        let mut host = AnalysisHost::new(None);
+        let mut host = AnalysisHost::new();
         let mut change = ide_db::apply_change::Change::new();
         change.change_file(id, &text);
         change.set_workspace_files(vec![id]);
@@ -2696,7 +2729,7 @@ fn inline_scattered_vectors_resolve_after_end_and_check_element_scope() {
         let at = text.rfind("all_E").unwrap();
         assert_eq!(a.goto_definition(&url, file.position_at(at)).unwrap().len(), 1);
         assert!(a
-            .completions(id, file.position_at(at + 3))
+            .completions(id, file.position_at(at + 3), &Default::default())
             .unwrap()
             .iter()
             .any(|i| i.label == "all_E"));
@@ -2747,7 +2780,9 @@ fn scattered_callable_heads_do_not_make_future_signatures_available() {
                     .unwrap();
                 assert_eq!(edit.source_file_edits[&FileId::from_raw(0)].len(), 5, "{text}{edit:?}");
             }
-            let items = a.completions(FileId::from_raw(0), file.position_at(at + 1)).unwrap();
+            let items = a
+                .completions(FileId::from_raw(0), file.position_at(at + 1), &Default::default())
+                .unwrap();
             assert_eq!(
                 items.iter().any(|i| i.label == "f" && i.import.is_none()),
                 !before,
@@ -2790,7 +2825,7 @@ fn ordered_generated_names_keep_type_and_value_identities_separate() {
             assert_eq!(help.signatures.len(), 1, "{help:?}");
             assert!(help.signatures[0].label.contains("E"), "{help:?}");
         }
-        let completions = a.completions(FileId::from_raw(1), file.position_at(body.rfind('E').unwrap() + 1)).unwrap();
+        let completions = a.completions(FileId::from_raw(1), file.position_at(body.rfind('E').unwrap() + 1), &Default::default()).unwrap();
         let mut value = completions.into_iter().find(|item| item.label == "E" && matches!(item.kind, ide_db::defs::CompletionItemKind::Function | ide_db::defs::CompletionItemKind::Variable | ide_db::defs::CompletionItemKind::Constant)).expect("generated value completion");
         a.resolve_completion_item(&mut value).unwrap();
         assert!(value.documentation.as_deref().unwrap().contains(signature), "{value:?}");
@@ -2899,7 +2934,7 @@ fn inline_generated_collision_completion_resolves_its_own_namespace() {
     ] {
         let text =
             format!("$project# Main {{}}\n$start_module# Main\ndefault Order dec\n{defs}{body}");
-        let mut host = AnalysisHost::new(None);
+        let mut host = AnalysisHost::new();
         let id = FileId::from_raw(0);
         let url = url::Url::parse("file:///project/main.sail").unwrap();
         let map = UrlMap::new(
@@ -2915,7 +2950,7 @@ fn inline_generated_collision_completion_resolves_its_own_namespace() {
         let offset = text.rfind('E').unwrap();
         let def = ide_db::defs::Definition::classify_at(&file, file.position_at(offset)).unwrap();
         assert!(!matches!(def, ide_db::defs::Definition::TypeDef(_)), "{def:?}");
-        let items = a.completions(id, file.position_at(offset + 1)).unwrap();
+        let items = a.completions(id, file.position_at(offset + 1), &Default::default()).unwrap();
         let mut item = items
             .into_iter()
             .find(|item| {
@@ -2960,7 +2995,9 @@ fn ordered_instantiation_rhs_keeps_type_callable_and_key_identities_separate() {
             file.position_at(main.find("convert").unwrap())
         )
         .is_none());
-        let items = a.completions(FileId::from_raw(1), file.position_at(target + 1)).unwrap();
+        let items = a
+            .completions(FileId::from_raw(1), file.position_at(target + 1), &Default::default())
+            .unwrap();
         let candidates: Vec<_> = items.iter().filter(|item| item.label == "T").collect();
         assert_eq!(candidates.len(), 1, "{items:?}");
         assert!(!items.iter().any(|item| item.label == "T_value"), "{items:?}");
@@ -3021,7 +3058,7 @@ fn instantiation_references_follow_namespace_privacy_and_order() {
                         [(url.clone(), id)].into_iter().collect(),
                         [(id, url.clone())].into_iter().collect(),
                     );
-                    let mut host = AnalysisHost::new(None);
+                    let mut host = AnalysisHost::new();
                     let mut change = ide_db::apply_change::Change::new();
                     change.change_file(id, combined.clone());
                     change.set_workspace_files(vec![id]);
@@ -3045,7 +3082,8 @@ fn instantiation_references_follow_namespace_privacy_and_order() {
                 let offset = text.rfind("Thing").unwrap();
                 let targets = a.goto_definition(url, file.position_at(offset)).unwrap();
                 assert_eq!(targets.is_empty(), unavailable, "{combined}{targets:?}");
-                let items = a.completions(id, file.position_at(offset + 5)).unwrap();
+                let items =
+                    a.completions(id, file.position_at(offset + 5), &Default::default()).unwrap();
                 assert_eq!(
                     items.iter().any(|item| item.label == "Thing"),
                     !unavailable,
@@ -3181,5 +3219,71 @@ fn ordered_overloads_reject_more_indirection_than_current_sail() {
         assert!(a.signature_help(FileId::from_raw(1), file.position_at(main.find("outer(x)").unwrap() + 6)).unwrap().is_none());
         let diagnostics = a.file_diagnostics(FileId::from_raw(1), &Default::default()).unwrap();
         assert!(diagnostics.iter().any(|d| d.severity == ide_diagnostics::Severity::Error), "{definitions}{main}{diagnostics:?}");
+    }
+}
+
+#[test]
+fn strict_bitvector_configuration_invalidates_types_and_preprocessing() {
+    let (mut host, map, _) = setup(
+        &[("main.sail", "default Order dec\n$ifdef STRICT_BITVECTOR\nfunction branch() -> int = true\n$else\nfunction branch() -> int = 0\n$endif\nfunction empty() -> unit = { let _ : list(bitvector(-1)) = [||]; () }\n")],
+        &[0], vec![],
+    );
+    for enabled in [false, true, false] {
+        let mut change = ide_db::apply_change::Change::new();
+        change.set_strict_bitvector(enabled);
+        host.apply_change(change);
+        let diagnostics = snapshot(&host, &map)
+            .file_diagnostics(FileId::from_raw(0), &Default::default())
+            .unwrap();
+        let errors: Vec<_> =
+            diagnostics.iter().filter(|d| d.severity == ide_diagnostics::Severity::Error).collect();
+        if enabled {
+            assert!(errors.iter().any(|d| d.message.contains("Well-formedness")), "{errors:?}");
+            assert!(errors.iter().any(|d| d.message.contains("mismatch")), "{errors:?}");
+        } else {
+            assert!(errors.is_empty(), "{errors:?}");
+        }
+    }
+}
+
+#[test]
+fn record_undefined_eligibility_tracks_provider_constraints() {
+    let provider = "default Order dec\nstruct R('n : Int) = { x : bitvector('n) }\n";
+    let (mut host, map, _) = setup(
+        &[
+            ("types.sail", provider),
+            (
+                "main.sail",
+                "$include \"types.sail\"\nregister V : R(1)\nfunction f() -> R(1) = undefined\n",
+            ),
+        ],
+        &[1],
+        vec![],
+    );
+    for constrained in [false, true, false] {
+        let mut change = ide_db::apply_change::Change::new();
+        change.change_file(
+            FileId::from_raw(0),
+            if constrained {
+                provider.replace("Int)", "Int), 'n >= 0")
+            } else {
+                provider.to_owned()
+            },
+        );
+        host.apply_change(change);
+        let diagnostics = snapshot(&host, &map)
+            .file_diagnostics(FileId::from_raw(1), &Default::default())
+            .unwrap();
+        let errors: Vec<_> =
+            diagnostics.iter().filter(|d| d.severity == ide_diagnostics::Severity::Error).collect();
+        if constrained {
+            assert!(errors.is_empty(), "{errors:?}");
+        } else {
+            assert!(errors.iter().any(|d| d.message.contains("cannot be undefined")), "{errors:?}");
+            assert!(
+                errors.iter().any(|d| d.message.contains("default register value")),
+                "{errors:?}"
+            );
+        }
     }
 }

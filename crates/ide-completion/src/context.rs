@@ -236,6 +236,7 @@ fn qualified_from_analysis(analysis: &CompletionAnalysis) -> Qualified {
 
 /// Completion context — everything a provider needs to generate items.
 pub(crate) struct CompletionContext<'a> {
+    pub(crate) config: crate::CompletionConfig,
     /// Semantic analysis access.
     pub(crate) sema: hir::Semantics<'a>,
     /// Database reference for salsa queries.
@@ -328,6 +329,7 @@ impl<'a> CompletionContext<'a> {
             sema,
             db,
             file_text,
+            config: crate::CompletionConfig::default(),
             expected_type,
             expected_name,
             file,

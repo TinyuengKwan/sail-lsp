@@ -123,9 +123,13 @@ pub fn find_all_refs(
                 }
             }
             let spans = spans_in_file(file, def, &name, false);
-            for (span, is_write) in spans {
-                let category =
-                    if is_write { ReferenceCategory::WRITE } else { ReferenceCategory::READ };
+            let root = file.syntax();
+            for (span, _) in spans {
+                let category = if root.as_ref().is_some_and(|root| is_assigned(root, span)) {
+                    ReferenceCategory::WRITE
+                } else {
+                    ReferenceCategory::READ
+                };
                 references
                     .entry(file_id)
                     .or_default()
@@ -172,6 +176,35 @@ fn build_declaration(def: &Definition, file: &dyn FileDb, file_id: FileId) -> Op
         name: search_name(def, file),
         is_mut: false,
     })
+}
+
+/// Whether the name at `span` is what an assignment writes: the left of
+/// `x = ..`, the base of `R[i] = ..`, `R[h .. l] = ..` or `r.f = ..`, or an
+/// element of `(a, b) = ..`. An index or field name inside the target is
+/// read, not written.
+pub(crate) fn is_assigned(root: &syntax::SyntaxNode, span: Span) -> bool {
+    use syntax::SyntaxKind as SK;
+    let Some(token) = root
+        .token_at_offset(base_db::TextSize::from(span.start as u32))
+        .right_biased()
+        .filter(|t| t.kind() == SK::IDENT)
+    else {
+        return false;
+    };
+    let Some(mut node) = token.parent().filter(|n| n.kind() == SK::IDENT_EXPR) else {
+        return false;
+    };
+    while let Some(parent) = node.parent() {
+        let is_first = parent.first_child().as_ref() == Some(&node);
+        match parent.kind() {
+            SK::ASSIGN_EXPR => return is_first,
+            SK::INDEX_EXPR | SK::SUBRANGE_EXPR | SK::FIELD_ACCESS_EXPR if is_first => {}
+            SK::TUPLE_EXPR => {}
+            _ => return false,
+        }
+        node = parent;
+    }
+    false
 }
 
 fn sort_and_dedup_spans(spans: &mut Vec<(Span, bool)>) {
@@ -395,6 +428,73 @@ pub fn normalize_validated_rename(
 #[cfg(test)]
 mod through_analysis {
     use crate::fixture::reference_texts;
+
+    const WRITES: &str = r#"
+//- /main.sail
+register R : vector(2, bits(8))
+function f(i : int) -> bits(8) = {
+  var x : int = 1;
+  x = 2;
+  (x, x) = (i, i);
+  R[i] = R[0];
+  R[0][3 .. 0] = 0x0;
+  (R[0], x) = (R[1], i);
+  $0R[1]
+}
+"#;
+
+    /// An assignment's target is a write — through an index or a subrange
+    /// too; the same name read on the right, or as the base of a read, is a
+    /// read.
+    #[test]
+    fn an_assignment_target_is_a_write() {
+        let (analysis, file_id, pos) = crate::fixture::position(WRITES);
+        let url = analysis.url_for_file_id(file_id).unwrap().clone();
+        let mut refs = Vec::new();
+        for result in analysis.find_all_refs(&url, pos, None).unwrap().unwrap() {
+            refs.extend(result.references[&file_id].iter().copied());
+        }
+        refs.sort_by_key(|(range, _)| base_db::range_start(*range));
+        let writes: Vec<_> =
+            refs.iter().map(|(_, c)| *c == ide_db::search::ReferenceCategory::WRITE).collect();
+        assert_eq!(writes, [true, false, true, true, false, false], "{refs:?}");
+    }
+
+    /// A field assignment writes the record it is a field of.
+    #[test]
+    fn a_field_assignment_writes_its_base() {
+        let (analysis, file_id, pos) = crate::fixture::position(
+            r#"
+//- /main.sail
+struct S = { f : bits(8) }
+register $0T : S
+function g() -> bits(8) = { T.f = 0x00; T.f }
+"#,
+        );
+        let url = analysis.url_for_file_id(file_id).unwrap().clone();
+        let mut refs = Vec::new();
+        for result in analysis.find_all_refs(&url, pos, None).unwrap().unwrap() {
+            refs.extend(result.references[&file_id].iter().copied());
+        }
+        refs.sort_by_key(|(range, _)| base_db::range_start(*range));
+        let writes: Vec<_> =
+            refs.iter().map(|(_, c)| *c == ide_db::search::ReferenceCategory::WRITE).collect();
+        assert_eq!(writes, [true, false], "{refs:?}");
+    }
+
+    /// Document highlight agrees: the declaration and the three assignment
+    /// targets are writes, the three reads are reads.
+    #[test]
+    fn an_assignment_target_is_highlighted_as_a_write() {
+        let (analysis, file_id, pos) = crate::fixture::position(WRITES);
+        let url = analysis.url_for_file_id(file_id).unwrap().clone();
+        let highlights = analysis.highlight_related(&url, pos).unwrap();
+        let writes = highlights
+            .iter()
+            .filter(|h| h.category == crate::highlight_related::ReferenceCategory::Write)
+            .count();
+        assert_eq!((writes, highlights.len()), (4, 7), "{highlights:?}");
+    }
 
     /// A local binding that shadows a top-level name is a different symbol.
     #[test]

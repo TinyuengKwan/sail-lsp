@@ -52,6 +52,8 @@ pub enum InlayKind {
 /// Configuration for inlay hint computation.
 #[derive(Clone, Debug)]
 pub struct InlayHintsConfig {
+    /// Maximum displayed Unicode characters; full labels remain in tooltips.
+    pub max_length: Option<usize>,
     /// Show type hints for let/var bindings.
     pub type_hints: bool,
     /// Show parameter name hints at call sites.
@@ -74,6 +76,7 @@ pub struct InlayHintsConfig {
 impl Default for InlayHintsConfig {
     fn default() -> Self {
         Self {
+            max_length: Some(25),
             type_hints: true,
             parameter_hints: true,
             closing_brace_hints_min_lines: Some(6),
@@ -147,8 +150,8 @@ pub fn inlay_hints_ide_with_types(
             &mut hints,
         );
     }
-    if config.closing_brace_hints_min_lines.is_some() {
-        closing_brace::collect_closing_brace_hints(current_file, begin, end, &mut hints);
+    if let Some(min_lines) = config.closing_brace_hints_min_lines {
+        closing_brace::collect_closing_brace_hints(current_file, begin, end, min_lines, &mut hints);
     }
     if config.type_hints {
         bind_pat::collect_type_hints(current_file, begin, end, &mut hints, type_check);
@@ -170,6 +173,23 @@ pub fn inlay_hints_ide_with_types(
     discriminant::collect_discriminant_hints(current_file, begin, end, &mut hints, config);
 
     hints.sort_by(|lhs, rhs| lhs.offset.cmp(&rhs.offset).then(lhs.label.cmp(&rhs.label)));
+    if let Some(limit) = config.max_length {
+        for hint in &mut hints {
+            if hint.label.chars().count() > limit {
+                let full = std::mem::take(&mut hint.label);
+                hint.label = if limit == 0 {
+                    String::new()
+                } else {
+                    full.chars().take(limit - 1).chain(std::iter::once('…')).collect()
+                };
+                hint.tooltip = Some(match hint.tooltip.take() {
+                    Some(tooltip) => format!("{full}\n\n{tooltip}"),
+                    None => full,
+                });
+            }
+        }
+        hints.retain(|hint| !hint.label.is_empty());
+    }
     hints
 }
 
@@ -200,6 +220,50 @@ mod tests {
     use super::*;
     use hir::callgraph::SourceFileInfo;
     use ide_db::test_utils::TestFile;
+
+    #[test]
+    fn parameter_hints_follow_replaced_signatures_and_display_limits() {
+        let source = "val pick : int -> int\nfunction pick(first_parameter) = first_parameter\nfunction before() -> int = pick(1)\nval pick : int -> int\nfunction pick(second_parameter) = second_parameter\nfunction after() -> int = pick(2)\n";
+        let fixture = format!("//- /main.sail\n{source}");
+        let (analysis, files) = crate::fixture::analysis(&fixture);
+        let mut config = InlayHintsConfig { max_length: None, ..Default::default() };
+        let whole = base_db::text_range(0, source.len());
+        let parameter_hints = |config: &InlayHintsConfig| {
+            analysis
+                .inlay_hints(files[0].0, whole, config)
+                .unwrap()
+                .into_iter()
+                .filter(|hint| hint.kind == InlayHintKind::Parameter)
+                .collect::<Vec<_>>()
+        };
+        let hints = parameter_hints(&config);
+        assert_eq!(
+            hints.iter().map(|hint| hint.label.as_str()).collect::<Vec<_>>(),
+            ["first_parameter:", "second_parameter:"]
+        );
+        config.max_length = Some(6);
+        let short = parameter_hints(&config);
+        assert_eq!(short[0].label, "first…");
+        assert_eq!(short[1].label, "secon…");
+        assert!(short[1].tooltip.as_ref().unwrap().contains("second_parameter:"));
+        config.max_length = Some(0);
+        assert!(parameter_hints(&config).is_empty());
+    }
+
+    #[test]
+    fn closing_brace_threshold_uses_the_configured_line_count() {
+        let source = "function long_function() -> int = {\n\n\n  1\n}\n";
+        let fixture = format!("//- /main.sail\n{source}");
+        let (analysis, files) = crate::fixture::analysis(&fixture);
+        for (threshold, expected) in [(Some(2), true), (Some(20), false), (None, false)] {
+            let config =
+                InlayHintsConfig { closing_brace_hints_min_lines: threshold, ..Default::default() };
+            let hints = analysis
+                .inlay_hints(files[0].0, base_db::text_range(0, source.len()), &config)
+                .unwrap();
+            assert_eq!(hints.iter().any(|hint| hint.label.contains("// long_function")), expected);
+        }
+    }
 
     fn full_range(file: &TestFile) -> TextRange {
         base_db::text_range(0, file.text().len())

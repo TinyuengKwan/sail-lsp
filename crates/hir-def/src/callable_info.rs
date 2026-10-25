@@ -3,6 +3,8 @@
 //! Canonical location: hir-def. Moved from ide-db in so
 //! hir-ty can access callable metadata without depending on ide-db.
 
+use std::collections::HashMap;
+
 use parser::Span;
 use syntax::parser_lower::{DeclKind, ParsedFile};
 
@@ -55,4 +57,21 @@ pub fn collect_callable_signatures_from(parsed: &ParsedFile, text: &str) -> Vec<
         out.push(CallableSignature { name: head.name.clone(), label, params, return_type });
     }
     out
+}
+
+pub fn build_signature_index_from_parsed(
+    parsed: &syntax::parser_lower::ParsedFile,
+    text: &str,
+) -> HashMap<String, CallableSignature> {
+    let sigs = collect_callable_signatures_from(parsed, text);
+    let mut index = HashMap::with_capacity(sigs.len());
+    for sig in sigs {
+        let dominated = index.get(&sig.name).is_some_and(|existing: &CallableSignature| {
+            existing.label.starts_with("val") && !sig.label.starts_with("val")
+        });
+        if !dominated {
+            index.insert(sig.name.clone(), sig);
+        }
+    }
+    index
 }

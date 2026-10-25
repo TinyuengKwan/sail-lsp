@@ -32,7 +32,6 @@ use ide_db::{collect_callable_signatures, function_snippet, Parameter};
 
 // --- Std + tower-lsp ---
 use lsp_types::{CodeActionKind, Diagnostic, NumberOrString, Range, TextEdit, Url};
-use std::collections::hash_map::HashMap;
 
 // Drop-in replacement for File::new(source) in tests.
 // Uses salsa database internally; provides same interface as File.
@@ -150,32 +149,8 @@ impl ide_db::FileDb for SalsaTestFile {
         let pf = syntax::parse_query::parsed_file(&self.db, self.input);
         pf.as_ref().map(|apf| apf.0.as_ref())
     }
-    fn signature_index(&self) -> Option<&HashMap<String, ide_db::CallableSignature>> {
-        Some(ide_db::db_query::signature_index(&self.db, self.input).as_ref())
-    }
-    fn ref_counts(&self) -> &HashMap<String, usize> {
-        static EMPTY: std::sync::LazyLock<HashMap<String, usize>> =
-            std::sync::LazyLock::new(HashMap::new);
-        &EMPTY
-    }
-    fn impl_counts(&self) -> &HashMap<String, usize> {
-        static EMPTY: std::sync::LazyLock<HashMap<String, usize>> =
-            std::sync::LazyLock::new(HashMap::new);
-        &EMPTY
-    }
     fn bodies(&self) -> Option<&hir::CallableBodies> {
         hir::def_query::callable_bodies(&self.db, self.input).as_ref().map(|b| b.0.as_ref())
-    }
-    fn cached_expr_type_text(&self, span: parser::Span) -> Option<String> {
-        let callable_ids = hir::def_query::file_def_with_body_ids(&self.db, self.input);
-        let bodies = self.bodies();
-        for &id in callable_ids.iter() {
-            let tcr = hir::ty_query::infer(&self.db, id);
-            if let Some(ty_text) = tcr.0.expr_type_text(span, bodies) {
-                return Some(ty_text);
-            }
-        }
-        None
     }
 }
 
@@ -1240,7 +1215,7 @@ fn builds_code_lenses_for_declarations() {
     let all_files = vec![(&uri, &file)];
     let refs = collect_reference_counts(&all_files);
     let impls = collect_implementation_counts(&all_files);
-    let lenses = code_lenses_ide(&file, &refs, &impls);
+    let lenses = code_lenses_ide(&file, &refs, &impls, &Default::default());
     // 2 lenses per function: references count + implementations count.
     // "Run" lens was removed (no Sail test runner integration).
     assert!(lenses.len() >= 2, "expected >= 2 lenses, got {}", lenses.len());
@@ -3864,6 +3839,7 @@ fn a_config_setting_changes_the_answer() {
         ..Default::default()
     };
     let all_off = InlayHintsConfig {
+        max_length: None,
         type_hints: false,
         parameter_hints: false,
         effect_hints: false,

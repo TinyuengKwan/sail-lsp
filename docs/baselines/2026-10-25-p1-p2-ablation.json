@@ -1,0 +1,1018 @@
+{
+  "schema_version": 1,
+  "date_utc": "2026-10-25",
+  "status": "complete",
+  "scope": "Ablation of all changes checkpointed from the previous uncommitted state",
+  "checkpoint": {
+    "commit": "76db47948c2d85891dc147ebe761600187d773e3",
+    "parent": "93afc795e5670e183f1de2011e6c04f69666704c"
+  },
+  "checkpoint_message": "fix(lsp): refine diagnostics and harden incremental type analysis",
+  "review_inventory": {
+    "semantic_fixes": {
+      "files": [
+        "crates/hir-ty/src/display.rs",
+        "crates/hir-ty/src/infer/declaration_constraints.rs",
+        "crates/hir-ty/src/infer/expr.rs",
+        "crates/hir-ty/src/infer/pat.rs",
+        "crates/hir-ty/src/infer/semantic_audit.rs",
+        "crates/hir-ty/src/query.rs"
+      ],
+      "decision": "Preserve the type-pattern, phantom-parameter, diagnostic and UTF-8 fixes plus their counterexamples. No additional wrapper or generic framework introduced."
+    },
+    "solver": {
+      "files": [
+        "crates/hir-ty/src/infer/solver.rs"
+      ],
+      "decision": "Preserve after three ablations; exact sign proofs and their premise evaluation are required."
+    },
+    "text_index": {
+      "files": [
+        "crates/ide-db/src/line_index.rs",
+        "crates/ide-db/src/text_document.rs"
+      ],
+      "decision": "Retain line-end and Unicode safeguards; simplify only redundant following-line work and the constant scan flag."
+    },
+    "semantic_api": {
+      "files": [
+        "crates/hir/src/semantics.rs",
+        "crates/hir/src/source_analyzer.rs"
+      ],
+      "decision": "Previous changes remove unused SourceAnalyzer members. Reintroducing them adds unused abstraction."
+    },
+    "diagnostics": {
+      "files": [
+        "crates/ide-diagnostics/src/handlers/duplicate_binding.rs",
+        "crates/ide-diagnostics/src/handlers/unresolved_field.rs",
+        "crates/ide-diagnostics/src/lib.rs",
+        "crates/ide-diagnostics/src/semantic.rs",
+        "crates/ide-diagnostics/src/semantic/declarations.rs",
+        "crates/ide-diagnostics/src/tests.rs"
+      ],
+      "decision": "Retain direct CST-based ranges and semantic fixes. Pattern-range removal has a concrete failing regression."
+    },
+    "other_callers_and_tests": {
+      "files": [
+        "crates/ide/src/analysis.rs",
+        "crates/ide/src/analysis/hierarchy.rs",
+        "crates/ide/src/analysis/ordered_names_tests.rs",
+        "crates/ide/src/fixture.rs",
+        "crates/ide/src/regression_tests.rs",
+        "crates/sail-lsp/examples/analysis_stats.rs",
+        "crates/sail-lsp/examples/completion_check.rs",
+        "crates/sail-lsp/examples/conformance_check.rs",
+        "crates/sail-lsp/examples/corpus_check.rs",
+        "crates/sail-lsp/examples/mutation_check.rs",
+        "crates/sail-lsp/src/cli.rs",
+        "crates/sail-lsp/src/global_state.rs",
+        "crates/sail-lsp/src/integrated_benchmarks.rs",
+        "crates/sail-lsp/src/mem_docs.rs"
+      ],
+      "decision": "Retain mechanical AnalysisHost constructor migrations, Unicode/editor tests, diagnostic fixture updates, and the expectation-parser correction. These support the removed unused LRU argument and verified behavior."
+    },
+    "reports": {
+      "files": [
+        "docs/baselines/2026-10-25-ablation.json",
+        "docs/baselines/2026-10-25-p1-p2.json"
+      ],
+      "decision": "Preserve historical experiment and validation records; they have no runtime cost."
+    }
+  },
+  "experiments": [
+    {
+      "id": "remove_arithmetic_rules",
+      "change": "Remove arithmetic_lower_bound, arithmetic_ordering and their call",
+      "result": "rejected",
+      "evidence": "remove-arithmetic.log",
+      "finding": "The nonnegative division proof regresses from Satisfied to Unknown; 1 of 2 targeted tests fails."
+    },
+    {
+      "id": "remove_lower_bound_evaluation",
+      "change": "Remove arbitrary-precision constant evaluation from arithmetic_lower_bound",
+      "result": "rejected",
+      "evidence": "remove-lower-eval.log",
+      "finding": "Cannot prove 0 <= 4 * m + q with nonnegative m and positive q; 425 pass, 1 fails."
+    },
+    {
+      "id": "remove_following_line_rescan",
+      "change": "Stop the edit rescan after the affected end line and its unchanged terminator",
+      "result": "retained",
+      "evidence": "remove-following-line-rescan.log",
+      "finding": "All 32 text-document tests pass, including 2000 independently checked random Unicode edits. The unchanged end-line terminator closes the splice window."
+    },
+    {
+      "id": "remove_previous_line_rescan",
+      "change": "Start rescanning at the edited line instead of including its predecessor",
+      "result": "rejected",
+      "evidence": "remove-previous-line-rescan.log",
+      "finding": "CRLF boundary and randomized Unicode differential tests fail; 30 pass, 2 fail."
+    },
+    {
+      "id": "remove_line_start_flag",
+      "change": "Remove the private is_at_line_start parameter and conditional push",
+      "result": "retained",
+      "evidence": "retained-unit.log",
+      "finding": "Every caller passes true and scans from a known line start. Initialize offsets with text_offset directly."
+    },
+    {
+      "id": "reorder_arithmetic_proofs",
+      "change": "Move arithmetic ordering after exact integer-difference evaluation",
+      "result": "rejected",
+      "evidence": [
+        "checkpoint-model.log",
+        "candidate-model.log"
+      ],
+      "finding": "426 hir-ty and 141 ide-db tests pass, but the trial model run takes 30664 ms versus 29490 ms and has 10 budget-exhausted goals versus 9. No demonstrated benefit; original order restored. One pair of runs does not establish a universal performance regression."
+    },
+    {
+      "id": "remove_type_pattern_range",
+      "change": "Remove AS_PAT syntax-range narrowing",
+      "result": "rejected",
+      "evidence": "remove-pattern-range.log",
+      "finding": "The error shifts from the invalid type pattern to the value binder, failing the precise-location regression."
+    }
+  ],
+  "checkpoint_model": {
+    "schema_version": 1,
+    "scope": "committed_deferred_obligations",
+    "sites": [
+      {
+        "assumptions": [
+          "(0 >= '_sk1_LMUL_pow & '_sk8__sk7__sk6__sk5_z == 0 | 0 < '_sk1_LMUL_pow & '_sk8__sk7__sk6__sk5_z == '_sk1_LMUL_pow)",
+          "3 <= vlen_exp & vlen_exp <= 16",
+          "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+          "-3 <= '_sk1_LMUL_pow & '_sk1_LMUL_pow <= 3",
+          "'_sk2__set in {8, 16, 32, 64}",
+          "'_sk3__set in {8, 16, 32, 64}",
+          "vlen >= '_sk3__set",
+          "vlen >= SEW",
+          "0 >= '_sk1_LMUL_pow & '_sk5_z == 0 | 0 < '_sk1_LMUL_pow & '_sk5_z == '_sk1_LMUL_pow",
+          "(0 >= '_sk1_LMUL_pow & '_sk6__sk5_z == 0 | 0 < '_sk1_LMUL_pow & '_sk6__sk5_z == '_sk1_LMUL_pow)",
+          "(0 >= '_sk1_LMUL_pow & '_sk7__sk6__sk5_z == 0 | 0 < '_sk1_LMUL_pow & '_sk7__sk6__sk5_z == '_sk1_LMUL_pow)",
+          "2 ^ vlen_exp >= '_sk3__set",
+          "2 ^ vlen_exp >= SEW"
+        ],
+        "callable": "get_num_elem",
+        "cause": "Compatibility",
+        "clause": 0,
+        "compatibility_types": null,
+        "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_control.sail",
+        "goal": "1 <= div(2 ^ '_sk8__sk7__sk6__sk5_z * 2 ^ vlen_exp, '_sk3__set) & div(2 ^ '_sk8__sk7__sk6__sk5_z * 2 ^ vlen_exp, '_sk3__set) <= 2 ^ vlen_exp",
+        "location": {
+          "column": 3,
+          "end": 2723,
+          "line": 39,
+          "source": "(2 ^ max(0, LMUL_pow)) * vlen / SEW",
+          "start": 2688
+        },
+        "origin_is_fallback": false,
+        "reason": "budget_exhausted",
+        "recovery_types": null,
+        "rigid_variables": [
+          "'_sk1_LMUL_pow",
+          "'_sk2__set",
+          "'_sk3__set",
+          "'_sk5_z",
+          "'_sk6__sk5_z",
+          "'_sk7__sk6__sk5_z",
+          "'_sk8__sk7__sk6__sk5_z"
+        ],
+        "status": "unknown"
+      },
+      {
+        "assumptions": [
+          "3 <= vlen_exp & vlen_exp <= 16",
+          "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+          "xlen in {32, 64}",
+          "'sew in {8, 16, 32, 64}",
+          "0 <= '_sk1_index",
+          "'sew <= vlen",
+          "EEW <= vlen",
+          "'sew <= 2 ^ vlen_exp",
+          "EEW <= 2 ^ vlen_exp"
+        ],
+        "callable": "read_single_element",
+        "cause": "Compatibility",
+        "clause": 0,
+        "compatibility_types": null,
+        "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_control.sail",
+        "goal": "2 ^ vlen_exp % 'sew == 0",
+        "location": {
+          "column": 3,
+          "end": 3007,
+          "line": 46,
+          "source": "static_assert(vlen % EEW == 0);",
+          "start": 2977
+        },
+        "origin_is_fallback": false,
+        "reason": "budget_exhausted",
+        "recovery_types": null,
+        "rigid_variables": [
+          "'_sk1_index"
+        ],
+        "status": "unknown"
+      },
+      {
+        "assumptions": [
+          "3 <= vlen_exp & vlen_exp <= 16",
+          "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+          "xlen in {32, 64}",
+          "'sew in {8, 16, 32, 64}",
+          "0 <= '_sk1_index",
+          "'sew <= vlen",
+          "EEW <= vlen",
+          "'sew <= 2 ^ vlen_exp",
+          "EEW <= 2 ^ vlen_exp"
+        ],
+        "callable": "write_single_element",
+        "cause": "Compatibility",
+        "clause": 0,
+        "compatibility_types": null,
+        "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_control.sail",
+        "goal": "2 ^ vlen_exp % 'sew == 0",
+        "location": {
+          "column": 3,
+          "end": 4753,
+          "line": 88,
+          "source": "static_assert(vlen % EEW == 0);",
+          "start": 4723
+        },
+        "origin_is_fallback": false,
+        "reason": "budget_exhausted",
+        "recovery_types": null,
+        "rigid_variables": [
+          "'_sk1_index"
+        ],
+        "status": "unknown"
+      },
+      {
+        "assumptions": [
+          "3 <= vlen_exp & vlen_exp <= 16",
+          "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+          "xlen in {32, 64}",
+          "'n >= 0 & 'sew in {8, 16, 32, 64}",
+          "-3 <= '_sk1_LMUL_pow & '_sk1_LMUL_pow <= 3",
+          "'_sk1_LMUL_pow >= 0 & '_sk3_z == '_sk1_LMUL_pow | '_sk1_LMUL_pow < 0 & '_sk3_z == 0",
+          "('_sk1_LMUL_pow >= 0 & '_sk4__sk3_z == '_sk1_LMUL_pow | '_sk1_LMUL_pow < 0 & '_sk4__sk3_z == 0)",
+          "'sew <= vlen",
+          "SEW <= vlen",
+          "'sew <= 2 ^ vlen_exp",
+          "SEW <= 2 ^ vlen_exp"
+        ],
+        "callable": "write_vreg",
+        "cause": "Compatibility",
+        "clause": 0,
+        "compatibility_types": null,
+        "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_control.sail",
+        "goal": "2 ^ vlen_exp % 'sew == 0",
+        "location": {
+          "column": 3,
+          "end": 6106,
+          "line": 123,
+          "source": "static_assert(vlen % SEW == 0);",
+          "start": 6076
+        },
+        "origin_is_fallback": false,
+        "reason": "budget_exhausted",
+        "recovery_types": null,
+        "rigid_variables": [
+          "'_sk1_LMUL_pow",
+          "'_sk3_z",
+          "'_sk4__sk3_z"
+        ],
+        "status": "unknown"
+      },
+      {
+        "assumptions": [
+          "xlen in {32, 64}",
+          "3 <= vlen_exp & vlen_exp <= 16",
+          "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+          "true",
+          "true",
+          "<unsupported>",
+          "-4 <= '_sk5_LMUL_pow_new & '_sk5_LMUL_pow_new <= 3",
+          "3 <= '_sk6_SEW_pow_new & '_sk6_SEW_pow_new <= 10",
+          "-9 <= '_sk7_lmul_sew_ratio & '_sk7_lmul_sew_ratio <= 0",
+          "~('_sk6_SEW_pow_new > '_sk5_LMUL_pow_new + elen_exp | '_sk1__flow_bool & <unsupported>)"
+        ],
+        "callable": "execute_vsetvl_type",
+        "cause": "Compatibility",
+        "clause": 0,
+        "compatibility_types": null,
+        "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_vset_insts.sail",
+        "goal": "1 <= 2 ^ ('_sk5_LMUL_pow_new + vlen_exp - '_sk6_SEW_pow_new) & 2 ^ ('_sk5_LMUL_pow_new + vlen_exp - '_sk6_SEW_pow_new) <= 2 ^ vlen_exp",
+        "location": {
+          "column": 16,
+          "end": 4187,
+          "line": 119,
+          "source": "vl = to_bits(calculate_new_vl(avl, VLMAX));",
+          "start": 4159
+        },
+        "origin_is_fallback": false,
+        "reason": "budget_exhausted",
+        "recovery_types": null,
+        "rigid_variables": [
+          "'_sk1__flow_bool",
+          "'_sk5_LMUL_pow_new",
+          "'_sk6_SEW_pow_new",
+          "'_sk7_lmul_sew_ratio"
+        ],
+        "status": "unknown"
+      },
+      {
+        "assumptions": [
+          "xlen in {32, 64}",
+          "'v in {32, 39, 48, 57}",
+          "0 <= '_sk1_level & '_sk1_level <= (if 'v == 32 then 1 else (if 'v == 39 then 2 else (if 'v == 48 then 3 else 4)))",
+          "true",
+          "true",
+          "0 <= '_sk4_index & '_sk4_index <= num_tlb_entries - 1",
+          "0 <= '_sk4_index & '_sk4_index <= 2 ^ num_tlb_entries_exp - 1",
+          "0 <= '_sk4_index & '_sk4_index <= 2 ^ 6 - 1"
+        ],
+        "callable": "add_to_TLB",
+        "cause": "Compatibility",
+        "clause": 0,
+        "compatibility_types": null,
+        "file": "/home/clair/tinyueng_workplace/sail-riscv/model/sys/vmem_tlb.sail",
+        "goal": "'v - 12 >= '_sk1_level * (if 'v == 32 then 10 else 9)",
+        "location": {
+          "column": 21,
+          "end": 5981,
+          "line": 157,
+          "source": "let vpn = vpn & ~(zero_extend(levelMask));",
+          "start": 5959
+        },
+        "origin_is_fallback": false,
+        "reason": "budget_exhausted",
+        "recovery_types": null,
+        "rigid_variables": [
+          "'_sk1_level",
+          "'_sk4_index"
+        ],
+        "status": "unknown"
+      },
+      {
+        "assumptions": [
+          "xlen in {32, 64}",
+          "'v in {32, 39, 48, 57}",
+          "0 <= '_sk1_level & '_sk1_level <= (if 'v == 32 then 1 else (if 'v == 39 then 2 else (if 'v == 48 then 3 else 4)))",
+          "true",
+          "true",
+          "0 <= '_sk4_index & '_sk4_index <= num_tlb_entries - 1",
+          "0 <= '_sk4_index & '_sk4_index <= 2 ^ num_tlb_entries_exp - 1",
+          "0 <= '_sk4_index & '_sk4_index <= 2 ^ 6 - 1"
+        ],
+        "callable": "add_to_TLB",
+        "cause": "Compatibility",
+        "clause": 0,
+        "compatibility_types": null,
+        "file": "/home/clair/tinyueng_workplace/sail-riscv/model/sys/vmem_tlb.sail",
+        "goal": "(if 'v == 32 then 22 else 44) >= '_sk1_level * (if 'v == 32 then 10 else 9)",
+        "location": {
+          "column": 21,
+          "end": 6026,
+          "line": 158,
+          "source": "let ppn = ppn & ~(zero_extend(levelMask));",
+          "start": 6004
+        },
+        "origin_is_fallback": false,
+        "reason": "budget_exhausted",
+        "recovery_types": null,
+        "rigid_variables": [
+          "'_sk1_level",
+          "'_sk4_index"
+        ],
+        "status": "unknown"
+      },
+      {
+        "assumptions": [
+          "xlen in {32, 64}",
+          "'v in {32, 39, 48, 57}",
+          "0 <= '_sk1_level & '_sk1_level <= (if 'v == 32 then 1 else (if 'v == 39 then 2 else (if 'v == 48 then 3 else 4)))",
+          "true",
+          "true",
+          "0 <= '_sk4_index & '_sk4_index <= num_tlb_entries - 1",
+          "0 <= '_sk4_index & '_sk4_index <= 2 ^ num_tlb_entries_exp - 1",
+          "0 <= '_sk4_index & '_sk4_index <= 2 ^ 6 - 1"
+        ],
+        "callable": "add_to_TLB",
+        "cause": "Compatibility",
+        "clause": 0,
+        "compatibility_types": null,
+        "file": "/home/clair/tinyueng_workplace/sail-riscv/model/sys/vmem_tlb.sail",
+        "goal": "57 - 12 >= '_sk1_level * (if 'v == 32 then 10 else 9)",
+        "location": {
+          "column": 46,
+          "end": 6318,
+          "line": 164,
+          "source": "levelMask = zero_extend(levelMask),",
+          "start": 6296
+        },
+        "origin_is_fallback": false,
+        "reason": "budget_exhausted",
+        "recovery_types": null,
+        "rigid_variables": [
+          "'_sk1_level",
+          "'_sk4_index"
+        ],
+        "status": "unknown"
+      },
+      {
+        "assumptions": [
+          "xlen in {32, 64}",
+          "'v in {32, 39, 48, 57}",
+          "0 <= '_sk1_level & '_sk1_level <= (if 'v == 32 then 1 else (if 'v == 39 then 2 else (if 'v == 48 then 3 else 4)))",
+          "true",
+          "true",
+          "0 <= '_sk4_index & '_sk4_index <= num_tlb_entries - 1",
+          "0 <= '_sk4_index & '_sk4_index <= 2 ^ num_tlb_entries_exp - 1",
+          "0 <= '_sk4_index & '_sk4_index <= 2 ^ 6 - 1"
+        ],
+        "callable": "add_to_TLB",
+        "cause": "Compatibility",
+        "clause": 0,
+        "compatibility_types": null,
+        "file": "/home/clair/tinyueng_workplace/sail-riscv/model/sys/vmem_tlb.sail",
+        "goal": "57 - 12 >= 'v - 12",
+        "location": {
+          "column": 46,
+          "end": 6381,
+          "line": 165,
+          "source": "vpn       = sign_extend(vpn),",
+          "start": 6365
+        },
+        "origin_is_fallback": false,
+        "reason": "budget_exhausted",
+        "recovery_types": null,
+        "rigid_variables": [
+          "'_sk1_level",
+          "'_sk4_index"
+        ],
+        "status": "unknown"
+      }
+    ],
+    "smt_enabled": true,
+    "totals": {
+      "proved": 2908,
+      "refuted": 0,
+      "total": 2917,
+      "unknown": 9
+    },
+    "unknown_by_reason": {
+      "budget_exhausted": 9
+    },
+    "workspace": "/home/clair/tinyueng_workplace/sail-riscv/model/riscv.sail_project"
+  },
+  "rejected_reordering_model": {
+    "schema_version": 1,
+    "scope": "committed_deferred_obligations",
+    "sites": [
+      {
+        "assumptions": [
+          "(0 >= '_sk1_LMUL_pow & '_sk8__sk7__sk6__sk5_z == 0 | 0 < '_sk1_LMUL_pow & '_sk8__sk7__sk6__sk5_z == '_sk1_LMUL_pow)",
+          "3 <= vlen_exp & vlen_exp <= 16",
+          "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+          "-3 <= '_sk1_LMUL_pow & '_sk1_LMUL_pow <= 3",
+          "'_sk2__set in {8, 16, 32, 64}",
+          "'_sk3__set in {8, 16, 32, 64}",
+          "vlen >= '_sk3__set",
+          "vlen >= SEW",
+          "0 >= '_sk1_LMUL_pow & '_sk5_z == 0 | 0 < '_sk1_LMUL_pow & '_sk5_z == '_sk1_LMUL_pow",
+          "(0 >= '_sk1_LMUL_pow & '_sk6__sk5_z == 0 | 0 < '_sk1_LMUL_pow & '_sk6__sk5_z == '_sk1_LMUL_pow)",
+          "(0 >= '_sk1_LMUL_pow & '_sk7__sk6__sk5_z == 0 | 0 < '_sk1_LMUL_pow & '_sk7__sk6__sk5_z == '_sk1_LMUL_pow)",
+          "2 ^ vlen_exp >= '_sk3__set",
+          "2 ^ vlen_exp >= SEW"
+        ],
+        "callable": "get_num_elem",
+        "cause": "Compatibility",
+        "clause": 0,
+        "compatibility_types": null,
+        "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_control.sail",
+        "goal": "1 <= div(2 ^ '_sk8__sk7__sk6__sk5_z * 2 ^ vlen_exp, '_sk3__set) & div(2 ^ '_sk8__sk7__sk6__sk5_z * 2 ^ vlen_exp, '_sk3__set) <= 2 ^ vlen_exp",
+        "location": {
+          "column": 3,
+          "end": 2723,
+          "line": 39,
+          "source": "(2 ^ max(0, LMUL_pow)) * vlen / SEW",
+          "start": 2688
+        },
+        "origin_is_fallback": false,
+        "reason": "budget_exhausted",
+        "recovery_types": null,
+        "rigid_variables": [
+          "'_sk1_LMUL_pow",
+          "'_sk2__set",
+          "'_sk3__set",
+          "'_sk5_z",
+          "'_sk6__sk5_z",
+          "'_sk7__sk6__sk5_z",
+          "'_sk8__sk7__sk6__sk5_z"
+        ],
+        "status": "unknown"
+      },
+      {
+        "assumptions": [
+          "3 <= vlen_exp & vlen_exp <= 16",
+          "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+          "xlen in {32, 64}",
+          "'sew in {8, 16, 32, 64}",
+          "0 <= '_sk1_index",
+          "'sew <= vlen",
+          "EEW <= vlen",
+          "'sew <= 2 ^ vlen_exp",
+          "EEW <= 2 ^ vlen_exp"
+        ],
+        "callable": "read_single_element",
+        "cause": "Compatibility",
+        "clause": 0,
+        "compatibility_types": null,
+        "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_control.sail",
+        "goal": "2 ^ vlen_exp % 'sew == 0",
+        "location": {
+          "column": 3,
+          "end": 3007,
+          "line": 46,
+          "source": "static_assert(vlen % EEW == 0);",
+          "start": 2977
+        },
+        "origin_is_fallback": false,
+        "reason": "budget_exhausted",
+        "recovery_types": null,
+        "rigid_variables": [
+          "'_sk1_index"
+        ],
+        "status": "unknown"
+      },
+      {
+        "assumptions": [
+          "3 <= vlen_exp & vlen_exp <= 16",
+          "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+          "xlen in {32, 64}",
+          "'sew in {8, 16, 32, 64}",
+          "0 <= '_sk1_index",
+          "'sew <= vlen",
+          "EEW <= vlen",
+          "'sew <= 2 ^ vlen_exp",
+          "EEW <= 2 ^ vlen_exp"
+        ],
+        "callable": "write_single_element",
+        "cause": "Compatibility",
+        "clause": 0,
+        "compatibility_types": null,
+        "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_control.sail",
+        "goal": "2 ^ vlen_exp % 'sew == 0",
+        "location": {
+          "column": 3,
+          "end": 4753,
+          "line": 88,
+          "source": "static_assert(vlen % EEW == 0);",
+          "start": 4723
+        },
+        "origin_is_fallback": false,
+        "reason": "budget_exhausted",
+        "recovery_types": null,
+        "rigid_variables": [
+          "'_sk1_index"
+        ],
+        "status": "unknown"
+      },
+      {
+        "assumptions": [
+          "3 <= vlen_exp & vlen_exp <= 16",
+          "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+          "xlen in {32, 64}",
+          "'n >= 0 & 'sew in {8, 16, 32, 64}",
+          "-3 <= '_sk1_LMUL_pow & '_sk1_LMUL_pow <= 3",
+          "'_sk1_LMUL_pow >= 0 & '_sk3_z == '_sk1_LMUL_pow | '_sk1_LMUL_pow < 0 & '_sk3_z == 0",
+          "('_sk1_LMUL_pow >= 0 & '_sk4__sk3_z == '_sk1_LMUL_pow | '_sk1_LMUL_pow < 0 & '_sk4__sk3_z == 0)",
+          "'sew <= vlen",
+          "SEW <= vlen",
+          "'sew <= 2 ^ vlen_exp",
+          "SEW <= 2 ^ vlen_exp"
+        ],
+        "callable": "write_vreg",
+        "cause": "Compatibility",
+        "clause": 0,
+        "compatibility_types": null,
+        "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_control.sail",
+        "goal": "2 ^ vlen_exp % 'sew == 0",
+        "location": {
+          "column": 3,
+          "end": 6106,
+          "line": 123,
+          "source": "static_assert(vlen % SEW == 0);",
+          "start": 6076
+        },
+        "origin_is_fallback": false,
+        "reason": "budget_exhausted",
+        "recovery_types": null,
+        "rigid_variables": [
+          "'_sk1_LMUL_pow",
+          "'_sk3_z",
+          "'_sk4__sk3_z"
+        ],
+        "status": "unknown"
+      },
+      {
+        "assumptions": [
+          "3 <= vlen_exp & vlen_exp <= 16",
+          "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+          "xlen in {32, 64}",
+          "'_sk1__set in {8, 16, 32, 64}",
+          "-3 <= '_sk2_LMUL_pow & '_sk2_LMUL_pow <= 3",
+          "1 <= '_sk3_num_elem & '_sk3_num_elem <= vlen",
+          "<unsupported>",
+          "true",
+          "0 <= '_sk5__loop_index & '_sk5__loop_index <= '_sk3_num_elem - 1",
+          "-(2 ^ ('_sk1__set - 1)) <= '_sk7__sk6__argument & '_sk7__sk6__argument <= 2 ^ ('_sk1__set - 1) - 1",
+          "1 <= '_sk3_num_elem & '_sk3_num_elem <= 2 ^ vlen_exp"
+        ],
+        "callable": "execute",
+        "cause": "Compatibility",
+        "clause": 0,
+        "compatibility_types": null,
+        "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/Zvabd/zvabd_insts.sail",
+        "goal": "'_sk1__set >= 0 & 0 <= abs('_sk7__sk6__argument) & abs('_sk7__sk6__argument) < 2 ^ '_sk1__set",
+        "location": {
+          "column": 19,
+          "end": 2058,
+          "line": 47,
+          "source": "result[i] = to_bits(SEW, abs_int(signed(vs2_val[i])))",
+          "start": 2017
+        },
+        "origin_is_fallback": false,
+        "reason": "budget_exhausted",
+        "recovery_types": null,
+        "rigid_variables": [
+          "'_sk1__set",
+          "'_sk2_LMUL_pow",
+          "'_sk3_num_elem",
+          "'_sk5__loop_index",
+          "'_sk7__sk6__argument"
+        ],
+        "status": "unknown"
+      },
+      {
+        "assumptions": [
+          "3 <= vlen_exp & vlen_exp <= 16",
+          "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+          "xlen in {32, 64}",
+          "'_sk1__set in {8, 16, 32, 64}",
+          "-3 <= '_sk2_LMUL_pow & '_sk2_LMUL_pow <= 3",
+          "1 <= '_sk3_num_elem & '_sk3_num_elem <= vlen",
+          "<unsupported>",
+          "true",
+          "0 <= '_sk5__loop_index & '_sk5__loop_index <= '_sk3_num_elem - 1",
+          "-(2 ^ ('_sk1__set - 1)) - (2 ^ ('_sk1__set - 1) - 1) <= '_sk7__sk6__argument & '_sk7__sk6__argument <= 2 ^ ('_sk1__set - 1) - 1 - -(2 ^ ('_sk1__set - 1))",
+          "1 <= '_sk3_num_elem & '_sk3_num_elem <= 2 ^ vlen_exp"
+        ],
+        "callable": "execute",
+        "cause": "Compatibility",
+        "clause": 1,
+        "compatibility_types": null,
+        "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/Zvabd/zvabd_insts.sail",
+        "goal": "'_sk1__set >= 0 & 0 <= abs('_sk7__sk6__argument) & abs('_sk7__sk6__argument) < 2 ^ '_sk1__set",
+        "location": {
+          "column": 21,
+          "end": 3790,
+          "line": 94,
+          "source": "VV_VABD  => to_bits(SEW, abs_int(signed(vs2_val[i]) - signed(vs1_val[i]))),",
+          "start": 3728
+        },
+        "origin_is_fallback": false,
+        "reason": "budget_exhausted",
+        "recovery_types": null,
+        "rigid_variables": [
+          "'_sk1__set",
+          "'_sk2_LMUL_pow",
+          "'_sk3_num_elem",
+          "'_sk5__loop_index",
+          "'_sk7__sk6__argument"
+        ],
+        "status": "unknown"
+      },
+      {
+        "assumptions": [
+          "xlen in {32, 64}",
+          "'v in {32, 39, 48, 57}",
+          "0 <= '_sk1_level & '_sk1_level <= (if 'v == 32 then 1 else (if 'v == 39 then 2 else (if 'v == 48 then 3 else 4)))",
+          "true",
+          "true",
+          "0 <= '_sk4_index & '_sk4_index <= num_tlb_entries - 1",
+          "0 <= '_sk4_index & '_sk4_index <= 2 ^ num_tlb_entries_exp - 1",
+          "0 <= '_sk4_index & '_sk4_index <= 2 ^ 6 - 1"
+        ],
+        "callable": "add_to_TLB",
+        "cause": "Compatibility",
+        "clause": 0,
+        "compatibility_types": null,
+        "file": "/home/clair/tinyueng_workplace/sail-riscv/model/sys/vmem_tlb.sail",
+        "goal": "'v - 12 >= '_sk1_level * (if 'v == 32 then 10 else 9)",
+        "location": {
+          "column": 21,
+          "end": 5981,
+          "line": 157,
+          "source": "let vpn = vpn & ~(zero_extend(levelMask));",
+          "start": 5959
+        },
+        "origin_is_fallback": false,
+        "reason": "budget_exhausted",
+        "recovery_types": null,
+        "rigid_variables": [
+          "'_sk1_level",
+          "'_sk4_index"
+        ],
+        "status": "unknown"
+      },
+      {
+        "assumptions": [
+          "xlen in {32, 64}",
+          "'v in {32, 39, 48, 57}",
+          "0 <= '_sk1_level & '_sk1_level <= (if 'v == 32 then 1 else (if 'v == 39 then 2 else (if 'v == 48 then 3 else 4)))",
+          "true",
+          "true",
+          "0 <= '_sk4_index & '_sk4_index <= num_tlb_entries - 1",
+          "0 <= '_sk4_index & '_sk4_index <= 2 ^ num_tlb_entries_exp - 1",
+          "0 <= '_sk4_index & '_sk4_index <= 2 ^ 6 - 1"
+        ],
+        "callable": "add_to_TLB",
+        "cause": "Compatibility",
+        "clause": 0,
+        "compatibility_types": null,
+        "file": "/home/clair/tinyueng_workplace/sail-riscv/model/sys/vmem_tlb.sail",
+        "goal": "(if 'v == 32 then 22 else 44) >= '_sk1_level * (if 'v == 32 then 10 else 9)",
+        "location": {
+          "column": 21,
+          "end": 6026,
+          "line": 158,
+          "source": "let ppn = ppn & ~(zero_extend(levelMask));",
+          "start": 6004
+        },
+        "origin_is_fallback": false,
+        "reason": "budget_exhausted",
+        "recovery_types": null,
+        "rigid_variables": [
+          "'_sk1_level",
+          "'_sk4_index"
+        ],
+        "status": "unknown"
+      },
+      {
+        "assumptions": [
+          "xlen in {32, 64}",
+          "'v in {32, 39, 48, 57}",
+          "0 <= '_sk1_level & '_sk1_level <= (if 'v == 32 then 1 else (if 'v == 39 then 2 else (if 'v == 48 then 3 else 4)))",
+          "true",
+          "true",
+          "0 <= '_sk4_index & '_sk4_index <= num_tlb_entries - 1",
+          "0 <= '_sk4_index & '_sk4_index <= 2 ^ num_tlb_entries_exp - 1",
+          "0 <= '_sk4_index & '_sk4_index <= 2 ^ 6 - 1"
+        ],
+        "callable": "add_to_TLB",
+        "cause": "Compatibility",
+        "clause": 0,
+        "compatibility_types": null,
+        "file": "/home/clair/tinyueng_workplace/sail-riscv/model/sys/vmem_tlb.sail",
+        "goal": "57 - 12 >= '_sk1_level * (if 'v == 32 then 10 else 9)",
+        "location": {
+          "column": 46,
+          "end": 6318,
+          "line": 164,
+          "source": "levelMask = zero_extend(levelMask),",
+          "start": 6296
+        },
+        "origin_is_fallback": false,
+        "reason": "budget_exhausted",
+        "recovery_types": null,
+        "rigid_variables": [
+          "'_sk1_level",
+          "'_sk4_index"
+        ],
+        "status": "unknown"
+      },
+      {
+        "assumptions": [
+          "xlen in {32, 64}",
+          "'v in {32, 39, 48, 57}",
+          "0 <= '_sk1_level & '_sk1_level <= (if 'v == 32 then 1 else (if 'v == 39 then 2 else (if 'v == 48 then 3 else 4)))",
+          "true",
+          "true",
+          "0 <= '_sk4_index & '_sk4_index <= num_tlb_entries - 1",
+          "0 <= '_sk4_index & '_sk4_index <= 2 ^ num_tlb_entries_exp - 1",
+          "0 <= '_sk4_index & '_sk4_index <= 2 ^ 6 - 1"
+        ],
+        "callable": "add_to_TLB",
+        "cause": "Compatibility",
+        "clause": 0,
+        "compatibility_types": null,
+        "file": "/home/clair/tinyueng_workplace/sail-riscv/model/sys/vmem_tlb.sail",
+        "goal": "57 - 12 >= 'v - 12",
+        "location": {
+          "column": 46,
+          "end": 6381,
+          "line": 165,
+          "source": "vpn       = sign_extend(vpn),",
+          "start": 6365
+        },
+        "origin_is_fallback": false,
+        "reason": "budget_exhausted",
+        "recovery_types": null,
+        "rigid_variables": [
+          "'_sk1_level",
+          "'_sk4_index"
+        ],
+        "status": "unknown"
+      }
+    ],
+    "smt_enabled": true,
+    "totals": {
+      "proved": 2908,
+      "refuted": 0,
+      "total": 2918,
+      "unknown": 10
+    },
+    "unknown_by_reason": {
+      "budget_exhausted": 10
+    },
+    "workspace": "/home/clair/tinyueng_workplace/sail-riscv/model/riscv.sail_project"
+  },
+  "retained_patch": "diff --git a/crates/ide-db/src/text_document.rs b/crates/ide-db/src/text_document.rs\nindex 72f767d..f1bdb6c 100644\n--- a/crates/ide-db/src/text_document.rs\n+++ b/crates/ide-db/src/text_document.rs\n@@ -27,7 +27,7 @@ pub struct TextDocument {\n \n impl TextDocument {\n     pub fn new(content: String) -> Self {\n-        let line_offsets = compute_line_offsets(&content, true, 0);\n+        let line_offsets = compute_line_offsets(&content, 0);\n         Self { content, line_offsets }\n     }\n \n@@ -50,19 +50,19 @@ impl TextDocument {\n             if byte_begin > byte_end {\n                 return;\n             }\n-            // Rescan the touched lines and their neighbours. A splice can\n-            // form or split CRLF across either boundary, so offsets derived\n-            // solely from the replacement text are insufficient.\n+            // Include the preceding line: inserting LF at a line start\n+            // can merge it with a preceding CR. Scanning through the end\n+            // line's terminator covers the other splice boundary.\n             let first_line = (self.position_at(byte_begin).line as usize).saturating_sub(1);\n             let past_line =\n-                (self.position_at(byte_end).line as usize + 2).min(self.line_offsets.len());\n+                (self.position_at(byte_end).line as usize + 1).min(self.line_offsets.len());\n             let scan_start = self.line_offsets[first_line];\n             let scan_end = self.line_start(past_line);\n             let has_tail = past_line < self.line_offsets.len();\n             self.content.replace_range(byte_begin..byte_end, &change.text);\n             let new_scan_end = byte_begin + change.text.len() + (scan_end - byte_end);\n             let mut offsets =\n-                compute_line_offsets(&self.content[scan_start..new_scan_end], true, scan_start);\n+                compute_line_offsets(&self.content[scan_start..new_scan_end], scan_start);\n             if has_tail && offsets.last() == Some(&new_scan_end) {\n                 offsets.pop();\n             }\n@@ -73,7 +73,7 @@ impl TextDocument {\n         } else {\n             // Just completely change the text.\n             self.content = change.text.clone();\n-            self.line_offsets = compute_line_offsets(&self.content, true, 0);\n+            self.line_offsets = compute_line_offsets(&self.content, 0);\n         }\n     }\n \n@@ -141,12 +141,9 @@ fn character_to_line_offset(line: &str, character: usize) -> usize {\n     line.len()\n }\n \n-fn compute_line_offsets(text: &str, is_at_line_start: bool, text_offset: usize) -> Vec<usize> {\n+fn compute_line_offsets(text: &str, text_offset: usize) -> Vec<usize> {\n     // VSCode treats `\\r\\n` or `\\n` *or* `\\r` as a single line end.\n-    let mut line_offsets = Vec::new();\n-    if is_at_line_start {\n-        line_offsets.push(text_offset);\n-    }\n+    let mut line_offsets = vec![text_offset];\n     let text = text.as_bytes();\n     for i in 0..text.len() {\n         match text[i] {\n",
+  "validation": {
+    "workspace": {
+      "command": "cargo +1.97.1 test --workspace -- --test-threads=1",
+      "passed": 2338,
+      "failed": 0,
+      "ignored": 17,
+      "suites": 55,
+      "log": "target/ablation/2026-10-25-p1-p2/workspace-final.log"
+    },
+    "all_targets": {
+      "command": "cargo +1.97.1 check --workspace --all-targets",
+      "success": true,
+      "log": "target/ablation/2026-10-25-p1-p2/all-targets-final.log"
+    },
+    "final_release_example": {
+      "command": "cargo +1.97.1 build --release -p sail-lsp --example analysis_stats",
+      "success": true,
+      "note": "Rebuilt after restoring the rejected solver-ordering experiment."
+    },
+    "semantic_source_identity": {
+      "unchanged_from_checkpoint": true,
+      "basis": "git diff --name-only contains only crates/ide-db/src/text_document.rs. All experimental solver and diagnostic changes have been restored."
+    },
+    "inherited_conformance": {
+      "reference": "2026-10-25-p1-p2.json#/validation",
+      "strict_pass": [
+        276,
+        276
+      ],
+      "strict_fail": [
+        217,
+        217
+      ],
+      "note": "Checkpoint results are inherited by unchanged semantic/conformance sources; the full corpus was not rerun for the final test-helper-only patch."
+    }
+  },
+  "artifacts_directory": "target/ablation/2026-10-25-p1-p2",
+  "limits": "TextDocument is used by server test fixtures; production document updates use DocumentData and LineIndex. Do not describe helper scan improvements as measured LSP latency improvements.",
+  "text_update_microbenchmark": {
+    "samples": [
+      {
+        "following_line_bytes": 80,
+        "run": 0,
+        "updates": 1000,
+        "checkpoint_ns": 506002,
+        "retained_ns": 415115
+      },
+      {
+        "following_line_bytes": 80,
+        "run": 1,
+        "updates": 1000,
+        "checkpoint_ns": 485972,
+        "retained_ns": 406298
+      },
+      {
+        "following_line_bytes": 80,
+        "run": 2,
+        "updates": 1000,
+        "checkpoint_ns": 493483,
+        "retained_ns": 474612
+      },
+      {
+        "following_line_bytes": 10000,
+        "run": 0,
+        "updates": 1000,
+        "checkpoint_ns": 31212309,
+        "retained_ns": 367702
+      },
+      {
+        "following_line_bytes": 10000,
+        "run": 1,
+        "updates": 1000,
+        "checkpoint_ns": 25620399,
+        "retained_ns": 319992
+      },
+      {
+        "following_line_bytes": 10000,
+        "run": 2,
+        "updates": 1000,
+        "checkpoint_ns": 22155592,
+        "retained_ns": 284772
+      },
+      {
+        "following_line_bytes": 1000000,
+        "run": 0,
+        "updates": 1000,
+        "checkpoint_ns": 1675376184,
+        "retained_ns": 240295
+      },
+      {
+        "following_line_bytes": 1000000,
+        "run": 1,
+        "updates": 1000,
+        "checkpoint_ns": 1437752000,
+        "retained_ns": 243013
+      },
+      {
+        "following_line_bytes": 1000000,
+        "run": 2,
+        "updates": 1000,
+        "checkpoint_ns": 1212755486,
+        "retained_ns": 181756
+      }
+    ],
+    "medians": [
+      {
+        "following_line_bytes": 80,
+        "checkpoint_ns": 493483,
+        "retained_ns": 415115
+      },
+      {
+        "following_line_bytes": 10000,
+        "checkpoint_ns": 25620399,
+        "retained_ns": 319992
+      },
+      {
+        "following_line_bytes": 1000000,
+        "checkpoint_ns": 1437752000,
+        "retained_ns": 240295
+      }
+    ],
+    "harness_source": "mod line_index {\n    #[derive(Clone, Copy, Debug, PartialEq, Eq)]\n    pub struct LineCol { pub line: u32, pub col: u32 }\n}\n#[path = \"text-document-checkpoint.rs\"] mod checkpoint;\n#[path = \"text-document-retained.rs\"] mod retained;\nfn main() {\n    use line_index::LineCol;\n    for size in [80, 10_000, 1_000_000] {\n        for run in 0..3 {\n            let content = format!(\"a\\n{}\\n\", \"x\".repeat(size));\n            let mut before = checkpoint::TextDocument::new(content.clone());\n            let mut after = retained::TextDocument::new(content);\n            let a = checkpoint::TextChange { range: Some(checkpoint::TextChangeRange {\n                start: LineCol { line: 0, col: 0 }, end: LineCol { line: 0, col: 1 }\n            }), text: \"b\".into() };\n            let b = retained::TextChange { range: Some(retained::TextChangeRange {\n                start: LineCol { line: 0, col: 0 }, end: LineCol { line: 0, col: 1 }\n            }), text: \"b\".into() };\n            let start = std::time::Instant::now();\n            for _ in 0..1000 { std::hint::black_box(&mut before).update(&a); }\n            let old = start.elapsed().as_nanos();\n            let start = std::time::Instant::now();\n            for _ in 0..1000 { std::hint::black_box(&mut after).update(&b); }\n            let new = start.elapsed().as_nanos();\n            assert_eq!(before.text(), after.text());\n            println!(\"{} {} {} {}\", size, run, old, new);\n        }\n    }\n}\n",
+    "build_command": "rustc +1.97.1 --edition=2021 -O target/ablation/2026-10-25-p1-p2/text-update-bench.rs -o target/ablation/2026-10-25-p1-p2/text-update-bench",
+    "method": "Compile the checkpoint and retained TextDocument implementations into the same optimized harness. Replace one character on the first line 1000 times, with the next line sized 80/10000/1000000 bytes; repeat three times and verify final contents agree. Document construction is outside the timer. Runs were made after all workspace tests completed.",
+    "limitation": "This measures redundant work in a test-helper component, not production LSP response times."
+  },
+  "retained_simplifications": [
+    "Remove the always-true is_at_line_start parameter and branch",
+    "Stop rescanning after the affected end line and its terminator; preserve the preceding-line CRLF safeguard"
+  ],
+  "source_sha256": {
+    "checkpoint_text_document": "b30cbb15e0a968bd6eac509eeb4cfeb11cc13da7c75c86e0edf437dd75fc98bd",
+    "retained_text_document": "1309be123a13a71b3558c664b16e72792b1805b848a677bb57ab1bb319745aee"
+  },
+  "artifact_sha256": {
+    "target/ablation/2026-10-25-p1-p2/all-targets-final.log": "34551f6d194655e8155fe75fad7130001dbab3975a91ee3d8cc7835d2b89aabe",
+    "target/ablation/2026-10-25-p1-p2/build-candidate.log": "dec28eebd42af435426bb1e5cab37aa097e9028f3b352df3137d0e6829942ea2",
+    "target/ablation/2026-10-25-p1-p2/build-final.log": "9999e28f1e6540585cef0c749a8c25b197c1fbdb4a611dbb70c3c62d1300eaf8",
+    "target/ablation/2026-10-25-p1-p2/candidate-constraints.json": "449d51860f29dc762ff70fe9510a64c7c6e90a54316660787bf68ba587abf6e7",
+    "target/ablation/2026-10-25-p1-p2/candidate-model.log": "c719bfd4dae92cf0695234f16e9462b1ff80e49fcd48a755b6bf3451a84925a4",
+    "target/ablation/2026-10-25-p1-p2/checkpoint-constraints.json": "f5d873a8ae586c652e06c8495076587d9bf4d14aa215da90bcb815cf4f4524cd",
+    "target/ablation/2026-10-25-p1-p2/checkpoint-model.log": "8dd143bbb9961ac81bfe90a9eacd0c64ebdc0bf8b99ae5923000b4119c6a6a8e",
+    "target/ablation/2026-10-25-p1-p2/checkpoint.json": "035869c3271598beaf8ff4579a43d2428aa3ab02a6c1746d66da477b0ddb4957",
+    "target/ablation/2026-10-25-p1-p2/remove-arithmetic.log": "3ee91c4630601d853838fe83db877b469ebda04f50b2bc19cdb8d2c0cdcd4f95",
+    "target/ablation/2026-10-25-p1-p2/remove-following-line-rescan.log": "cb793f5335a1802bfb091532e11374397225801ab6fa94564eca614c2b445a6a",
+    "target/ablation/2026-10-25-p1-p2/remove-lower-eval.log": "3d6dcc245bb14fb03b69d8c9de6f7e4d7de7cce637fe517e2ad0c700ab5f533b",
+    "target/ablation/2026-10-25-p1-p2/remove-pattern-range.log": "60bfe53b043152a18814d8128f9f45543406fd6e6fbe5ce0d6ec9a476cbdc7d0",
+    "target/ablation/2026-10-25-p1-p2/remove-previous-line-rescan.log": "36e16d068b0da5655eec3e128e877365af1a5463ab736757690cdaecabab8b30",
+    "target/ablation/2026-10-25-p1-p2/retained-unit.log": "a3907c0697728d33c1d4349dc9280720c9a5b419893548fe9c60154f26ef6153",
+    "target/ablation/2026-10-25-p1-p2/text-document-checkpoint.rs": "b30cbb15e0a968bd6eac509eeb4cfeb11cc13da7c75c86e0edf437dd75fc98bd",
+    "target/ablation/2026-10-25-p1-p2/text-document-retained.rs": "1309be123a13a71b3558c664b16e72792b1805b848a677bb57ab1bb319745aee",
+    "target/ablation/2026-10-25-p1-p2/text-update-bench.log": "e23d0e76606560c74c30bf8c106525cedf08f4dc3a64481e3653643c6fad6147",
+    "target/ablation/2026-10-25-p1-p2/text-update-bench.rs": "3c49b8f7cf511b9e410200f51123abe472a49dbc7943d690c8b34134f2d4d02e",
+    "target/ablation/2026-10-25-p1-p2/workspace-final.log": "f0c83e202eaa6cc57f21f1b58077c7b9447d9e37a148488468ebeb8361778c46"
+  },
+  "completion_audit": [
+    {
+      "requirement": "Commit the original uncommitted state before any experiments",
+      "status": "verified",
+      "evidence": "76db47948c2d85891dc147ebe761600187d773e3"
+    },
+    {
+      "requirement": "Review all changes from the preceding uncommitted state",
+      "status": "verified",
+      "evidence": "review_inventory covers every file in the checkpoint commit"
+    },
+    {
+      "requirement": "Ablate candidate abstractions and retain only justified simplifications",
+      "status": "verified",
+      "evidence": "Seven recorded experiments/static eliminations, with failed removals restored"
+    },
+    {
+      "requirement": "Validate the final simplified state",
+      "status": "verified",
+      "evidence": "Full workspace tests, all-targets check, source identity checks, release rebuild, and paired helper microbenchmark"
+    }
+  ]
+}

@@ -11,12 +11,16 @@ type Result<T> = std::result::Result<T, String>;
 pub enum ProjectValue {
     Bool(bool),
     String(String),
+    Virtual(String),
     List(Vec<ProjectValue>),
     Selector { name: String, tree: bool },
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProjectOptions {
     pub variables: BTreeMap<String, ProjectValue>,
+    /// Registered virtual contents exposed through physical source files.
+    /// Resolution never guesses a path for an unregistered virtual name.
+    pub virtual_files: BTreeMap<String, PathBuf>,
     /// Empty means all modules; a selected module also selects its children.
     pub roots: Vec<String>,
 }
@@ -67,6 +71,7 @@ impl ProjectManifest {
     pub fn resolve(&self, options: &ProjectOptions) -> Result<ResolvedProject> {
         let mut evaluator = Evaluator {
             variables: options.variables.clone(),
+            virtual_files: &options.virtual_files,
             declared: BTreeSet::new(),
             modules: Vec::new(),
             names: BTreeMap::new(),
@@ -230,8 +235,11 @@ impl Parser {
                 let args = self.list(Tok::RParen)?;
                 Expr::Call(n, args)
             }
-            Some(Tok::Id(n)) if n == "virtual" => {
-                return Err("Virtual project files require generated-file support".into())
+            Some(Tok::Id(n)) if n == "__virtual" => {
+                let Some(Tok::FileId(name)) = self.take() else {
+                    return Err("Expected a filename after __virtual".into());
+                };
+                Expr::Value(ProjectValue::Virtual(name))
             }
             Some(Tok::Id(n) | Tok::FileId(n) | Tok::Str(n)) => Expr::Value(ProjectValue::String(n)),
             Some(Tok::LSquare) => Expr::List(self.list(Tok::RSquare)?),
@@ -282,6 +290,9 @@ fn eval(expr: &Expr, variables: &BTreeMap<String, ProjectValue>) -> Result<Proje
         },
         Expr::Binary(a, op, b) => match (eval(a, variables)?, op.as_str(), eval(b, variables)?) {
             (V::String(a), "/", V::String(b)) => V::String(format!("{a}/{b}")),
+            (V::String(a), "/", V::Virtual(b)) => V::Virtual(format!("{a}/{b}")),
+            (V::Virtual(a), "==", V::Virtual(b)) => V::Bool(a == b),
+            (V::Virtual(a), "!=", V::Virtual(b)) => V::Bool(a != b),
             (V::String(a), "==", V::String(b)) => V::Bool(a == b),
             (V::String(a), "!=", V::String(b)) => V::Bool(a != b),
             (V::Bool(a), "==", V::Bool(b)) => V::Bool(a == b),
@@ -312,14 +323,15 @@ struct Edge {
     name: String,
     tree: bool,
 }
-struct Evaluator {
+struct Evaluator<'a> {
     variables: BTreeMap<String, ProjectValue>,
+    virtual_files: &'a BTreeMap<String, PathBuf>,
     declared: BTreeSet<String>,
     modules: Vec<ResolvedModule>,
     names: BTreeMap<String, usize>,
     edges: Vec<Vec<Edge>>,
 }
-impl Evaluator {
+impl Evaluator<'_> {
     fn selectors(&self, exprs: &[Expr], kind: DependencyKind) -> Result<Vec<Edge>> {
         let mut out = Vec::new();
         for expr in exprs {
@@ -362,10 +374,15 @@ impl Evaluator {
                     let id = parent.ok_or("Files must belong to a module")?;
                     for expr in exprs {
                         for value in flatten(eval(expr, &self.variables)?) {
-                            let ProjectValue::String(path) = value else {
-                                return Err("Expected a project file path".into());
+                            let path = match value {
+                                ProjectValue::String(path) => PathBuf::from(path),
+                                ProjectValue::Virtual(name) => self.virtual_files.get(&name)
+                                    .cloned().ok_or_else(|| format!(
+                                        "Virtual file {name} is not registered; supply its generated source through workspace.generatedFiles"
+                                    ))?,
+                                _ => return Err("Expected a project file path".into()),
                             };
-                            self.modules[id].files.push(PathBuf::from(path));
+                            self.modules[id].files.push(path);
                         }
                     }
                 }
@@ -504,6 +521,29 @@ impl Evaluator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn virtual_files_use_registered_sources_and_preserve_value_kind() {
+        let options = ProjectOptions {
+            virtual_files: BTreeMap::from([(
+                "generated/defs.sail".into(),
+                PathBuf::from("build/actual.sail"),
+            )]),
+            ..Default::default()
+        };
+        let project = resolve(
+            "variable SAME = __virtual a.sail == __virtual a.sail\nMain { files [generated / __virtual defs.sail, if $SAME then plain.sail else __virtual missing.sail] }",
+            options,
+        );
+        assert_eq!(files(&project), ["build/actual.sail", "plain.sail"]);
+        let unregistered = ProjectManifest::parse("Main { files __virtual defs.sail }").unwrap();
+        assert!(unregistered
+            .resolve(&ProjectOptions::default())
+            .unwrap_err()
+            .contains("defs.sail"));
+        assert!(ProjectManifest::parse("Main { files __virtual }").is_err());
+    }
+
     fn resolve(text: &str, options: ProjectOptions) -> ResolvedProject {
         ProjectManifest::parse(text).unwrap().resolve(&options).unwrap()
     }

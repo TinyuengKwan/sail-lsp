@@ -1,0 +1,203 @@
+{
+  "date_utc": "2026-10-24",
+  "purpose": "Investigate loss of agreement with the previously recorded complete typecheck baseline.",
+  "sail_commit": "ac09f8870b9d85e528e2a3436150b03b9d805d40",
+  "compiler_version": "Sail 0.20.3 (sail2 @ ac09f8870b9d85e528e2a3436150b03b9d805d40)",
+  "compiler": "../sail/_build/default/src/bin/sail.exe",
+  "compiler_environment": {
+    "SAIL_DIR": "../sail (absolute path in the actual run)"
+  },
+  "oracle_flags": [
+    "--just-check",
+    "--no-memo-z3",
+    "--no-color"
+  ],
+  "modes": [
+    "default",
+    "--strict-bitvector"
+  ],
+  "comparison": [
+    {
+      "state": "Historical full-suite log, 2026-10-22",
+      "accepted_clean": 276,
+      "accepted_total": 276,
+      "rejected": 217,
+      "rejected_total": 217,
+      "evidence": "/tmp/sail-coverage-conformance-final2.log"
+    },
+    {
+      "state": "dad440eb98e835deebfb8182022507dc8e31fa61 rebuilt in isolated worktree, before the four-item changes",
+      "accepted_clean": 273,
+      "accepted_total": 276,
+      "rejected": 210,
+      "rejected_total": 217,
+      "command": "SAIL_LIB=<original bundled library> head-conformance --list --typecheck-only <absolute Sail typecheck path>"
+    },
+    {
+      "state": "Current four-item working tree",
+      "accepted_clean": 273,
+      "accepted_total": 276,
+      "rejected": 210,
+      "rejected_total": 217,
+      "evidence": "2026-10-24.json"
+    }
+  ],
+  "live_cases": [
+    {
+      "file": "poly_list.sail",
+      "suite": "pass",
+      "strict_bitvector": false,
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "poly_list.sail",
+      "suite": "pass",
+      "strict_bitvector": true,
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "shadow_leak_check.sail",
+      "suite": "pass",
+      "strict_bitvector": false,
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "shadow_leak_check.sail",
+      "suite": "pass",
+      "strict_bitvector": true,
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "short_circuit_bool_ex.sail",
+      "suite": "pass",
+      "strict_bitvector": false,
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "short_circuit_bool_ex.sail",
+      "suite": "pass",
+      "strict_bitvector": true,
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "negative_bits_existential.sail",
+      "suite": "fail",
+      "strict_bitvector": false,
+      "exit_code": 1,
+      "error": "/home/clair/tinyueng_workplace/sail/test/typecheck/fail/negative_bits_existential.sail:12.17-26:\n12 |    let x: Foo = undefined;\n   |                 ^-------^\n   | Type Foo cannot be undefined"
+    },
+    {
+      "file": "negative_bits_existential.sail",
+      "suite": "fail",
+      "strict_bitvector": true,
+      "exit_code": 1,
+      "error": "/home/clair/tinyueng_workplace/sail/test/typecheck/fail/negative_bits_existential.sail:5.0-7.1:\n5 |struct Foo = {\n  |^-------------\n7 |}\n  |^\n  | Types are not well-formed within this type definition. Note that recursive types are forbidden.\n  | \n  | Caused by /home/clair/tinyueng_workplace/sail/test/typecheck/fail/negative_bits_existential.sail:6.8-32:\n  | 6 |    xs: {'n, 'n == -1. bits('n)}\n  |   |        ^----------------------^\n  |   | Well-formedness check failed for type\n  |   | \n  |   | Caused by /home/clair/tinyueng_workplace/sail/test/typecheck/fail/negative_bits_existential.sail:6.23-27:\n  |   | 6 |    xs: {'n, 'n == -1. bits('n)}\n  |   |   |                       ^--^\n  |   |   | Could not prove 'n >= 0 for type constructor bits"
+    },
+    {
+      "file": "negative_bits_list.sail",
+      "suite": "fail",
+      "strict_bitvector": false,
+      "exit_code": 0,
+      "error": null
+    },
+    {
+      "file": "negative_bits_list.sail",
+      "suite": "fail",
+      "strict_bitvector": true,
+      "exit_code": 1,
+      "error": "/home/clair/tinyueng_workplace/sail/test/typecheck/fail/negative_bits_list.sail:8.11-25:\n8 |    let x: list(bits(-1)) = [||];\n  |           ^------------^\n  | Well-formedness check failed for type\n  | \n  | Caused by /home/clair/tinyueng_workplace/sail/test/typecheck/fail/negative_bits_list.sail:8.16-20:\n  | 8 |    let x: list(bits(-1)) = [||];\n  |   |                ^--^\n  |   | Could not prove - 1 >= 0 for type constructor bits"
+    },
+    {
+      "file": "negative_bits_struct2.sail",
+      "suite": "fail",
+      "strict_bitvector": false,
+      "exit_code": 1,
+      "error": "/home/clair/tinyueng_workplace/sail/test/typecheck/fail/negative_bits_struct2.sail:12.17-26:\n12 |    let x: Foo = undefined;\n   |                 ^-------^\n   | Type Foo cannot be undefined"
+    },
+    {
+      "file": "negative_bits_struct2.sail",
+      "suite": "fail",
+      "strict_bitvector": true,
+      "exit_code": 1,
+      "error": "/home/clair/tinyueng_workplace/sail/test/typecheck/fail/negative_bits_struct2.sail:5.0-7.1:\n5 |struct Foo = {\n  |^-------------\n7 |}\n  |^\n  | Types are not well-formed within this type definition. Note that recursive types are forbidden.\n  | \n  | Caused by /home/clair/tinyueng_workplace/sail/test/typecheck/fail/negative_bits_struct2.sail:6.8-16:\n  | 6 |    xs: bits(-3)\n  |   |        ^------^\n  |   | Well-formedness check failed for type\n  |   | \n  |   | Caused by /home/clair/tinyueng_workplace/sail/test/typecheck/fail/negative_bits_struct2.sail:6.8-12:\n  |   | 6 |    xs: bits(-3)\n  |   |   |        ^--^\n  |   |   | Could not prove - 3 >= 0 for type constructor bits"
+    },
+    {
+      "file": "negative_bits_tuple.sail",
+      "suite": "fail",
+      "strict_bitvector": false,
+      "exit_code": 1,
+      "error": "/home/clair/tinyueng_workplace/sail/test/typecheck/fail/negative_bits_tuple.sail:8.29-38:\n8 |    let x: (bits(-1), int) = undefined;\n  |                             ^-------^\n  | Type (bits(- 1), int) could be empty"
+    },
+    {
+      "file": "negative_bits_tuple.sail",
+      "suite": "fail",
+      "strict_bitvector": true,
+      "exit_code": 1,
+      "error": "/home/clair/tinyueng_workplace/sail/test/typecheck/fail/negative_bits_tuple.sail:8.11-26:\n8 |    let x: (bits(-1), int) = undefined;\n  |           ^-------------^\n  | Well-formedness check failed for type\n  | \n  | Caused by /home/clair/tinyueng_workplace/sail/test/typecheck/fail/negative_bits_tuple.sail:8.12-16:\n  | 8 |    let x: (bits(-1), int) = undefined;\n  |   |            ^--^\n  |   | Could not prove - 1 >= 0 for type constructor bits"
+    },
+    {
+      "file": "negative_bits_union.sail",
+      "suite": "fail",
+      "strict_bitvector": false,
+      "exit_code": 1,
+      "error": "/home/clair/tinyueng_workplace/sail/test/typecheck/fail/negative_bits_union.sail:12.20-29:\n12 |    let x: Foo(1) = undefined;\n   |                    ^-------^\n   | Type Foo(1) cannot be undefined"
+    },
+    {
+      "file": "negative_bits_union.sail",
+      "suite": "fail",
+      "strict_bitvector": true,
+      "exit_code": 1,
+      "error": "/home/clair/tinyueng_workplace/sail/test/typecheck/fail/negative_bits_union.sail:5.0-7.1:\n5 |union Foo('n: Int) = {\n  |^---------------------\n7 |}\n  |^\n  | Types are not well-formed within this type definition. Note that recursive types are forbidden.\n  | \n  | Caused by /home/clair/tinyueng_workplace/sail/test/typecheck/fail/negative_bits_union.sail:6.10-22:\n  | 6 |    Bar : bits('n - 2),\n  |   |          ^----------^\n  |   | Well-formedness check failed for type\n  |   | \n  |   | Caused by /home/clair/tinyueng_workplace/sail/test/typecheck/fail/negative_bits_union.sail:6.10-14:\n  |   | 6 |    Bar : bits('n - 2),\n  |   |   |          ^--^\n  |   |   | Could not prove ('n - 2) >= 0 for type constructor bits"
+    },
+    {
+      "file": "negative_bits_union2.sail",
+      "suite": "fail",
+      "strict_bitvector": false,
+      "exit_code": 1,
+      "error": "/home/clair/tinyueng_workplace/sail/test/typecheck/fail/negative_bits_union2.sail:15.20-29:\n15 |    let x: Foo(1) = undefined;\n   |                    ^-------^\n   | Type Foo(1) cannot be undefined"
+    },
+    {
+      "file": "negative_bits_union2.sail",
+      "suite": "fail",
+      "strict_bitvector": true,
+      "exit_code": 1,
+      "error": "/home/clair/tinyueng_workplace/sail/test/typecheck/fail/negative_bits_union2.sail:7.0-10.1:\n7  |union Foo('n: Int) = {\n   |^---------------------\n10 |}\n   |^\n   | Types are not well-formed within this type definition. Note that recursive types are forbidden.\n   | \n   | Caused by /home/clair/tinyueng_workplace/sail/test/typecheck/fail/negative_bits_union2.sail:8.10-22:\n   | 8 |    Bar : bits('n - 2),\n   |   |          ^----------^\n   |   | Well-formedness check failed for type\n   |   | \n   |   | Caused by /home/clair/tinyueng_workplace/sail/test/typecheck/fail/negative_bits_union2.sail:8.10-14:\n   |   | 8 |    Bar : bits('n - 2),\n   |   |   |          ^--^\n   |   |   | Could not prove ('n - 2) >= 0 for type constructor bits"
+    },
+    {
+      "file": "procstate1.sail",
+      "suite": "fail",
+      "strict_bitvector": false,
+      "exit_code": 1,
+      "error": "/home/clair/tinyueng_workplace/sail/test/typecheck/fail/procstate1.sail:14.0-30:\n14 |register PSTATE : ProcState(1)\n   |^----------------------------^\n   | Must provide a default register value for a register of type ProcState(1)"
+    },
+    {
+      "file": "procstate1.sail",
+      "suite": "fail",
+      "strict_bitvector": true,
+      "exit_code": 1,
+      "error": "/home/clair/tinyueng_workplace/sail/test/typecheck/fail/procstate1.sail:7.0-12.1:\n7  |struct ProcState('n : Int) = {\n   |^-----------------------------\n12 |}\n   |^\n   | Types are not well-formed within this type definition. Note that recursive types are forbidden.\n   | \n   | Caused by /home/clair/tinyueng_workplace/sail/test/typecheck/fail/procstate1.sail:8.6-24:\n   | 8 |  N : bitvector('n, dec),\n   |   |      ^----------------^\n   |   | Well-formedness check failed for type\n   |   | \n   |   | Caused by /home/clair/tinyueng_workplace/sail/test/typecheck/fail/procstate1.sail:8.6-24:\n   |   | 8 |  N : bitvector('n, dec),\n   |   |   |      ^----------------^\n   |   |   | Bitvector index must be greater than or equal to zero"
+    }
+  ],
+  "findings": [
+    "The test corpus revision and the 276/217 case counts did not change between the old full-suite log and this run.",
+    "Rebuilding dad440e reproduces the same three false positives and seven rejection differences; these are not introduced by the latest four-item implementation.",
+    "All three false-positive fixtures pass current Sail in both default and strict-bitvector modes. The individual introducing changes have not been bisected.",
+    "The upstream suite enables strict-bitvector; the LSP probe does not model that mode. Earlier declaration checks enforced negative-width restrictions by name, and their replacement deliberately removed that behavior for default-mode semantics.",
+    "negative_bits_list is accepted by current Sail in default mode and rejected with strict-bitvector. It must not be fixed by forcing the strict-mode rule on all projects.",
+    "The other six rejection differences also fail current Sail in default mode: five undefined/empty-type failures and procstate1 missing a default register value. These are real missing checks, even though their strict-mode first error is different.",
+    "Recent historical verification focused on unit tests, RISC-V, and targeted compiler cases; those checks did not preserve the full-suite agreement gate."
+  ],
+  "next_actions": [
+    "Fix the three genuine false-positive regressions.",
+    "Implement/recover the five undefined/inhabitance checks and the register default-value check.",
+    "Make strict-bitvector mode explicit in project semantics and conformance comparison.",
+    "Preserve full-suite acceptance/rejection baselines with compiler revision, library revision and flags; keep default and strict results separate."
+  ],
+  "artifacts": "target/quality-baseline/2026-10-24/regression-audit/"
+}

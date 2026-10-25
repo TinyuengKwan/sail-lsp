@@ -10,10 +10,8 @@
 //! low score with "same role, built on salsa here", which was simply wrong.
 //! The index is `symbol_index` now and this is what it holds.
 
-use crate::helpers::Parameter;
 use crate::ide_types::SymbolKind;
 use crate::{CallableSignature, FileDb};
-use parser::Span;
 use std::collections::HashMap;
 use url::Url;
 
@@ -44,78 +42,20 @@ pub fn collect_callable_signatures(file: &dyn FileDb) -> Vec<CallableSignature> 
     collect_callable_signatures_from(parsed, file.text())
 }
 
-/// Pure version of `collect_callable_signatures` that takes parsed
-/// data directly, without requiring `FileDb`. Used by hir-ty for
-/// workspace context building (avoids hir-ty → ide-db dependency).
-pub fn collect_callable_signatures_from(
-    parsed: &syntax::parser_lower::ParsedFile,
-    text: &str,
-) -> Vec<CallableSignature> {
-    use syntax::parser_lower::DeclKind;
-    let mut out = Vec::new();
-    for head in &parsed.callable_heads {
-        if !matches!(head.kind, DeclKind::Function | DeclKind::Value | DeclKind::Mapping) {
-            continue;
-        }
+pub use hir::callable_info::{build_signature_index_from_parsed, collect_callable_signatures_from};
 
-        let label = span_text(text, head.label_span).to_string();
-        let params = head
-            .params
-            .iter()
-            .enumerate()
-            .map(|(idx, param)| {
-                let ty_text = param.ty_span.map(|span| span_text(text, span).to_string());
-                let name = match (param.name.as_deref(), ty_text.as_deref()) {
-                    (Some(name), Some(ty)) => format!("{name} : {ty}"),
-                    (Some(name), None) => name.to_string(),
-                    (None, Some(ty)) => format!("arg{}: {}", idx + 1, ty),
-                    (None, None) => format!("arg{}", idx + 1),
-                };
-                Parameter { name, is_implicit: span_text(text, param.span).contains("implicit") }
-            })
-            .collect::<Vec<_>>();
-        let return_type = head.return_type_span.map(|span| span_text(text, span).to_string());
-        out.push(CallableSignature { name: head.name.clone(), label, params, return_type });
+/// Read cached semantic metadata, with a syntax-only fallback for text fixtures.
+pub fn signature_index<F: FileDb + ?Sized>(
+    file: &F,
+) -> std::sync::Arc<HashMap<String, CallableSignature>> {
+    if let Some((db, ft)) = file.file_text() {
+        return hir::Semantics::new(db).signature_index(ft);
     }
-    out
-}
-
-/// Build a name -> signature index from a ParsedFile + source text.
-///
-/// Salsa-friendly variant that doesn't need `&dyn FileDb`. Used by
-/// `db_query::signature_index`.
-pub fn build_signature_index_from_parsed(
-    parsed: &syntax::parser_lower::ParsedFile,
-    text: &str,
-) -> HashMap<String, CallableSignature> {
-    let sigs = collect_callable_signatures_from(parsed, text);
-    let mut index = HashMap::with_capacity(sigs.len());
-    for sig in sigs {
-        let dominated = index.get(&sig.name).is_some_and(|existing: &CallableSignature| {
-            existing.label.starts_with("val") && !sig.label.starts_with("val")
-        });
-        if !dominated {
-            index.insert(sig.name.clone(), sig);
-        }
-    }
-    index
-}
-
-/// Build a name -> signature index for a single file.
-/// Prefers `val` specs over bare function definitions when the same
-/// name appears in both forms.
-pub fn build_signature_index(file: &dyn FileDb) -> HashMap<String, CallableSignature> {
-    let sigs = collect_callable_signatures(file);
-    let mut index = HashMap::with_capacity(sigs.len());
-    for sig in sigs {
-        let dominated = index.get(&sig.name).is_some_and(|existing: &CallableSignature| {
-            existing.label.starts_with("val") && !sig.label.starts_with("val")
-        });
-        if !dominated {
-            index.insert(sig.name.clone(), sig);
-        }
-    }
-    index
+    std::sync::Arc::new(
+        file.parsed()
+            .map(|parsed| build_signature_index_from_parsed(parsed, file.text()))
+            .unwrap_or_default(),
+    )
 }
 
 /// Find ALL callable signatures for `name` across `files`.
@@ -129,9 +69,7 @@ where
     let mut results = Vec::new();
     let mut seen_labels = std::collections::HashSet::new();
     for (_uri, file) in files {
-        let Some(sig_index) = file.signature_index() else {
-            continue;
-        };
+        let sig_index = signature_index(file);
         if let Some(sig) = sig_index.get(name) {
             if seen_labels.insert(sig.label.clone()) {
                 results.push(sig.clone());
@@ -231,6 +169,77 @@ pub fn callable_signatures_at(
     Some(result)
 }
 
+/// Parameter bindings of the implementations owned by the callable selected
+/// at this use site. Signature display labels are not parameter names.
+pub fn callable_parameter_names_at(
+    db: &dyn salsa::Database,
+    file: base_db::FileText,
+    offset: usize,
+    name: &str,
+) -> Option<Vec<Vec<String>>> {
+    use crate::defs::Definition;
+    use hir::source_order::{
+        self,
+        bindings::{self, Namespace},
+    };
+    source_order::declarations_for(db, file)?;
+    let at = source_order::at_offset(db, file, offset)?;
+    if matches!(source_order::program(db, file), Some(source_order::Program::Inline(_)))
+        && !bindings::contains_name(db, at, &hir::Name::new(name))
+    {
+        return None;
+    }
+    let members = bindings::overload_leaf_members(db, at, hir::Name::new(name))
+        .unwrap_or_else(|| vec![hir::Name::new(name)]);
+    let mut result = Vec::new();
+    for member in members {
+        let Some(selected) = bindings::resolve(db, at, member.clone(), Namespace::Callable)
+            .and_then(|decl| {
+                hir::def_at_declaration_in_namespace(db, decl, member.as_str(), Namespace::Callable)
+            })
+            .and_then(Definition::from_def)
+        else {
+            continue;
+        };
+        let canonical = selected.canonical(db);
+        for decl in bindings::declarations_named_at(db, at, member.clone(), Namespace::Callable) {
+            let Some(def) = hir::def_at_declaration_in_namespace(
+                db,
+                decl,
+                member.as_str(),
+                Namespace::Callable,
+            )
+            .and_then(Definition::from_def) else {
+                continue;
+            };
+            if !matches!(
+                def,
+                Definition::Function(_) | Definition::Mapping(_) | Definition::ScatteredClause(_)
+            ) || def.canonical(db) != canonical
+            {
+                continue;
+            }
+            let Some(node) = source_order::node(db, decl) else { continue };
+            let Some(parsed) = syntax::parse_query::parsed_file_cst(db, decl.file) else {
+                continue;
+            };
+            for head in &parsed.0.callable_heads {
+                if head.name == member.as_str()
+                    && node.text_range().contains((head.label_span.start as u32).into())
+                {
+                    result.push(
+                        head.params
+                            .iter()
+                            .map(|param| param.name.clone().unwrap_or_else(|| "_".into()))
+                            .collect(),
+                    );
+                }
+            }
+        }
+    }
+    Some(result)
+}
+
 /// Substitute argument-type information into a signature label so
 /// generic type variables (`'n`, `'m`) get specialised when the
 /// arguments fix them.
@@ -265,10 +274,6 @@ pub fn instantiate_signature(sig: &CallableSignature, arg_types: &[Option<String
         label = label.replace(&var, &val);
     }
     label
-}
-
-fn span_text(text: &str, span: Span) -> &str {
-    text[span.start..span.end].trim()
 }
 
 /// Lightweight symbol-declaration view used to drive document outlines
@@ -368,9 +373,7 @@ where
 {
     let mut best: Option<(usize, CallableSignature)> = None;
     for (candidate_uri, candidate_file) in files {
-        let Some(sig_index) = candidate_file.signature_index() else {
-            continue;
-        };
+        let sig_index = signature_index(candidate_file);
         let Some(sig) = sig_index.get(name) else {
             continue;
         };

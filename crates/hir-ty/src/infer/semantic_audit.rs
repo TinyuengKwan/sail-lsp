@@ -399,6 +399,72 @@ fn distinct_unresolved_witnesses_are_not_both_erased_to_one_symbol() {
 }
 
 #[test]
+fn numeric_subtyping_solves_only_registered_flexible_witnesses() {
+    let mut table = InferenceTable::new();
+    let variable = table.new_type_var();
+    let TyKind::Infer(id) = variable.kind() else { panic!() };
+    table.register_placeholder("'_fv_width", id.0);
+    assert!(matches!(
+        subtype::is_subtype(&mut table, &ty("bits(32)"), &ty("bits('_fv_width * 8)")),
+        subtype::SubtypeResult::Ok
+    ));
+    assert_eq!(table.placeholder_value("'_fv_width").as_deref(), Some("4"));
+    assert!(!matches!(
+        subtype::is_subtype(&mut table, &ty("bits(33)"), &ty("bits('_fv_width * 8)")),
+        subtype::SubtypeResult::Ok
+    ));
+    assert!(!matches!(
+        subtype::is_subtype(&mut table, &ty("bits(32)"), &ty("bits('caller * 8)")),
+        subtype::SubtypeResult::Ok
+    ));
+}
+
+#[test]
+fn common_nonzero_width_factors_preserve_symbolic_witnesses() {
+    let mut table = InferenceTable::new();
+    let variable = table.new_type_var();
+    let TyKind::Infer(id) = variable.kind() else { panic!() };
+    table.register_placeholder("'_fv_width", id.0);
+    assert!(table
+        .bind_numeric_equality(&n("'_fv_width * 8"), &n("8 * (if 'mode == 32 then 4 else 8)"),));
+    assert_eq!(
+        table.placeholder_value("'_fv_width").map(|s| n(&s)),
+        Some(n("if 'mode == 32 then 4 else 8"))
+    );
+    let other = table.new_type_var();
+    let TyKind::Infer(id) = other.kind() else { panic!() };
+    table.register_placeholder("'_fv_other", id.0);
+    assert!(!table.bind_numeric_equality(&n("'_fv_other * 0"), &n("'mode * 0")));
+    assert!(table.placeholder_value("'_fv_other").is_none());
+}
+
+#[test]
+fn polynomial_cancellation_treats_conditional_values_as_opaque_atoms() {
+    let goal = parse_constraint_text("(if 'v == 32 then 22 else 44) - 1 - 'k + 1 + ('k - 1 + 1) == (if 'v == 32 then 22 else 44)");
+    assert_eq!(
+        solver::solve_without_smt(&goal, &Subst::default(), &[]),
+        ConstraintStatus::Satisfied
+    );
+    assert_eq!(
+        solver::solve_without_smt(
+            &parse_constraint_text("(if 'v == 32 then 22 else 44) == 22"),
+            &Subst::default(),
+            &[],
+        ),
+        ConstraintStatus::Unknown
+    );
+}
+
+#[test]
+fn conditional_equality_cancels_unbounded_common_terms_before_splitting() {
+    let goal = parse_constraint_text("(if 8 * 2 ^ (if 'v == 32 then 2 else 3) == 32 then 22 else 44) - 'k + 'k == (if 'v == 32 then 22 else 44)");
+    assert_eq!(
+        solver::solve_without_smt(&goal, &Subst::default(), &[]),
+        ConstraintStatus::Satisfied
+    );
+}
+
+#[test]
 fn compatibility_reports_proof_pending_and_recovery_separately() {
     use super::unify::Compatibility;
     let mut table = InferenceTable::new();
@@ -917,4 +983,410 @@ fn numeric_fallback_substitutions_cannot_make_assumptions_contradictory() {
         z3_solver::try_solve(&ConstraintExpr::Bool(false), &subst, &facts),
         ConstraintStatus::Unknown
     );
+}
+
+#[test]
+fn deferred_obligations_expand_predicate_synonyms_before_solving() {
+    let mut ctx = obligation_context();
+    ctx.env
+        .constraint_synonyms
+        .insert("valid_width".into(), (vec!["'n".into()], parse_constraint_text("'n in {16, 32}")));
+    for text in ["valid_width(16)", "valid_width(8)"] {
+        ctx.table.push_obligation(Obligation::NumericConstraint(parse_constraint_text(text)));
+    }
+    let result = ctx.finish_query();
+    assert_eq!(result.obligation_stats, ObligationStats { proved: 1, refuted: 1, unknown: 0 });
+}
+
+#[test]
+fn reflexive_width_equality_does_not_need_opaque_assumptions() {
+    let facts = [
+        parse_constraint_text(r#"3 <= vlen_exp & vlen_exp <= 16"#),
+        parse_constraint_text(r#"3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp"#),
+        parse_constraint_text(r#"xlen in {32, 64}"#),
+        parse_constraint_text(r#"'_sk1__set in {8, 16, 32, 64}"#),
+        parse_constraint_text(r#"-3 <= '_sk2_LMUL_pow & '_sk2_LMUL_pow <= 3"#),
+        parse_constraint_text(r#"1 <= '_sk3_num_elem & '_sk3_num_elem <= vlen"#),
+        parse_constraint_text(r#"true"#),
+        parse_constraint_text(r#"<unsupported>"#),
+        parse_constraint_text(
+            r#"~(<unsupported> | ~(valid_reg_overlap(vs1, vd, LMUL_pow, LMUL_pow_widen)) | ~(valid_reg_overlap(vs2, vd, LMUL_pow, LMUL_pow_widen)))"#,
+        ),
+        parse_constraint_text(r#"'_sk1__set >= 16 & '_sk1__set * 2 <= 64"#),
+        parse_constraint_text(r#"SEW >= 16 & SEW_widen <= 64"#),
+        parse_constraint_text(r#"'_sk2_LMUL_pow + 1 <= 3"#),
+        parse_constraint_text(r#"LMUL_pow_widen <= 3"#),
+        parse_constraint_text(
+            r#"0 <= '_sk14__loop_index & '_sk14__loop_index <= '_sk3_num_elem - 1"#,
+        ),
+        parse_constraint_text(r#"1 <= '_sk3_num_elem & '_sk3_num_elem <= 2 ^ vlen_exp"#),
+    ];
+    assert_eq!(
+        solver::solve(
+            &ConstraintExpr::And(vec![parse_constraint_text(
+                r#"'_sk1__set * 2 == '_sk1__set * 2"#
+            )]),
+            &Subst::default(),
+            &facts
+        ),
+        ConstraintStatus::Satisfied
+    );
+}
+
+#[test]
+#[cfg(feature = "z3-solver")]
+fn opaque_assumptions_do_not_block_supported_entailment() {
+    let bound = parse_constraint_text("'n in {8,16,32} & 'n <= 16");
+    let facts = [ConstraintExpr::And(vec![bound, ConstraintExpr::Unsupported])];
+    for (goal, status) in [
+        ("'n * 2 in {16,32}", ConstraintStatus::Satisfied),
+        ("'n * 2 == 64", ConstraintStatus::Failed),
+        ("'n == 8", ConstraintStatus::Unknown),
+    ] {
+        assert_eq!(
+            z3_solver::try_solve(&parse_constraint_text(goal), &Subst::default(), &facts),
+            status
+        );
+    }
+    let disjunction =
+        [ConstraintExpr::Or(vec![parse_constraint_text("'n == 8"), ConstraintExpr::Unsupported])];
+    assert_eq!(
+        z3_solver::try_solve(&parse_constraint_text("'n == 8"), &Subst::default(), &disjunction),
+        ConstraintStatus::Unknown
+    );
+}
+
+#[test]
+#[cfg(feature = "z3-solver")]
+fn negated_disjunction_retains_each_supported_negative_fact() {
+    let comparison = parse_constraint_text("'n > 5");
+    for (inner, expected) in [
+        (
+            ConstraintExpr::Or(vec![comparison.clone(), ConstraintExpr::Unsupported]),
+            ConstraintStatus::Satisfied,
+        ),
+        (
+            ConstraintExpr::And(vec![comparison, ConstraintExpr::Unsupported]),
+            ConstraintStatus::Unknown,
+        ),
+    ] {
+        assert_eq!(
+            z3_solver::try_solve(
+                &parse_constraint_text("'n <= 5"),
+                &Subst::default(),
+                &[ConstraintExpr::Not(Box::new(inner))],
+            ),
+            expected
+        );
+    }
+}
+
+#[test]
+#[cfg(feature = "z3-solver")]
+fn focused_smt_context_keeps_transitive_facts_and_checks_unreachable_paths() {
+    let facts = ["'n == 'k", "'k == 'm", "'m == 8", "'unrelated >= 0", "'other <= 100"]
+        .map(parse_constraint_text);
+    for (goal, expected) in
+        [("'n % 2 == 0", ConstraintStatus::Satisfied), ("'n % 2 == 1", ConstraintStatus::Failed)]
+    {
+        assert_eq!(
+            z3_solver::try_solve(&parse_constraint_text(goal), &Subst::default(), &facts),
+            expected
+        );
+    }
+    let unreachable = ["'n == 0", "'z < 0", "'z > 0", "'other > 0"].map(parse_constraint_text);
+    assert_eq!(
+        z3_solver::try_solve(&parse_constraint_text("'n == 1"), &Subst::default(), &unreachable),
+        ConstraintStatus::Satisfied
+    );
+    let reachable = ["'n >= 0", "'z < 0", "'other > 0", "true"].map(parse_constraint_text);
+    assert_eq!(
+        z3_solver::try_solve(&parse_constraint_text("'n == 1"), &Subst::default(), &reachable),
+        ConstraintStatus::Unknown
+    );
+}
+
+#[test]
+fn arithmetic_ordering_proves_only_with_sign_and_divisor_evidence() {
+    let facts = [
+        parse_constraint_text("'n in {8, 16, 32, 64}"),
+        parse_constraint_text("1 <= 'k & 'k <= 3"),
+        parse_constraint_text("'m >= 0"),
+        parse_constraint_text("'q >= 1"),
+    ];
+    for goal in ["'n >= 'n / 2 ^ 'k", "'q * 'm >= 0", "'q * 'm >= 'm", "0 <= 4 * 'm + 'q"] {
+        assert_eq!(
+            solver::solve_without_smt(&parse_constraint_text(goal), &Subst::default(), &facts),
+            ConstraintStatus::Satisfied,
+            "{goal}"
+        );
+    }
+    for (goal, fact) in [
+        ("'n >= 'n / 'd", "'n >= 0 & 'd >= 0"),
+        ("'n >= 'n / 2 ^ 'k", "'n >= 0 & 'k >= -1"),
+        ("'q * 'm >= 'm", "'q >= 0 & 'm >= 0"),
+        ("'q * 'm >= 0", "'q >= 1"),
+        ("'q * 'm >= 0", "'q >= 0 | 'm >= 0"),
+    ] {
+        assert_ne!(
+            solver::solve_without_smt(
+                &parse_constraint_text(goal),
+                &Subst::default(),
+                &[parse_constraint_text(fact)]
+            ),
+            ConstraintStatus::Satisfied,
+            "{goal}: {fact}"
+        );
+    }
+}
+
+#[test]
+fn arithmetic_ordering_agrees_with_small_signed_integer_domains() {
+    let domains = [(-2, -1), (-1, 1), (0, 0), (0, 2), (1, 2)];
+    for (alo, ahi) in domains {
+        for (blo, bhi) in domains {
+            let facts = [
+                parse_constraint_text(&format!("{alo} <= 'a & 'a <= {ahi}")),
+                parse_constraint_text(&format!("{blo} <= 'b & 'b <= {bhi}")),
+            ];
+            for source in [
+                "0 <= 'a * 'b",
+                "'a <= 'a * 'b",
+                "'a >= 'a / 'b",
+                "0 <= 'a + 'b",
+                "'a >= 'a / 2 ^ 'b",
+            ] {
+                let goal = parse_constraint_text(source);
+                if solver::solve_without_smt(&goal, &Subst::default(), &facts)
+                    != ConstraintStatus::Satisfied
+                {
+                    continue;
+                }
+                for a in alo..=ahi {
+                    for b in blo..=bhi {
+                        let mut subst = Subst::default();
+                        subst.values.insert("'a".into(), a.to_string());
+                        subst.values.insert("'b".into(), b.to_string());
+                        assert_eq!(
+                            integer::condition(&goal, &subst, &[]),
+                            Some(true),
+                            "{source}, a={a}, b={b}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn power_ordering_requires_natural_ordered_exponents() {
+    for (goal, facts, expected) in [
+        ("2 ^ 'a <= 2 ^ 'b", "0 <= 'a & 'a <= 'b", true),
+        ("1 <= 2 ^ 'a", "0 <= 'a", true),
+        ("2 ^ 'a <= 2 ^ ('a + 'b)", "0 <= 'a & 0 <= 'b", true),
+        ("2 ^ 'a <= 2 ^ 'b", "'a <= 'b", false),
+        ("2 ^ 'a <= 2 ^ 'b", "0 <= 'a", false),
+        ("2 ^ 'a <= 2 ^ 'b", "0 <= 'a | 'a <= 'b", false),
+    ] {
+        let result = solver::solve_without_smt(
+            &parse_constraint_text(goal),
+            &Subst::default(),
+            &[parse_constraint_text(facts)],
+        );
+        assert_eq!(
+            result == ConstraintStatus::Satisfied,
+            expected,
+            "{goal} under {facts}: {result:?}"
+        );
+    }
+    for alo in -2..=3 {
+        for blo in -2..=3 {
+            let facts = [
+                parse_constraint_text(&format!("{alo} <= 'a & 'a <= 3")),
+                parse_constraint_text(&format!("{blo} <= 'b & 'b <= 3")),
+            ];
+            let goal = parse_constraint_text("2 ^ 'a <= 2 ^ ('a + 'b)");
+            if solver::solve_without_smt(&goal, &Subst::default(), &facts)
+                != ConstraintStatus::Satisfied
+            {
+                continue;
+            }
+            for a in alo..=3 {
+                for b in blo..=3 {
+                    let mut subst = Subst::default();
+                    subst.values.insert("'a".into(), a.to_string());
+                    subst.values.insert("'b".into(), b.to_string());
+                    assert_eq!(integer::condition(&goal, &subst, &[]), Some(true), "a={a}, b={b}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn positive_integer_factor_is_bounded_by_its_product() {
+    for (facts, expected) in [
+        ("'width in {1, 2, 4, 8} & 'width == 'n * 'bytes & 'bytes > 0", true),
+        ("'width in {1, 2, 4, 8} & 'bytes * 'n == 'width & 'bytes > 0", true),
+        ("'width in {0, 1, 2, 4, 8} & 'width == 'n * 'bytes & 'bytes > 0", false),
+        ("'width in {1, 2, 4, 8} & ('width == 'n * 'bytes | 'bytes > 0)", false),
+    ] {
+        let goal = parse_constraint_text("'bytes <= 4096");
+        let result =
+            solver::solve_without_smt(&goal, &Subst::default(), &[parse_constraint_text(facts)]);
+        assert_eq!(result == ConstraintStatus::Satisfied, expected, "{facts}: {result:?}");
+    }
+    for bound in -2..=4 {
+        for minimum in -2..=2 {
+            let facts = [parse_constraint_text(&format!(
+                "'product <= {bound} & 'product > 0 & 'product == 'a * 'b & 'a >= {minimum}"
+            ))];
+            let goal = parse_constraint_text(&format!("'a <= {bound}"));
+            if solver::solve_without_smt(&goal, &Subst::default(), &facts)
+                != ConstraintStatus::Satisfied
+            {
+                continue;
+            }
+            for a in minimum..=8 {
+                for b in -8..=8 {
+                    let product = a * b;
+                    if product > 0 && product <= bound {
+                        assert!(a <= bound, "a={a}, b={b}, bound={bound}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+#[cfg(feature = "z3-solver")]
+fn vector_length_power_bound_uses_linear_exponent_premises() {
+    let facts = [
+        parse_constraint_text("3 <= 'elen & 'elen <= 'vlen & 'vlen <= 16"),
+        parse_constraint_text("-4 <= 'lmul & 'lmul <= 3"),
+        parse_constraint_text("3 <= 'sew & 'sew <= 10"),
+        ConstraintExpr::Not(Box::new(ConstraintExpr::Or(vec![
+            parse_constraint_text("'sew > 'lmul + 'elen"),
+            ConstraintExpr::Unsupported,
+        ]))),
+    ];
+    let goal = parse_constraint_text(
+        "1 <= 2 ^ ('lmul + 'vlen - 'sew) & 2 ^ ('lmul + 'vlen - 'sew) <= 2 ^ 'vlen",
+    );
+    assert_eq!(solver::solve(&goal, &Subst::default(), &facts), ConstraintStatus::Satisfied);
+    assert_ne!(solver::solve(&goal, &Subst::default(), &facts[..3]), ConstraintStatus::Satisfied);
+}
+
+#[test]
+#[cfg(feature = "z3-solver")]
+fn vector_element_count_uses_product_quotient_premises() {
+    let facts = [
+        "-3 <= 'lmul & 'lmul <= 3",
+        "3 <= 'vlen & 'vlen <= 16",
+        "'sew in {8, 16, 32, 64}",
+        "2 ^ 'vlen >= 'sew",
+        "(0 >= 'lmul & 'z == 0 | 0 < 'lmul & 'z == 'lmul)",
+    ]
+    .map(parse_constraint_text);
+    let goal = parse_constraint_text(
+        "1 <= div(2 ^ 'z * 2 ^ 'vlen, 'sew) & div(2 ^ 'z * 2 ^ 'vlen, 'sew) <= 2 ^ 'vlen",
+    );
+    assert_eq!(solver::solve(&goal, &Subst::default(), &facts), ConstraintStatus::Satisfied);
+    for facts in [
+        "'a == 0 & 'b == 8 & 'd == 8",
+        "'a == 9 & 'b == 8 & 'd == 8",
+        "'a == 1 & 'b == 8 & 'd == -1",
+    ] {
+        let goal = parse_constraint_text("1 <= div('a * 'b, 'd) & div('a * 'b, 'd) <= 'b");
+        assert_ne!(
+            solver::solve(&goal, &Subst::default(), &[parse_constraint_text(facts)]),
+            ConstraintStatus::Satisfied
+        );
+    }
+}
+
+#[test]
+fn finite_domains_prove_arithmetic_without_smt_or_guessed_values() {
+    for (goal, facts, expected) in [
+        ("'n * 8 in {16,32}", "'n in {2,4}", true),
+        ("div('n, 8) in {1,2,4,8}", "'n in {8,16,32,64}", true),
+        ("'i <= 63", "'n in {0,16,64} & 'i <= 'n - 1", true),
+        ("'n * 8 in {16,32}", "'n in {2,4,5}", false),
+        ("'n * 8 in {16,32}", "'n in {2,4} | 'n == 5", false),
+        ("'n * 8 in {16,32}", "~('n in {2,4})", false),
+        ("'n * 8 in {16,32}", "'n in {'m,4}", false),
+        ("'n >= 0", "~('n < 0)", true),
+    ] {
+        let result = solver::solve_without_smt(
+            &parse_constraint_text(goal),
+            &Subst::default(),
+            &[parse_constraint_text(facts)],
+        );
+        assert_eq!(
+            result == ConstraintStatus::Satisfied,
+            expected,
+            "{goal} under {facts}: {result:?}"
+        );
+    }
+    // An incomplete search cannot certify a property of every member.
+    let members = (0..65).map(|n| n.to_string()).collect::<Vec<_>>().join(",");
+    let facts = parse_constraint_text(&format!("'n in {{{members}}}"));
+    let allowed = (0..64).map(|n| (n * 2).to_string()).collect::<Vec<_>>().join(",");
+    let goal = parse_constraint_text(&format!("'n * 2 in {{{allowed}}}"));
+    assert_ne!(
+        solver::solve_without_smt(&goal, &Subst::default(), &[facts]),
+        ConstraintStatus::Satisfied
+    );
+}
+
+#[test]
+fn finite_arithmetic_entailment_agrees_with_exact_signed_evaluation() {
+    for left in -3..=3 {
+        for right in -3..=3 {
+            for factor in -2..=2 {
+                let facts = parse_constraint_text(&format!("'n in {{{left},{right}}}"));
+                for bound in -3..=3 {
+                    let goal = parse_constraint_text(&format!("'n * {factor} <= {bound}"));
+                    if solver::solve_without_smt(&goal, &Subst::default(), &[facts.clone()])
+                        == ConstraintStatus::Satisfied
+                    {
+                        assert!(left * factor <= bound && right * factor <= bound);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn negated_comparison_edges_preserve_complements_and_disjunctions() {
+    for (operator, complement) in [("<", ">="), ("<=", ">"), (">", "<="), (">=", "<")] {
+        let facts = parse_constraint_text(&format!("~('n {operator} 3)"));
+        let goal = parse_constraint_text(&format!("'n {complement} 3"));
+        assert_eq!(
+            solver::solve_without_smt(&goal, &Subst::default(), &[facts]),
+            ConstraintStatus::Satisfied
+        );
+        let facts = parse_constraint_text(&format!("~('n {operator} 3) | 'n == 3"));
+        let strict = parse_constraint_text("'n < 3");
+        assert_ne!(
+            solver::solve_without_smt(&strict, &Subst::default(), &[facts]),
+            ConstraintStatus::Satisfied
+        );
+    }
+}
+
+#[test]
+fn bounded_vector_width_division_does_not_need_smt() {
+    let goal = parse_constraint_text("'n >= 0 & 'width / 2 ^ 'shift in {8,16,32,64}");
+    for (facts, expected) in [
+        ("1 <= 'n & 'width in {8,16,32,64} & 1 <= 'shift & 'shift <= 3 & 'width / 2 ^ 'shift >= 8", true),
+        ("1 <= 'n & 'width in {8,16,32,64} & 1 <= 'shift & 'shift <= 3", false),
+        ("1 <= 'n & 'width in {8,16,32,64} & (1 <= 'shift | 'shift <= 3)", false),
+        ("1 <= 'n & 'width in {8,16,32,64} & -1 <= 'shift & 'shift <= 3", false),
+    ] {
+        assert_eq!(solver::solve_without_smt(&goal, &Subst::default(), &[parse_constraint_text(facts)]) == ConstraintStatus::Satisfied, expected, "{facts}");
+    }
 }

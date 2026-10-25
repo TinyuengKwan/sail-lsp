@@ -90,14 +90,21 @@ fn highlight_references(file: &dyn FileDb, position: LineCol) -> Vec<Highlighted
     // A local resolves through the bodies, which know its scope; the flat
     // scrape below cannot tell one `x` from a shadowing one and found
     // neither, so highlighting a variable lit nothing at all.
+    // A declaration and an assignment's target are writes; every other
+    // mention reads.
+    let root = file.syntax();
+    let highlight = |(span, is_decl): (parser::Span, bool)| HighlightedRange {
+        range: base_db::text_range(span.start, span.end),
+        category: if is_decl
+            || root.as_ref().is_some_and(|root| crate::references::is_assigned(root, span))
+        {
+            ReferenceCategory::Write
+        } else {
+            ReferenceCategory::Read
+        },
+    };
     if let Some(spans) = crate::references::local_spans_through_hir(file, position) {
-        return spans
-            .into_iter()
-            .map(|(span, is_decl)| HighlightedRange {
-                range: base_db::text_range(span.start, span.end),
-                category: if is_decl { ReferenceCategory::Write } else { ReferenceCategory::Read },
-            })
-            .collect();
+        return spans.into_iter().map(highlight).collect();
     }
     let symbol = match crate::references::resolve_symbol_at(file, position) {
         Some(s) => s,
@@ -105,10 +112,7 @@ fn highlight_references(file: &dyn FileDb, position: LineCol) -> Vec<Highlighted
     };
     crate::references::symbol_spans_for_file(file, &symbol, true)
         .into_iter()
-        .map(|(span, is_write)| HighlightedRange {
-            range: base_db::text_range(span.start, span.end),
-            category: if is_write { ReferenceCategory::Write } else { ReferenceCategory::Read },
-        })
+        .map(highlight)
         .collect()
 }
 

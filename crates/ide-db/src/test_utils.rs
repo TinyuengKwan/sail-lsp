@@ -15,7 +15,6 @@
 //! let file = TestFile::new("function f(x) = x + 1\n");
 //! ```
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use base_db::{FileId, FileText};
@@ -25,7 +24,7 @@ use syntax::parser_lower::ParsedFile;
 
 use crate::line_index::LineIndex;
 use crate::root_database::RootDatabase;
-use crate::{CallableSignature, FileDb, LineCol};
+use crate::{FileDb, LineCol};
 
 /// A single-file workspace in a real salsa database.
 #[derive(Clone)]
@@ -131,31 +130,7 @@ impl FileDb for TestFile {
         crate::db_query::enriched_parsed_file(&self.db, self.input).as_ref().map(Arc::as_ref)
     }
 
-    fn signature_index(&self) -> Option<&HashMap<String, CallableSignature>> {
-        Some(crate::db_query::signature_index(&self.db, self.input).as_ref())
-    }
-
-    fn ref_counts(&self) -> &HashMap<String, usize> {
-        crate::db_query::ref_counts(&self.db, self.input).as_ref()
-    }
-
-    fn impl_counts(&self) -> &HashMap<String, usize> {
-        crate::db_query::impl_counts(&self.db, self.input).as_ref()
-    }
-
     fn bodies(&self) -> Option<&hir::CallableBodies> {
         hir::def_query::callable_bodies(&self.db, self.input).as_ref().map(|b| b.0.as_ref())
-    }
-
-    fn binding_type_text(&self, span: Span) -> Option<String> {
-        let callable_ids = hir::def_query::file_def_with_body_ids(&self.db, self.input);
-        let bodies = self.bodies();
-        for &id in callable_ids {
-            let tcr = hir::ty_query::infer(&self.db, id);
-            if let Some(ty_text) = tcr.0.binding_type_text(span, bodies) {
-                return Some(ty_text);
-            }
-        }
-        None
     }
 }

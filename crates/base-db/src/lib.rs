@@ -241,6 +241,16 @@ impl Files {
 
 // the workspace is a flat list of files.
 
+/// Compiler language mode, shared by preprocessing and semantic checks.
+#[salsa::input(singleton)]
+pub struct LanguageOptions {
+    pub strict_bitvector: bool,
+}
+
+pub fn strict_bitvector(db: &dyn salsa::Database) -> bool {
+    LanguageOptions::try_get(db).is_some_and(|options| options.strict_bitvector(db))
+}
+
 /// Salsa input: the set of all files in the workspace.
 #[salsa::input(singleton)]
 pub struct WorkspaceFiles {

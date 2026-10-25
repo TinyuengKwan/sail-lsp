@@ -1,0 +1,833 @@
+{
+  "schema_version": 1,
+  "date_utc": "2026-10-24",
+  "scope": "P1 semantic fixes; follows the historical four-item baseline without overwriting it.",
+  "source": {
+    "sail_lsp_base_commit": "dad440eb98e835deebfb8182022507dc8e31fa61",
+    "worktree": "Uncommitted P1 fixes plus preceding four-item and project-loading work.",
+    "rust_and_cargo_source_sha256": "8451baf2a8247456289528efe7251d8f9bf15a3e1c5357f08d32aa5e05e997a0",
+    "hash_method": "SHA256 of sorted rg --files paths (*.rs, Cargo.toml, Cargo.lock, rust-toolchain.toml), each path + NUL + contents + NUL.",
+    "sail_commit": "ac09f8870b9d85e528e2a3436150b03b9d805d40",
+    "sail_riscv_commit": "20690c8a8d6ccbb0e6adea8e2977efd3adaf8391",
+    "toolchain": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+    "oracle_binary": "../sail/_build/default/src/bin/sail.exe",
+    "oracle_arguments": [
+      "--just-check",
+      "--no-memo-z3",
+      "--no-color"
+    ],
+    "oracle_environment": {
+      "SAIL_DIR": "../sail (absolute path)"
+    }
+  },
+  "validation": {
+    "workspace_suites": 27,
+    "workspace_passed": 2216,
+    "workspace_failed": 0,
+    "workspace_ignored": 4,
+    "all_targets_check": "passed, no warnings",
+    "new_regression_tests": 9,
+    "tests_command": "cargo +1.97.1 test --workspace --lib -- --test-threads=1",
+    "check_command": "cargo +1.97.1 check --workspace --all-targets"
+  },
+  "conformance": {
+    "command": "target/release/examples/conformance_check --list --fail-detail ../sail/test/typecheck",
+    "typecheck_mode": "strict-bitvector=true; same mode as upstream test/suites/typecheck.py",
+    "pass": {
+      "before": 273,
+      "after": 276,
+      "total": 276
+    },
+    "fail": {
+      "before": 210,
+      "after": 217,
+      "total": 217
+    },
+    "fixed_false_positives": [
+      "poly_list.sail",
+      "shadow_leak_check.sail",
+      "short_circuit_bool_ex.sail"
+    ],
+    "fixed_false_negatives": [
+      {
+        "file": "negative_bits_existential.sail",
+        "strict_rejection_reason": "Existential field requires n >= 0 but constrains n == -1.",
+        "default_behavior": "Type Foo cannot be undefined"
+      },
+      {
+        "file": "negative_bits_list.sail",
+        "strict_rejection_reason": "Negative bitvector width inside list element type.",
+        "default_behavior": "Accepted: an empty list needs no value of its element type."
+      },
+      {
+        "file": "negative_bits_struct2.sail",
+        "strict_rejection_reason": "Record field bitvector width is -3.",
+        "default_behavior": "Type Foo cannot be undefined"
+      },
+      {
+        "file": "negative_bits_tuple.sail",
+        "strict_rejection_reason": "Negative bitvector width inside tuple component.",
+        "default_behavior": "Type (bits(-1), int) could be empty"
+      },
+      {
+        "file": "negative_bits_union.sail",
+        "strict_rejection_reason": "Union payload width n - 2 is not nonnegative for every declared Int parameter.",
+        "default_behavior": "Type Foo(1) cannot be undefined"
+      },
+      {
+        "file": "negative_bits_union2.sail",
+        "strict_rejection_reason": "Same payload well-formedness failure; another unit constructor does not legalize that field type.",
+        "default_behavior": "Type Foo(1) cannot be undefined; inhabitedness alone does not provide a generated undefined function."
+      },
+      {
+        "file": "procstate1.sail",
+        "strict_rejection_reason": "Explicit Int width on ProcState field is unconstrained at its declaration.",
+        "default_behavior": "Must provide a default register value for a register of type ProcState(1); the unconstrained generic record has no valid generated undefined function."
+      }
+    ],
+    "diagnostic_location_agreement": {
+      "matched": 183,
+      "compared": 216
+    },
+    "diagnostic_wording_agreement": {
+      "matched": 119,
+      "compared": 216
+    },
+    "default_mode_comparison": {
+      "command": "target/release/examples/conformance_check --list --typecheck-only --default-bitvector ../sail/test/typecheck",
+      "pass_clean": 276,
+      "fail_rejected": 216,
+      "strict_only_rejection": "negative_bits_list.sail",
+      "note": "The directory expectations are strict-mode expectations. The live default-mode compiler also accepts negative_bits_list; all other six targeted cases are rejected in both modes."
+    },
+    "extended_corpora": {
+      "mode": "default",
+      "false_positive_files": 7,
+      "false_negative_files": 0,
+      "scope_only_files": 18,
+      "note": "Unchanged from the preceding baseline. The full conformance command exits 1 for these existing extended-corpus errors; the requested typecheck suite has no acceptance/rejection disagreement."
+    }
+  },
+  "configuration": {
+    "setting": "workspace.strictBitvector",
+    "default": false,
+    "preprocessor_symbol": "STRICT_BITVECTOR",
+    "invalidation": "Salsa LanguageOptions input shared by preprocessing and type diagnostics; initializationOptions and configuration changes update it.",
+    "tests": [
+      "strict_bitvector_configuration_invalidates_types_and_preprocessing",
+      "record_undefined_eligibility_tracks_provider_constraints"
+    ]
+  },
+  "riscv": {
+    "command": "target/release/examples/analysis_stats --diagnostics-only -v --constraint-report constraints.json ../sail-riscv/model/riscv.sail_project",
+    "mode": "default",
+    "root_files": 156,
+    "active_include_library_files": 40,
+    "expressions": 81543,
+    "unknown_expressions": 0,
+    "partially_unknown_expressions": 0,
+    "type_mismatches": 0,
+    "diagnostics": {
+      "error": 0,
+      "warning": 62,
+      "hint": 6
+    },
+    "metrics": {
+      "workspace_load": {
+        "value": 689,
+        "unit": "ms"
+      },
+      "parse_all": {
+        "value": 1,
+        "unit": "ms"
+      },
+      "total_lines": {
+        "value": 29968,
+        "unit": "lines"
+      },
+      "item_tree_all": {
+        "value": 13,
+        "unit": "ms"
+      },
+      "body_lowering": {
+        "value": 150,
+        "unit": "ms"
+      },
+      "bodies": {
+        "value": 3318,
+        "unit": "count"
+      },
+      "scattered_type_clauses": {
+        "value": 471,
+        "unit": "count"
+      },
+      "infer_all": {
+        "value": 17438,
+        "unit": "ms"
+      },
+      "callables": {
+        "value": 3318,
+        "unit": "count"
+      },
+      "exprs": {
+        "value": 81543,
+        "unit": "count"
+      },
+      "unknown type": {
+        "value": 0,
+        "unit": "#"
+      },
+      "partially unknown type": {
+        "value": 0,
+        "unit": "#"
+      },
+      "type mismatches": {
+        "value": 0,
+        "unit": "#"
+      },
+      "diagnostics_all": {
+        "value": 3209,
+        "unit": "ms"
+      }
+    },
+    "constraint_totals": {
+      "proved": 2719,
+      "refuted": 0,
+      "total": 3295,
+      "unknown": 576
+    },
+    "unknown_by_reason": {
+      "budget_exhausted": 16,
+      "flexible_witness": 30,
+      "not_established": 486,
+      "type_recovery": 26,
+      "unsupported_goal": 18
+    },
+    "note": "Expression coverage, diagnostic counts and deferred obligation counts match the preceding baseline. Wall times were collected concurrently with validation; use incremental probes below for serialized timing."
+  },
+  "incremental": {
+    "method": "Release; probes run serially after corpus checks and workspace tests completed, 32 edits each. Large cases repeated three times after an elevated first run; all four runs retained.",
+    "limitations": "Synthetic inference invalidation probe, shared host without CPU pinning; 160-file cases have one run and 1600-file cases four. Not an end-to-end LSP latency benchmark or proof of rust-analyzer performance parity.",
+    "probes": [
+      {
+        "files": 160,
+        "edits": 32,
+        "mode": "body",
+        "command": "target/release/examples/incremental_stats 160 32 body --modules",
+        "previous_edit_p95_us": {
+          "min": 1803,
+          "max": 1803,
+          "median_across_runs": 1803
+        },
+        "runs": [
+          {
+            "incremental_cold": {
+              "value": 94270,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 320,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 47,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 63,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 122,
+              "unit": "us"
+            },
+            "incremental_body_edit_p50": {
+              "value": 1701,
+              "unit": "us"
+            },
+            "incremental_body_edit_p95": {
+              "value": 1743,
+              "unit": "us"
+            },
+            "incremental_body_edit_p99": {
+              "value": 1752,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1326,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 1451,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 1465,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 1,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 1,
+              "unit": "count"
+            }
+          }
+        ],
+        "edit_p95_us": {
+          "min": 1743,
+          "max": 1743,
+          "median_across_runs": 1743
+        }
+      },
+      {
+        "files": 160,
+        "edits": 32,
+        "mode": "signature",
+        "command": "target/release/examples/incremental_stats 160 32 signature --modules",
+        "previous_edit_p95_us": {
+          "min": 2134,
+          "max": 2134,
+          "median_across_runs": 2134
+        },
+        "runs": [
+          {
+            "incremental_cold": {
+              "value": 90076,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 320,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 48,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 65,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 68,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p50": {
+              "value": 2034,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p95": {
+              "value": 2169,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p99": {
+              "value": 2215,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1292,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 1491,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 1564,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 3,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 3,
+              "unit": "count"
+            }
+          }
+        ],
+        "edit_p95_us": {
+          "min": 2169,
+          "max": 2169,
+          "median_across_runs": 2169
+        }
+      },
+      {
+        "files": 1600,
+        "edits": 32,
+        "mode": "body",
+        "command": "target/release/examples/incremental_stats 1600 32 body --modules",
+        "previous_edit_p95_us": {
+          "min": 14355,
+          "max": 24349,
+          "median_across_runs": 16738.0
+        },
+        "runs": [
+          {
+            "incremental_cold": {
+              "value": 785285,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 3200,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 864,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 1335,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 2231,
+              "unit": "us"
+            },
+            "incremental_body_edit_p50": {
+              "value": 14438,
+              "unit": "us"
+            },
+            "incremental_body_edit_p95": {
+              "value": 31419,
+              "unit": "us"
+            },
+            "incremental_body_edit_p99": {
+              "value": 33296,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1914,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 4863,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 5550,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 1,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 2,
+              "unit": "count"
+            }
+          },
+          {
+            "incremental_cold": {
+              "value": 750095,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 3200,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 845,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 890,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 1032,
+              "unit": "us"
+            },
+            "incremental_body_edit_p50": {
+              "value": 14061,
+              "unit": "us"
+            },
+            "incremental_body_edit_p95": {
+              "value": 14396,
+              "unit": "us"
+            },
+            "incremental_body_edit_p99": {
+              "value": 17348,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1379,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 1512,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 2735,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 1,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 2,
+              "unit": "count"
+            }
+          },
+          {
+            "incremental_cold": {
+              "value": 752177,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 3200,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 843,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 967,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 990,
+              "unit": "us"
+            },
+            "incremental_body_edit_p50": {
+              "value": 13805,
+              "unit": "us"
+            },
+            "incremental_body_edit_p95": {
+              "value": 14204,
+              "unit": "us"
+            },
+            "incremental_body_edit_p99": {
+              "value": 18079,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1521,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 1984,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 2578,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 1,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 2,
+              "unit": "count"
+            }
+          },
+          {
+            "incremental_cold": {
+              "value": 744103,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 3200,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 872,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 915,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 1015,
+              "unit": "us"
+            },
+            "incremental_body_edit_p50": {
+              "value": 14009,
+              "unit": "us"
+            },
+            "incremental_body_edit_p95": {
+              "value": 14294,
+              "unit": "us"
+            },
+            "incremental_body_edit_p99": {
+              "value": 17426,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1413,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 1793,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 2603,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 1,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 2,
+              "unit": "count"
+            }
+          }
+        ],
+        "edit_p95_us": {
+          "min": 14204,
+          "max": 31419,
+          "median_across_runs": 14345.0
+        }
+      },
+      {
+        "files": 1600,
+        "edits": 32,
+        "mode": "signature",
+        "command": "target/release/examples/incremental_stats 1600 32 signature --modules",
+        "previous_edit_p95_us": {
+          "min": 14396,
+          "max": 16593,
+          "median_across_runs": 15291.0
+        },
+        "runs": [
+          {
+            "incremental_cold": {
+              "value": 734750,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 3200,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 791,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 1084,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 1839,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p50": {
+              "value": 14012,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p95": {
+              "value": 23666,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p99": {
+              "value": 30509,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1627,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 2659,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 3269,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 3,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 3,
+              "unit": "count"
+            }
+          },
+          {
+            "incremental_cold": {
+              "value": 735363,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 3200,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 856,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 949,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 1059,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p50": {
+              "value": 14609,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p95": {
+              "value": 14836,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p99": {
+              "value": 18128,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1690,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 1987,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 2846,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 3,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 3,
+              "unit": "count"
+            }
+          },
+          {
+            "incremental_cold": {
+              "value": 739510,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 3200,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 855,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 887,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 1006,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p50": {
+              "value": 14165,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p95": {
+              "value": 14494,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p99": {
+              "value": 17713,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1436,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 1843,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 2303,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 3,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 3,
+              "unit": "count"
+            }
+          },
+          {
+            "incremental_cold": {
+              "value": 735392,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 3200,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 859,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 1116,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 1762,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p50": {
+              "value": 14127,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p95": {
+              "value": 14335,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p99": {
+              "value": 17849,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1676,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 1858,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 2722,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 3,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 3,
+              "unit": "count"
+            }
+          }
+        ],
+        "edit_p95_us": {
+          "min": 14335,
+          "max": 23666,
+          "median_across_runs": 14665.0
+        }
+      }
+    ],
+    "finding": "Reinferred bodies match the previous baseline: body edits 1 (160 files), 1\u20132 (1600 files), signature edits 3. Initial large-case p95 values were elevated (31.4/23.7 ms); repetitions measured 14.2\u201314.4 ms body and 14.3\u201314.8 ms signature. No stable edit-latency regression was reproduced; all timings remain in the report."
+  },
+  "local_full_artifacts": "target/quality-baseline/2026-10-24/p1/",
+  "remaining_findings": [
+    "Seven false positives in the separate extended upstream corpora.",
+    "Diagnostic location/wording parity is tracked separately from acceptance/rejection.",
+    "576 unknown deferred constraints remain on the pinned RISC-V manifest; they are not unknown expression types."
+  ]
+}

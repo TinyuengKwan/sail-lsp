@@ -372,7 +372,7 @@ fn load_workspace(
     let project_start = all.len();
     all.extend(project_files);
 
-    let mut host = AnalysisHost::new(None);
+    let mut host = AnalysisHost::new();
     let mut change = ide_db::apply_change::Change::new();
     let mut vfs = vfs::Vfs::default();
     for (url, _, text) in &all {

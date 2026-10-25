@@ -27,7 +27,6 @@ mod extract_struct_from_enum_variant;
 mod extract_to_include;
 mod extract_type_alias;
 pub(crate) mod extract_variable;
-mod fill_record_fields;
 mod flip_binexpr;
 mod flip_comma;
 mod flip_or_pattern;
@@ -59,7 +58,6 @@ mod remove_else_branches;
 mod remove_mut;
 mod remove_parentheses;
 mod remove_underscore;
-mod remove_unused_imports;
 mod remove_unused_param;
 mod reorder_fields;
 mod replace_if_with_match;
@@ -101,14 +99,12 @@ pub(crate) fn all() -> &'static [Handler] {
         evaluate_constant::evaluate_constant,
         simplify_boolean::simplify_boolean,
         organize_imports::organize_imports,
-        remove_unused_imports::remove_unused_imports,
         generate_val_spec::generate_val_spec,
         add_missing_match_arms::add_missing_match_arms,
         generate_enum_variant::generate_enum_variant,
         generate_fn_type_alias::generate_fn_type_alias,
         generate_function::generate_function,
         add_missing_fields::add_missing_fields,
-        fill_record_fields::fill_record_fields,
         convert_match_to_if::convert_match_to_if,
         merge_match_arms::merge_match_arms,
         move_guard::move_guard,

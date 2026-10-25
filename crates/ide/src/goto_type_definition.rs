@@ -110,7 +110,9 @@ pub fn typed_bindings(file: &dyn FileDb) -> HashMap<String, String> {
         for (pat_id, pat) in entry.body.iter_pats() {
             let hir::Pat::Bind(name) = pat else { continue };
             let Some(span) = entry.source_map.pat_syntax(pat_id) else { continue };
-            if let Some(ty) = file.binding_type_text(span) {
+            if let Some(ty) = file.file_text().and_then(|(db, ft)| {
+                hir::Semantics::new(db).binding_type_text(ft, span, file.bodies())
+            }) {
                 out.entry(name.to_string()).or_insert(ty);
             }
         }

@@ -30,6 +30,28 @@ use lsp_types::*;
 pub(crate) struct ClientCapabilities(pub(crate) lsp_types::ClientCapabilities);
 
 impl ClientCapabilities {
+    pub(crate) fn file_creation_support(&self) -> bool {
+        self.0
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.workspace_edit.as_ref())
+            .is_some_and(|edit| {
+                edit.document_changes == Some(true)
+                    && edit
+                        .resource_operations
+                        .as_ref()
+                        .is_some_and(|ops| ops.contains(&ResourceOperationKind::Create))
+            })
+    }
+    /// Whether the client pulls diagnostics (`textDocument/diagnostic`).
+    ///
+    /// Such a client keeps what it pulls apart from what is published —
+    /// vscode-languageclient creates a second diagnostic collection — so a
+    /// server that also pushes the same findings shows each one twice.
+    pub(crate) fn pull_diagnostics_support(&self) -> bool {
+        (|| -> Option<_> { self.0.text_document.as_ref()?.diagnostic.as_ref() })().is_some()
+    }
+
     /// Whether the client supports `relatedDocuments` in diagnostic responses.
     ///.
     pub(crate) fn text_document_diagnostic_related_document_support(&self) -> bool {

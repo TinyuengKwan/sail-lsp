@@ -15,18 +15,24 @@ use crate::text_edit::TextEdit;
 /// }
 /// ```
 ///
-/// `file_system_edits` is not here: rust-analyzer produces one when a
-/// rename moves a file, which happens because a Rust module's name *is*
-/// its file's name. Sail has no definition whose rename moves a file, so
-/// the field had no producer and could not get one.
+/// File creation is represented separately so clients can apply the creation
+/// and the edits to existing sources as one workspace operation.
 #[derive(Clone, Debug, Default)]
 pub struct SourceChange {
+    pub file_creations: Vec<FileCreation>,
     /// Per-file text edits.
     pub source_file_edits: HashMap<FileId, Vec<TextEdit>>,
     /// Whether any edit's text is a snippet — `$0` where the cursor
     /// should land, `${1:name}` for something to type over. A client that
     /// cannot expand those gets them stripped.
     pub is_snippet: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct FileCreation {
+    pub anchor: FileId,
+    pub path: String,
+    pub contents: String,
 }
 
 impl SourceChange {
@@ -40,7 +46,7 @@ impl SourceChange {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.source_file_edits.is_empty()
+        self.source_file_edits.is_empty() && self.file_creations.is_empty()
     }
 }
 
@@ -82,6 +88,15 @@ pub struct SourceChangeBuilder {
 }
 
 impl SourceChangeBuilder {
+    /// Create a sibling file, anchored at the source being edited.
+    pub fn create_file(&mut self, path: String, contents: String) {
+        self.source_change.file_creations.push(FileCreation {
+            anchor: self.file_id,
+            path,
+            contents,
+        });
+    }
+
     /// Create a builder targeting a single file.
     pub fn new(file_id: FileId) -> Self {
         Self { file_id, edits: Vec::new(), source_change: SourceChange::new() }

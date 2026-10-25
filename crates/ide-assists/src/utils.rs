@@ -116,43 +116,41 @@ pub(crate) fn missing_token_fix(
     Some(IdeTextEdit { range: base_db::text_range(offset, offset), new_text: token.to_string() })
 }
 
-/// Quick-fix for incomplete match: insert `_ => ()` wildcard arm.
-///
-/// Looks for the closing `}` of the match expression and inserts
-/// a wildcard arm before it.
+/// Insert an explicitly unfinished wildcard branch into the diagnosed match.
+/// Use its direct closing token: braces in nested expressions, comments and
+/// strings do not delimit this match. `undefined` preserves the expected type.
 pub(crate) fn incomplete_match_fix(
     file: &dyn FileDb,
     diagnostic: &Diagnostic,
 ) -> Option<(String, IdeTextEdit, bool)> {
-    let text = file.text();
-    // The diagnostic range points at the match expression's first arm.
-    // Search forward from there for the closing `}` of the match block.
-    let search_start = base_db::range_end(diagnostic.range.range);
-    let remaining = text.get(search_start..)?;
-    // Find matching closing brace, tracking depth
-    let mut depth = 0i32;
-    let mut close_pos = None;
-    for (i, ch) in remaining.char_indices() {
-        match ch {
-            '{' => depth += 1,
-            '}' => {
-                if depth == 0 {
-                    close_pos = Some(search_start + i);
-                    break;
-                }
-                depth -= 1;
-            }
-            _ => {}
-        }
+    let root = file.syntax()?;
+    let range = diagnostic.range.range;
+    let node = root
+        .descendants()
+        .filter(|node| {
+            node.kind() == syntax::SyntaxKind::MATCH_EXPR && node.text_range().contains_range(range)
+        })
+        .min_by_key(|node| node.text_range().len())?;
+    let close = node
+        .children_with_tokens()
+        .filter_map(|it| it.into_token())
+        .find(|token| token.kind() == syntax::SyntaxKind::R_CURLY)?;
+    let previous = close.prev_token()?;
+    let mut previous = previous;
+    while previous.kind().is_trivia() {
+        previous = previous.prev_token()?;
     }
-    let insert_offset = close_pos?;
+    let separator = if previous.text() == "," || previous.text() == "{" { "" } else { "," };
     Some((
-        "Add wildcard arm `_ => ()`".to_string(),
+        "Add wildcard arm with `undefined` placeholder".to_string(),
         IdeTextEdit {
-            range: base_db::text_range(insert_offset, insert_offset),
-            new_text: "\n    _ => (),\n".to_string(),
+            range: base_db::text_range(
+                usize::from(close.text_range().start()),
+                usize::from(close.text_range().start()),
+            ),
+            new_text: format!("{separator}\n    _ => undefined\n"),
         },
-        false, // not is_preferred — user should review
+        false,
     ))
 }
 

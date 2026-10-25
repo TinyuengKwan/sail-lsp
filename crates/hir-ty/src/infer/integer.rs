@@ -259,10 +259,34 @@ impl Evaluator<'_> {
                 result
             }
             C::Compare { lhs, op, rhs } => {
-                let a = self.values(lhs)?;
-                let b = self.values(rhs)?;
-                let first = compare(a.first()?, *op, b.first()?);
-                a.iter().all(|a| b.iter().all(|b| compare(a, *op, b) == first)).then_some(first)
+                if let (Some(a), Some(b)) = (self.values(lhs), self.values(rhs)) {
+                    let first = compare(a.first()?, *op, b.first()?);
+                    return a
+                        .iter()
+                        .all(|a| b.iter().all(|b| compare(a, *op, b) == first))
+                        .then_some(first);
+                }
+                // Common symbolic terms need not be known numerically. Cancel
+                // them first, then evaluate the residual under the same branch
+                // choices used for all occurrences of a conditional.
+                let terms = polynomial(
+                    &N::Sub(Box::new(lhs.clone()), Box::new(rhs.clone())),
+                    &mut self.fuel,
+                )?;
+                let mut value = BigInt::zero();
+                for (factors, mut coefficient) in terms {
+                    for factor in factors {
+                        coefficient *= self.number(&factor)?;
+                        if coefficient.bits() > MAX_BITS {
+                            return None;
+                        }
+                    }
+                    value += coefficient;
+                    if value.bits() > MAX_BITS {
+                        return None;
+                    }
+                }
+                Some(compare(&value, *op, &BigInt::zero()))
             }
             C::InSet { value, items } => {
                 let values = self.values(value)?;
@@ -350,7 +374,9 @@ fn polynomial(e: &N, fuel: &mut usize) -> Option<Polynomial> {
             }
             out
         }
-        N::If { .. } => return None,
+        // An unevaluated conditional is still a pure numeric expression.
+        // Treat it as one atom: identical occurrences may cancel without
+        // choosing either branch or assuming anything about its condition.
         _ => HashMap::from([(vec![e.clone()], BigInt::one())]),
     };
     out.retain(|_, n| !n.is_zero());
@@ -416,6 +442,27 @@ pub(super) fn contradictory(assumptions: &[C], subst: &Subst) -> bool {
                 return true;
             }
         }
+        // A false comparison is its complementary edge, not an opaque
+        // boolean atom. This preserves guards on paths whose other branch exits.
+        let normalized = match fact {
+            C::Not(inner) => match inner.as_ref() {
+                C::Compare { lhs, op, rhs } => Some(C::Compare {
+                    lhs: lhs.clone(),
+                    rhs: rhs.clone(),
+                    op: match op {
+                        CompareOp::Eq => CompareOp::Neq,
+                        CompareOp::Neq => CompareOp::Eq,
+                        CompareOp::Lt => CompareOp::Gte,
+                        CompareOp::Lte => CompareOp::Gt,
+                        CompareOp::Gt => CompareOp::Lte,
+                        CompareOp::Gte => CompareOp::Lt,
+                    },
+                }),
+                _ => None,
+            },
+            _ => None,
+        };
+        let fact = normalized.as_ref().unwrap_or(fact);
         let C::Compare { lhs, op, rhs } = fact else {
             continue;
         };

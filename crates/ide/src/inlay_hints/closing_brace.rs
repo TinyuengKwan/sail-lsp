@@ -6,6 +6,7 @@ pub(super) fn collect_closing_brace_hints(
     file: &dyn FileDb,
     begin: usize,
     end: usize,
+    min_lines: usize,
     hints: &mut Vec<InlayHint>,
 ) {
     let Some(tree) = file.item_tree() else {
@@ -16,7 +17,7 @@ pub(super) fn collect_closing_brace_hints(
         let span = id.span(tree);
         let start_lc = file.position_at(span.start);
         let end_lc = file.position_at(span.end);
-        if end_lc.line - start_lc.line <= 5 {
+        if ((end_lc.line - start_lc.line) as usize) < min_lines {
             continue;
         }
         if span.end < begin || span.end > end {

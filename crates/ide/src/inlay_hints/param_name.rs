@@ -16,22 +16,9 @@ pub(super) fn collect_hir_parameter_hints<'a>(
     let Some(bodies) = current_file.bodies() else {
         return;
     };
-    // Build a lookup table: callee name → param names
-    let param_lookup: std::collections::HashMap<String, Vec<String>> = {
-        let mut map = std::collections::HashMap::new();
-        for (_, f) in files {
-            if let Some(parsed) = f.parsed() {
-                for head in &parsed.callable_heads {
-                    let params: Vec<String> =
-                        head.params.iter().filter_map(|p| p.name.clone()).collect();
-                    if !params.is_empty() {
-                        map.entry(head.name.clone()).or_insert(params);
-                    }
-                }
-            }
-        }
-        map
-    };
+    // Only ad-hoc buffers need the legacy workspace fallback. Configured
+    // calls select their signature at the call's actual declaration position.
+    let fallback = std::cell::OnceCell::new();
 
     for entry in bodies.entries() {
         for (id, hir) in entry.body.iter_exprs() {
@@ -54,8 +41,68 @@ pub(super) fn collect_hir_parameter_hints<'a>(
                 {
                     continue;
                 }
-                let Some(param_names) = param_lookup.get(callee_name) else {
-                    continue;
+                let selected = current_file.file_text().and_then(|(db, file)| {
+                    if matches!(
+                        hir::Semantics::new(db).resolve_path(db, file, span.start, callee_name),
+                        Some(hir::PathResolution::Local(_))
+                    ) {
+                        Some(Vec::new())
+                    } else {
+                        ide_db::signatures::callable_parameter_names_at(
+                            db,
+                            file,
+                            span.start,
+                            callee_name,
+                        )
+                    }
+                });
+                let selected_names;
+                let param_names = if let Some(signatures) = selected {
+                    let Some(first) = signatures.first() else { continue };
+                    selected_names = first.clone();
+                    // Clauses and overload alternatives must agree on names.
+                    if signatures.iter().skip(1).any(|names| names != &selected_names) {
+                        continue;
+                    }
+                    &selected_names
+                } else {
+                    let local = current_file.parsed().and_then(|parsed| {
+                        parsed
+                            .callable_heads
+                            .iter()
+                            .filter(|head| {
+                                head.name == callee_name
+                                    && head.label_span.start < span.start
+                                    && head.params.iter().any(|param| param.name.is_some())
+                            })
+                            .max_by_key(|head| head.label_span.start)
+                    });
+                    if let Some(head) = local {
+                        selected_names =
+                            head.params.iter().filter_map(|param| param.name.clone()).collect();
+                        &selected_names
+                    } else {
+                        let lookup = fallback.get_or_init(|| {
+                            let mut map = std::collections::HashMap::new();
+                            for (_, file) in files {
+                                if let Some(parsed) = file.parsed() {
+                                    for head in &parsed.callable_heads {
+                                        let params = head
+                                            .params
+                                            .iter()
+                                            .filter_map(|p| p.name.clone())
+                                            .collect::<Vec<_>>();
+                                        if !params.is_empty() {
+                                            map.entry(head.name.clone()).or_insert(params);
+                                        }
+                                    }
+                                }
+                            }
+                            map
+                        });
+                        let Some(names) = lookup.get(callee_name) else { continue };
+                        names
+                    }
                 };
                 // Generate parameter hints
                 for (i, arg_id) in args.iter().enumerate() {
@@ -63,6 +110,9 @@ pub(super) fn collect_hir_parameter_hints<'a>(
                         break;
                     }
                     let param_name = &param_names[i];
+                    if param_name == "_" {
+                        continue;
+                    }
                     if let Some(arg_span) = entry.source_map.expr_syntax(*arg_id) {
                         if arg_span.start >= begin && arg_span.end <= end {
                             // Skip if arg text matches param name

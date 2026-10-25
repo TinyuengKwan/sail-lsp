@@ -3,131 +3,40 @@
 use crate::assist_context::{AssistContext, AssistId, AssistKind, Assists};
 
 pub(crate) fn add_missing_match_arms(acc: &mut Assists, ctx: &AssistContext<'_>) -> Option<()> {
-    use hir::DefKind;
-
     let text = ctx.file.text();
     let offset = ctx.offset();
-
-    // Parse CST and find the MATCH_EXPR at cursor
-    // The tree the assist run already parsed. Parsing the text a second
-    // time here built one unrelated to it.
-    let cst_root = ctx.source_file()?.clone();
-    let bodies = hir::CallableBodies::from_cst(&cst_root);
-
-    // Find the callable body containing this offset
-    let entry = bodies.entry_at_offset(offset)?;
-    let body = &entry.body;
-    let source_map = &entry.source_map;
-
-    // Find the match expression at cursor
-    let expr_id = source_map.expr_at_offset(offset)?;
-    let hir::Expr::Match { scrutinee, arms } = body.expr(expr_id)? else {
-        return None;
-    };
-
-    // Get the scrutinee name (must be a simple ident for enum resolution)
-    let _scrutinee_name = match body.expr(*scrutinee)? {
-        hir::Expr::Ident(name) => name.clone(),
-        _ => return None, // Can't resolve complex scrutinee
-    };
-
-    // Try to find the enum/union type from the workspace ItemTrees
-    // Look for the scrutinee's type via val spec or direct enum name
-    let item_tree = ctx.file.item_tree()?;
-
-    // Strategy: Look for an enum/union whose name matches the scrutinee's type.
-    // For sail-riscv, patterns like `match ext { ... }` where ext is of type `extension`.
-    // We need to find the enum type. Heuristic: check if there's a val spec that
-    // tells us the parameter type, or if the scrutinee name IS an enum type.
-
-    // Collect all enum/union variants from the workspace for potential matches.
-    // For a real implementation, we'd use type inference to determine the exact type.
-    // For now, use a heuristic: look for an enum whose name is similar to the scrutinee.
-
-    // Collect all enum variants from workspace
-    let mut all_variants: Vec<String> = Vec::new();
-    let mut enum_name: Option<String> = None;
-
-    // The variants an enum or union declares.
-    //
-    // These used to be recovered by finding `{` and `}` in the item's
-    // *signature text* and splitting the inside on `,` — so
-    // `enum C = A | B`, Sail's bar-separated form, yielded no variants at
-    // all and the assist never fired on it. The item tree records the
-    // members; `fields` is what every other reader asks.
-    for &id in item_tree.top_level_items() {
-        if matches!(id.def_kind(item_tree), DefKind::Enum | DefKind::Union) {
-            let members: Vec<String> =
-                id.fields(item_tree).iter().map(|f| f.name.to_string()).collect();
-            if !members.is_empty() {
-                enum_name = Some(id.name(item_tree).as_str().to_string());
-                all_variants = members;
-            }
-        }
-        // Also check scattered enum clauses (member_name field)
-        if id.is_clause(item_tree) && id.member_name(item_tree).is_some() {
-            if let Some(member) = id.member_name(item_tree) {
-                if !all_variants.contains(&member.to_string()) {
-                    all_variants.push(member.to_string());
-                    if enum_name.is_none() {
-                        enum_name = Some(id.name(item_tree).as_str().to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    if all_variants.is_empty() {
-        return None;
-    }
-
-    // Collect existing arm patterns
-    let mut covered: Vec<String> = Vec::new();
-    for arm in arms {
-        if let Some(pat) = body.pat(arm.pat) {
-            match pat {
-                hir::Pat::Bind(name) => {
-                    if name == "_" {
-                        return None; // Wildcard covers everything
-                    }
-                    covered.push(name.clone());
-                }
-                hir::Pat::App { ctor, .. } => {
-                    covered.push(ctor.clone());
-                }
-                hir::Pat::Wild => return None,
-                _ => {}
-            }
-        }
-    }
-
-    // Find missing variants
-    let missing: Vec<&String> = all_variants.iter().filter(|v| !covered.contains(v)).collect();
-
+    let root = ctx.source_file()?;
+    let node = root
+        .descendants()
+        .filter(|node| {
+            node.kind() == syntax::SyntaxKind::MATCH_EXPR
+                && usize::from(node.text_range().start()) <= offset
+                && offset <= usize::from(node.text_range().end())
+        })
+        .min_by_key(|node| node.text_range().len())?;
+    let (sema, _, file) = ctx.sema()?;
+    let missing = sema.missing_match_patterns(file, node.text_range())?;
     if missing.is_empty() {
         return None;
     }
+    let close = node
+        .children_with_tokens()
+        .filter_map(|it| it.into_token())
+        .find(|token| token.kind() == syntax::SyntaxKind::R_CURLY)?;
+    let insert_offset = usize::from(close.text_range().start());
+    let mut previous = close.prev_token()?;
+    while previous.kind().is_trivia() {
+        previous = previous.prev_token()?;
+    }
+    let needs_comma = !matches!(previous.text(), "{" | ",");
 
-    // Build the text to insert
-    let match_span = source_map.expr_syntax(expr_id)?;
-    // Find the closing brace of the match expression
-    let match_text = text.get(match_span.start..match_span.end)?;
-    let close_brace_offset = match_text.rfind('}')?;
-    let insert_offset = match_span.start + close_brace_offset;
-
-    // Determine indentation from existing arms
-    let indent = "    "; // default 4 spaces
-                         // Each new arm's body is a `todo`, which is the thing to type over —
-                         // so for a client that can expand snippets they are the tabstops, the
-                         // first one being where the cursor lands.
+    // Each unfinished body is a snippet tabstop when the client supports it.
+    let indent = "    ";
     let snippet = ctx.config.snippet_cap.is_some();
     let mut new_arms = String::new();
     for (i, variant) in missing.iter().enumerate() {
-        let body = if snippet {
-            format!("${{{}:todo(\"implement {variant}\")}}", i + 1)
-        } else {
-            format!("todo(\"implement {variant}\")")
-        };
+        let body =
+            if snippet { format!("${{{}:undefined}}", i + 1) } else { "undefined".to_string() };
         new_arms.push_str(&format!("{indent}{variant} => {body},\n"));
     }
 
@@ -137,7 +46,7 @@ pub(crate) fn add_missing_match_arms(acc: &mut Assists, ctx: &AssistContext<'_>)
     // which does not parse. Nothing noticed, because the assist could not
     // fire on a bar-separated enum at all.
     let before = text.get(..insert_offset)?.trim_end();
-    let separator = if before.ends_with(['{', ',']) { "\n" } else { ",\n" };
+    let separator = if needs_comma { ",\n" } else { "\n" };
     let new_arms = format!("{separator}{new_arms}");
     // Replacing the whitespace before the `}` rather than inserting at it,
     // so the last arm does not end up with a space before its comma.
@@ -156,11 +65,6 @@ pub(crate) fn add_missing_match_arms(acc: &mut Assists, ctx: &AssistContext<'_>)
     Some(())
 }
 
-//
-// Trigger: cursor on a function call where the callee is not defined
-// anywhere in the current file.
-// Action: generate val spec + function stub at end of file.
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,7 +80,68 @@ mod tests {
                 enum C = A | B
                 val f : C -> int
                 function f(c) = match c { A => 1,
-                    B => todo("implement B"),
+                    B => undefined,
+                }
+            "#]],
+        );
+    }
+
+    #[test]
+    fn uses_the_scrutinee_type_instead_of_the_last_enum() {
+        check_assist(
+            add_missing_match_arms,
+            "enum C = A | B\nenum Other = X | Y\nval f : C -> int\nfunction f(c) = mat$0ch c { A => 1 }\n",
+            expect![[r#"
+                enum C = A | B
+                enum Other = X | Y
+                val f : C -> int
+                function f(c) = match c { A => 1,
+                    B => undefined,
+                }
+            "#]],
+        );
+    }
+
+    #[test]
+    fn retains_uncovered_constructor_payloads() {
+        check_assist(
+            add_missing_match_arms,
+            "union U = { Some : bool, None : unit }\nval f : U -> int\nfunction f(c) = mat$0ch c { Some(true) => 1, None => 0 }\n",
+            expect![[r#"
+                union U = { Some : bool, None : unit }
+                val f : U -> int
+                function f(c) = match c { Some(true) => 1, None => 0,
+                    Some(false) => undefined,
+                }
+            "#]],
+        );
+    }
+
+    #[test]
+    fn guarded_arm_does_not_cover_its_pattern_unconditionally() {
+        check_assist(
+            add_missing_match_arms,
+            "val f : (bool, bool) -> int\nfunction f(c, ready) = mat$0ch c { true if ready => 1, false => 0 }\n",
+            expect![[r#"
+                val f : (bool, bool) -> int
+                function f(c, ready) = match c { true if ready => 1, false => 0,
+                    true => undefined,
+                }
+            "#]],
+        );
+    }
+
+    #[test]
+    fn nested_payload_witness_preserves_the_uncovered_value() {
+        check_assist(
+            add_missing_match_arms,
+            "union Inner = { Inside : bool }\nunion Outer = { Outside : Inner }\nval f : Outer -> int\nfunction f(c) = mat$0ch c { Outside(Inside(true)) => 1 }\n",
+            expect![[r#"
+                union Inner = { Inside : bool }
+                union Outer = { Outside : Inner }
+                val f : Outer -> int
+                function f(c) = match c { Outside(Inside(true)) => 1,
+                    Outside(Inside(false)) => undefined,
                 }
             "#]],
         );
@@ -193,8 +158,8 @@ mod tests {
                 enum C = A | B | D
                 val f : C -> int
                 function f(c) = match c { A => 1,
-                    B => ${1:todo("implement B")},
-                    D => ${2:todo("implement D")},
+                    B => ${1:undefined},
+                    D => ${2:undefined},
                 }
             "#]],
         );

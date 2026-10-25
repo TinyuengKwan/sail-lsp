@@ -519,7 +519,7 @@ pub fn lower_body_with_params_at(
                 return finish_body_with_guard(ctx, vec![acc], root, guard_src);
             }
         }
-        if !from_nodes.is_empty() {
+        if !from_nodes.is_empty() && !joined {
             from_nodes
         } else {
             // Fallback: extract params from raw tokens/nodes in PARAM_LIST.

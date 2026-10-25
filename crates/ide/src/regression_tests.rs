@@ -1593,7 +1593,7 @@ $include <prelude.sail>
 val foo : forall 'n, 'n >= 0. implicit('n) -> bits(8 * 'n)
 val f : unit -> unit
 function f() = { let w: bits(65) = foo(); print_bits("", w) }
-//                                 ^^^^^ error: bits(8 * int) is not a subtype of bits(65)
+//                                 ^^^^^ error: bits(8 * 'n) is not a subtype of bits(65)
 "#,
     );
 }
@@ -2998,7 +2998,7 @@ fn a_field_the_record_does_not_declare_is_reported() {
 default Order dec
 struct Record = {rsig : int, bitf : bits(32)}
 function test(r : Record) -> bits(32) = r.zzz
-//                                      ^^^^^ error: no field `zzz` on type `Record`
+//                                        ^^^ error: no field `zzz` on type `Record`
 "#,
     );
 }
@@ -3022,7 +3022,7 @@ struct Record = {rsig : int, bitf : bits(32)}
 register R0 : bits(32)
 val test : Record -> unit
 function test(r) = R0 = r.zzz
-//                      ^^^^^ error: no field `zzz` on type `Record`
+//                        ^^^ error: no field `zzz` on type `Record`
 "#,
     );
 }
@@ -3089,7 +3089,7 @@ default Order dec
 struct A = {field_A : bool, shared : int}
 val makeA : bool -> A
 function makeA(x) = { record : A = undefined; record.zzz = x; record }
-//                                            ^^^^^^^^^^ error: no field `zzz` on type `A`
+//                                                   ^^^ error: no field `zzz` on type `A`
 "#,
     );
 }
@@ -3610,7 +3610,7 @@ val g : unit -> bool
 register R : bits(32)
 val f : unit -> unit
 function f() = { R[0 .. 0] = [g()] }
-//                           ^^^^^ error: Type mismatch between bits(1) and vector(1, bool)
+//                            ^^^ error: Type mismatch between bit and bool
 "#,
     );
     crate::fixture::check_diagnostics(
@@ -5133,9 +5133,15 @@ fn quantified_values_cannot_be_narrowed_or_share_independent_witnesses() {
         "val make : unit -> {'n, 'n in {8, 16}. bits('n)}\nval same : forall 'n. (bits('n), bits('n)) -> unit\nval bad : unit -> unit\nfunction bad() = { let x = make(); let y = make(); same(x, y) }",
         "val make : unit -> {'n, 'n in {8, 16}. bits('n)}\nval bad : forall 'm. unit -> bits('m)\nfunction bad() = make()",
     ] {
-        let (analysis, files) = crate::fixture::analysis(&format!("//- /main.sail\ndefault Order dec\n{source}\n"));
-        let diagnostics = analysis.file_diagnostics(files[0].0, &ide_diagnostics::DiagnosticsConfig::new()).unwrap();
-        assert!(diagnostics.iter().any(|d| d.severity == ide_diagnostics::Severity::Error), "accepted invalid quantified program: {source}\n{diagnostics:?}");
+        let (analysis, files) =
+            crate::fixture::analysis(&format!("//- /main.sail\ndefault Order dec\n{source}\n"));
+        let diagnostics = analysis
+            .file_diagnostics(files[0].0, &ide_diagnostics::DiagnosticsConfig::new())
+            .unwrap();
+        assert!(
+            diagnostics.iter().any(|d| d.severity == ide_diagnostics::Severity::Error),
+            "accepted invalid quantified program: {source}\n{diagnostics:?}"
+        );
     }
 }
 #[test]
@@ -5418,7 +5424,9 @@ function check(n) = {
 #[test]
 fn numeric_set_arguments_reject_gaps_and_accept_members() {
     for (value, rejected) in [(1, false), (2, true), (3, false)] {
-        let source = format!("//- /main.sail\ntype sparse = {{1, 3}}\nval consume : sparse -> unit\nfunction caller() -> unit = consume({value})\n");
+        let source = format!(
+            "//- /main.sail\ntype sparse = {{1, 3}}\nval consume : sparse -> unit\nfunction caller() -> unit = consume({value})\n"
+        );
         let (analysis, files) = crate::fixture::analysis(&source);
         let diagnostics = analysis
             .file_diagnostics(files[0].0, &ide_diagnostics::DiagnosticsConfig::new())
@@ -5560,6 +5568,647 @@ function audit(m, x, fallback) = try {
 } catch {
     Failure(s) => { print(s); fallback }
 }
+"#,
+    );
+}
+
+#[test]
+fn upstream_p1_poly_list() {
+    check_diagnostics(
+        r#"
+//- prelude
+//- /main.sail
+default Order dec
+
+$include <prelude.sail>
+
+function cons(x: int, xs: list(int)) -> list(int) = {
+  x :: xs
+}
+
+function poly_cons forall ('a : Type). (x: 'a, xs: list('a)) -> list('a) = {
+  x :: xs
+}
+
+function main((): unit) -> unit = {
+  let _ = cons(1, [|2, 3, 4|]);
+  let _ : list(int) = poly_cons(1, [|2, 3, 4|]);
+  // TODO: This fails due to different order of instantiation
+
+  ()
+}
+
+"#,
+    );
+}
+
+#[test]
+fn upstream_p1_shadow_leak_check() {
+    check_diagnostics(
+        r#"
+//- prelude
+//- /main.sail
+default Order dec
+
+function some_int() -> int = {
+  4
+}
+
+function some_other_int() -> int = {
+  5
+}
+
+val test : forall 'n 'm, 'n == 'm. (int('n), int('m)) -> unit
+
+function main() -> unit = {
+  let 'x = some_int();
+
+  let 'y: int('x) = {
+     let 'x = some_other_int();
+     x
+  };
+
+  _prove(constraint('x == 'y));
+
+  test(x, y)
+}
+
+"#,
+    );
+}
+
+#[test]
+fn upstream_p1_short_circuit_bool_ex() {
+    check_diagnostics(
+        r#"
+//- prelude
+//- /main.sail
+default Order dec
+
+$include <prelude.sail>
+$include <string.sail>
+
+val assertive : forall 'n. int('n) -> range(0,'n) effect {escape}
+
+function assertive(n) = {
+  assert(n > 0);
+  0
+}
+
+val ok : unit -> bool(0 == 1) effect {escape}
+
+function ok() = {
+  let n = -1;
+  let a = assertive(n) > 0 in
+  if (true | a) then true else true
+}
+
+/*
+val bad : unit -> bool(0 == 1) effect {escape}
+
+function bad() = {
+  let n = -1;
+  if (true | assertive(n) > 0) then true else true
+}
+*/
+
+val main : unit -> unit effect {escape}
+
+function main() =
+  if ok() then
+    print_endline("0 = 1")
+  else
+    print_endline("0 != 1")
+"#,
+    );
+}
+
+#[test]
+fn upstream_p1_fixes_preserve_rejections() {
+    for source in [
+        "function poly_cons forall ('a : Type). (x : 'a, xs : list('a)) -> list('a) = x :: xs\nfunction bad() -> unit = { let _ : list(int) = poly_cons(1, [|true|]); () }",
+        "function first() -> int = 4\nfunction second() -> int = 5\nfunction bad() -> unit = { let 'x = first(); let 'y : int('x) = { let 'z = second(); z }; () }",
+        "val assertive : forall 'n. int('n) -> range(0, 'n)\nfunction bad() -> bool(false) = { let n = -1; if true | assertive(n) > 0 then true else true }",
+        "val assertive : forall 'n. int('n) -> range(0, 'n)\nfunction bad() -> bool(false) = { let n = 1; let a = assertive(n) > 0; if true | a then true else true }",
+        "val condition : unit -> bool\nval assertive : forall 'n. int('n) -> range(0, 'n)\nfunction bad() -> bool(false) = { if condition() | assertive(-1) > 0 then true else true }",
+    ] {
+        let (analysis, files) = crate::fixture::analysis(&format!(
+            "//- prelude\n//- /main.sail\ndefault Order dec\n$include <prelude.sail>\n{source}\n"
+        ));
+        let diagnostics = analysis
+            .file_diagnostics(files[0].0, &ide_diagnostics::DiagnosticsConfig::new())
+            .unwrap();
+        assert!(
+            diagnostics.iter().any(|d| d.severity == ide_diagnostics::Severity::Error),
+            "accepted invalid program: {source}\n{diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn upstream_p1_negative_widths_have_semantic_reasons() {
+    let cases = [
+        (
+            "struct Foo = { xs : {'n, 'n == -1. bits('n)} }\nfunction bad() -> unit = { let x : Foo = undefined; () }",
+            "cannot be undefined",
+        ),
+        (
+            "struct Foo = { xs : bits(-3) }\nfunction bad() -> unit = { let x : Foo = undefined; () }",
+            "cannot be undefined",
+        ),
+        ("function bad() -> unit = { let x : (bits(-1), int) = undefined; () }", "could be empty"),
+        (
+            "union Foo('n : Int) = { Bar : bits('n - 2) }\nfunction bad() -> unit = { let x : Foo(1) = undefined; () }",
+            "cannot be undefined",
+        ),
+        (
+            "union Foo('n : Int) = { Bar : bits('n - 2), Baz : unit }\nfunction bad() -> unit = { let x : Foo(1) = undefined; () }",
+            "cannot be undefined",
+        ),
+    ];
+    for (source, reason) in cases {
+        for strict in [false, true] {
+            let marker = if strict { "//- strict-bitvector\n" } else { "" };
+            let (analysis, files) = crate::fixture::analysis(&format!(
+                "{marker}//- /main.sail\ndefault Order dec\n{source}\n"
+            ));
+            let diagnostics = analysis
+                .file_diagnostics(files[0].0, &ide_diagnostics::DiagnosticsConfig::new())
+                .unwrap();
+            let expected = if strict { "Well-formedness check failed" } else { reason };
+            assert!(
+                diagnostics.iter().any(|d| d.severity == ide_diagnostics::Severity::Error
+                    && d.message.contains(expected)),
+                "missing {expected}: {source}\n{diagnostics:?}"
+            );
+        }
+    }
+    check_diagnostics(
+        "//- /main.sail\ndefault Order dec\nfunction f() -> unit = { let _ : list(bits(-1)) = [||]; () }\n",
+    );
+}
+
+#[test]
+fn upstream_p1_preserves_boolean_existential_branch_scope() {
+    check_diagnostics(
+        r#"
+//- prelude
+//- /main.sail
+default Order dec
+
+$include <prelude.sail>
+
+type datasize('n: Int) -> Bool = 'n in {32, 64}
+
+union ast = {
+  Ctor : {'d 'n, datasize('d) & 0 <= 'n < 'd. (int('d), int('n))}
+}
+
+val decode : bits(16) -> option(ast)
+
+// Can have a constrained pair
+
+function clause decode(a : bits(5) @ b : bits(1) @ 0b0000011111) = {
+  let (datasize, n) : {'d 'n, datasize('d) & 0 <= 'n < 'd. (int('d), int('n))} =
+    if b == 0b0 then (64, unsigned(b @ a)) else (32, unsigned(a));
+  Some(Ctor(datasize, n))
+}
+
+// Or just lift the function body into the body if the if for flow typing
+
+function clause decode(a : bits(5) @ b : bits(1) @ 0b0000011111) = {
+  if b == 0b0 then {
+    Some(Ctor(64, unsigned(b @ a)))
+  } else {
+    Some(Ctor(32, unsigned(a)))
+  }
+}
+
+// Or use boolean constraint
+
+function clause decode(a : bits(5) @ b : bits(1) @ 0b0000011111) = {
+  let 'is_64 = b == 0b0;
+  let 'datasize : {'d, ('is_64 & 'd == 64) | (not('is_64) & 'd == 32). int('d)} =
+    if is_64 then 64 else 32;
+  let _n : range(0, 'datasize) = if is_64 then unsigned(b @ a) else unsigned(a);
+  None()
+}
+
+// Other variants
+
+function clause decode(a : bits(5) @ b : bits(1) @ 0b0000011111) = {
+  let (datasize, n) : {'d 'n, datasize('d) & 0 <= 'n < 'd. (int('d), int('n))} =
+    if b == 0b0 then {
+      let c = unsigned(b @ a);
+      (64, c)
+    } else (32, unsigned(a));
+  Some(Ctor(datasize, n))
+}
+"#,
+    );
+}
+
+#[test]
+fn upstream_p1_strict_widths_and_register_defaults() {
+    for (source, reason) in [
+        (
+            "function f() -> unit = { let _ : list(bits(-1)) = [||]; () }",
+            "Well-formedness check failed",
+        ),
+        (
+            "struct S('n : Int) = { x : bitvector('n, dec) }\nregister R : S(1)",
+            "Well-formedness check failed",
+        ),
+    ] {
+        let (analysis, files) = crate::fixture::analysis(&format!(
+            "//- strict-bitvector\n//- /main.sail\ndefault Order dec\n{source}\n"
+        ));
+        let diagnostics = analysis
+            .file_diagnostics(files[0].0, &ide_diagnostics::DiagnosticsConfig::new())
+            .unwrap();
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.severity == ide_diagnostics::Severity::Error
+                    && d.message.contains(reason)),
+            "{diagnostics:?}"
+        );
+    }
+    let (analysis, files) = crate::fixture::analysis(
+        "//- /main.sail\ndefault Order dec\nstruct S('n : Int) = { x : bitvector('n, dec) }\nregister R : S(1)\n",
+    );
+    let diagnostics =
+        analysis.file_diagnostics(files[0].0, &ide_diagnostics::DiagnosticsConfig::new()).unwrap();
+    assert!(
+        diagnostics.iter().any(|d| d.message.contains("Must provide a default register value")),
+        "{diagnostics:?}"
+    );
+    check_diagnostics(
+        r#"
+//- strict-bitvector
+//- /main.sail
+default Order dec
+struct Inferred('n) = { x : bitvector('n) }
+struct Explicit('n : Nat) = { x : bitvector('n) }
+struct Constrained('n : Int), 'n >= 0 = { x : bitvector('n) }
+type Nonnegative('n : Int), 'n >= 0 -> Type = bitvector('n)
+register R : Explicit(1)
+register R2 : Inferred(0)
+function f() -> unit = { let _ : list(bits(0)) = [||]; () }
+"#,
+    );
+}
+
+#[test]
+fn upstream_extended_vector_elements_have_a_common_type() {
+    check_diagnostics(
+        r#"
+//- prelude
+//- /main.sail
+default Order dec
+$include <prelude.sail>
+function contextual(x : int, y : int) -> vector(2, int) = [x, y]
+function inferred(x : int, y : int) -> int = {
+  let xs = [x, y];
+  xs[0]
+}
+"#,
+    );
+}
+
+#[test]
+fn upstream_extended_constructor_payload_keeps_existential_facts() {
+    check_diagnostics(
+        r#"
+//- prelude
+//- /main.sail
+default Order dec
+$include <prelude.sail>
+type reg = range(0,15)
+union instr = { Mov : {'d, 'd in {8,16}. (int('d), reg, bits('d))} }
+val exec : instr -> bits(32)
+function exec(Mov(sz, r, imm)) = {
+  let _ = (sz,r);
+  sail_zero_extend(imm, 32)
+}
+"#,
+    );
+}
+
+#[test]
+fn upstream_extended_symbolic_subtraction_preserves_width() {
+    check_diagnostics(
+        r#"
+//- prelude
+//- /main.sail
+default Order dec
+$include <prelude.sail>
+val f : forall 'n, 'n in {16, 32}. (implicit('n), bits('n)) -> bits('n)
+function f(n, v) = {
+  result : bits('n) = v;
+  result = 0x5 @ sail_zeros(n - 4);
+  result
+}
+"#,
+    );
+}
+
+#[test]
+fn upstream_extended_mutable_set_bounds_survive_match() {
+    check_diagnostics(
+        r#"
+//- prelude
+//- /main.sail
+default Order dec
+$include <prelude.sail>
+enum choice = A | B | C
+function f(x : choice, v : bits(64)) -> bits(64) = {
+  sz : {|8,10,15|} = 10;
+  match x { A => sz = 15, B => sz = 8, _ => () };
+  let w = v[20 .. sz];
+  sail_zero_extend(w, 64)
+}
+"#,
+    );
+}
+
+#[test]
+fn upstream_extended_nested_existential_record_update() {
+    check_diagnostics(
+        r#"
+//- prelude
+//- /main.sail
+default Order dec
+$include <prelude.sail>
+struct st = { Two : {'n, 'n in {16,32}. (int('n), bits('n))}, Three : (int, {'n, 'n in {16,32}. (int('n), bits('n))}) }
+function create(i : int, v : bits(16)) -> st = struct { Two = (16, v), Three = (i, (16, v)) }
+function update(v : bits(16), st0 : st) -> st = {
+  var st1 = st0;
+  st1.Two = (16, v);
+  st1.Three = (0, (16, v));
+  st1
+}
+"#,
+    );
+}
+
+#[test]
+fn upstream_extended_nested_existential_constructor() {
+    check_diagnostics(
+        r#"
+//- prelude
+//- /main.sail
+default Order dec
+$include <prelude.sail>
+union ast = { Foo : {'n, 'n in {16,32}. (int, (int('n), bits('n)))} }
+function make(i : int, v : bits(16)) -> ast = Foo(i,(16,v))
+"#,
+    );
+}
+
+#[test]
+fn upstream_extended_payload_type_pattern_names_opened_witness() {
+    check_diagnostics(
+        r#"
+//- prelude
+//- /main.sail
+default Order dec
+$include <prelude.sail>
+union ast = { SomeOp : {'n, 'n in {8,16}. (int('n),bits('n))} }
+val execute : ast -> bits(32)
+function execute(SomeOp(n as int('n),v)) = {
+  a : bits('n) = sail_zero_extend(0x12,n);
+  b : bits('n) = and_vec(v, a);
+  sail_zero_extend(b,32)
+}
+"#,
+    );
+}
+
+#[test]
+fn upstream_extended_constructor_annotations_keep_outer_signature() {
+    check_diagnostics(
+        r#"
+//- prelude
+//- /main.sail
+default Order dec
+$include <prelude.sail>
+union Quux('a : Type) = { Quux : 'a }
+function quux(Quux(x as int('x)) : Quux({'n, 'n >= 3. int('n)})) -> unit = {
+  let _ = x;
+  _prove(constraint('x >= 3));
+  ()
+}
+union ast('D : Int), 'D in {32,64,128} = { Instr : {'R, 'R in {32,64}. (int('R), bits('D))} }
+val execute : forall 'd, 'd in {32,64,128}. ast('d) -> unit
+function execute(Instr((r as int('R), d))) = {
+  let _ = (r, d);
+  _prove(constraint('R in {32,64}));
+  ()
+}
+"#,
+    );
+}
+
+#[test]
+fn upstream_extended_constructor_keeps_local_finite_set() {
+    check_diagnostics(
+        r#"
+//- prelude
+//- /main.sail
+default Order dec
+$include <prelude.sail>
+type datasize('n : Int) -> Bool = 'n in {32,64}
+union ast = { Ctor : {'d, datasize('d). (bits(4), int('d), bits(4))} }
+function decode(a : bits(4), b : bool, c : bits(4)) -> ast = {
+  let x : {|32,64|} = if b then 32 else 64;
+  Ctor(a, x, c)
+}
+"#,
+    );
+}
+
+#[test]
+fn upstream_extended_exact_constraint_ctor() {
+    check_diagnostics(
+        r#"
+//- prelude
+//- strict-bitvector
+//- /main.sail
+default Order dec
+
+$include <flow.sail>
+
+union Foo = {
+  Foo : {'n, 'n >= 3. int('n)}
+}
+
+function foo(Foo(x as int('x)): Foo) -> unit = {
+  _prove(constraint('x >= 3));
+}
+
+union Bar('m), 'm <= 100 = {
+  Bar : {'n, 'n >= 'm. int('n)}
+}
+
+function bar(Bar(x as int('x)) : Bar(23)) -> unit = {
+  _prove(constraint('x >= 23));
+  ()
+}
+
+union Quux('a : Type) = {
+  Quux : 'a
+}
+
+function quux(Quux(x as int('x)) : Quux({'n, 'n >= 3. int('n)})) -> unit = {
+  _prove(constraint('x >= 3));
+  ()
+}
+
+"#,
+    );
+}
+
+#[test]
+fn upstream_extended_exact_execute_decode_hard() {
+    check_diagnostics(
+        r#"
+//- prelude
+//- strict-bitvector
+//- /main.sail
+default Order dec
+
+$include <prelude.sail>
+
+union ast('D: Int), 'D in {32, 64, 128} = {
+  Instr1 : {'R, 'R in {32, 64}. (int('R), bits('D))}
+}
+
+val execute : forall 'd, 'd in {32, 64, 128}. ast('d) -> unit
+
+function clause execute(Instr1(r as int('R), d)) = {
+  _prove(constraint('R in {32, 64}));
+  if length(d) == 64 then {
+    let _ = d[r - 1 .. 0];
+    ()
+  }
+}
+
+function clause execute(Instr1((r as int('R), d))) = {
+  _prove(constraint('R in {32, 64}));
+  if length(d) == 64 then {
+    let _ = d[r - 1 .. 0];
+    ()
+  }
+}
+
+
+"#,
+    );
+}
+
+#[test]
+fn upstream_extended_exact_exist1() {
+    check_diagnostics(
+        r#"
+//- prelude
+//- strict-bitvector
+//- /main.sail
+let v1 : {|0, 1|} = 0
+
+val test : bool -> {|0, 1|}
+
+function test flag = if flag then 0 else 1
+
+let v2 : range(0, 1) = test(true)
+
+val add : forall 'a 'b. (atom('a), atom('b)) -> atom('a + 'b)
+
+let v3 : {|3, 4|} = 3
+
+let v4 : {'q, 'q in {0, 1}. atom('q + 3)} = v3
+
+let v5 = add(test(true), 4)
+
+let v6 : atom(4) = 4
+
+val unit_fn : atom(4) -> unit
+
+function unit_fn x : atom(4) = ()
+
+val s_add : forall 'a. (atom('a), atom('a)) -> atom('a + 'a)
+
+let v7 : {'k, 'k == 4. atom('k)} = 4
+
+let v8 = s_add(v7, 4)
+
+"#,
+    );
+}
+
+#[test]
+fn upstream_extended_exact_global_type_var() {
+    check_diagnostics(
+        r#"
+//- prelude
+//- strict-bitvector
+//- /main.sail
+$include <flow.sail>
+
+let (size as 'size) : {|32, 64|} = 32
+
+val zeros : forall 'n. atom('n) -> vector ('n, dec, bit)
+
+val test : atom('size) -> unit
+
+function test x =
+  if x == 32 then {
+    ()
+  } else {
+    let _y : atom(64) = size in
+    ()
+  }
+
+val test2 : unit -> atom('size)
+
+function test2 () = size
+
+"#,
+    );
+}
+
+#[test]
+fn upstream_extended_throw_fact() {
+    check_diagnostics(
+        r#"
+//- prelude
+//- /main.sail
+default Order dec
+$include <prelude.sail>
+
+union exception = {
+  BadInput : int
+}
+
+val test1 : int -> nat effect {escape}
+
+function test1(n) = {
+  if (n < 0) then {
+    throw (BadInput(n))
+  };
+  n
+}
+
+val test2 : int -> nat effect {escape}
+
+function test2(n) = {
+  m : nat = 0;
+  if (n < 0) then {
+    throw (BadInput(n))
+  } else { m = 1 };
+  n+m
+}
+
 "#,
     );
 }

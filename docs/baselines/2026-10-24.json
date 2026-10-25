@@ -1,0 +1,1422 @@
+{
+  "schema_version": 1,
+  "date_utc": "2026-10-24",
+  "source": {
+    "sail_lsp_base_commit": "dad440eb98e835deebfb8182022507dc8e31fa61",
+    "sail_lsp_worktree": "Uncommitted four-item implementation plus preceding project-loading fixes; this is not a release-tag measurement.",
+    "rust_and_cargo_source_sha256": "580baa6413f167994b65749ad8ed1e3d240406dba47aa2724748061ec0f29c80",
+    "sail_commit": "ac09f8870b9d85e528e2a3436150b03b9d805d40",
+    "sail_riscv_commit": "20690c8a8d6ccbb0e6adea8e2977efd3adaf8391",
+    "sail_and_sail_riscv_worktrees_clean": true,
+    "toolchain": "rustc 1.97.1 (8bab26f4f 2026-07-14)"
+  },
+  "commands": {
+    "build": "cargo +1.97.1 build --release -p sail-lsp --example analysis_stats --example conformance_check --example incremental_stats",
+    "coverage": "target/release/examples/analysis_stats --diagnostics-only --constraint-report constraints.json ../sail-riscv/model/riscv.sail_project",
+    "conformance": "target/release/examples/conformance_check --list ../sail/test/typecheck",
+    "tests": "cargo +1.97.1 test --workspace --lib -- --test-threads=1",
+    "check": "cargo +1.97.1 check --workspace --all-targets"
+  },
+  "validation": {
+    "workspace_suites": 27,
+    "workspace_passed": 2206,
+    "workspace_failed": 0,
+    "workspace_ignored": 4,
+    "additional_conversion_test_passed": 1,
+    "all_targets_check": "passed, no warnings",
+    "extraction_protocol_test": "passed: creation order, source version, collision, cross-include definition, stale action"
+  },
+  "coverage": {
+    "scope": "Manifest default configuration, active project roots; diagnostics and expression counts cover roots, using included/library sources as context.",
+    "manifest": "../sail-riscv/model/riscv.sail_project",
+    "root_files": 156,
+    "active_included_library_files": 40,
+    "project_lines": 29968,
+    "expressions": 81543,
+    "unknown_expressions": 0,
+    "partially_unknown_expressions": 0,
+    "unvisited_expressions": 0,
+    "skipped_bodies": 0,
+    "type_mismatches": 0,
+    "diagnostics": {
+      "error": 0,
+      "warning": 62,
+      "hint": 6
+    },
+    "metrics": {
+      "workspace_load": {
+        "value": 659,
+        "unit": "ms"
+      },
+      "parse_all": {
+        "value": 1,
+        "unit": "ms"
+      },
+      "total_lines": {
+        "value": 29968,
+        "unit": "lines"
+      },
+      "item_tree_all": {
+        "value": 12,
+        "unit": "ms"
+      },
+      "body_lowering": {
+        "value": 153,
+        "unit": "ms"
+      },
+      "bodies": {
+        "value": 3318,
+        "unit": "count"
+      },
+      "scattered_type_clauses": {
+        "value": 471,
+        "unit": "count"
+      },
+      "infer_all": {
+        "value": 18867,
+        "unit": "ms"
+      },
+      "callables": {
+        "value": 3318,
+        "unit": "count"
+      },
+      "exprs": {
+        "value": 81543,
+        "unit": "count"
+      },
+      "unknown type": {
+        "value": 0,
+        "unit": "#"
+      },
+      "partially unknown type": {
+        "value": 0,
+        "unit": "#"
+      },
+      "type mismatches": {
+        "value": 0,
+        "unit": "#"
+      },
+      "diagnostics_all": {
+        "value": 1940,
+        "unit": "ms"
+      }
+    },
+    "timing_note": "Coverage/conformance ran alongside tests; their wall times are not an isolated performance comparison."
+  },
+  "constraints": {
+    "scope": "committed_deferred_obligations",
+    "smt_enabled": true,
+    "totals": {
+      "proved": 2719,
+      "refuted": 0,
+      "total": 3295,
+      "unknown": 576
+    },
+    "unknown_by_reason": {
+      "budget_exhausted": 16,
+      "flexible_witness": 30,
+      "not_established": 486,
+      "type_recovery": 26,
+      "unsupported_goal": 18
+    },
+    "unsupported_goal_sites": [
+      {
+        "file": "model/extensions/V/vext_control.sail",
+        "line": 39,
+        "column": 3,
+        "callable": "get_num_elem",
+        "goal": "<unsupported> & <unsupported>",
+        "reason": "unsupported_goal"
+      },
+      {
+        "file": "model/extensions/V/vext_control.sail",
+        "line": 39,
+        "column": 3,
+        "callable": "get_num_elem",
+        "goal": "<unsupported> & <unsupported>",
+        "reason": "unsupported_goal"
+      },
+      {
+        "file": "model/extensions/V/vext_regs.sail",
+        "line": 273,
+        "column": 3,
+        "callable": "get_sew_bytes",
+        "goal": "<unsupported> & <unsupported>",
+        "reason": "unsupported_goal"
+      },
+      {
+        "file": "model/extensions/V/vext_utils_insts.sail",
+        "line": 53,
+        "column": 3,
+        "callable": "valid_reg_group",
+        "goal": "<unsupported> & <unsupported>",
+        "reason": "unsupported_goal"
+      },
+      {
+        "file": "model/extensions/V/vext_utils_insts.sail",
+        "line": 62,
+        "column": 3,
+        "callable": "valid_whole_register",
+        "goal": "<unsupported> & <unsupported>",
+        "reason": "unsupported_goal"
+      },
+      {
+        "file": "model/extensions/V/vext_utils_insts.sail",
+        "line": 92,
+        "column": 24,
+        "callable": "valid_segment",
+        "goal": "<unsupported> & <unsupported>",
+        "reason": "unsupported_goal"
+      },
+      {
+        "file": "model/extensions/V/vext_utils_insts.sail",
+        "line": 93,
+        "column": 8,
+        "callable": "valid_segment",
+        "goal": "<unsupported> & <unsupported>",
+        "reason": "unsupported_goal"
+      },
+      {
+        "file": "model/extensions/V/vext_utils_insts.sail",
+        "line": 309,
+        "column": 59,
+        "callable": "init_masked_result",
+        "goal": "<unsupported> & <unsupported>",
+        "reason": "unsupported_goal"
+      },
+      {
+        "file": "model/extensions/V/vext_utils_insts.sail",
+        "line": 361,
+        "column": 59,
+        "callable": "init_masked_source",
+        "goal": "<unsupported> & <unsupported>",
+        "reason": "unsupported_goal"
+      },
+      {
+        "file": "model/extensions/V/vext_utils_insts.sail",
+        "line": 399,
+        "column": 59,
+        "callable": "init_masked_result_carry",
+        "goal": "<unsupported> & <unsupported>",
+        "reason": "unsupported_goal"
+      },
+      {
+        "file": "model/extensions/V/vext_utils_insts.sail",
+        "line": 439,
+        "column": 59,
+        "callable": "init_masked_result_cmp",
+        "goal": "<unsupported> & <unsupported>",
+        "reason": "unsupported_goal"
+      },
+      {
+        "file": "model/extensions/vector_crypto/zvk_utils.sail",
+        "line": 18,
+        "column": 46,
+        "callable": "zvk_check_encdec",
+        "goal": "<unsupported> & <unsupported>",
+        "reason": "unsupported_goal"
+      },
+      {
+        "file": "model/extensions/vector_crypto/zvk_utils.sail",
+        "line": 19,
+        "column": 4,
+        "callable": "zvk_check_encdec",
+        "goal": "<unsupported> & <unsupported>",
+        "reason": "unsupported_goal"
+      },
+      {
+        "file": "model/extensions/vector_crypto/zvk_utils.sail",
+        "line": 19,
+        "column": 32,
+        "callable": "zvk_check_encdec",
+        "goal": "<unsupported> & <unsupported>",
+        "reason": "unsupported_goal"
+      },
+      {
+        "file": "model/postlude/device_tree.sail",
+        "line": 147,
+        "column": 42,
+        "callable": "generate_dts",
+        "goal": "<unsupported> & <unsupported>",
+        "reason": "unsupported_goal"
+      },
+      {
+        "file": "model/sys/mem.sail",
+        "line": 42,
+        "column": 3,
+        "callable": "is_aligned_paddr",
+        "goal": "<unsupported> & <unsupported>",
+        "reason": "unsupported_goal"
+      },
+      {
+        "file": "model/sys/mem.sail",
+        "line": 45,
+        "column": 3,
+        "callable": "is_aligned_vaddr",
+        "goal": "<unsupported> & <unsupported>",
+        "reason": "unsupported_goal"
+      },
+      {
+        "file": "model/sys/vmem_utils.sail",
+        "line": 67,
+        "column": 52,
+        "callable": "prop_access_within_is_aligned",
+        "goal": "<unsupported> & <unsupported>",
+        "reason": "unsupported_goal"
+      }
+    ],
+    "other_reason_examples": {
+      "budget_exhausted": [
+        {
+          "file": "model/core/float_classify.sail",
+          "line": 49,
+          "column": 12,
+          "callable": "float_in_one_class",
+          "goal": "is_fp_bits(16)",
+          "reason": "budget_exhausted"
+        },
+        {
+          "file": "model/core/float_classify.sail",
+          "line": 49,
+          "column": 35,
+          "callable": "float_in_one_class",
+          "goal": "is_fp_bits(16)",
+          "reason": "budget_exhausted"
+        },
+        {
+          "file": "model/core/float_classify.sail",
+          "line": 50,
+          "column": 12,
+          "callable": "float_in_one_class",
+          "goal": "is_fp_bits(16)",
+          "reason": "budget_exhausted"
+        }
+      ],
+      "flexible_witness": [
+        {
+          "file": "model/extensions/V/vext_regs.sail",
+          "line": 273,
+          "column": 3,
+          "callable": "get_sew_bytes",
+          "goal": "div('_fv0, 8) in {1, 2, 4, 8}",
+          "reason": "flexible_witness"
+        },
+        {
+          "file": "model/extensions/vector_crypto/zvksh_insts.sail",
+          "line": 50,
+          "column": 7,
+          "callable": "execute",
+          "goal": "32 == '_fv43 * 8",
+          "reason": "flexible_witness"
+        },
+        {
+          "file": "model/extensions/vector_crypto/zvksh_insts.sail",
+          "line": 50,
+          "column": 7,
+          "callable": "execute",
+          "goal": "32 == '_fv43 * 8",
+          "reason": "flexible_witness"
+        }
+      ],
+      "not_established": [
+        {
+          "file": "model/core/float_classify.sail",
+          "line": 26,
+          "column": 12,
+          "callable": "float_in_one_broad_class",
+          "goal": "is_fp_bits(16)",
+          "reason": "not_established"
+        },
+        {
+          "file": "model/core/float_classify.sail",
+          "line": 27,
+          "column": 12,
+          "callable": "float_in_one_broad_class",
+          "goal": "is_fp_bits(16)",
+          "reason": "not_established"
+        },
+        {
+          "file": "model/core/float_classify.sail",
+          "line": 28,
+          "column": 12,
+          "callable": "float_in_one_broad_class",
+          "goal": "is_fp_bits(16)",
+          "reason": "not_established"
+        }
+      ],
+      "type_recovery": [
+        {
+          "file": "model/extensions/A/zaamo_insts.sail",
+          "line": 63,
+          "column": 7,
+          "callable": "encdec",
+          "goal": "<unsupported>",
+          "reason": "type_recovery"
+        },
+        {
+          "file": "model/extensions/A/zaamo_insts.sail",
+          "line": 63,
+          "column": 7,
+          "callable": "encdec",
+          "goal": "<unsupported>",
+          "reason": "type_recovery"
+        },
+        {
+          "file": "model/extensions/A/zaamo_insts.sail",
+          "line": 139,
+          "column": 7,
+          "callable": "assembly",
+          "goal": "<unsupported>",
+          "reason": "type_recovery"
+        }
+      ]
+    },
+    "note": "Deferred unknown obligations are distinct from unknown expression types. These counts replace historical unsupported_goal counts only for this pinned manifest/configuration."
+  },
+  "conformance": {
+    "exit_code": 1,
+    "oracle": "Current Sail typecheck pass/fail directories; extended corpora use docs/upstream-accepts.txt recorded verdicts, not a new upstream compiler invocation.",
+    "typecheck": {
+      "accepted_files": 276,
+      "accepted_clean": 273,
+      "false_positive_files": 3,
+      "rejected_files": 217,
+      "rejected_by_lsp": 210,
+      "false_negative_files": 7,
+      "expectations_with_locations": 216,
+      "matching_upstream_caret": 176,
+      "matching_upstream_wording": 119
+    },
+    "extended_corpora": [
+      {
+        "name": "builtins",
+        "agree": 30,
+        "false_positive_files": 0,
+        "false_negative_files": 0,
+        "scope_only_files": 0
+      },
+      {
+        "name": "float",
+        "agree": 19,
+        "false_positive_files": 0,
+        "false_negative_files": 0,
+        "scope_only_files": 1
+      },
+      {
+        "name": "lean",
+        "agree": 35,
+        "false_positive_files": 1,
+        "false_negative_files": 0,
+        "scope_only_files": 0
+      },
+      {
+        "name": "mono",
+        "agree": 40,
+        "false_positive_files": 1,
+        "false_negative_files": 0,
+        "scope_only_files": 0
+      },
+      {
+        "name": "ocaml",
+        "agree": 4,
+        "false_positive_files": 0,
+        "false_negative_files": 0,
+        "scope_only_files": 15
+      },
+      {
+        "name": "pattern_completeness",
+        "agree": 43,
+        "false_positive_files": 0,
+        "false_negative_files": 0,
+        "scope_only_files": 0
+      },
+      {
+        "name": "rocq",
+        "agree": 55,
+        "false_positive_files": 3,
+        "false_negative_files": 0,
+        "scope_only_files": 1
+      },
+      {
+        "name": "smt",
+        "agree": 119,
+        "false_positive_files": 2,
+        "false_negative_files": 0,
+        "scope_only_files": 1
+      }
+    ],
+    "all_false_positive_diagnostics": [
+      {
+        "file": "poly_list.sail",
+        "code": "type-error",
+        "message": "list(int) is not a subtype of list(_)"
+      },
+      {
+        "file": "shadow_leak_check.sail",
+        "code": "unsolved-constraint",
+        "message": "constraint cannot hold: '_value#2 == '_value#1"
+      },
+      {
+        "file": "short_circuit_bool_ex.sail",
+        "code": "type-error",
+        "message": "bool(true) is not a subtype of bool(0 == 1)"
+      },
+      {
+        "file": "bitvec_operation.sail",
+        "code": "unsolved-constraint",
+        "message": "constraint cannot hold: 'y__flow_int == 'x__flow_int"
+      },
+      {
+        "file": "splitreturn.sail",
+        "code": "type-error",
+        "message": "bits(4 + 'n) is not a subtype of bits('n)"
+      },
+      {
+        "file": "ast_with_dep_tuple.sail",
+        "code": "unsolved-constraint",
+        "message": "constraint cannot hold: 32 >= 'd"
+      },
+      {
+        "file": "enummatch.sail",
+        "code": "unsolved-constraint",
+        "message": "constraint cannot hold: 64 >= '_sk1__slice_width"
+      },
+      {
+        "file": "existentials2.sail",
+        "code": "type-error",
+        "message": "(int, bits(16)) is not a subtype of (int(int), bits(int))"
+      },
+      {
+        "file": "mem_builtins.unsat.sail",
+        "code": "unresolved-ident",
+        "message": "unresolved identifier `A64_FullShare`"
+      },
+      {
+        "file": "mem_builtins.unsat.sail",
+        "code": "unresolved-ident",
+        "message": "unresolved identifier `A64_barrier_all`"
+      },
+      {
+        "file": "mem_builtins.unsat.sail",
+        "code": "type-error",
+        "message": "Function Barrier_DSB not found"
+      },
+      {
+        "file": "mem_builtins.unsat.sail",
+        "code": "type-error",
+        "message": "Function __barrier not found"
+      },
+      {
+        "file": "mem_builtins.unsat.sail",
+        "code": "type-error",
+        "message": "Function __excl_res not found"
+      },
+      {
+        "file": "mem_builtins.unsat.sail",
+        "code": "unresolved-ident",
+        "message": "unresolved identifier `Write_exclusive_release`"
+      },
+      {
+        "file": "mem_builtins.unsat.sail",
+        "code": "type-error",
+        "message": "Function __write_mem_ea not found"
+      },
+      {
+        "file": "store_load_scattered.sat.sail",
+        "code": "unresolved-ident",
+        "message": "unresolved identifier `Read_plain`"
+      },
+      {
+        "file": "store_load_scattered.sat.sail",
+        "code": "type-error",
+        "message": "Function __read_mem not found. Did you mean read_mem#?"
+      },
+      {
+        "file": "store_load_scattered.sat.sail",
+        "code": "unresolved-ident",
+        "message": "unresolved identifier `Write_plain`"
+      },
+      {
+        "file": "store_load_scattered.sat.sail",
+        "code": "type-error",
+        "message": "Function __write_mem not found. Did you mean write_mem#?"
+      }
+    ],
+    "typecheck_false_negative_files": [
+      "negative_bits_existential.sail",
+      "negative_bits_list.sail",
+      "negative_bits_struct2.sail",
+      "negative_bits_tuple.sail",
+      "negative_bits_union.sail",
+      "negative_bits_union2.sail",
+      "procstate1.sail"
+    ],
+    "checker_crashes": 0,
+    "interpretation_audit": "2026-10-24-regression-audit.json",
+    "mode_caveat": "The upstream typecheck suite uses --strict-bitvector, whereas the LSP pipeline currently does not expose that mode. Live replay confirms three real false-positive regressions; of the seven recorded rejection differences, six also reject in default mode for undefined/inhabitance or register-default reasons, while negative_bits_list is accepted in default mode."
+  },
+  "incremental": {
+    "scope": "Synthetic module graph, 2 callables per file, one edit then inference of all files. This measures query reuse and the full probe sweep, not a single RPC or end-to-end filesystem/preprocessor reload.",
+    "method": "Release; current timing runs serialized after other checks finished. Before/current run on the same machine. The 1600-file cases were repeated after the first body-edit p95 varied substantially. All runs are retained.",
+    "limitations": "32 edits per run; ordinary shared host, no CPU pinning. Before has one run per case, current large cases have four. Do not infer a statistically significant speedup/regression or rust-analyzer parity from these timings.",
+    "probes": [
+      {
+        "files": 160,
+        "edits_per_run": 32,
+        "mode": "body",
+        "command": "target/release/examples/incremental_stats 160 32 body --modules",
+        "before_this_task": {
+          "incremental_cold": {
+            "value": 69286,
+            "unit": "us"
+          },
+          "incremental_callables": {
+            "value": 320,
+            "unit": "count"
+          },
+          "incremental_warm_p50": {
+            "value": 46,
+            "unit": "us"
+          },
+          "incremental_warm_p95": {
+            "value": 55,
+            "unit": "us"
+          },
+          "incremental_warm_p99": {
+            "value": 61,
+            "unit": "us"
+          },
+          "incremental_body_edit_p50": {
+            "value": 1652,
+            "unit": "us"
+          },
+          "incremental_body_edit_p95": {
+            "value": 1741,
+            "unit": "us"
+          },
+          "incremental_body_edit_p99": {
+            "value": 1769,
+            "unit": "us"
+          },
+          "incremental_snapshot_p50": {
+            "value": 1471,
+            "unit": "ns"
+          },
+          "incremental_snapshot_p95": {
+            "value": 1603,
+            "unit": "ns"
+          },
+          "incremental_snapshot_p99": {
+            "value": 1610,
+            "unit": "ns"
+          },
+          "incremental_reinferred_min": {
+            "value": 1,
+            "unit": "count"
+          },
+          "incremental_reinferred_max": {
+            "value": 1,
+            "unit": "count"
+          }
+        },
+        "current_runs": [
+          {
+            "incremental_cold": {
+              "value": 81283,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 320,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 46,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 57,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 60,
+              "unit": "us"
+            },
+            "incremental_body_edit_p50": {
+              "value": 1733,
+              "unit": "us"
+            },
+            "incremental_body_edit_p95": {
+              "value": 1803,
+              "unit": "us"
+            },
+            "incremental_body_edit_p99": {
+              "value": 1823,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1848,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 2190,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 2215,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 1,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 1,
+              "unit": "count"
+            }
+          }
+        ],
+        "current_edit_p95_us": {
+          "min": 1803,
+          "max": 1803,
+          "median_across_runs": 1803
+        }
+      },
+      {
+        "files": 160,
+        "edits_per_run": 32,
+        "mode": "signature",
+        "command": "target/release/examples/incremental_stats 160 32 signature --modules",
+        "before_this_task": {
+          "incremental_cold": {
+            "value": 64216,
+            "unit": "us"
+          },
+          "incremental_callables": {
+            "value": 320,
+            "unit": "count"
+          },
+          "incremental_warm_p50": {
+            "value": 48,
+            "unit": "us"
+          },
+          "incremental_warm_p95": {
+            "value": 60,
+            "unit": "us"
+          },
+          "incremental_warm_p99": {
+            "value": 65,
+            "unit": "us"
+          },
+          "incremental_signature_edit_p50": {
+            "value": 2019,
+            "unit": "us"
+          },
+          "incremental_signature_edit_p95": {
+            "value": 2072,
+            "unit": "us"
+          },
+          "incremental_signature_edit_p99": {
+            "value": 2076,
+            "unit": "us"
+          },
+          "incremental_snapshot_p50": {
+            "value": 1587,
+            "unit": "ns"
+          },
+          "incremental_snapshot_p95": {
+            "value": 1704,
+            "unit": "ns"
+          },
+          "incremental_snapshot_p99": {
+            "value": 1745,
+            "unit": "ns"
+          },
+          "incremental_reinferred_min": {
+            "value": 3,
+            "unit": "count"
+          },
+          "incremental_reinferred_max": {
+            "value": 3,
+            "unit": "count"
+          }
+        },
+        "current_runs": [
+          {
+            "incremental_cold": {
+              "value": 98377,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 320,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 46,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 56,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 63,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p50": {
+              "value": 2047,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p95": {
+              "value": 2134,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p99": {
+              "value": 2230,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1632,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 1824,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 2166,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 3,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 3,
+              "unit": "count"
+            }
+          }
+        ],
+        "current_edit_p95_us": {
+          "min": 2134,
+          "max": 2134,
+          "median_across_runs": 2134
+        }
+      },
+      {
+        "files": 1600,
+        "edits_per_run": 32,
+        "mode": "body",
+        "command": "target/release/examples/incremental_stats 1600 32 body --modules",
+        "before_this_task": {
+          "incremental_cold": {
+            "value": 735010,
+            "unit": "us"
+          },
+          "incremental_callables": {
+            "value": 3200,
+            "unit": "count"
+          },
+          "incremental_warm_p50": {
+            "value": 675,
+            "unit": "us"
+          },
+          "incremental_warm_p95": {
+            "value": 774,
+            "unit": "us"
+          },
+          "incremental_warm_p99": {
+            "value": 1168,
+            "unit": "us"
+          },
+          "incremental_body_edit_p50": {
+            "value": 13072,
+            "unit": "us"
+          },
+          "incremental_body_edit_p95": {
+            "value": 15048,
+            "unit": "us"
+          },
+          "incremental_body_edit_p99": {
+            "value": 19889,
+            "unit": "us"
+          },
+          "incremental_snapshot_p50": {
+            "value": 1624,
+            "unit": "ns"
+          },
+          "incremental_snapshot_p95": {
+            "value": 1880,
+            "unit": "ns"
+          },
+          "incremental_snapshot_p99": {
+            "value": 2583,
+            "unit": "ns"
+          },
+          "incremental_reinferred_min": {
+            "value": 1,
+            "unit": "count"
+          },
+          "incremental_reinferred_max": {
+            "value": 2,
+            "unit": "count"
+          }
+        },
+        "current_runs": [
+          {
+            "incremental_cold": {
+              "value": 808021,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 3200,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 703,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 1321,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 1825,
+              "unit": "us"
+            },
+            "incremental_body_edit_p50": {
+              "value": 13805,
+              "unit": "us"
+            },
+            "incremental_body_edit_p95": {
+              "value": 24349,
+              "unit": "us"
+            },
+            "incremental_body_edit_p99": {
+              "value": 42417,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1868,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 3616,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 4168,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 1,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 2,
+              "unit": "count"
+            }
+          },
+          {
+            "incremental_cold": {
+              "value": 757632,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 3200,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 739,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 784,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 955,
+              "unit": "us"
+            },
+            "incremental_body_edit_p50": {
+              "value": 14033,
+              "unit": "us"
+            },
+            "incremental_body_edit_p95": {
+              "value": 18066,
+              "unit": "us"
+            },
+            "incremental_body_edit_p99": {
+              "value": 18228,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 2096,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 2464,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 3209,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 1,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 2,
+              "unit": "count"
+            }
+          },
+          {
+            "incremental_cold": {
+              "value": 761228,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 3200,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 720,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 856,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 1033,
+              "unit": "us"
+            },
+            "incremental_body_edit_p50": {
+              "value": 13957,
+              "unit": "us"
+            },
+            "incremental_body_edit_p95": {
+              "value": 14355,
+              "unit": "us"
+            },
+            "incremental_body_edit_p99": {
+              "value": 18374,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 2025,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 2302,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 3459,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 1,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 2,
+              "unit": "count"
+            }
+          },
+          {
+            "incremental_cold": {
+              "value": 753231,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 3200,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 717,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 770,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 1062,
+              "unit": "us"
+            },
+            "incremental_body_edit_p50": {
+              "value": 14065,
+              "unit": "us"
+            },
+            "incremental_body_edit_p95": {
+              "value": 15410,
+              "unit": "us"
+            },
+            "incremental_body_edit_p99": {
+              "value": 18376,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1965,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 2632,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 3423,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 1,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 2,
+              "unit": "count"
+            }
+          }
+        ],
+        "current_edit_p95_us": {
+          "min": 14355,
+          "max": 24349,
+          "median_across_runs": 16738.0
+        }
+      },
+      {
+        "files": 1600,
+        "edits_per_run": 32,
+        "mode": "signature",
+        "command": "target/release/examples/incremental_stats 1600 32 signature --modules",
+        "before_this_task": {
+          "incremental_cold": {
+            "value": 721702,
+            "unit": "us"
+          },
+          "incremental_callables": {
+            "value": 3200,
+            "unit": "count"
+          },
+          "incremental_warm_p50": {
+            "value": 705,
+            "unit": "us"
+          },
+          "incremental_warm_p95": {
+            "value": 768,
+            "unit": "us"
+          },
+          "incremental_warm_p99": {
+            "value": 1302,
+            "unit": "us"
+          },
+          "incremental_signature_edit_p50": {
+            "value": 13559,
+            "unit": "us"
+          },
+          "incremental_signature_edit_p95": {
+            "value": 16848,
+            "unit": "us"
+          },
+          "incremental_signature_edit_p99": {
+            "value": 21643,
+            "unit": "us"
+          },
+          "incremental_snapshot_p50": {
+            "value": 1798,
+            "unit": "ns"
+          },
+          "incremental_snapshot_p95": {
+            "value": 2966,
+            "unit": "ns"
+          },
+          "incremental_snapshot_p99": {
+            "value": 3078,
+            "unit": "ns"
+          },
+          "incremental_reinferred_min": {
+            "value": 3,
+            "unit": "count"
+          },
+          "incremental_reinferred_max": {
+            "value": 3,
+            "unit": "count"
+          }
+        },
+        "current_runs": [
+          {
+            "incremental_cold": {
+              "value": 747550,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 3200,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 699,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 750,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 1193,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p50": {
+              "value": 14596,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p95": {
+              "value": 16593,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p99": {
+              "value": 19968,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1887,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 2661,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 3603,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 3,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 3,
+              "unit": "count"
+            }
+          },
+          {
+            "incremental_cold": {
+              "value": 750378,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 3200,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 761,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 791,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 1166,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p50": {
+              "value": 14600,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p95": {
+              "value": 15955,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p99": {
+              "value": 19237,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1779,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 2345,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 3071,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 3,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 3,
+              "unit": "count"
+            }
+          },
+          {
+            "incremental_cold": {
+              "value": 731767,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 3200,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 690,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 739,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 928,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p50": {
+              "value": 14045,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p95": {
+              "value": 14627,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p99": {
+              "value": 18090,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1863,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 2265,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 3311,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 3,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 3,
+              "unit": "count"
+            }
+          },
+          {
+            "incremental_cold": {
+              "value": 726252,
+              "unit": "us"
+            },
+            "incremental_callables": {
+              "value": 3200,
+              "unit": "count"
+            },
+            "incremental_warm_p50": {
+              "value": 649,
+              "unit": "us"
+            },
+            "incremental_warm_p95": {
+              "value": 683,
+              "unit": "us"
+            },
+            "incremental_warm_p99": {
+              "value": 863,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p50": {
+              "value": 13678,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p95": {
+              "value": 14396,
+              "unit": "us"
+            },
+            "incremental_signature_edit_p99": {
+              "value": 17672,
+              "unit": "us"
+            },
+            "incremental_snapshot_p50": {
+              "value": 1733,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p95": {
+              "value": 1956,
+              "unit": "ns"
+            },
+            "incremental_snapshot_p99": {
+              "value": 2584,
+              "unit": "ns"
+            },
+            "incremental_reinferred_min": {
+              "value": 3,
+              "unit": "count"
+            },
+            "incremental_reinferred_max": {
+              "value": 3,
+              "unit": "count"
+            }
+          }
+        ],
+        "current_edit_p95_us": {
+          "min": 14396,
+          "max": 16593,
+          "median_across_runs": 15291.0
+        }
+      }
+    ]
+  },
+  "next_issues_from_this_run": [
+    {
+      "priority": "P1",
+      "issue": "Typecheck false positives",
+      "cases": [
+        "poly_list.sail: list(int) versus list(_)",
+        "shadow_leak_check.sail: local singleton witnesses",
+        "short_circuit_bool_ex.sail: short-circuit boolean refinement"
+      ]
+    },
+    {
+      "priority": "P1",
+      "issue": "Recover undefined/inhabitance and register-default diagnostics; model strict-bitvector separately",
+      "default_mode_rejected_cases": [
+        "negative_bits_existential.sail",
+        "negative_bits_struct2.sail",
+        "negative_bits_tuple.sail",
+        "negative_bits_union.sail",
+        "negative_bits_union2.sail",
+        "procstate1.sail"
+      ],
+      "strict_mode_only_rejection": [
+        "negative_bits_list.sail"
+      ],
+      "evidence": "2026-10-24-regression-audit.json"
+    },
+    {
+      "priority": "P2",
+      "issue": "Classify deferred unknown obligations from this report",
+      "counts": {
+        "budget_exhausted": 16,
+        "flexible_witness": 30,
+        "not_established": 486,
+        "type_recovery": 26,
+        "unsupported_goal": 18
+      }
+    },
+    {
+      "priority": "P2",
+      "issue": "Check extended-corpus scope and remaining diagnostic location/wording disagreements",
+      "note": "Extended oracle includes scope-only cases; do not treat every corpus finding as a core type-system defect."
+    },
+    {
+      "priority": "P2",
+      "issue": "Incremental full-sweep scaling and timing variance",
+      "note": "Body edits reuse inference outside 1–2 callables, signature edits outside 3, but the probe still visits all files. Profile the full update path before proposing another performance change."
+    }
+  ],
+  "local_full_artifacts": "target/quality-baseline/2026-10-24/ (ignored build artifacts: raw coverage/conformance logs, all 576 constraint sites, incremental runs, validation logs)"
+}

@@ -102,7 +102,7 @@ impl<'db> SemanticsImpl<'db> {
         // had no caller — is what it is for. rust-analyzer's
         // `Semantics::scope` falls back to the module scope the same way.
         let Some(callable) = bodies.0.entry_at_offset(offset) else {
-            return Some(SourceAnalyzer::new_for_resolver(file_id, resolver));
+            return Some(SourceAnalyzer::new_for_resolver(resolver));
         };
 
         let body = (*callable.body).clone();
@@ -117,7 +117,6 @@ impl<'db> SemanticsImpl<'db> {
             // Per-callable inference via salsa
             let inference = self.infer_for_callable(db, file_text, &bodies.0, callable);
             Some(SourceAnalyzer {
-                file_id,
                 resolver,
                 body_or_sig: Some(crate::source_analyzer::BodyOrSig::Body {
                     body,
@@ -127,7 +126,6 @@ impl<'db> SemanticsImpl<'db> {
             })
         } else {
             Some(SourceAnalyzer {
-                file_id,
                 resolver,
                 body_or_sig: Some(crate::source_analyzer::BodyOrSig::Body {
                     body,
@@ -186,6 +184,72 @@ impl<'db> Semantics<'db> {
         let sa = self.imp.analyze(file_text, offset, true)?;
         let expr_id = sa.expr_id(offset)?;
         sa.type_of_expr(expr_id).cloned()
+    }
+
+    /// Missing fields of this exact record literal or pattern, with instantiated types.
+    /// This editing information is available even when diagnostic policy keeps
+    /// an anonymous literal's missing fields quiet.
+    pub fn missing_record_fields(
+        &self,
+        file: FileText,
+        range: base_db::TextRange,
+    ) -> Option<Vec<(String, String)>> {
+        for &id in hir_def::def_query::file_def_with_body_ids(self.db, file) {
+            let inferred = hir_ty::query::infer(self.db, id);
+            let source_map = hir_def::def_query::body_with_source_map(self.db, id);
+            for (expr, fields) in &inferred.0.missing_record_fields {
+                if source_map.0 .1.expr_syntax_in_file(*expr).is_some_and(|node| {
+                    node.file_id == file.file_id(self.db) && node.value.text_range() == range
+                }) {
+                    return Some(fields.clone());
+                }
+            }
+            for diagnostic in &inferred.0.diagnostics {
+                let hir_ty::InferenceDiagnostic::MissingPatternFields {
+                    pat,
+                    missing,
+                    field_types,
+                    ..
+                } = diagnostic
+                else {
+                    continue;
+                };
+                if source_map.0 .1.pat_syntax_in_file(*pat).is_some_and(|node| {
+                    node.file_id == file.file_id(self.db) && node.value.text_range() == range
+                }) {
+                    return Some(
+                        missing.iter().cloned().zip(field_types.iter().cloned()).collect(),
+                    );
+                }
+            }
+        }
+        None
+    }
+
+    /// Exhaustiveness witnesses for this exact match, from its inferred
+    /// scrutinee type and the usefulness analysis of existing guarded arms.
+    pub fn missing_match_patterns(
+        &self,
+        file: FileText,
+        range: base_db::TextRange,
+    ) -> Option<Vec<String>> {
+        for &id in hir_def::def_query::file_def_with_body_ids(self.db, file) {
+            let inferred = hir_ty::query::infer(self.db, id);
+            let source_map = hir_def::def_query::body_with_source_map(self.db, id);
+            for diagnostic in &inferred.0.diagnostics {
+                let hir_ty::InferenceDiagnostic::IncompleteMatch { expr, missing_arms } =
+                    diagnostic
+                else {
+                    continue;
+                };
+                if source_map.0 .1.expr_syntax_in_file(*expr).is_some_and(|node| {
+                    node.file_id == file.file_id(self.db) && node.value.text_range() == range
+                }) {
+                    return Some(missing_arms.clone());
+                }
+            }
+        }
+        None
     }
 
     /// Get the type of a pattern at an offset.
@@ -319,7 +383,7 @@ impl<'db> Semantics<'db> {
             hir_def::Name::new(name),
         ) {
             let Some(map) = hir_def::def_query::file_def_map(db, target) else { continue };
-            let sa = SourceAnalyzer::new_for_resolver(target.file_id(db), map.0.clone());
+            let sa = SourceAnalyzer::new_for_resolver(map.0.clone());
             if let Some(resolved) = sa.resolve_path(db, target, name) {
                 return Some(resolved);
             }
@@ -336,6 +400,19 @@ impl<'db> Semantics<'db> {
         node: hir_def::in_file::InFile<syntax::SyntaxNodePtr>,
     ) -> hir_def::in_file::FileRange {
         hir_def::in_file::FileRange { file_id: node.file_id, range: node.value.text_range() }
+    }
+
+    /// Parse a file through the cached syntax query.
+    pub fn parse(&self, file: FileText) -> Option<syntax::SyntaxNode> {
+        let parsed = syntax::parse_query::parse_file(self.db, file);
+        parsed.green.as_ref().map(|green| syntax::SyntaxNode::new_root((**green).clone()))
+    }
+
+    pub fn signature_index(
+        &self,
+        file: FileText,
+    ) -> Arc<std::collections::HashMap<String, hir_def::callable_info::CallableSignature>> {
+        crate::semantic_queries::signature_index(self.db, file).clone()
     }
 
     /// Where a name is mentioned in a file, and which of those mentions

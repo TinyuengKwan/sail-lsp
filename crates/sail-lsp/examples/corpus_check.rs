@@ -101,7 +101,7 @@ fn load_workspace(
     let project_start = all_sail_files.len();
     all_sail_files.extend(project_files);
 
-    let mut host = AnalysisHost::new(None);
+    let mut host = AnalysisHost::new();
     let mut change = ide_db::apply_change::Change::new();
     let mut vfs = vfs::Vfs::default();
 

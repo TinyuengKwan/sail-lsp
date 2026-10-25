@@ -14,7 +14,7 @@ fn token_range_for_offsets(
 
 /// Infer argument types at a call site for signature help / hover.
 ///
-/// Uses salsa-cached InferenceResult via `cached_expr_type_text`
+/// Uses salsa-cached InferenceResult via `Semantics::expr_type_text`
 /// instead of inline type inference.
 /// queries cached `InferenceResult` (`hir/src/source_analyzer.rs:381`).
 pub fn infer_call_arg_types_at_position(
@@ -47,7 +47,9 @@ pub fn infer_call_arg_types_at_position(
                 let span = parser::Span::new(start, end);
                 // Use salsa-cached InferenceResult instead of
                 // inline inference (infer_expr_type_text_in_files).
-                current_file.cached_expr_type_text(span)
+                current_file.file_text().and_then(|(db, ft)| {
+                    hir::Semantics::new(db).expr_type_text(ft, span, current_file.bodies())
+                })
             },
         );
         arg_types.push(inferred);
@@ -71,7 +73,7 @@ fn span_text(file: &dyn FileDb, span: parser::Span) -> &str {
 /// the cached InferenceResult via `SourceAnalyzer::type_of_expr()`
 /// (`hir/src/source_analyzer.rs:381-395`).
 ///
-/// Path: `FileDb::binding_type_text(span)` → `SalsaFile` impl →
+/// Path: `Semantics::binding_type_text` → `SourceAnalyzer` →
 /// `infer(db, id)` → `TypeCheckResult::binding_type_text()`
 pub fn binding_type_hint(
     _files: &[(&Url, &dyn FileDb)],
@@ -80,9 +82,11 @@ pub fn binding_type_hint(
     decl: &Decl,
 ) -> Option<String> {
     // 1. Salsa-cached type from per-callable InferenceResult.
-    // SalsaFile::binding_type_text queries infer
+    // Semantics::binding_type_text queries infer
     // (salsa-tracked, LRU=256) — no recomputation.
-    if let Some(ty) = file.binding_type_text(decl.span) {
+    if let Some(ty) = file.file_text().and_then(|(db, ft)| {
+        hir::Semantics::new(db).binding_type_text(ft, decl.span, file.bodies())
+    }) {
         return Some(ty);
     }
 

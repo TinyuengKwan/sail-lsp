@@ -5,6 +5,19 @@ use std::fmt;
 
 use cfg_if::cfg_if;
 
+/// Return free allocator pages after a large background workload. This is a
+/// best-effort lifecycle operation, not a cache eviction or per-request hook.
+/// Other platforms retain their allocator's normal reclamation policy.
+pub fn release_unused_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: glibc's thread-safe allocator operation accepts a byte count and
+    // releases only unused pages. This also covers native-library allocations
+    // when Rust uses a different global allocator.
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
 #[derive(Copy, Clone)]
 pub struct MemoryUsage {
     pub allocated: Bytes,

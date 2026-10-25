@@ -430,6 +430,8 @@ pub struct SnippetTextEdit {
 #[serde(rename_all = "camelCase")]
 pub struct SnippetWorkspaceEdit {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub document_changes: Option<lsp_types::DocumentChanges>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub changes: Option<std::collections::HashMap<lsp_types::Url, Vec<SnippetTextEdit>>>,
 }
 

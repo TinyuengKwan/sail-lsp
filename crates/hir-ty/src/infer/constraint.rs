@@ -843,9 +843,9 @@ pub(super) fn is_numeric_text(t: &str) -> bool {
 pub(super) fn is_numeric_scalar_ty(ty: &Ty) -> bool {
     match ty.kind() {
         TyKind::Scalar(s) => matches!(s, crate::ty::Scalar::Int | crate::ty::Scalar::Nat),
-        TyKind::Named(t, _) => t == "int" || t == "nat",
+        TyKind::Named(t, _) => matches!(t.as_str(), "int" | "nat" | "implicit"),
         TyKind::App { name, .. } => {
-            matches!(name.as_str(), "range" | "atom" | "int" | "nat")
+            matches!(name.as_str(), "range" | "atom" | "int" | "nat" | "implicit")
         }
         _ => false,
     }

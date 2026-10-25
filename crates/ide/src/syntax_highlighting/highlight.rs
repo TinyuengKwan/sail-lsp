@@ -111,9 +111,9 @@ pub(super) fn compute_semantic_tokens_filtered(
         // Use ItemTree-driven classification for identifiers at reference positions
         let tt = if let parser::Token::Id(name) = token {
             if let Some(&cls) = name_classes.get(name.as_str()) {
-                // At declaration site, use the declaration-context logic
-                let decl_context = token_type_index(token, prev_token);
-                decl_context.unwrap_or(cls) // prefer context if available, else use ItemTree
+                // What the item tree says the name is, at its declaration
+                // and at every use alike.
+                cls
             } else {
                 // Unknown name — fall back to syntactic classification
                 match token_type_index(token, prev_token) {

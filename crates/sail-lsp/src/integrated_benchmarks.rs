@@ -94,7 +94,7 @@ fn patch(what: &mut String, from: &str, to: &str) -> usize {
 
 fn load_workspace(root: &Path) -> (AnalysisHost, Files, Vec<(Url, FileId)>) {
     let sail_files = discover_sail_files(root);
-    let mut host = AnalysisHost::new(None);
+    let mut host = AnalysisHost::new();
     let mut change = ide_db::apply_change::Change::new();
     let mut vfs = vfs::Vfs::default();
 
@@ -118,7 +118,7 @@ fn load_workspace(root: &Path) -> (AnalysisHost, Files, Vec<(Url, FileId)>) {
 /// need URL<->FileId resolution (semantic_tokens, completions, etc.).
 fn load_workspace_with_url_map(root: &Path) -> (AnalysisHost, Files, Vec<(Url, FileId)>, UrlMap) {
     let sail_files = discover_sail_files(root);
-    let mut host = AnalysisHost::new(None);
+    let mut host = AnalysisHost::new();
     let mut change = ide_db::apply_change::Change::new();
     let mut vfs = vfs::Vfs::default();
 
@@ -1076,7 +1076,7 @@ fn benchmark_completion() {
     {
         let _t = stdx::timeit("initial_completion");
         let analysis = host.analysis_with_url_map(&files, url_map.clone());
-        let items = analysis.completions(target_fid, position).unwrap();
+        let items = analysis.completions(target_fid, position, &Default::default()).unwrap();
         initial_items = items.len();
     }
     let initial_ms = t1.elapsed().as_secs_f64() * 1000.0;
@@ -1100,7 +1100,7 @@ fn benchmark_completion() {
     {
         let _t = stdx::timeit("incremental_completion");
         let analysis = host.analysis_with_url_map(&files, url_map.clone());
-        let items = analysis.completions(target_fid, position2).unwrap();
+        let items = analysis.completions(target_fid, position2, &Default::default()).unwrap();
         incr_items = items.len();
     }
     let incr_ms = t2.elapsed().as_secs_f64() * 1000.0;

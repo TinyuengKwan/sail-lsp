@@ -101,8 +101,15 @@ pub(crate) fn field_completions(
     // Look up the receiver's type from binding_type_text
     let receiver_span = parser::Span::new(dot_pos - receiver.len(), dot_pos);
     let ty_text = current_file
-        .binding_type_text(receiver_span)
-        .or_else(|| current_file.cached_expr_type_text(receiver_span));
+        .file_text()
+        .and_then(|(db, ft)| {
+            hir::Semantics::new(db).binding_type_text(ft, receiver_span, current_file.bodies())
+        })
+        .or_else(|| {
+            current_file.file_text().and_then(|(db, ft)| {
+                hir::Semantics::new(db).expr_type_text(ft, receiver_span, current_file.bodies())
+            })
+        });
 
     if let Some(ref ty_name) = ty_text {
         // Search all files for struct/record/bitfield with matching type name

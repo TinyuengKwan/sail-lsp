@@ -50,9 +50,6 @@ pub struct HirFormatter<'a> {
     pub db: &'a dyn salsa::Database,
     /// The sink to write into.
     fmt: &'a mut dyn HirWrite,
-    /// A buffer to intercept writes with, tracking overall output size.
-    #[expect(dead_code)] // TODO: wire up truncation logic that reads buf
-    buf: String,
     /// Current size of formatted output.
     curr_size: usize,
     /// Size from which we should truncate the output.
@@ -66,7 +63,7 @@ impl<'a> HirFormatter<'a> {
     /// renders a name needs one and there is no useful thing to print
     /// without it.
     pub fn new_with_db(fmt: &'a mut dyn HirWrite, db: &'a dyn salsa::Database) -> Self {
-        Self { db, fmt, buf: String::new(), curr_size: 0, max_size: None, entity_limit: None }
+        Self { db, fmt, curr_size: 0, max_size: None, entity_limit: None }
     }
 
     pub fn with_max_size(mut self, max_size: usize) -> Self {
@@ -133,11 +130,18 @@ pub trait HirDisplay {
 
     /// Convenience: format with a max size.
     fn display_truncated(&self, db: &dyn salsa::Database, max_size: usize) -> String {
+        if max_size == 0 {
+            return String::new();
+        }
         let mut s = String::new();
         let mut f = HirFormatter::new_with_db(&mut s, db).with_max_size(max_size);
         let _ = self.hir_fmt(&mut f);
         if s.len() >= max_size {
-            s.truncate(max_size.saturating_sub(1));
+            let mut end = max_size.saturating_sub(1).min(s.len());
+            while !s.is_char_boundary(end) {
+                end -= 1;
+            }
+            s.truncate(end);
             s.push('…');
         }
         s
@@ -557,6 +561,18 @@ mod tests {
         assert!(s.ends_with('…'), "expected truncation ellipsis, got: {s}");
         // '…' is 3 bytes in UTF-8, so max byte len = 9 + 3 = 12
         assert!(s.len() <= 12, "too long: {}", s.len());
+    }
+
+    #[test]
+    fn truncated_unicode_names_keep_utf8_boundaries() {
+        let ty = Ty::named("中文🦀类型");
+        assert_eq!(ty.display_truncated(&db(), 0), "");
+        for limit in 1..20 {
+            let text = ty.display_truncated(&db(), limit);
+            let prefix = text.strip_suffix('…').unwrap_or(&text);
+            assert!("中文🦀类型".starts_with(prefix));
+            assert!(text.len() <= limit + 2);
+        }
     }
 
     // Verify all type kinds display correctly

@@ -27,7 +27,7 @@ pub struct TextDocument {
 
 impl TextDocument {
     pub fn new(content: String) -> Self {
-        let line_offsets = compute_line_offsets(&content, true, 0);
+        let line_offsets = compute_line_offsets(&content, 0);
         Self { content, line_offsets }
     }
 
@@ -47,37 +47,33 @@ impl TextDocument {
             // Get the corresponding byte range.
             let byte_begin = self.offset_at(&range.start);
             let byte_end = self.offset_at(&range.end);
-            self.content.replace_range(byte_begin..byte_end, &change.text);
-
-            // Calculate the line offsets for the inserted text.
-            let added_line_offsets = compute_line_offsets(&change.text, false, byte_begin);
-
-            // The line offsets that we need to delete. It is the lines one past
-            // the actual positions. Because if you edit line 10, you need to change
-            // the line offset for line 11.
-            let delete_line_offset_begin = range.start.line as usize + 1;
-            let delete_line_offset_end = range.end.line as usize + 1;
-
-            // Update the offsets after the splice according to the length change
-            // of the modified region.
-            let len_before = byte_end - byte_begin;
-            let len_after = change.text.len();
-            if len_before != len_after {
-                for offset in &mut self.line_offsets[delete_line_offset_end..] {
-                    *offset += len_after;
-                    *offset -= len_before;
-                }
+            if byte_begin > byte_end {
+                return;
             }
-
-            // Insert the new offsets.
-            self.line_offsets.splice(
-                delete_line_offset_begin..delete_line_offset_end,
-                added_line_offsets.clone(),
-            );
+            // Include the preceding line: inserting LF at a line start
+            // can merge it with a preceding CR. Scanning through the end
+            // line's terminator covers the other splice boundary.
+            let first_line = (self.position_at(byte_begin).line as usize).saturating_sub(1);
+            let past_line =
+                (self.position_at(byte_end).line as usize + 1).min(self.line_offsets.len());
+            let scan_start = self.line_offsets[first_line];
+            let scan_end = self.line_start(past_line);
+            let has_tail = past_line < self.line_offsets.len();
+            self.content.replace_range(byte_begin..byte_end, &change.text);
+            let new_scan_end = byte_begin + change.text.len() + (scan_end - byte_end);
+            let mut offsets =
+                compute_line_offsets(&self.content[scan_start..new_scan_end], scan_start);
+            if has_tail && offsets.last() == Some(&new_scan_end) {
+                offsets.pop();
+            }
+            for offset in &mut self.line_offsets[past_line..] {
+                *offset = byte_begin + change.text.len() + (*offset - byte_end);
+            }
+            self.line_offsets.splice(first_line..past_line, offsets);
         } else {
             // Just completely change the text.
             self.content = change.text.clone();
-            self.line_offsets = compute_line_offsets(&self.content, true, 0);
+            self.line_offsets = compute_line_offsets(&self.content, 0);
         }
     }
 
@@ -85,7 +81,7 @@ impl TextDocument {
     pub fn offset_at(&self, position: &LineCol) -> usize {
         let line_begin = self.line_start(position.line as usize);
         let line_end = self.line_start(position.line as usize + 1);
-        let line = &self.content[line_begin..line_end];
+        let line = self.content[line_begin..line_end].trim_end_matches(['\r', '\n']);
 
         line_begin + character_to_line_offset(line, position.col as usize)
     }
@@ -93,7 +89,10 @@ impl TextDocument {
     // Convert a byte index to a row/column position.
     pub fn position_at(&self, offset: usize) -> LineCol {
         // Clamp to valid range.
-        let offset = std::cmp::min(offset, self.content.len());
+        let mut offset = std::cmp::min(offset, self.content.len());
+        while !self.content.is_char_boundary(offset) {
+            offset -= 1;
+        }
 
         // Binary search for a line offset that is greater than the offset.
         match self.line_offsets.binary_search(&offset) {
@@ -133,7 +132,7 @@ fn character_to_line_offset(line: &str, character: usize) -> usize {
     let mut utf16_pos = 0;
 
     for (byte_pos, ch) in line.char_indices() {
-        if utf16_pos == character {
+        if utf16_pos + ch.len_utf16() > character {
             return byte_pos;
         }
         utf16_pos += ch.len_utf16();
@@ -142,12 +141,9 @@ fn character_to_line_offset(line: &str, character: usize) -> usize {
     line.len()
 }
 
-fn compute_line_offsets(text: &str, is_at_line_start: bool, text_offset: usize) -> Vec<usize> {
+fn compute_line_offsets(text: &str, text_offset: usize) -> Vec<usize> {
     // VSCode treats `\r\n` or `\n` *or* `\r` as a single line end.
-    let mut line_offsets = Vec::new();
-    if is_at_line_start {
-        line_offsets.push(text_offset);
-    }
+    let mut line_offsets = vec![text_offset];
     let text = text.as_bytes();
     for i in 0..text.len() {
         match text[i] {
@@ -621,25 +617,110 @@ mod test {
         assert_valid_line_numbers(&document);
     }
 
-    /* TODO: Not clear that these should pass.
-
     #[test]
-    fn invalid_update_ranges() {
-        // After the document ends -> after the document ends
-        let mut document = TextDocument::new("foo\nbar".to_string());
-        document.update(&TextChange {
-            text: "abc123".to_string(),
-            range: Some(TextChangeRange {
-                start: lc(3, 0),
-                end: lc(6, 10),
-            }),
-        });
-        assert_eq!(document.text(), "foo\nbarabc123");
-        assert_valid_line_numbers(&document);
+    fn unicode_positions_clamp_to_character_boundaries() {
+        let doc = TextDocument::new("é🦀中\r\nx".into());
+        assert_eq!(doc.offset_at(&lc(0, 2)), 2);
+        assert_eq!(doc.offset_at(&lc(0, 99)), 9);
+        assert_eq!(doc.position_at(4), lc(0, 1));
+        assert_eq!(doc.offset_at(&lc(99, 99)), doc.text().len());
     }
 
-    */
+    #[test]
+    fn invalid_update_ranges_are_bounded_and_reversed_ranges_are_ignored() {
+        let mut doc = TextDocument::new("foo\nbar".into());
+        doc.update(&TextChange {
+            range: Some(TextChangeRange { start: lc(3, 0), end: lc(6, 10) }),
+            text: "中文".into(),
+        });
+        assert_eq!(doc.text(), "foo\nbar中文");
+        doc.update(&TextChange {
+            range: Some(TextChangeRange { start: lc(1, 2), end: lc(0, 0) }),
+            text: "bad".into(),
+        });
+        assert_eq!(doc.text(), "foo\nbar中文");
+        assert_valid_line_numbers(&doc);
+    }
 
-    // TODO: Test non-ASCII characters, emojis, etc.
-    // TODO: Fuzzing!
+    #[test]
+    fn edits_form_and_split_crlf_at_splice_boundaries() {
+        let mut doc = TextDocument::new("a\rb".into());
+        doc.update(&TextChange {
+            range: Some(TextChangeRange { start: lc(1, 0), end: lc(1, 0) }),
+            text: "\n".into(),
+        });
+        assert_eq!(doc.text(), "a\r\nb");
+        assert_eq!(doc.line_offsets, vec![0, 3]);
+        doc.update(&TextChange {
+            range: Some(TextChangeRange { start: lc(0, 1), end: lc(1, 0) }),
+            text: "\n\r".into(),
+        });
+        assert_eq!(doc.text(), "a\n\rb");
+        assert_eq!(doc.line_offsets, vec![0, 2, 3]);
+    }
+
+    #[test]
+    fn randomized_unicode_edits_match_a_fresh_document() {
+        fn position(text: &str, offset: usize) -> LineCol {
+            let mut p = lc(0, 0);
+            let mut chars = text.char_indices().peekable();
+            while let Some((i, c)) = chars.next() {
+                if i >= offset {
+                    break;
+                }
+                if c == '\r' && chars.peek().is_some_and(|(_, c)| *c == '\n') {
+                    continue;
+                }
+                if c == '\r' || c == '\n' {
+                    p = lc(p.line + 1, 0);
+                } else {
+                    p.col += c.len_utf16() as u32;
+                }
+            }
+            p
+        }
+        let mut seed = 17u64;
+        let mut next = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (seed >> 32) as usize
+        };
+        let pieces = ["", "x", "é", "🦀", "中文", "\n", "\r", "\r\n", "a\n🦀"];
+        let mut reference = "é🦀中\r\nfirst\nlast".to_string();
+        let mut doc = TextDocument::new(reference.clone());
+        for _ in 0..2000 {
+            let boundaries: Vec<_> = reference
+                .char_indices()
+                .map(|(i, _)| i)
+                .chain(std::iter::once(reference.len()))
+                .filter(|&i| {
+                    !(i > 0
+                        && reference.as_bytes().get(i) == Some(&b'\n')
+                        && reference.as_bytes()[i - 1] == b'\r')
+                })
+                .collect();
+            let a = boundaries[next() % boundaries.len()];
+            let b = boundaries[next() % boundaries.len()];
+            let (a, b) = (a.min(b), a.max(b));
+            let replacement = pieces[next() % pieces.len()];
+            doc.update(&TextChange {
+                range: Some(TextChangeRange {
+                    start: position(&reference, a),
+                    end: position(&reference, b),
+                }),
+                text: replacement.into(),
+            });
+            reference.replace_range(a..b, replacement);
+            assert_eq!(doc.text(), reference);
+            assert_eq!(doc.line_offsets, TextDocument::new(reference.clone()).line_offsets);
+            for (i, _) in reference.char_indices() {
+                if i > 0 && reference.as_bytes()[i] == b'\n' && reference.as_bytes()[i - 1] == b'\r'
+                {
+                    continue;
+                }
+                let p = position(&reference, i);
+                assert_eq!(doc.position_at(i), p);
+                assert_eq!(doc.offset_at(&p), i);
+            }
+        }
+    }
 }
