@@ -58,6 +58,12 @@ pub(crate) fn names_in(text: &str) -> Names {
         .map(|i| Name::new(lexed.text(i)))
         .collect()
 }
+pub(super) fn names_in_type(ty: &Ty) -> BTreeSet<Name> {
+    let mut names = BTreeSet::new();
+    ty.references(&mut names);
+    names
+}
+
 trait References {
     fn references(&self, out: &mut Names);
 }
@@ -584,6 +590,9 @@ pub(crate) fn callable_names(cb: &hir_def::def_query::ArcCallableBody) -> Names 
                 }
                 hir_def::Expr::Struct { fields, .. } | hir_def::Expr::Update { fields, .. } => {
                     names.extend(fields.iter().map(|(field, _)| Name::from(field_key(field))));
+                }
+                hir_def::Expr::Index { .. } => {
+                    names.insert(Name::new("vector_access"));
                 }
                 hir_def::Expr::BinaryOp { op, .. } => {
                     names.insert(Name::from(op.to_string()));

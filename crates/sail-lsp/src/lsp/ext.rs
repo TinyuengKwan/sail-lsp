@@ -201,6 +201,40 @@ impl lsp_types::request::Request for ViewItemTree {
     const METHOD: &'static str = "sail-lsp/viewItemTree";
 }
 
+/// Parameters for the project navigation requests: the file asked about.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectNavigationParams {
+    pub text_document: lsp_types::TextDocumentIdentifier,
+}
+
+/// Custom request: `sail-lsp/openProjectManifest`, rust-analyzer's
+/// `experimental/openCargoToml`.
+///
+/// The manifest of the project the file belongs to, at the `files` entry
+/// that lists it (at the start of the manifest when the file is reached
+/// through `$include`). `null` outside every project.
+pub enum OpenProjectManifest {}
+
+impl lsp_types::request::Request for OpenProjectManifest {
+    type Params = ProjectNavigationParams;
+    type Result = Option<lsp_types::Location>;
+    const METHOD: &'static str = "sail-lsp/openProjectManifest";
+}
+
+/// Custom request: `sail-lsp/parentModule`, rust-analyzer's
+/// `experimental/parentModule`.
+///
+/// What brings the file into the project: the name of each manifest module
+/// whose `files` lists it, and each `$include` that names it.
+pub enum ParentModule {}
+
+impl lsp_types::request::Request for ParentModule {
+    type Params = ProjectNavigationParams;
+    type Result = Vec<lsp_types::Location>;
+    const METHOD: &'static str = "sail-lsp/parentModule";
+}
+
 /// Parameters for `sail-lsp/expandInclude`.
 ///
 /// Expand includes for a Sail file.
@@ -302,23 +336,6 @@ pub enum ReloadWorkspace {}
 impl lsp_types::notification::Notification for ReloadWorkspace {
     type Params = ();
     const METHOD: &'static str = "sail-lsp/reloadWorkspace";
-}
-
-/// Parameters for `experimental/ssr`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SsrParams {
-    pub query: String,
-}
-
-/// Custom request: `experimental/ssr`.
-///
-/// Structural search-replace across the workspace.
-pub enum Ssr {}
-
-impl lsp_types::request::Request for Ssr {
-    type Params = SsrParams;
-    type Result = lsp_types::WorkspaceEdit;
-    const METHOD: &'static str = "experimental/ssr";
 }
 
 /// Parameters for `experimental/matchingBrace`.
@@ -433,6 +450,13 @@ pub struct SnippetWorkspaceEdit {
     pub document_changes: Option<lsp_types::DocumentChanges>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub changes: Option<std::collections::HashMap<lsp_types::Url, Vec<SnippetTextEdit>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub change_annotations: Option<
+        std::collections::HashMap<
+            lsp_types::ChangeAnnotationIdentifier,
+            lsp_types::ChangeAnnotation,
+        >,
+    >,
 }
 
 /// `textDocument/codeAction`'s result, with the edit widened to carry
@@ -469,4 +493,24 @@ impl lsp_types::request::Request for CodeActionResolveRequest {
     type Params = CodeAction;
     type Result = CodeAction;
     const METHOD: &'static str = "codeAction/resolve";
+}
+
+/// Preview semantic structural search/replace. Selections limit edits to the
+/// context file; an empty list searches project sources.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SsrParams {
+    pub query: String,
+    #[serde(default)]
+    pub parse_only: bool,
+    #[serde(flatten)]
+    pub position: lsp_types::TextDocumentPositionParams,
+    #[serde(default)]
+    pub selections: Vec<lsp_types::Range>,
+}
+pub enum Ssr {}
+impl lsp_types::request::Request for Ssr {
+    type Params = SsrParams;
+    type Result = lsp_types::WorkspaceEdit;
+    const METHOD: &'static str = "experimental/ssr";
 }

@@ -796,7 +796,7 @@ fn type_pattern_and_constraint_errors_highlight_the_invalid_type_or_constraint()
         (
             "default Order dec\nfunction f(x : bits(4)) -> unit = match x { y as bits(4) => () }",
             "binders or wildcards",
-            "bits(4) =>",
+            "4) =>",
         ),
         (
             "type q : Bool = missing_constraint",
@@ -826,5 +826,55 @@ fn type_pattern_and_constraint_errors_highlight_the_invalid_type_or_constraint()
             source.find(target).unwrap(),
             "{diagnostics:?}"
         );
+    }
+}
+
+#[test]
+fn unbound_annotation_variable_highlights_the_variable_token() {
+    for annotation in ["'a", "list('a)"] {
+        let source =
+            format!("function f() -> unit = {{ let y /* 'a 注释 */ : {annotation} = 3; () }}");
+        let file = TestFile::new(&source);
+        let (db, ft) = ide_db::FileDb::file_text(&file).unwrap();
+        let diagnostics = crate::semantic_diagnostics(
+            db,
+            &crate::DiagnosticsConfig::new(),
+            &crate::AssistResolveStrategy::None,
+            &file,
+            ft,
+            None,
+        );
+        let diagnostic = diagnostics
+            .iter()
+            .find(|d| d.message.contains("Unbound type variable 'a"))
+            .unwrap_or_else(|| panic!("{diagnostics:?}"));
+        let expected = source.rfind("'a").unwrap();
+        assert_eq!(usize::from(diagnostic.range.range.start()), expected);
+        assert_eq!(usize::from(diagnostic.range.range.end()), expected + 2);
+    }
+}
+
+#[test]
+fn type_pattern_errors_highlight_the_failed_written_argument() {
+    for (source, target) in [
+        ("function f(x : bitvector(4)) -> unit = match x { y as bitvector(int('n)) => () }", "int('n)"),
+        ("function f(x : bits(4)) -> unit = match x { y as bits(4) => () }", "4"),
+        ("function f(x : bits(4)) -> unit = match x { y as bits(int('n)) => () }", "int('n)"),
+        ("type dup('a : Type) = ('a, 'a)\nfunction f(x : (int(1), int(2))) -> unit = match x { y as dup(int('n)) => () }", "int('n)"),
+        ("function f(x : (bits(4), bits(8))) -> unit = match x { y as (bits('n), bits(8)) => () }", "8"),
+        // A constructor-head mismatch has no individual bad argument.
+        ("function f(x : bits(4)) -> unit = match x { y as list('a) => () }", "list('a)"),
+    ] {
+        let source = format!("default Order dec\n{source}");
+        let file = TestFile::new(&source);
+        let (db, ft) = ide_db::FileDb::file_text(&file).unwrap();
+        let diagnostics = crate::semantic_diagnostics(
+            db, &crate::DiagnosticsConfig::new(), &crate::AssistResolveStrategy::None,
+            &file, ft, None,
+        );
+        let diagnostic = diagnostics.iter().find(|d| d.message.starts_with("Type pattern"))
+            .unwrap_or_else(|| panic!("{source}: {diagnostics:?}"));
+        let start = source.rfind(target).unwrap();
+        assert_eq!(diagnostic.range.range, base_db::text_range(start, start + target.len()), "{source}: {diagnostic:?}");
     }
 }

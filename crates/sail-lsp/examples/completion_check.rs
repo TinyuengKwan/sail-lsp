@@ -31,9 +31,10 @@
 //! - **rank**: where it sits in the list the client shows. Items arrive
 //!   sorted by relevance and carry a `sort_text` that preserves that order,
 //!   so the index *is* what the user scrolls past.
-//! - **size**: how many items come back. The list is truncated to 200 by
-//!   `deduplicate_and_sort`, so a name ranked past that is dropped outright
-//!   — size and rank are one question, not two.
+//! - **size**: how many items come back. The list is cut at
+//!   `CompletionConfig::limit` (200 by default), so a name ranked past that
+//!   is not in this answer — the server marks such a list incomplete, and
+//!   the client asks again as the prefix grows.
 //! - **latency**: per query, p50 and p95. Completion runs on a keystroke;
 //!   it is the one feature where a millisecond figure is a correctness
 //!   figure.
@@ -43,6 +44,7 @@
 //! ```sh
 //! cargo run --release --example completion_check -- /path/to/sail-riscv
 //! cargo run --release --example completion_check -- --list /path/to/sail-riscv
+//! cargo run --release --example completion_check -- --ranked /path/to/sail-riscv
 //! cargo run --release --example completion_check -- --prefix 1 /path/to/sail-riscv
 //! ```
 
@@ -232,6 +234,7 @@ struct Miss {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let list = args.iter().any(|a| a == "--list");
+    let ranked = args.iter().any(|a| a == "--ranked");
     let prefix_len: usize = args
         .iter()
         .position(|a| a == "--prefix")
@@ -244,12 +247,16 @@ fn main() {
         .find(|a| !a.starts_with('-') && a.parse::<usize>().is_err())
         .cloned()
         .unwrap_or_else(|| {
-            eprintln!("Usage: completion_check [--list] [--prefix N] /path/to/corpus");
+            eprintln!("Usage: completion_check [--list] [--ranked] [--prefix N] /path/to/corpus");
             std::process::exit(2);
         });
 
     let t0 = Instant::now();
-    let (host, files, url_fids, prelude_url_fids) = load_workspace(&PathBuf::from(&root));
+    let (host, files, url_fids, prelude_url_fids) =
+        load_workspace(&std::fs::canonicalize(&root).unwrap_or_else(|error| {
+            eprintln!("Cannot open completion corpus {root}: {error}");
+            std::process::exit(2);
+        }));
     let analysis = make_analysis(
         &host,
         &files,
@@ -311,6 +318,21 @@ fn main() {
                     offered += 1;
                     entry.1 += 1;
                     ranks.push(rank);
+                    // What the user scrolls past, and why each ranked
+                    // higher: the label and its relevance score.
+                    if ranked && rank > 0 {
+                        let above: Vec<String> = items[..rank.min(3)]
+                            .iter()
+                            .map(|i| format!("{}={}", i.label, i.relevance.score()))
+                            .collect();
+                        println!(
+                            "RANK\t{rank}\t{name}={}\t{}:{}\t{context}\t{}",
+                            items[rank].relevance.score(),
+                            name_of_file,
+                            line_index.line_col(start).line + 1,
+                            above.join(" ")
+                        );
+                    }
                 }
                 None => misses.push(Miss {
                     name,
@@ -349,6 +371,10 @@ fn main() {
 
     let top = |n: usize| ranks.iter().filter(|r| **r < n).count();
 
+    if asked == 0 {
+        eprintln!("No completion references found in {root}");
+        std::process::exit(2);
+    }
     println!("============================================================");
     println!("COMPLETION CHECK (prefix {prefix_len}, {} ms to load)", t_load.as_millis());
     println!("============================================================");

@@ -50,6 +50,8 @@ pub mod hover;
 pub mod include_graph_view;
 pub mod inlay_hints;
 pub mod join_lines;
+#[cfg(test)]
+mod manifest_mutation_tests;
 mod markdown_remove;
 /// Rich text formatting for hover/docs.
 pub mod markup;
@@ -65,7 +67,6 @@ pub mod references;
 #[cfg(test)]
 mod regression_tests;
 pub mod rename;
-pub mod runnables;
 pub mod signature_help;
 pub mod static_index;
 pub mod syntax_highlighting;

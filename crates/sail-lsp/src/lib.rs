@@ -48,6 +48,7 @@ mod flycheck;
 mod global_state;
 mod handlers;
 mod main_loop;
+mod manifest_editing;
 mod mem_docs;
 mod op_queue;
 mod progress;
@@ -84,3 +85,5 @@ pub fn from_json<T: serde::de::DeserializeOwned>(
     serde_json::from_value(json.clone())
         .map_err(|e| anyhow::anyhow!("Failed to deserialize {what}: {e}"))
 }
+
+mod version;

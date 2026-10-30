@@ -1,11 +1,8 @@
 //! Handler for `AnyDiagnostic::DuplicateDefinition`.
-//! Fix: rename the duplicate or remove it.
+//! Automatic renaming requires a coordinated declaration/reference edit.
 
 use crate::Diagnostic;
 use hir::diagnostics::DiagnosticCode;
-use ide_db::assists::Assist;
-use ide_db::source_change::SourceChange;
-use ide_db::text_edit::TextEdit;
 
 use crate::{DiagnosticsContext, DuplicateDefinition};
 
@@ -42,21 +39,10 @@ pub(crate) fn duplicate_definition(
         crate::node_file_range(&d.node),
     )
     .with_related(related)
-    .with_fixes(fixes(d))
 }
 
-/// Fix: rename the duplicate definition by appending `_2` suffix.
-fn fixes(d: &DuplicateDefinition) -> Option<Vec<Assist>> {
-    let range: ide_db::line_index::TextRange = d.node.value.text_range();
-    let new_name = format!("{}_2", d.name);
-    let edit = TextEdit { range, new_text: new_name.clone() };
-    Some(vec![crate::fix(
-        "rename_duplicate",
-        &format!("Rename to `{new_name}`"),
-        SourceChange::from_text_edit(edit),
-        range,
-    )])
-}
+// Renaming a declaration alone can corrupt syntax or leave references bound
+// to the wrong symbol. Use the semantic rename refactoring instead.
 
 #[cfg(test)]
 mod tests {

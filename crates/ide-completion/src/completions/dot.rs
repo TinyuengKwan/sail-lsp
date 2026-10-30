@@ -24,50 +24,53 @@ pub(crate) fn complete_dot(
 ) {
     // Type-based path: receiver_ty resolved by sema.type_of_expr.
     if let Some(ref receiver_ty) = dot_access.receiver_ty {
-        let ty_name = receiver_ty.display_text();
-        // Strip type parameters: "Struct_name(...)" → "Struct_name".
-        let base_name = ty_name.split('(').next().unwrap_or(&ty_name).trim();
-        if !base_name.is_empty() {
-            let prefix_lower = ctx.prefix.to_ascii_lowercase();
-            let mut found = false;
-            for (_, file) in all_files {
-                if let Some(tree) = file.item_tree() {
-                    for &id in tree.top_level_items() {
-                        if !ctx.can_see(*file, id.name(tree).as_str()) {
-                            continue;
-                        }
-                        if id.name(tree).as_str() != base_name {
-                            continue;
-                        }
-                        if !matches!(
-                            id.def_kind(tree),
-                            hir::DefKind::Struct | hir::DefKind::Bitfield
-                        ) {
-                            continue;
-                        }
-                        // The fields the item tree recorded, not the ones a
-                        // regex found in the definition's text.
-                        for field in id.fields(tree).iter().map(|f| f.name.to_string()) {
-                            if !prefix_lower.is_empty()
-                                && !field.to_ascii_lowercase().starts_with(&prefix_lower)
-                            {
-                                continue;
-                            }
-                            acc.add(crate::render::render_field(&field, None, base_name));
-                            found = true;
-                        }
-                    }
-                }
-            }
-            if found {
-                return;
-            }
+        if complete_fields(acc, ctx, receiver_ty, all_files) {
+            return;
         }
     }
 
     // Text-heuristic fallback.
     let items = field_completions(all_files, ctx.file, ctx.text, ctx.offset, ctx.prefix);
     acc.add_many(items);
+}
+
+/// Offer the fields of the struct or bitfield `ty` names, as the item tree
+/// recorded them. Whether any were offered.
+pub(crate) fn complete_fields(
+    acc: &mut Completions,
+    ctx: &CompletionContext<'_>,
+    ty: &hir::Ty,
+    all_files: &[(&Url, &dyn FileDb)],
+) -> bool {
+    let ty_name = ty.display_text();
+    // Strip type parameters: "Struct_name(...)" → "Struct_name".
+    let base_name = ty_name.split('(').next().unwrap_or(&ty_name).trim();
+    if base_name.is_empty() {
+        return false;
+    }
+    let prefix_lower = ctx.prefix.to_ascii_lowercase();
+    let mut found = false;
+    for (_, file) in all_files {
+        let Some(tree) = file.item_tree() else { continue };
+        for &id in tree.top_level_items() {
+            if id.name(tree).as_str() != base_name
+                || !matches!(id.def_kind(tree), hir::DefKind::Struct | hir::DefKind::Bitfield)
+                || !ctx.can_see(*file, base_name)
+            {
+                continue;
+            }
+            for field in id.fields(tree).iter().map(|f| f.name.to_string()) {
+                if !prefix_lower.is_empty()
+                    && !field.to_ascii_lowercase().starts_with(&prefix_lower)
+                {
+                    continue;
+                }
+                acc.add(crate::render::render_field(&field, None, base_name));
+                found = true;
+            }
+        }
+    }
+    found
 }
 
 /// Field completion after `.`: suggest struct field names when the receiver

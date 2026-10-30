@@ -186,6 +186,17 @@ impl<'db> Semantics<'db> {
         sa.type_of_expr(expr_id).cloned()
     }
 
+    /// Field type of an inferred record owner, including generic arguments.
+    pub fn record_field_type(
+        &self,
+        file: FileText,
+        offset: usize,
+        owner: &Ty,
+        field: &str,
+    ) -> Option<Ty> {
+        hir_ty::infer::completion::field_type_at(self.db, file, offset, owner, field)
+    }
+
     /// Missing fields of this exact record literal or pattern, with instantiated types.
     /// This editing information is available even when diagnostic policy keeps
     /// an anonymous literal's missing fields quiet.
@@ -195,8 +206,15 @@ impl<'db> Semantics<'db> {
         range: base_db::TextRange,
     ) -> Option<Vec<(String, String)>> {
         for &id in hir_def::def_query::file_def_with_body_ids(self.db, file) {
-            let inferred = hir_ty::query::infer(self.db, id);
             let source_map = hir_def::def_query::body_with_source_map(self.db, id);
+            let span = parser::Span::new(range.start().into(), range.end().into());
+            if source_map.0 .1.file_id != Some(file.file_id(self.db))
+                || (source_map.0 .1.expr_at_span(span).is_none()
+                    && source_map.0 .1.pat_at_span(span).is_none())
+            {
+                continue;
+            }
+            let inferred = hir_ty::query::infer(self.db, id);
             for (expr, fields) in &inferred.0.missing_record_fields {
                 if source_map.0 .1.expr_syntax_in_file(*expr).is_some_and(|node| {
                     node.file_id == file.file_id(self.db) && node.value.text_range() == range
@@ -234,8 +252,14 @@ impl<'db> Semantics<'db> {
         range: base_db::TextRange,
     ) -> Option<Vec<String>> {
         for &id in hir_def::def_query::file_def_with_body_ids(self.db, file) {
-            let inferred = hir_ty::query::infer(self.db, id);
             let source_map = hir_def::def_query::body_with_source_map(self.db, id);
+            let span = parser::Span::new(range.start().into(), range.end().into());
+            if source_map.0 .1.file_id != Some(file.file_id(self.db))
+                || source_map.0 .1.expr_at_span(span).is_none()
+            {
+                continue;
+            }
+            let inferred = hir_ty::query::infer(self.db, id);
             for diagnostic in &inferred.0.diagnostics {
                 let hir_ty::InferenceDiagnostic::IncompleteMatch { expr, missing_arms } =
                     diagnostic
@@ -822,6 +846,87 @@ impl<'db> Semantics<'db> {
         sa.resolve_field(expr_id)
     }
 
+    /// Resolve a proposed callable name at an arbitrary expression position.
+    /// Unlike token navigation, this does not derive the namespace from the
+    /// token currently under the cursor. Local shadowing still takes priority.
+    pub fn resolve_callable_at(
+        &self,
+        file: FileText,
+        offset: usize,
+        name: &str,
+    ) -> Option<crate::Def> {
+        use hir_def::source_order::bindings::{resolve, Namespace};
+        if self
+            .imp
+            .analyze(file, offset, false)
+            .and_then(|sa| sa.local_at(self.db, file, offset, name))
+            .is_some()
+        {
+            return None;
+        }
+        let at = hir_def::source_order::at_offset(self.db, file, offset)?;
+        if let Some(declaration) =
+            resolve(self.db, at, hir_def::Name::new(name), Namespace::Callable)
+        {
+            return crate::def_at_declaration_in_namespace(
+                self.db,
+                declaration,
+                name,
+                Namespace::Callable,
+            );
+        }
+        None
+    }
+
+    /// Semantic compatibility for completion ranking. This bounded probe never
+    /// runs SMT or commits bindings into a body's inference result.
+    pub fn completion_type_match(
+        &self,
+        file: FileText,
+        offset: usize,
+        expected: &Ty,
+        candidate: &Ty,
+    ) -> Option<crate::CompletionTypeMatch> {
+        hir_ty::infer::completion::type_match_at(self.db, file, offset, expected, candidate)
+    }
+
+    /// Rank a visible callable's declared return types, including overload
+    /// members and their quantified predicates, in declaration context.
+    pub fn completion_return_type_match(
+        &self,
+        file: FileText,
+        offset: usize,
+        expected: &Ty,
+        name: &str,
+    ) -> Option<crate::CompletionTypeMatch> {
+        let offset = if hir_def::source_order::at_offset(self.db, file, offset).is_some() {
+            offset
+        } else {
+            offset.saturating_sub(1)
+        };
+        if hir_def::source_order::program(self.db, file).is_some() {
+            self.resolve_callable_at(file, offset, name)?;
+        } else if self
+            .imp
+            .analyze(file, offset, false)
+            .and_then(|sa| sa.local_at(self.db, file, offset, name))
+            .is_some()
+        {
+            return None;
+        }
+        hir_ty::infer::completion::return_type_match_at(self.db, file, offset, expected, name)
+    }
+
+    /// Declared shapes of a proposed callable, respecting source order and
+    /// shadowing. Numeric constraints still belong to normal type checking.
+    pub fn callable_types_at(&self, file: FileText, offset: usize, name: &str) -> Vec<Ty> {
+        self.resolve_callable_at(file, offset, name)
+            .map(|def| {
+                hir_ty::query::declared_callable_types(self.db, def.location().file_text, name)
+            })
+            .unwrap_or_default()
+    }
+
     /// Resolve the selected leaf of an overloaded callee at its source point.
     /// Ordinary navigation still resolves the group written by the user.
     pub fn resolve_overload_callee(&self, file: FileText, offset: usize) -> Option<crate::Def> {
@@ -993,6 +1098,16 @@ impl<'db> Semantics<'db> {
         names.sort();
         names.dedup();
         names
+    }
+
+    /// The locals in scope at `offset`, innermost first, with the span each
+    /// is bound at — for a name that is not written there yet, which
+    /// `resolve_path` cannot resolve because it resolves a mention.
+    pub fn locals_in_scope(&self, file_text: FileText, offset: usize) -> Vec<crate::Local> {
+        self.imp
+            .analyze(file_text, offset, false)
+            .map(|sa| sa.locals_at(self.db, file_text, offset))
+            .unwrap_or_default()
     }
 
     pub fn local_names_in_scope(&self, file_text: FileText, offset: usize) -> Vec<hir_def::Name> {

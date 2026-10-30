@@ -229,7 +229,18 @@ fn scheme_free_params(scheme: &TypeScheme) -> Vec<String> {
                 sig.params.iter().for_each(|t| walk(t, out));
                 walk(&sig.ret, out);
             }
-            TyKind::Exist { inner, .. } => walk(inner, out),
+            TyKind::Exist { vars, inner, .. } => {
+                // Existential witnesses belong to this payload, not to the
+                // callable's implicit forall. Preserve a free occurrence of
+                // the same name in a different parameter's scope.
+                let mut local = Vec::new();
+                walk(inner, &mut local);
+                for name in local {
+                    if !vars.contains(&name) && !out.contains(&name) {
+                        out.push(name);
+                    }
+                }
+            }
             TyKind::Bidir { lhs, rhs } => {
                 walk(lhs, out);
                 walk(rhs, out);
@@ -938,7 +949,7 @@ impl<'db> InferenceContext<'db> {
             {
                 self.push_inference_diagnostic(InferenceDiagnostic::UnrecoverableImplicit {
                     expr: pending.callee,
-                    message: format!("Cannot re-write sizeof({}) for an implicit argument: no runtime witness or unique constant is available", value.to_string_repr()),
+                    message: format!("Cannot re-write sizeof({}): no runtime witness or unique constant is available", value.to_string_repr()),
                 });
             }
         }
@@ -2214,10 +2225,6 @@ impl<'db> InferenceContext<'db> {
         expectation: &Expectation,
         locals: &mut LocalEnv,
     ) -> Ty {
-        let expected_ret = match expectation {
-            Expectation::HasType(ty) if !ty.is_error() => Some(ty.clone()),
-            _ => None,
-        };
         use hir_def::Expr;
 
         // 1. Extract callee name
@@ -2244,6 +2251,25 @@ impl<'db> InferenceContext<'db> {
             }
         };
 
+        self.infer_named_call_hir(body, call_id, callee_id, callee_name, args, expectation, locals)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn infer_named_call_hir(
+        &mut self,
+        body: &hir_def::Body,
+        call_id: hir_def::ExprId,
+        callee_id: hir_def::ExprId,
+        callee_name: String,
+        args: &[hir_def::ExprId],
+        expectation: &Expectation,
+        locals: &mut LocalEnv,
+    ) -> Ty {
+        use hir_def::Expr;
+        let expected_ret = match expectation {
+            Expectation::HasType(ty) if !ty.is_error() => Some(ty.clone()),
+            _ => None,
+        };
         // Give the callee itself a type. Inference never visits it — the
         // name is read straight off the CST — so `f` in `f(x)` was one of
         // the 23,590 untyped `Ident` expressions on sail-riscv, and hover
@@ -4118,63 +4144,6 @@ impl<'db> InferenceContext<'db> {
         }
     }
 
-    /// A quantifier the body mentions must be *determined* by a named
-    /// parameter.
-    ///
-    /// `sizeof('n)` — and a bare `'n` in an expression, which upstream
-    /// desugars to the same thing — has to be rewritten to a runtime value,
-    /// and the only place that value can come from is a parameter the
-    /// function actually binds. `function test(_, n)` against
-    /// `(implicit('n), unit)` puts `'n` behind a wildcard, and upstream says
-    /// "Cannot re-write sizeof('n)". Nothing here said anything.
-    ///
-    /// Only for a quantifier that *some* parameter type mentions and that
-    /// every such parameter binds to a wildcard. One reachable through the
-    /// return type, a constraint or an enclosing scope says nothing.
-    fn check_quantifiers_are_determined(&mut self, body: &hir_def::Body, param_tys: &[Ty]) {
-        use hir_def::hir::Pat;
-        let mut mentioned: HashSet<String> = HashSet::new();
-        let mut determined: HashSet<String> = HashSet::new();
-        for (pat_id, ty) in body.params.iter().zip(param_tys.iter()) {
-            let mut vars = Vec::new();
-            collect_type_vars(ty, &mut vars);
-            let binds_a_name = !matches!(body.pat(*pat_id), Some(Pat::Wild) | None);
-            for v in vars {
-                mentioned.insert(v.clone());
-                if binds_a_name {
-                    determined.insert(v);
-                }
-            }
-        }
-        if mentioned.len() == determined.len() {
-            return;
-        }
-        for (expr_id, expr) in body.iter_exprs() {
-            let used = match expr {
-                hir_def::Expr::SizeOf { nexp } => nexp.clone(),
-                // `'n` on its own is `Expr::TypeVar`; upstream desugars it
-                // to `sizeof('n)` and needs the same runtime value.
-                hir_def::Expr::TypeVar(n) => n.clone(),
-                hir_def::Expr::Ident(n) if n.starts_with('\'') => n.clone(),
-                _ => continue,
-            };
-            for q in mentioned.difference(&determined) {
-                if !used
-                    .split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '\''))
-                    .any(|w| w == q)
-                {
-                    continue;
-                }
-                self.push_inference_diagnostic(InferenceDiagnostic::ConstraintViolation {
-                    expr: expr_id,
-                    constraint: format!("{q} is not determined by any parameter"),
-                    derived_from: Vec::new(),
-                });
-                break;
-            }
-        }
-    }
-
     fn immutable_value_identity(
         &self,
         body: &hir_def::Body,
@@ -4680,6 +4649,22 @@ impl<'db> InferenceContext<'db> {
         } else {
             ty
         };
+
+        // Explicit sizeof and type-variable expressions require the same runtime
+        // evidence as omitted implicit arguments, at this lexical scope.
+        if matches!(body.expr(id), Some(hir_def::Expr::SizeOf { .. } | hir_def::Expr::TypeVar(_))) {
+            let mut assumptions = Vec::new();
+            self.fill_assumptions(locals, &mut assumptions);
+            let mut bindings: Vec<_> =
+                locals.bindings.iter().filter(|(name, _)| !name.starts_with('$')).collect();
+            bindings.sort_unstable_by_key(|(name, _)| *name);
+            self.pending_implicits.push(PendingImplicit {
+                callee: id,
+                ty: ty.clone(),
+                witnesses: bindings.into_iter().map(|(_, ty)| ty.clone()).collect(),
+                assumptions,
+            });
+        }
 
         // A compound expression can introduce runtime witnesses while
         // evaluating its operands. Package them before leaving its universe;
@@ -6826,6 +6811,22 @@ impl<'db> InferenceContext<'db> {
                         }
                     }
                 }
+                // Index syntax calls the visible vector_access declaration in Sail.
+                // Its return type and constraints may differ from the built-in shape.
+                let access_candidates = self.env.lookup_functions("vector_access");
+                let ambiguous_base = matches!(base_ty.kind(), TyKind::Infer(_) | TyKind::Error)
+                    && access_candidates.len() > 1;
+                if !self.in_assign_target && !access_candidates.is_empty() && !ambiguous_base {
+                    return self.infer_named_call_hir(
+                        body,
+                        id,
+                        id,
+                        "vector_access".into(),
+                        &[*base, *index],
+                        &Expectation::None,
+                        locals,
+                    );
+                }
                 self.concat_operand_info(&base_ty)
                     .map(|info| info.elem)
                     .unwrap_or_else(|| self.table.new_type_var())
@@ -7137,7 +7138,6 @@ impl<'db> InferenceContext<'db> {
                     let expected_ty = self.immutable_boolean_identity(expected_ty.clone());
                     self.bind_pattern_hir(body, *pat_id, &expected_ty, &mut locals);
                 }
-                self.check_quantifiers_are_determined(body, &param_tys);
             } else {
                 // Fewer patterns than declared types is the definition
                 // disagreeing with its `val`, and upstream rejects it. More
@@ -7165,31 +7165,13 @@ impl<'db> InferenceContext<'db> {
                         },
                     );
                 }
-                // Fewer patterns than declared types, and the list is
-                // positional to begin with: the definition disagrees with
-                // the `val` that declares it, and upstream rejects it.
-                //
-                // The `>= 2` is not caution, it is meaning. One pattern
-                // stands for the whole tuple —
-                // `function mem_write_callback(_) = ()` against a `val`
-                // declaring four — and none is `function f()` against
-                // `val f : unit -> ..`, which declares `unit` as a
-                // parameter. Both are legal Sail and both are common.
-                //
-                // What this reported on sail-riscv, as the parameter
-                // lowering was fixed one shape at a time, is the record of
-                // how wrong the counts were: **287, 18, 9, 4, 0** — a
-                // wildcard parameter that was dropped, a binding that
-                // arrives as a bare token in a guarded head, a `@` group
-                // beside commas, and a guard's second pair of parentheses.
-                // The check was written first and held back four times
-                // until the thing it counts was true.
-                // The counts disagree, so position says nothing. Bind the
-                // patterns to variables rather than to types known to be
-                // wrong.
-                for &pat_id in body.params.iter() {
-                    let var = self.table.new_type_var();
-                    self.bind_pattern_hir(body, pat_id, &var, &mut locals);
+                // A single pattern was already bound to the whole tuple.
+                // Recovery must not overwrite that binding with an unconstrained variable.
+                if body.params.len() != 1 || param_tys.len() <= 1 {
+                    for &pat_id in body.params.iter() {
+                        let var = self.table.new_type_var();
+                        self.bind_pattern_hir(body, pat_id, &var, &mut locals);
+                    }
                 }
             }
         } else {

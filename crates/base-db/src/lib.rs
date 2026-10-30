@@ -16,6 +16,7 @@ pub use salsa::Durability;
 
 mod change;
 pub mod module_graph;
+pub mod parse_cache;
 pub mod preprocess;
 
 pub mod input;
@@ -91,6 +92,10 @@ pub struct FileText {
     #[returns(ref)]
     pub text: Arc<str>,
     pub file_id: FileId,
+    /// Disposable parse seed; reading it never supplies source semantics.
+    #[default]
+    #[returns(ref)]
+    pub parse_cache: parse_cache::ParseCache,
 }
 
 /// Manages the set of files known to the database.

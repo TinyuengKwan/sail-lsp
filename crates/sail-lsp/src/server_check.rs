@@ -261,7 +261,9 @@ impl ServerFixture {
             }),
         );
         let response = self.wait_for_response(id);
-        self.capabilities = response.result.expect("initialize response")["capabilities"].clone();
+        let result = response.result.expect("initialize response");
+        assert_eq!(result["serverInfo"]["version"], crate::version::version());
+        self.capabilities = result["capabilities"].clone();
         self.notify("initialized", serde_json::json!({}));
         // The scan is asynchronous; its completion is what "ready" means.
         self.wait_until("workspace loading to finish", |f| {
@@ -855,6 +857,230 @@ fn invalid_manifest_reports_its_cause_to_the_editor_and_unlinked_files() {
     assert!(server.log.iter().any(|m| m.contains("Sail project loading recovered")));
 }
 
+/// From a file to what brings it into the project: the manifest module
+/// that lists it, or the `$include` that names it, and the manifest entry
+/// behind either.
+#[test]
+fn a_file_leads_to_its_module_and_manifest() {
+    let manifest = "Lib {\n  files lib.sail\n}\nMain {\n  requires Lib\n  files main.sail\n}\n";
+    let main = "$include \"inc.sail\"\n";
+    let mut server = ServerFixture::new(
+        "project-navigation",
+        &[
+            ("sail.proj", manifest),
+            ("lib.sail", "val f : unit -> unit\n"),
+            ("main.sail", main),
+            ("inc.sail", "val g : unit -> unit\n"),
+            ("stray.sail", ""),
+        ],
+    );
+    server.did_open("main.sail", main);
+    server.pull("main.sail");
+    let doc = |server: &ServerFixture, rel: &str| serde_json::json!({ "textDocument": { "uri": server.url(rel) } });
+    let at = |v: &serde_json::Value| {
+        (
+            v["uri"].as_str().unwrap().rsplit('/').next().unwrap().to_owned(),
+            v["range"]["start"]["line"].as_u64().unwrap(),
+            v["range"]["start"]["character"].as_u64().unwrap(),
+            v["range"]["end"]["character"].as_u64().unwrap(),
+        )
+    };
+    let entry = ("sail.proj".to_owned(), 5, 8, 17);
+
+    let parents = server.ask("sail-lsp/parentModule", doc(&server, "main.sail"));
+    let parents: Vec<_> = parents.as_array().unwrap().iter().map(at).collect();
+    assert_eq!(parents, [("sail.proj".to_owned(), 3, 0, 4)]);
+    let manifest_entry = server.ask("sail-lsp/openProjectManifest", doc(&server, "main.sail"));
+    assert_eq!(at(&manifest_entry), entry);
+
+    let parents = server.ask("sail-lsp/parentModule", doc(&server, "inc.sail"));
+    let parents: Vec<_> = parents.as_array().unwrap().iter().map(at).collect();
+    assert_eq!(parents, [("main.sail".to_owned(), 0, 10, 18)]);
+    let manifest_entry = server.ask("sail-lsp/openProjectManifest", doc(&server, "inc.sail"));
+    assert_eq!(at(&manifest_entry), entry, "an included file opens its includer's entry");
+
+    assert!(server.ask("sail-lsp/openProjectManifest", doc(&server, "stray.sail")).is_null());
+    assert_eq!(
+        server.ask("sail-lsp/parentModule", doc(&server, "stray.sail")),
+        serde_json::json!([])
+    );
+}
+
+/// Inside a manifest: a module reference goes to its header, a path to its
+/// file, completion offers modules after `requires`; the manifest is never
+/// analysed as Sail. A file no module lists gets a fix that lists it, and
+/// the project then loads it.
+#[test]
+fn a_manifest_is_edited_as_a_manifest() {
+    let manifest =
+        "Lib {\n  files core/lib.sail\n}\nMain {\n  requires Lib\n  files core/main.sail\n}\n";
+    let mut server = ServerFixture::new(
+        "manifest-editing",
+        &[
+            ("sail.proj", manifest),
+            ("core/lib.sail", "val f : unit -> unit\n"),
+            ("core/main.sail", "val g : unit -> unit\n"),
+            ("core/new.sail", "val h : unit -> int\nfunction h() = true\n"),
+        ],
+    );
+    server.did_open("sail.proj", manifest);
+    let doc = server.url("sail.proj");
+    let at = |line: u32, character: u32| serde_json::json!({ "textDocument": { "uri": doc }, "position": { "line": line, "character": character } });
+    let target = server.ask("textDocument/definition", at(4, 12));
+    assert_eq!(target[0]["uri"], serde_json::json!(doc));
+    assert_eq!(target[0]["range"]["start"], serde_json::json!({ "line": 0, "character": 0 }));
+    let target = server.ask("textDocument/definition", at(1, 14));
+    assert_eq!(target[0]["uri"], serde_json::json!(server.url("core/lib.sail")));
+
+    let edited = manifest.replace("requires Lib", "requires Lib, ");
+    server.notify(
+        "textDocument/didChange",
+        serde_json::json!({ "textDocument": { "uri": doc, "version": 2 }, "contentChanges": [{ "text": edited }] }),
+    );
+    let items = server.ask("textDocument/completion", at(4, 16));
+    let labels: Vec<_> =
+        items.as_array().unwrap().iter().map(|i| i["label"].as_str().unwrap()).collect();
+    assert_eq!(labels, ["Lib"], "Main does not require itself");
+    assert!(server.ask("textDocument/hover", at(4, 12)).is_null(), "not Sail");
+    server.notify(
+        "textDocument/didChange",
+        serde_json::json!({ "textDocument": { "uri": doc, "version": 3 }, "contentChanges": [{ "text": manifest }] }),
+    );
+
+    let new = "val h : unit -> int\nfunction h() = true\n";
+    server.did_open("core/new.sail", new);
+    let unlinked: Vec<_> = server
+        .pull("core/new.sail")
+        .into_iter()
+        .filter(|d| d.code == Some(lsp_types::NumberOrString::String("unlinked-file".into())))
+        .collect();
+    assert_eq!(unlinked.len(), 1);
+    let actions = server.ask(
+        "textDocument/codeAction",
+        serde_json::json!({
+            "textDocument": { "uri": server.url("core/new.sail") },
+            "range": unlinked[0].range,
+            "context": { "diagnostics": unlinked },
+        }),
+    );
+    let fixes: Vec<_> = actions
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["title"].as_str().unwrap().starts_with("Add `"))
+        .collect();
+    let titles: Vec<_> = fixes.iter().map(|a| a["title"].as_str().unwrap()).collect();
+    assert_eq!(
+        titles,
+        [
+            "Add `core/new.sail` to module `Lib` in sail.proj",
+            "Add `core/new.sail` to module `Main` in sail.proj",
+        ],
+        "both modules list files beside it, so the user chooses"
+    );
+    let edit = &fixes[1]["edit"]["changes"][doc.as_str()][0];
+    assert_eq!(edit["newText"], ", core/new.sail");
+    assert_eq!(edit["range"]["start"], serde_json::json!({ "line": 5, "character": 22 }));
+
+    server.create_on_disk(
+        "sail.proj",
+        &manifest.replace("core/main.sail", "core/main.sail, core/new.sail"),
+    );
+    server.wait_for_diagnostics("core/new.sail", "the added file to be checked", |ds| {
+        errors(ds) == 1 && !mentions(ds, "not part of a loaded Sail project")
+    });
+}
+
+#[test]
+fn manifest_paths_use_expressions_and_fixes_only_offer_active_modules() {
+    let manifest = "variable BASE = \"sub\"\nA { files a.sail }\nB { files $BASE / \"b.sail\" }\n";
+    let source = "function f() -> int = 0\n";
+    let mut server = ServerFixture::open_with_options(
+        "manifest-active-fix",
+        &[
+            ("sail.proj", manifest),
+            ("a.sail", source),
+            ("sub/b.sail", source),
+            ("sub/new.sail", "function bad() -> int = true\n"),
+        ],
+        Root::Real,
+        None,
+        serde_json::json!({"workspace": {"projectModules": ["A"]}}),
+    );
+    server.did_open("sail.proj", manifest);
+    let doc = server.url("sail.proj");
+    let definition = server.ask(
+        "textDocument/definition",
+        serde_json::json!({
+            "textDocument": {"uri": doc}, "position": {"line": 2, "character": 22}
+        }),
+    );
+    assert_eq!(definition[0]["uri"], serde_json::json!(server.url("sub/b.sail")));
+    server.did_open("sub/new.sail", "function bad() -> int = true\n");
+    let unlinked: Vec<_> = server
+        .pull("sub/new.sail")
+        .into_iter()
+        .filter(|d| d.code == Some(lsp_types::NumberOrString::String("unlinked-file".into())))
+        .collect();
+    assert_eq!(unlinked.len(), 1);
+    let actions = server.ask(
+        "textDocument/codeAction",
+        serde_json::json!({
+            "textDocument": {"uri": server.url("sub/new.sail")},
+            "range": unlinked[0].range, "context": {"diagnostics": unlinked}
+        }),
+    );
+    let fixes: Vec<_> = actions
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["title"].as_str().unwrap().starts_with("Add `"))
+        .collect();
+    assert_eq!(fixes.len(), 1, "{fixes:?}");
+    assert_eq!(fixes[0]["title"], "Add `sub/new.sail` to module `A` in sail.proj");
+    let edit: lsp_types::TextEdit =
+        serde_json::from_value(fixes[0]["edit"]["changes"][doc.as_str()][0].clone()).unwrap();
+    let index = ide_db::line_index::LineIndex::new(manifest);
+    let start = crate::from_proto::offset(&index, edit.range.start);
+    let end = crate::from_proto::offset(&index, edit.range.end);
+    let mut updated = manifest.to_owned();
+    updated.replace_range(start..end, &edit.new_text);
+    server.create_on_disk("sail.proj", &updated);
+    server.wait_for_diagnostics("sub/new.sail", "active module fix loads its file", |ds| {
+        errors(ds) == 1 && !mentions(ds, "not part of a loaded Sail project")
+    });
+}
+
+/// A broken manifest is underlined where it is broken, in the manifest:
+/// the unknown module in `requires`, the `files` entry naming a missing
+/// file. Fixing it clears the manifest.
+#[test]
+fn manifest_problems_are_published_on_the_manifest() {
+    let source = "function f() -> int = 1\n";
+    let manifest = "Main {\n  requires Nope\n  files main.sail\n}\n";
+    let mut server = ServerFixture::new(
+        "manifest-diagnostics",
+        &[("sail.proj", manifest), ("main.sail", source)],
+    );
+    server.wait_for_diagnostics("sail.proj", "unknown module underlined", |ds| {
+        ds.len() == 1 && ds[0].message.contains("Nope")
+    });
+    let d = &server.published[&server.url("sail.proj")][0];
+    assert_eq!((d.range.start.line, d.range.start.character, d.range.end.character), (1, 11, 15));
+    assert_eq!(d.code, Some(lsp_types::NumberOrString::String("unknown-module".into())));
+
+    server.create_on_disk("sail.proj", "Main {\n  files main.sail, gone.sail\n}\n");
+    server.wait_for_diagnostics("sail.proj", "missing file underlined", |ds| {
+        ds.len() == 1 && ds[0].message.contains("gone.sail")
+    });
+    let d = &server.published[&server.url("sail.proj")][0];
+    assert_eq!((d.range.start.line, d.range.start.character, d.range.end.character), (1, 19, 28));
+    assert_eq!(d.code, Some(lsp_types::NumberOrString::String("missing-file".into())));
+
+    server.create_on_disk("sail.proj", "Main {\n  files main.sail\n}\n");
+    server.wait_for_diagnostics("sail.proj", "fixed manifest cleared", |ds| ds.is_empty());
+}
+
 #[test]
 fn invalid_manifest_reload_keeps_the_project_and_deduplicates_notifications() {
     let source = "function bad() -> int = true\n";
@@ -1305,10 +1531,10 @@ fn display_configuration_controls_lens_categories_hints_and_tokens() {
     server.did_open("main.sail", source);
     let params = serde_json::json!({"textDocument": {"uri": server.url("main.sail")}});
     let all = server.ask("textDocument/codeLens", params.clone());
-    for kind in ["refs", "impls", "runnable"] {
+    for kind in ["refs", "impls"] {
         assert!(all.as_array().unwrap().iter().any(|lens| lens["data"]["kind"] == kind), "{all}");
         server.configure(serde_json::json!({"codeLens": {
-            "references": kind == "refs", "implementations": kind == "impls", "runnables": kind == "runnable",
+            "references": kind == "refs", "implementations": kind == "impls",
         }}));
         let selected = server.ask("textDocument/codeLens", params.clone());
         let lenses = selected.as_array().unwrap();
@@ -1367,6 +1593,15 @@ fn shared_token_lenses_merge_contexts_without_duplicate_locations() {
     let lens = refs[0].clone();
     let resolved = server.ask("codeLens/resolve", lens.clone());
     assert_eq!(resolved["command"]["title"], "2 references", "{resolved}");
+    // Clicking shows what the title counted: it sent an empty list.
+    assert_eq!(resolved["command"]["command"], "editor.action.showReferences", "{resolved}");
+    let shown: Vec<String> = resolved["command"]["arguments"][2]
+        .as_array()
+        .expect("locations")
+        .iter()
+        .map(|l| l["uri"].as_str().unwrap().rsplit('/').next().unwrap().to_owned())
+        .collect();
+    assert_eq!(shown, ["a.sail", "b.sail"], "{resolved}");
     server.notify(
         "textDocument/didChange",
         serde_json::json!({
@@ -2285,6 +2520,67 @@ fn a_bad_setting_is_reported_once_and_costs_only_itself() {
     assert_eq!(server.messages.len(), 1, "the same bad setting is not reported again");
 }
 
+/// Signature help shows the overload taking as many arguments as the call
+/// has, not the one taking the most.
+#[test]
+fn signature_help_picks_the_overload_the_call_fits() {
+    for (call, wanted) in [("f(1)", "f1"), ("f(1, 2, 3)", "f3")] {
+        let source = format!(
+            "val f3 : (int, int, int) -> int\nval f1 : int -> int\noverload f = {{f3, f1}}\n\
+             function g() -> int = {call}\n"
+        );
+        let mut server = ServerFixture::new_project("signature-overload", &[("a.sail", &source)]);
+        server.did_open("a.sail", &source);
+        let line = source.lines().nth(3).unwrap();
+        let answer = server.ask(
+            "textDocument/signatureHelp",
+            serde_json::json!({
+                "textDocument": {"uri": server.url("a.sail")},
+                "position": {"line": 3, "character": line.len() - 1},
+            }),
+        );
+        let active = answer["activeSignature"].as_u64().expect("an active signature") as usize;
+        let label = answer["signatures"][active]["label"].as_str().unwrap();
+        assert!(label.contains(wanted), "{call}: {answer}");
+    }
+}
+
+/// The path of an `$include` links to, and goes to, the file it names.
+#[test]
+fn an_include_path_links_and_goes_to_its_file() {
+    let main = "$include \"sub/types.sail\"\nfunction f() -> word = 0x00\n";
+    let types = "type word = bits(8)\n";
+    let mut server = ServerFixture::new(
+        "include-link",
+        &[
+            ("sail.proj", "Main { files main.sail }"),
+            ("main.sail", main),
+            ("sub/types.sail", types),
+        ],
+    );
+    server.did_open("main.sail", main);
+    let links = server.ask(
+        "textDocument/documentLink",
+        serde_json::json!({"textDocument": {"uri": server.url("main.sail")}}),
+    );
+    let link = links
+        .as_array()
+        .expect("links")
+        .iter()
+        .find(|l| l["target"].as_str().is_some_and(|t| t.ends_with("/sub/types.sail")))
+        .unwrap_or_else(|| panic!("no link to the included file: {links}"));
+    assert_eq!(link["range"]["start"], serde_json::json!({"line": 0, "character": 10}));
+    assert_eq!(link["range"]["end"], serde_json::json!({"line": 0, "character": 24}));
+    let target = server.ask(
+        "textDocument/definition",
+        serde_json::json!({
+            "textDocument": {"uri": server.url("main.sail")},
+            "position": {"line": 0, "character": 14},
+        }),
+    );
+    assert!(target.to_string().contains("/sub/types.sail"), "{target}");
+}
+
 /// With no limit every candidate arrives, past the 200 that used to be cut
 /// silently while the response said the list was complete.
 #[test]
@@ -2604,11 +2900,14 @@ fn closing_delimiter_quick_fixes_apply_at_eof() {
 
 #[test]
 fn binding_quick_fixes_remove_their_diagnostic_after_application() {
-    for (source, message, title) in [(
-        "function f(x : int) -> int = { let unused = 42; x + 1 }\n",
-        "unused",
-        "Rename `unused` to `_unused`",
-    )] {
+    for (source, message, title) in [
+        (
+            "function f(x : int) -> int = { let unused = 42; x + 1 }\n",
+            "unused",
+            "Rename `unused` to `_unused`",
+        ),
+        ("function f() -> int = { return 1; 2 }\n", "unreachable", "Remove unreachable code"),
+    ] {
         let mut server =
             ServerFixture::new_project("binding-fix-roundtrip", &[("main.sail", source)]);
         server.did_open("main.sail", source);
@@ -3469,4 +3768,382 @@ fn local_rename_preserves_shadowed_global_and_non_code_occurrences() {
         }),
     );
     assert_eq!(errors(&server.pull("main.sail")), 0);
+}
+
+#[test]
+fn analyzer_status_explains_the_running_build_and_loaded_project() {
+    let mut server = ServerFixture::new_project(
+        "analyzer-status-provenance",
+        &[("main.sail", "function f() -> int = 1\n")],
+    );
+    let status = server.ask("sail-lsp/analyzerStatus", serde_json::Value::Null);
+    let status = status.as_str().expect("status text");
+    assert!(status.contains(&crate::version::version()), "{status}");
+    assert!(status.contains(&std::env::current_exe().unwrap().display().to_string()), "{status}");
+    assert!(status.contains(server.root.to_str().unwrap()), "{status}");
+    assert!(status.contains("sail.proj"), "{status}");
+    assert!(status.contains("SAIL_DIR environment"), "{status}");
+    assert!(status.contains("workspace loaded: true"), "{status}");
+    assert!(status.contains("\"diagnostics\""), "{status}");
+    server.notify(
+        "workspace/didChangeConfiguration",
+        serde_json::json!({
+            "settings": {"sail-lsp": {"completion": {"limit": 37}}}
+        }),
+    );
+    let updated = server.ask("sail-lsp/analyzerStatus", serde_json::Value::Null);
+    assert!(updated.as_str().unwrap().contains("\"limit\": 37"), "{updated}");
+}
+
+#[test]
+fn analyzer_status_exposes_load_errors_and_effective_fallback_settings() {
+    let mut server = ServerFixture::open_with_options(
+        "analyzer-status-error",
+        &[("broken.sail_project", "Main { files missing.sail }")],
+        Root::Real,
+        None,
+        serde_json::json!({"diagnostics": {"enable": "invalid"}}),
+    );
+    let status = server.ask("sail-lsp/analyzerStatus", serde_json::Value::Null);
+    let status = status.as_str().unwrap();
+    assert!(status.contains("missing.sail"), "{status}");
+    assert!(status.contains("configuration error"), "{status}");
+    assert!(status.contains("\"enable\": true"), "{status}");
+}
+
+#[test]
+fn signature_help_uses_types_for_equal_arity_overloads() {
+    for (argument, wanted) in [("true", "on_bool"), ("42", "on_int"), ("value", "on_bool")] {
+        let source = format!("val on_int : int -> int\nval on_bool : bool -> int\noverload pick_value = {{on_int, on_bool}}\nfunction f(value : bool) -> int = pick_value({argument})\n");
+        let mut server = ServerFixture::new_project("signature-types", &[("main.sail", &source)]);
+        server.did_open("main.sail", &source);
+        let answer = server.ask(
+            "textDocument/signatureHelp",
+            serde_json::json!({
+                "textDocument": {"uri": server.url("main.sail")},
+                "position": {"line": 3, "character": source.lines().nth(3).unwrap().len()-1}
+            }),
+        );
+        let index = answer["activeSignature"].as_u64().expect("active signature") as usize;
+        assert!(
+            answer["signatures"][index]["label"].as_str().unwrap().contains(wanted),
+            "{answer}"
+        );
+    }
+}
+
+#[test]
+fn ssr_previews_all_matches_and_respects_bindings_selections_and_versions() {
+    let defs = "val combine : (int, int) -> int\nval flipped : (int, int) -> int\n";
+    let main = "function f() -> int = combine(1, 2)\nfunction g() -> int = combine(3, 4)\n";
+    let other = "function h() -> int = combine(5, 6)\n";
+    let shadow = "function local(combine : (int, int) -> int) -> int = combine(7, 8)\n";
+    let mut server = ServerFixture::new_project(
+        "ssr-preview",
+        &[("defs.sail", defs), ("main.sail", main), ("other.sail", other), ("shadow.sail", shadow)],
+    );
+    server.did_open("main.sail", main);
+    server.did_open("other.sail", other);
+    let params = serde_json::json!({
+        "query": "combine($a, $b) ==>> flipped($b, $a)", "parseOnly": false,
+        "textDocument": {"uri": server.url("main.sail")}, "position": {"line": 0, "character": 23}, "selections": []
+    });
+    let preview = server.ask("experimental/ssr", params.clone());
+    let changes = preview["documentChanges"].as_array().unwrap();
+    assert_eq!(changes.len(), 2, "{preview}");
+    assert_eq!(
+        changes.iter().map(|c| c["edits"].as_array().unwrap().len()).sum::<usize>(),
+        3,
+        "{preview}"
+    );
+    let mut applied = Vec::new();
+    for change in changes {
+        assert_eq!(change["textDocument"]["version"], 1, "{change}");
+        let rel = if change["textDocument"]["uri"] == server.url("main.sail").as_str() {
+            "main.sail"
+        } else {
+            "other.sail"
+        };
+        let source = if rel == "main.sail" { main } else { other };
+        let mut edits: Vec<lsp_types::TextEdit> =
+            serde_json::from_value(change["edits"].clone()).unwrap();
+        edits.sort_by_key(|e| std::cmp::Reverse(e.range.start));
+        let index = ide_db::line_index::LineIndex::new(source);
+        let mut updated = source.to_owned();
+        for edit in edits {
+            updated.replace_range(
+                crate::from_proto::offset(&index, edit.range.start)
+                    ..crate::from_proto::offset(&index, edit.range.end),
+                &edit.new_text,
+            );
+        }
+        assert!(
+            updated.contains(if rel == "main.sail" {
+                "flipped((2), (1))"
+            } else {
+                "flipped((6), (5))"
+            }),
+            "{updated}"
+        );
+        applied.push((rel, updated));
+    }
+    let mut selected = params.clone();
+    selected["selections"] =
+        serde_json::json!([{"start":{"line":1,"character":0},"end":{"line":2,"character":0}}]);
+    let selected = server.ask("experimental/ssr", selected);
+    assert_eq!(selected["documentChanges"].as_array().unwrap().len(), 1, "{selected}");
+    assert_eq!(selected["documentChanges"][0]["edits"].as_array().unwrap().len(), 1, "{selected}");
+    let mut parse_only = params.clone();
+    parse_only["parseOnly"] = true.into();
+    assert_eq!(
+        server.ask("experimental/ssr", parse_only)["documentChanges"],
+        serde_json::json!([])
+    );
+    for rule in [
+        "combine($a, $b) ==>> flipped($c, $a)",
+        "combine($a, $b) ==>> (",
+        "combine($a, $b) ==>> absent($a)",
+        "let x = $a in x ==>> $a",
+    ] {
+        let mut invalid = params.clone();
+        invalid["query"] = rule.into();
+        let request = server.request("experimental/ssr", invalid);
+        let response = server.wait_for_response(request);
+        assert_eq!(response.error.expect(rule).code, lsp_server::ErrorCode::InvalidParams as i32);
+    }
+    for (rel, updated) in applied {
+        server.notify("textDocument/didChange", serde_json::json!({"textDocument":{"uri":server.url(rel),"version":2},"contentChanges":[{"text":updated}]}));
+        assert_eq!(errors(&server.pull(rel)), 0, "{updated}");
+    }
+}
+
+#[test]
+fn branch_like_manifest_renames_and_generated_batches_recover() {
+    let caller = "function caller(x : int) -> int = identity(x)\n";
+    let valid = "function identity(x : int) -> int = x\n";
+    let invalid = "function identity(x : bool) -> bool = x\n";
+    let mut server = ServerFixture::new_project(
+        "branch-generated-batch",
+        &[("old.sail", valid), ("caller.sail", caller)],
+    );
+    server.did_open("caller.sail", caller);
+    assert_eq!(errors(&server.pull("caller.sail")), 0);
+    let definition = |server: &mut ServerFixture| {
+        server.ask("textDocument/definition", serde_json::json!({
+        "textDocument":{"uri":server.url("caller.sail")},"position":{"line":0,"character":34}
+    }))
+    };
+    assert!(definition(&mut server).to_string().contains("old.sail"));
+    for round in 0..3 {
+        // The disk transaction models checkout/code generation: rename the
+        // provider, replace the manifest and create a batch of generated files.
+        let (old, new) =
+            if round % 2 == 0 { ("old.sail", "new.sail") } else { ("new.sail", "old.sail") };
+        std::fs::rename(server.path(old), server.path(new)).unwrap();
+        std::fs::write(server.path(new), invalid).unwrap();
+        let mut paths = vec![new.to_owned(), "caller.sail".to_owned()];
+        let mut events = vec![
+            serde_json::json!({"uri":server.url(old),"type":3}),
+            serde_json::json!({"uri":server.url(new),"type":1}),
+        ];
+        for n in 0..16 {
+            let path = format!("generated_{n}.sail");
+            std::fs::write(
+                server.path(&path),
+                format!("function generated_{n}() -> int = {round}\n"),
+            )
+            .unwrap();
+            events.push(
+                serde_json::json!({"uri":server.url(&path),"type":if round == 0 {1} else {2}}),
+            );
+            paths.push(path);
+        }
+        std::fs::write(server.path("sail.proj"), format!("Main {{ files {} }}", paths.join(", ")))
+            .unwrap();
+        events.push(serde_json::json!({"uri":server.url("sail.proj"),"type":2}));
+        server.notify("workspace/didChangeWatchedFiles", serde_json::json!({"changes":events}));
+        server.wait_for_diagnostics("caller.sail", "new branch changes provider signature", |d| {
+            errors(d) > 0
+        });
+        let moved = definition(&mut server).to_string();
+        assert!(moved.contains(new) && !moved.contains(old), "{moved}");
+        // Sustained edits in two buffers while a request is cancelled.
+        server.did_open(new, invalid);
+        for version in 2..12 {
+            for (path, text) in [
+                (new, if version % 2 == 0 { "function identity(" } else { invalid }),
+                ("caller.sail", caller),
+            ] {
+                server.notify("textDocument/didChange", serde_json::json!({"textDocument":{"uri":server.url(path),"version":round*20+version},"contentChanges":[{"text":text}]}));
+            }
+        }
+        let pending = server.request(
+            "textDocument/documentSymbol",
+            serde_json::json!({"textDocument":{"uri":server.url(new)}}),
+        );
+        server.notify("$/cancelRequest", serde_json::json!({"id":pending}));
+        let response = server.wait_for_response(pending);
+        if let Some(error) = response.error {
+            assert!(matches!(error.code, -32800 | -32801), "{error:?}");
+        }
+        server.notify("textDocument/didChange", serde_json::json!({"textDocument":{"uri":server.url(new),"version":round*20+12},"contentChanges":[{"text":valid}]}));
+        server.wait_for_diagnostics(
+            "caller.sail",
+            "valid unsaved provider clears stale diagnostics",
+            |d| errors(d) == 0,
+        );
+        assert_eq!(errors(&server.pull(new)), 0);
+        std::fs::write(server.path(new), valid).unwrap();
+        server.close_url(&server.url(new));
+        server.wait_until("server becomes quiescent after burst", |f| {
+            f.statuses.last().is_some_and(|s| s.quiescent)
+        });
+    }
+    let mut events = Vec::new();
+    for n in 0..16 {
+        let path = format!("generated_{n}.sail");
+        std::fs::remove_file(server.path(&path)).unwrap();
+        events.push(serde_json::json!({"uri":server.url(&path),"type":3}));
+    }
+    std::fs::write(server.path("sail.proj"), "Main { files new.sail, caller.sail }").unwrap();
+    events.push(serde_json::json!({"uri":server.url("sail.proj"),"type":2}));
+    server.log.clear();
+    server.notify("workspace/didChangeWatchedFiles", serde_json::json!({"changes":events}));
+    server.wait_until("generated files leave workspace", |f| {
+        f.log.iter().any(|m| m.contains("background scan: 2 files"))
+    });
+    let symbols = server.ask("workspace/symbol", serde_json::json!({"query":"generated_"}));
+    assert!(symbols.is_null() || symbols == serde_json::json!([]), "{symbols}");
+    assert_eq!(errors(&server.pull("caller.sail")), 0);
+}
+
+#[test]
+fn conversion_quick_fixes_apply_and_recheck_over_the_protocol() {
+    for wrapper in ["unsigned", "signed"] {
+        let source = "default Order dec\nval unsigned : bits(8) -> int\nval signed : bits(8) -> int\nfunction f(v : bits(8)) -> int = v\n";
+        let mut server =
+            ServerFixture::new_project("conversion-roundtrip", &[("main.sail", source)]);
+        server.did_open("main.sail", source);
+        let diagnostics = server.pull("main.sail");
+        let target = diagnostics
+            .iter()
+            .find(|d| d.code == Some(lsp_types::NumberOrString::String("type-error".into())))
+            .unwrap();
+        let actions = server.ask("textDocument/codeAction", serde_json::json!({"textDocument":{"uri":server.url("main.sail")},"range":target.range,"context":{"diagnostics":diagnostics,"only":["quickfix"]}}));
+        let title = format!("Wrap with `{wrapper}(...)`");
+        let action = actions
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["title"] == title)
+            .unwrap_or_else(|| panic!("{actions}"));
+        let resolved = server.ask("codeAction/resolve", action.clone());
+        let edit: lsp_types::WorkspaceEdit =
+            serde_json::from_value(resolved["edit"].clone()).unwrap();
+        let mut edits = edit.changes.unwrap()[&server.url("main.sail")].clone();
+        edits.sort_by_key(|e| std::cmp::Reverse(e.range.start));
+        let index = ide_db::line_index::LineIndex::new(source);
+        let mut updated = source.to_owned();
+        for edit in edits {
+            updated.replace_range(
+                crate::from_proto::offset(&index, edit.range.start)
+                    ..crate::from_proto::offset(&index, edit.range.end),
+                &edit.new_text,
+            );
+        }
+        server.notify("textDocument/didChange", serde_json::json!({"textDocument":{"uri":server.url("main.sail"),"version":2},"contentChanges":[{"text":updated}]}));
+        assert_eq!(errors(&server.pull("main.sail")), 0, "{updated}");
+    }
+}
+
+#[test]
+fn ssr_preserves_precedence_comments_and_repeated_capture_constraints() {
+    for (expr, query, count, replacement) in [
+        ("combine(1 + 2, 3) * 4", "combine($a, $b) ==>> $a + $b", 1, "((1 + 2) + (3)) * 4"),
+        ("combine(1, 1)", "combine(${a:kind(literal)}, $a) ==>> $a", 1, "((1))"),
+        ("combine(1, 2)", "combine($a, $a) ==>> $a", 0, ""),
+        ("combine(1 + 2, 1 + 2)", "combine(${a:kind(literal)}, $a) ==>> $a", 0, ""),
+        ("combine(/* keep */ 1, 2)", "combine($a, $b) ==>> $a", 0, ""),
+        ("combine((1 /* keep */ + 2), 3)", "combine($a, $b) ==>> $a", 1, "keep"),
+        ("combine(combine(1, 2), 3)", "combine($a, $b) ==>> $a", 1, "combine(1, 2)"),
+    ] {
+        let source = format!("val combine : (int, int) -> int\nfunction f() -> int = {expr}\n");
+        let mut server = ServerFixture::new_project("ssr-syntax-safety", &[("main.sail", &source)]);
+        server.did_open("main.sail", &source);
+        let result = server.ask("experimental/ssr", serde_json::json!({"query":query,"textDocument":{"uri":server.url("main.sail")},"position":{"line":1,"character":22},"selections":[]}));
+        let changes = result["documentChanges"].as_array().unwrap();
+        let edits: Vec<lsp_types::TextEdit> = changes
+            .iter()
+            .flat_map(|c| {
+                serde_json::from_value::<Vec<lsp_types::TextEdit>>(c["edits"].clone()).unwrap()
+            })
+            .collect();
+        assert_eq!(edits.len(), count, "{query}: {result}");
+        let index = ide_db::line_index::LineIndex::new(&source);
+        let mut updated = source.clone();
+        for edit in edits {
+            updated.replace_range(
+                crate::from_proto::offset(&index, edit.range.start)
+                    ..crate::from_proto::offset(&index, edit.range.end),
+                &edit.new_text,
+            );
+        }
+        if count > 0 {
+            assert!(updated.contains(replacement), "{updated}");
+        }
+        server.notify("textDocument/didChange", serde_json::json!({"textDocument":{"uri":server.url("main.sail"),"version":2},"contentChanges":[{"text":updated}]}));
+        assert_eq!(errors(&server.pull("main.sail")), 0, "{updated}");
+    }
+}
+
+#[test]
+fn signature_help_distinguishes_dependent_widths_and_aliases() {
+    for (argument, wanted) in [("0x12", "byte"), ("0x1234", "word"), ("value", "word")] {
+        let source = format!("default Order dec\ntype word_bits = bits(16)\nval byte : bits(8) -> int\nval word : bits(16) -> int\noverload pick_width = {{byte, word}}\nfunction f(value : word_bits) -> int = pick_width({argument})\n");
+        let mut server = ServerFixture::new_project("signature-widths", &[("main.sail", &source)]);
+        server.did_open("main.sail", &source);
+        let answer = server.ask("textDocument/signatureHelp", serde_json::json!({"textDocument":{"uri":server.url("main.sail")},"position":{"line":5,"character":source.lines().nth(5).unwrap().len()-1}}));
+        let index = answer["activeSignature"].as_u64().expect("active signature") as usize;
+        assert!(
+            answer["signatures"][index]["label"].as_str().unwrap().contains(wanted),
+            "{answer}"
+        );
+    }
+}
+
+#[test]
+fn ssr_selects_nested_matches_and_rejects_ambiguous_include_contexts() {
+    {
+        let source =
+            "val combine : (int, int) -> int\nfunction f() -> int = combine(combine(1, 2), 3)\n";
+        let mut server =
+            ServerFixture::new_project("ssr-nested-selection", &[("main.sail", source)]);
+        let start = source.lines().nth(1).unwrap().find("combine(1").unwrap();
+        let result = server.ask("experimental/ssr", serde_json::json!({"query":"combine($a, $b) ==>> $b","textDocument":{"uri":server.url("main.sail")},"position":{"line":1,"character":start},"selections":[{"start":{"line":1,"character":start},"end":{"line":1,"character":start+13}}]}));
+        assert_eq!(result["documentChanges"][0]["edits"][0]["newText"], "((2))", "{result}");
+    }
+    let mut server = ServerFixture::new(
+        "ssr-shared-include",
+        &[
+            ("sail.proj", "A { files a.sail } B { files b.sail }"),
+            ("a.sail", "$include \"shared.sail\"\n"),
+            ("b.sail", "$include \"shared.sail\"\n"),
+            ("shared.sail", "function shared() -> int = 1\n"),
+        ],
+    );
+    let request = server.request("experimental/ssr", serde_json::json!({"query":"1 ==>> 2","textDocument":{"uri":server.url("shared.sail")},"position":{"line":0,"character":27},"selections":[]}));
+    let response = server.wait_for_response(request);
+    let error = response.error.expect("ambiguous context must not produce edits");
+    assert_eq!(error.code, lsp_server::ErrorCode::InvalidParams as i32);
+    assert!(error.message.contains("include"), "{error:?}");
+}
+
+#[test]
+fn ssr_does_not_edit_inactive_preprocessor_branches() {
+    let source = "$ifdef NEVER_DEFINED\nfunction inactive() -> int = 1\n$else\nfunction active() -> int = 1\n$endif\n";
+    let mut server = ServerFixture::new_project("ssr-active-branches", &[("main.sail", source)]);
+    let result = server.ask("experimental/ssr", serde_json::json!({"query":"1 ==>> 2","textDocument":{"uri":server.url("main.sail")},"position":{"line":3,"character":27},"selections":[]}));
+    let edits = result["documentChanges"][0]["edits"].as_array().expect("one active file");
+    assert_eq!(edits.len(), 1, "{result}");
+    assert_eq!(edits[0]["range"]["start"]["line"], 3, "{result}");
 }

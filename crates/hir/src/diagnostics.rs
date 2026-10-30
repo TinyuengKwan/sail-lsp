@@ -170,6 +170,9 @@ pub struct ConcatTypeMismatch {
 pub struct InvalidTypeUse {
     pub message: String,
     pub node: InFile<SyntaxNodePtr>,
+    /// Structured token focus, independent of the rendered diagnostic text.
+    pub unbound_variable: Option<String>,
+    pub type_pattern_path: Option<Vec<usize>>,
 }
 
 pub struct NoOverloading {
@@ -372,6 +375,7 @@ impl AnyDiagnostic {
         // source map's own base unless the result was reused across an edit
         // above the callable.
         def_base: usize,
+        original_tokens: &[hir_def::Span],
     ) -> Option<AnyDiagnostic> {
         // Helper closures for syntax lookup.
         let expr_syntax = |expr| source_map.expr_syntax_in_file(expr);
@@ -386,6 +390,24 @@ impl AnyDiagnostic {
                 Some(AnyDiagnostic::InvalidTypeUse(InvalidTypeUse {
                     node,
                     message: message.clone(),
+                    unbound_variable: None,
+                    type_pattern_path: None,
+                }))
+            }
+            InferenceDiagnostic::UnboundTypeVariable { pat, name } => {
+                Some(AnyDiagnostic::InvalidTypeUse(InvalidTypeUse {
+                    node: pat_syntax(*pat)?,
+                    message: format!("Unbound type variable {name} in annotation"),
+                    unbound_variable: Some(name.clone()),
+                    type_pattern_path: None,
+                }))
+            }
+            InferenceDiagnostic::InvalidTypePattern { pat, message, path } => {
+                Some(AnyDiagnostic::InvalidTypeUse(InvalidTypeUse {
+                    node: pat_syntax(*pat)?,
+                    message: message.clone(),
+                    unbound_variable: None,
+                    type_pattern_path: Some(path.clone()),
                 }))
             }
             InferenceDiagnostic::UnresolvedIdent { expr, name } => {
@@ -496,6 +518,8 @@ impl AnyDiagnostic {
                 Some(AnyDiagnostic::UnrecoverableImplicit(InvalidTypeUse {
                     node: expr_syntax(*expr)?,
                     message: message.clone(),
+                    unbound_variable: None,
+                    type_pattern_path: None,
                 }))
             }
             InferenceDiagnostic::ConstraintViolation { expr, constraint, derived_from } => {
@@ -506,7 +530,7 @@ impl AnyDiagnostic {
                     // inferred in, which need not be the current one.
                     derived_from: derived_from
                         .iter()
-                        .map(|s| source_map.rebase(*s, def_base))
+                        .map(|s| source_map.rebase(*s, def_base, original_tokens))
                         .collect(),
                     node: expr_syntax(*expr)?,
                 }))
@@ -612,7 +636,7 @@ impl AnyDiagnostic {
                     proved_false: *proved_false,
                     derived_from: derived_from
                         .iter()
-                        .map(|s| source_map.rebase(*s, def_base))
+                        .map(|s| source_map.rebase(*s, def_base, original_tokens))
                         .collect(),
                     node: expr_syntax(*call_expr)?,
                 }))

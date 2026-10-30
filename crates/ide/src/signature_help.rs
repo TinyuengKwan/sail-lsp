@@ -72,12 +72,21 @@ pub(crate) fn signature_help(
     // Build signature info for each overload
     let mut signatures = Vec::new();
     let mut best_active = 0usize;
-    let mut best_score = 0usize;
+    let mut best_score = 0u8;
 
     for (sig_idx, sig) in all_sigs.iter().enumerate() {
-        // Score this overload: prefer one where the arg count matches
+        // The overload taking as many arguments as the call has, else one
+        // that still has a parameter at the cursor; the earlier on a tie.
+        // This scored a candidate by its parameter count, so the overload
+        // with the *most* parameters won whatever the call looked like.
         let non_implicit_count = sig.params.iter().filter(|p| !p.is_implicit).count();
-        let score = if non_implicit_count > arg_index { non_implicit_count } else { 0 };
+        let score = if non_implicit_count == call.arg_count && non_implicit_count > arg_index {
+            2
+        } else if non_implicit_count > arg_index {
+            1
+        } else {
+            0
+        };
         if score > best_score {
             best_score = score;
             best_active = sig_idx;
@@ -92,6 +101,19 @@ pub(crate) fn signature_help(
                 .map(|param| ide_db::ide_types::ParameterInfo { label: param.name.clone() })
                 .collect(),
         });
+    }
+
+    // Reuse inference's source-order-aware overload resolution (including
+    // aliases, dependent widths and constraints), rather than comparing
+    // rendered parameter strings. In incomplete code, keep the arity fallback.
+    if let Some(selected) = file.file_text().and_then(|(db, ft)| {
+        hir::Semantics::new(db)
+            .resolve_overload_callee(ft, call.callee_span.start)
+            .map(|definition| definition.name(db).to_string())
+    }) {
+        if let Some(index) = all_sigs.iter().position(|sig| sig.name == selected) {
+            best_active = index;
+        }
     }
 
     let active_parameter = {

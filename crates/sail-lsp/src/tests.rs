@@ -1184,14 +1184,22 @@ fn preserves_type_variables_in_let_bindings() {
     assert!(formatted.contains("let vd_val"), "vd_val preserved: {formatted}");
 }
 
+/// A local links its binding and its mentions — and nothing else that
+/// spells the same name: not another function's `x`, not a top-level `x`.
 #[test]
-fn returns_linked_editing_ranges_for_identifier() {
-    let source = "let x = x\n";
+fn linked_editing_links_one_binding() {
+    let source = "let x : int = 0\n\
+                  function f() -> int = { let x : int = 1; x + x }\n\
+                  function g() -> int = { let x : int = 2; x }\n";
     let file = SalsaTestFile::new(source.to_string());
-    let offset = source.rfind('x').expect("rhs x");
-    let lc = file.source.position_at(offset);
-    let linked = linked_editing_ranges_for_position(&file, lc).expect("linked ranges");
-    assert!(linked.ranges.len() >= 2);
+    let in_f = source.find("x + x").expect("f's use");
+    let linked = linked_editing_ranges_for_position(&file, file.source.position_at(in_f))
+        .expect("f's x is linked");
+    let f = source.find("function f").unwrap()..source.find("function g").unwrap();
+    assert_eq!(linked.ranges.len(), 3, "the binding and two uses: {:?}", linked.ranges);
+    assert!(linked.ranges.iter().all(|r| f.contains(&base_db::range_start(*r))));
+    let top = source.find('x').unwrap();
+    assert!(linked_editing_ranges_for_position(&file, file.source.position_at(top)).is_none());
 }
 
 #[test]
@@ -4178,6 +4186,11 @@ fn query_results_compare_by_value() {
     // Wrappers still allowed to compare by pointer, and why.
     const ALLOWED: &[(&str, &str)] = &[
         (
+            "ParseCache",
+            "a stable disposable cache on a FileText input, not a query result; \
+             allocated once per file, shared by snapshots, never recreated by query execution",
+        ),
+        (
             "ArcCallableBodies",
             "whole-file, and the only consumer that matters — callable_body — \
              fingerprints its own result, so a cascade stops there",
@@ -4562,7 +4575,9 @@ fn what_the_compiler_says_reaches_the_client() {
         ..Default::default()
     };
 
-    collection.set_check_diagnostics(vec![(file, vec![diag("not a subtype")])]);
+    let project = crate::flycheck::CheckTarget::Project("/w/a.sail_project".into());
+    let other = crate::flycheck::CheckTarget::Project("/w/b/b.sail_project".into());
+    collection.set_check_diagnostics(&project, vec![(file, vec![diag("not a subtype")])]);
     let shown: Vec<_> = collection.diagnostics_for(file).map(|d| d.message.clone()).collect();
     assert_eq!(shown, vec!["not a subtype"], "a check finding must reach the client");
     assert!(collection.take_changes().is_some_and(|c| c.contains(&file)));
@@ -4570,7 +4585,11 @@ fn what_the_compiler_says_reaches_the_client() {
     // A later run that finds nothing clears the file. Upstream stops at the
     // first error, so keeping the previous run's findings would leave a
     // diagnostic it no longer makes.
-    collection.set_check_diagnostics(Vec::new());
+    // Another project's run is not this one's: it neither clears nor
+    // duplicates what this project's run found.
+    collection.set_check_diagnostics(&other, Vec::new());
+    assert_eq!(collection.diagnostics_for(file).count(), 1);
+    collection.set_check_diagnostics(&project, Vec::new());
     assert_eq!(collection.diagnostics_for(file).count(), 0);
     assert!(
         collection.take_changes().is_some_and(|c| c.contains(&file)),
@@ -4621,4 +4640,172 @@ fn a_secondary_location_is_sent_as_a_location() {
     assert_eq!(related[0].location.uri, url);
     assert_eq!(related[0].location.range.start.character, 23);
     assert_eq!(related[0].message, "constraint from here");
+}
+
+/// A request advertised under `experimental` has a handler behind it.
+///
+/// `ssr` was advertised while its handler parsed the rule and returned an
+/// empty edit, so a client that offered structural search-replace would
+/// have reported success and changed nothing.
+#[test]
+fn every_experimental_capability_has_a_handler() {
+    let caps = crate::lsp::capabilities::server_capabilities(
+        &crate::lsp::capabilities::ClientCapabilities::default(),
+    );
+    let ext = include_str!("lsp/ext.rs");
+    let main_loop = include_str!("main_loop.rs");
+    let experimental = caps.experimental.expect("experimental capabilities");
+    for (name, on) in experimental.as_object().expect("an object") {
+        if on != &serde_json::Value::Bool(true) {
+            continue;
+        }
+        let method = format!("METHOD: &'static str = \"experimental/{name}\";");
+        let at = ext.find(&method).unwrap_or_else(|| panic!("no request type for `{name}`"));
+        let ty = ext[..at].rsplit("pub enum ").next().unwrap().split_whitespace().next().unwrap();
+        assert!(
+            main_loop.contains(&format!("crate::lsp_ext::{ty}>")),
+            "`{name}` is advertised and `{ty}` has no handler"
+        );
+    }
+}
+
+#[test]
+fn internal_trivia_reuses_inference_and_refreshes_source_locations() {
+    use ide::analysis::AnalysisHost;
+    use std::sync::Arc;
+    let mut host = AnalysisHost::default();
+    let mut files = base_db::Files::default();
+    let fid = base_db::FileId::from_raw(0);
+    let original = "function f(x : int) -> int = { let unused = 1; missing }\n";
+    let mut previous = None;
+    for text in [
+        original.to_owned(),
+        original.replace("let unused", "/* 注释 */ let unused").replace("missing", "\n  missing"),
+        original.replace("= 1", "= /* widened comment */ 1").replace("missing", "/* b */ missing"),
+        format!("// above\n{original}"),
+        original.to_owned(),
+    ] {
+        files.set_file_text(host.raw_database_mut(), fid, &text);
+        let db = host.raw_database();
+        let ft = files.file_text(fid).unwrap();
+        let id = hir::def_query::file_def_with_body_ids(db, ft)[0];
+        let inferred = hir::ty_query::infer(db, id).0.clone();
+        if let Some(old) = &previous {
+            assert!(Arc::ptr_eq(old, &inferred), "trivia edit re-inferred f: {text}");
+        }
+        previous = Some(inferred.clone());
+        let sf = ide_db::root_database::SalsaFile::new(db, ft);
+        let diagnostics = ide_diagnostics::semantic_diagnostics(
+            db,
+            &ide_diagnostics::DiagnosticsConfig::new(),
+            &ide_db::assists::AssistResolveStrategy::None,
+            &sf,
+            ft,
+            None,
+        );
+        {
+            let name = "unused";
+            let expected = text.find(name).unwrap();
+            assert!(
+                diagnostics.iter().any(|d| {
+                    usize::from(d.range.range.start()) == expected
+                        && usize::from(d.range.range.end()) == expected + name.len()
+                }),
+                "diagnostic for {name} did not move: {diagnostics:?}"
+            );
+        }
+        let mapped = hir::def_query::body_with_source_map(db, id);
+        let current = &mapped.0 .1;
+        let (expr, _) = mapped
+            .0
+             .0
+            .exprs
+            .iter()
+            .find(|(_, expr)| matches!(expr, hir::Expr::Ident(name) if name == "missing"))
+            .unwrap();
+        assert_eq!(current.expr_syntax(expr).unwrap().start, text.find("missing").unwrap());
+        let old_start = original.find("missing").unwrap();
+        let moved = current.rebase(
+            hir::Span::new(old_start, old_start + 7),
+            inferred.def_base,
+            &inferred.source_tokens,
+        );
+        assert_eq!(moved.start, text.find("missing").unwrap());
+        assert_eq!(moved.end, moved.start + 7);
+    }
+}
+
+#[test]
+fn reused_inference_keeps_constraint_related_locations_current() {
+    use ide::analysis::AnalysisHost;
+    use std::sync::Arc;
+    let mut host = AnalysisHost::default();
+    let mut files = base_db::Files::default();
+    let fid = base_db::FileId::from_raw(0);
+    let original = "val g : forall 'n, 'n > 4. int('n) -> int\nfunction f() -> int = g(2)\n";
+    let mut previous = None;
+    for text in
+        [original.to_owned(), original.replace("g(2)", "g(/* 注释 */ 2)"), original.to_owned()]
+    {
+        files.set_file_text(host.raw_database_mut(), fid, &text);
+        let db = host.raw_database();
+        let ft = files.file_text(fid).unwrap();
+        let id = hir::def_query::file_def_with_body_ids(db, ft)[0];
+        let inferred = hir::ty_query::infer(db, id).0.clone();
+        if let Some(old) = &previous {
+            assert!(Arc::ptr_eq(old, &inferred));
+        }
+        previous = Some(inferred);
+        let sf = ide_db::root_database::SalsaFile::new(db, ft);
+        let diagnostics = ide_diagnostics::semantic_diagnostics(
+            db,
+            &ide_diagnostics::DiagnosticsConfig::new(),
+            &ide_db::assists::AssistResolveStrategy::None,
+            &sf,
+            ft,
+            None,
+        );
+        let related: Vec<_> = diagnostics.iter().flat_map(|d| &d.related).collect();
+        let expected = text.rfind('2').unwrap();
+        assert!(
+            related.iter().any(|(range, _)| {
+                usize::from(range.range.start()) == expected
+                    && usize::from(range.range.end()) == expected + 1
+            }),
+            "constraint origin did not move: {diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn callable_semantic_fingerprint_tracks_operator_grouping() {
+    use ide::analysis::AnalysisHost;
+    let mut host = AnalysisHost::default();
+    let mut files = base_db::Files::default();
+    let fid = base_db::FileId::from_raw(0);
+    let fingerprint = |host: &AnalysisHost, files: &base_db::Files| {
+        let db = host.raw_database();
+        let ft = files.file_text(fid).unwrap();
+        let id = hir::def_query::file_def_with_body_ids(db, ft)[0];
+        hir::def_query::callable_body(db, id).as_ref().unwrap().fingerprint()
+    };
+    files.set_file_text(
+        host.raw_database_mut(),
+        fid,
+        "infix 8 =%\nfunction f() -> int = 1 =% 2 + 3\n",
+    );
+    let ft = files.file_text(fid).unwrap();
+    hir::def_query::set_workspace_files(host.raw_database_mut(), vec![ft]);
+    let before = fingerprint(&host, &files);
+    files.set_file_text(
+        host.raw_database_mut(),
+        fid,
+        "infix 2 =%\nfunction f() -> int = 1 =% 2 + 3\n",
+    );
+    hir::def_query::set_workspace_files(host.raw_database_mut(), vec![ft]);
+    assert_ne!(
+        before,
+        fingerprint(&host, &files),
+        "same tokens with different grouping must invalidate inference"
+    );
 }

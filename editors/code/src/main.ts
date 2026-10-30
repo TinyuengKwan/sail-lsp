@@ -18,11 +18,21 @@ import {
 
 let client: LanguageClient | undefined;
 let outputChannel: vscode.OutputChannel;
+let statusBar: vscode.StatusBarItem;
 let activationErrorShown = false;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
     outputChannel = vscode.window.createOutputChannel("Sail Language Server");
     context.subscriptions.push(outputChannel);
+
+    // RA's status bar item: health and whether the server is still working,
+    // the last message on hover, the full status on click.
+    statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left);
+    statusBar.command = "sail-lsp.analyzerStatus";
+    statusBar.text = "$(sync~spin) Sail";
+    statusBar.tooltip = "Sail: starting";
+    statusBar.show();
+    context.subscriptions.push(statusBar);
 
     const serverPath = getServerPath(context);
     if (!serverPath) {
@@ -46,7 +56,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     // RA pattern: client options define document selector & capabilities.
     const clientOptions: LanguageClientOptions = {
-        documentSelector: [{ scheme: "file", language: "sail" }],
+        // Manifests too: the server answers definition, completion and
+        // diagnostics in them, and never analyses them as Sail.
+        documentSelector: [
+            { scheme: "file", language: "sail" },
+            { scheme: "file", language: "sail-project" },
+        ],
         outputChannel,
         traceOutputChannel: outputChannel,
         middleware: {},
@@ -55,6 +70,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     };
 
     client = new LanguageClient("sail-lsp", "Sail Language Server", serverOptions, clientOptions);
+    client.onNotification("sail-lsp/serverStatus", (status: ServerStatus) => showStatus(status));
 
     client.onDidChangeState((event) => {
         outputChannel.appendLine(`[sail-lsp] client state ${event.oldState} -> ${event.newState}`);
@@ -68,6 +84,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         await client.start();
     } catch (error) {
         client = undefined;
+        showStatus({ health: "error", quiescent: true, message: "The server failed to start." });
         const message = error instanceof Error ? error.message : String(error);
         outputChannel.appendLine(`[sail-lsp] failed to start: ${message}`);
         void vscode.window.showErrorMessage(`Failed to start sail-lsp: ${message}`);
@@ -175,50 +192,40 @@ function getExtraEnv(): Record<string, string> {
 }
 
 function getInitializationOptions(): unknown {
-    // Pass all sail-lsp.* settings to the server as initializationOptions.
-    // Mirrors RA pattern where config is sent as initialization options.
-    const config = vscode.workspace.getConfiguration("sail-lsp");
-    return {
-        diagnostics: {
-            enable: config.get<boolean>("diagnostics.enable", true),
-            effectMismatch: config.get<boolean>("diagnostics.effectMismatch", true),
-            disabled: config.get<string[]>("diagnostics.disabled", []),
-        },
-        inlayHints: {
-            enable: config.get<boolean>("inlayHints.enable", true),
-            typeHints: config.get<boolean>("inlayHints.typeHints", true),
-            parameterHints: config.get<boolean>("inlayHints.parameterHints", true),
-            effectHints: config.get<boolean>("inlayHints.effectHints", true),
-            maxLength: config.get<number | null>("inlayHints.maxLength", 25),
-        },
-        completion: {
-            enable: config.get<boolean>("completion.enable", true),
-            addCallParenthesis: config.get<boolean>("completion.addCallParenthesis", true),
-            postfix: config.get<boolean>("completion.postfix", true),
-            limit: config.get<number>("completion.limit", 200),
-        },
-        codeLens: {
-            enable: config.get<boolean>("codeLens.enable", true),
-        },
-        hover: {
-            docs: config.get<boolean>("hover.docs", true),
-            keywords: config.get<boolean>("hover.keywords", true),
-        },
-        semanticTokens: {
-            enable: config.get<boolean>("semanticTokens.enable", true),
-        },
-        z3: {
-            timeoutMs: config.get<number>("z3.timeoutMs", 1000),
-        },
-        workspace: {
-            projectFile: config.get<string | null>("workspace.projectFile", null),
-            projectVariables: config.get<Record<string, boolean | string>>("workspace.projectVariables", {}),
-            projectModules: config.get<string[]>("workspace.projectModules", []),
-            maxFiles: config.get<number>("workspace.maxFiles", 10000),
-            target: config.get<string | null>("workspace.target", null),
-            includePaths: config.get<string[]>("workspace.includePaths", []),
-        },
-    };
+    // The whole `sail-lsp` section, as rust-analyzer sends its own: a hand
+    // copied subset drifted from package.json (it lacked generatedFiles and
+    // flycheck and still sent removed settings).
+    return JSON.parse(JSON.stringify(vscode.workspace.getConfiguration("sail-lsp")));
+}
+
+// ── Status ───────────────────────────────────────────────────────
+
+interface ServerStatus {
+    health: "ok" | "warning" | "error";
+    quiescent: boolean;
+    message?: string;
+}
+
+function showStatus(status: ServerStatus): void {
+    const icon = !status.quiescent
+        ? "$(sync~spin)"
+        : status.health === "error"
+          ? "$(error)"
+          : status.health === "warning"
+            ? "$(warning)"
+            : "$(check)";
+    statusBar.text = `${icon} Sail`;
+    statusBar.backgroundColor =
+        status.health === "error"
+            ? new vscode.ThemeColor("statusBarItem.errorBackground")
+            : status.health === "warning"
+              ? new vscode.ThemeColor("statusBarItem.warningBackground")
+              : undefined;
+    const tooltip = new vscode.MarkdownString("", true);
+    tooltip.appendText(status.message ?? (status.quiescent ? "Sail: ready" : "Sail: loading"));
+    tooltip.appendMarkdown("\n\n[Show status](command:sail-lsp.analyzerStatus)");
+    tooltip.isTrusted = true;
+    statusBar.tooltip = tooltip;
 }
 
 // ── Commands ─────────────────────────────────────────────────────
@@ -255,6 +262,54 @@ function registerCommands(context: vscode.ExtensionContext): void {
             const config = vscode.workspace.getConfiguration("sail-lsp");
             const current = config.get<boolean>("inlayHints.enable", true);
             void config.update("inlayHints.enable", !current, vscode.ConfigurationTarget.Global);
+        }),
+
+        vscode.commands.registerCommand("sail-lsp.analyzerStatus", async () => {
+            if (!client) return;
+            const content = await client.sendRequest<string>("sail-lsp/analyzerStatus");
+            await showVirtualTextDocument(content);
+        }),
+
+        vscode.commands.registerCommand("sail-lsp.openProjectManifest", async () => {
+            const editor = vscode.window.activeTextEditor;
+            if (!client || !editor) return;
+            const location = await client.sendRequest<unknown>("sail-lsp/openProjectManifest", {
+                textDocument: { uri: editor.document.uri.toString() },
+            });
+            if (!location) {
+                void vscode.window.showInformationMessage(
+                    "This file is not part of a loaded Sail project.",
+                );
+                return;
+            }
+            await showLocation(client.protocol2CodeConverter.asLocation(location as never));
+        }),
+
+        vscode.commands.registerCommand("sail-lsp.parentModule", async () => {
+            const editor = vscode.window.activeTextEditor;
+            if (!client || !editor) return;
+            const locations = await client.sendRequest<unknown[]>("sail-lsp/parentModule", {
+                textDocument: { uri: editor.document.uri.toString() },
+            });
+            const converted = locations.map((l) =>
+                client!.protocol2CodeConverter.asLocation(l as never),
+            );
+            if (converted.length === 0) {
+                void vscode.window.showInformationMessage(
+                    "Nothing in the project lists or includes this file.",
+                );
+            } else if (converted.length === 1) {
+                await showLocation(converted[0]);
+            } else {
+                await vscode.commands.executeCommand(
+                    "editor.action.goToLocations",
+                    editor.document.uri,
+                    editor.selection.active,
+                    converted,
+                    "peek",
+                    "Nothing in the project lists or includes this file.",
+                );
+            }
         }),
 
         vscode.commands.registerCommand("sail-lsp.showSyntaxTree", async () => {
@@ -297,6 +352,12 @@ function registerCommands(context: vscode.ExtensionContext): void {
             await showVirtualTextDocument(content);
         }),
     );
+}
+
+async function showLocation(location: vscode.Location): Promise<void> {
+    const editor = await vscode.window.showTextDocument(location.uri);
+    editor.selection = new vscode.Selection(location.range.start, location.range.end);
+    editor.revealRange(location.range, vscode.TextEditorRevealType.InCenterIfOutsideViewport);
 }
 
 async function showVirtualTextDocument(content: string): Promise<void> {

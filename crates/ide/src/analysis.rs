@@ -350,6 +350,9 @@ pub struct ServerStatus {
     pub include_nodes: usize,
 }
 
+/// The sites a code lens counts, which clicking it shows.
+pub type LensSites = Vec<(FileId, base_db::TextRange)>;
+
 #[derive(Debug, Clone)]
 pub struct CodeAction {
     pub import: Option<ide_db::imports::import_assets::ImportRequest>,
@@ -607,14 +610,19 @@ impl Analysis {
         crate::completion::resolve_completion_item_ide(item, &all);
     }
 
-    /// The title a code lens should show, from the lens's own data.
-    pub fn code_lens_title(&self, data: &serde_json::Value) -> crate::Cancellable<Option<String>> {
-        self.with_db(|a| a.code_lens_title_inner(data))
+    /// A code lens's title, and the sites it counts — what clicking it
+    /// shows. The sites were counted for the title and then dropped, so a
+    /// lens said "3 references" and clicking it listed none.
+    pub fn resolve_code_lens(
+        &self,
+        data: &serde_json::Value,
+    ) -> crate::Cancellable<Option<(String, LensSites)>> {
+        self.with_db(|a| a.resolve_code_lens_inner(data))
     }
 
-    fn code_lens_title_inner(&self, data: &serde_json::Value) -> Option<String> {
-        if data.get("contexts").is_none() || data["kind"] == "runnable" {
-            return crate::annotations::code_lens_title(data);
+    fn resolve_code_lens_inner(&self, data: &serde_json::Value) -> Option<(String, LensSites)> {
+        if data.get("contexts").is_none() {
+            return crate::annotations::code_lens_title(data).map(|title| (title, Vec::new()));
         }
         let source = u32::try_from(data["source"].as_u64()?).ok()?;
         let source = self
@@ -673,7 +681,9 @@ impl Analysis {
         }
         let mut resolved = data.clone();
         resolved["count"] = serde_json::json!(sites.len());
-        crate::annotations::code_lens_title(&resolved)
+        let mut sites: Vec<_> = sites.into_iter().collect();
+        sites.sort_by_key(|(file, range)| (*file, base_db::range_start(*range)));
+        crate::annotations::code_lens_title(&resolved).map(|title| (title, sites))
     }
 
     /// The `$include` graph rendered for the debugging command.
@@ -974,20 +984,19 @@ impl Analysis {
         ide_assists::quick_fix_for_diagnostic(&sf, diagnostic)
     }
 
-    /// Edits to apply when the user types `ch`, if it triggers formatting.
+    /// Edits to apply when the user types `ch`: local ones only.
     ///
-    /// Which characters trigger, and what they trigger, is knowledge about
-    /// Sail — that `->` and `=>` are complete only once the second character
-    /// arrives, so the trigger is the arrow head behind the cursor. It lived
-    /// in the LSP handler, which also read the buffer to find that head.
+    /// Every trigger but newline used to reformat the whole document — each
+    /// `}` or `;` typed rewrote the file under the cursor. Now `}` re-indents
+    /// its own line to its `{`, a completed `->` gets its space, and newline
+    /// is on-enter; `;` and `=` trigger nothing.
     pub fn on_type_formatting(
         &self,
         url: &url::Url,
         position: ide_db::LineCol,
         ch: &str,
-        config: &ide_db::ide_types::FormatOptions,
     ) -> crate::Cancellable<Option<Vec<ide_db::text_edit::TextEdit>>> {
-        self.with_db(|a| a.on_type_formatting_inner(url, position, ch, config))
+        self.with_db(|a| a.on_type_formatting_inner(url, position, ch))
     }
 
     fn on_type_formatting_inner(
@@ -995,20 +1004,14 @@ impl Analysis {
         url: &url::Url,
         position: ide_db::LineCol,
         ch: &str,
-        config: &ide_db::ide_types::FormatOptions,
     ) -> Option<Vec<ide_db::text_edit::TextEdit>> {
-        match ch {
-            "}" | ";" => self.format_inner(url, config),
-            "\n" => self.on_enter_inner(url, position),
-            "=" | ">" => {
-                let sf = self.file(url)?;
-                let offset = sf.offset_at(&position);
-                let closes_an_arrow = offset >= 2
-                    && matches!(sf.text().as_bytes().get(offset - 2), Some(b'-') | Some(b'='));
-                closes_an_arrow.then(|| self.format_inner(url, config)).flatten()
-            }
-            _ => None,
+        if ch == "\n" {
+            return self.on_enter_inner(url, position);
         }
+        let sf = self.file(url)?;
+        let mut chars = ch.chars();
+        let (Some(c), None) = (chars.next(), chars.next()) else { return None };
+        crate::typing::on_char_typed(&sf, sf.offset_at(&position), c)
     }
 
     /// Ranges an editor should keep in sync while typing.
@@ -1058,7 +1061,89 @@ impl Analysis {
 
     fn document_links_inner(&self, url: &url::Url) -> Vec<ide_db::ide_types::DocumentLink> {
         let Some(sf) = self.file(url) else { return Vec::new() };
-        crate::formatting::document_links_for_file(url, &sf)
+        let mut links = crate::formatting::document_links_for_file(url, &sf);
+        let Some(file_id) = self.file_id(url) else { return links };
+        for (range, target) in self.include_targets(file_id) {
+            let Some(target) = self.url_for_file_id(target) else { continue };
+            links.push(ide_db::ide_types::DocumentLink {
+                range,
+                target: Some(target.to_string()),
+                tooltip: Some("Open the included file".to_owned()),
+            });
+        }
+        links
+    }
+
+    /// Each `$include` that brings `url` into the project: the including
+    /// file and the range of the path there. A file the manifest does not
+    /// list belongs to the project through these, as a Rust module file
+    /// belongs to its crate through `mod x;`.
+    pub fn include_sites(
+        &self,
+        url: &url::Url,
+    ) -> crate::Cancellable<Vec<ide_db::ide_types::FileLocation>> {
+        self.with_db(|a| a.include_sites_inner(url))
+    }
+
+    fn include_sites_inner(&self, url: &url::Url) -> Vec<ide_db::ide_types::FileLocation> {
+        let Some(file_id) = self.file_id(url) else { return Vec::new() };
+        let Some(project) = base_db::preprocess::WorkspaceSourceProject::try_get(&self.db) else {
+            return Vec::new();
+        };
+        let plan = hir::preprocess::workspace_plan(&self.db, project);
+        let mut includers: Vec<_> = plan
+            .includes
+            .iter()
+            .filter(|(_, _, to)| *to == file_id)
+            .map(|(from, _, _)| *from)
+            .collect();
+        includers.sort();
+        includers.dedup();
+        includers
+            .into_iter()
+            .flat_map(|from| {
+                let url = self.url_for_file_id(from);
+                self.include_targets(from)
+                    .into_iter()
+                    .filter(|(_, target)| *target == file_id)
+                    .filter_map(move |(range, _)| {
+                        Some(ide_db::ide_types::FileLocation { url: url?.clone(), range })
+                    })
+            })
+            .collect()
+    }
+
+    /// Each `$include` in `file_id` the project resolved: the range of its
+    /// path, and the file that path names — as the preprocessor resolved
+    /// it, through the include paths and the library.
+    ///
+    /// `$include "x.sail"` is one directive token, which neither document
+    /// links (they looked at string literals) nor goto (it resolves names)
+    /// looked inside, so the file a model is assembled from could not be
+    /// opened from where it is included.
+    fn include_targets(&self, file_id: FileId) -> Vec<(base_db::TextRange, FileId)> {
+        let Some(project) = base_db::preprocess::WorkspaceSourceProject::try_get(&self.db) else {
+            return Vec::new();
+        };
+        let plan = hir::preprocess::workspace_plan(&self.db, project);
+        let Some(ft) = self.file_text(file_id) else { return Vec::new() };
+        let Some(root) = syntax::parse_query::parse_file(&self.db, ft).syntax_node() else {
+            return Vec::new();
+        };
+        let events: Vec<_> =
+            root.children().filter(|n| syntax::preprocess::Event::from_node(n).is_some()).collect();
+        plan.includes
+            .iter()
+            .filter(|(from, _, _)| *from == file_id)
+            .filter_map(|&(_, event, target)| {
+                let node = events.get(event)?;
+                let text = node.text().to_string();
+                let open = text.find(['"', '<'])?;
+                let close = text.rfind(['"', '>']).filter(|&c| c > open)?;
+                let start = usize::from(node.text_range().start());
+                Some((base_db::text_range(start + open + 1, start + close), target))
+            })
+            .collect()
     }
 
     /// The lowered HIR at `position`, for the debugging command.
@@ -1208,6 +1293,76 @@ impl Analysis {
                 position,
             )
         })?
+    }
+
+    /// Resolve an SSR rule in the selected scope and return preview edits.
+    /// No files are modified by this query.
+    pub fn structural_search_replace(
+        &self,
+        file_id: FileId,
+        position: ide_db::LineCol,
+        query: &str,
+        parse_only: bool,
+        selections: &[base_db::TextRange],
+        excluded: &std::collections::HashSet<FileId>,
+    ) -> crate::Cancellable<Result<ide_db::source_change::SourceChange, String>> {
+        self.with_db(|a| {
+            let instances = a.position_instances(file_id, position);
+            if instances.len() > 1 {
+                return Err("SSR context is active in multiple include instances".into());
+            }
+            let origin = instances.first().copied().unwrap_or(file_id);
+            let ft = a.file_text(origin).ok_or("SSR file is unavailable")?;
+            let file = a.file_by_id(origin).ok_or("SSR file is unavailable")?;
+            let finder = ide_ssr::MatchFinder::new(&a.db, ft, file.offset_at(&position), query)
+                .map_err(|e| e.to_string())?;
+            let mut change = ide_db::source_change::SourceChange::new();
+            if parse_only {
+                return Ok(change);
+            }
+            for (_, file) in a.all_salsa_files() {
+                let Some((_, input)) = file.file_text() else { continue };
+                let view = input.file_id(&a.db);
+                let physical = base_db::preprocess::physical_file(&a.db, view);
+                if excluded.contains(&physical) || (!selections.is_empty() && physical != file_id) {
+                    continue;
+                }
+                let Some(tree) =
+                    syntax::parse_query::semantic_parse_file(&a.db, input).syntax_node()
+                else {
+                    continue;
+                };
+                for edit in finder.edits_for_tree_in_ranges(&tree, input, selections) {
+                    if a.instances_at_offset(physical, base_db::range_start(edit.range)).len() > 1 {
+                        return Err(
+                            "SSR would edit a token shared by multiple include contexts".into()
+                        );
+                    }
+                    let target = change.source_file_edits.entry(physical).or_default();
+                    if !target.contains(&edit) {
+                        target.push(edit);
+                    }
+                }
+            }
+            // A malformed replacement must never reach the editor. Parse the
+            // complete resulting file so precedence and surrounding syntax count.
+            for (&id, edits) in &change.source_file_edits {
+                let mut text =
+                    a.file_text(id).ok_or("SSR target disappeared")?.text(&a.db).to_string();
+                let mut edits = edits.clone();
+                edits.sort_by_key(|e| std::cmp::Reverse(base_db::range_start(e.range)));
+                for edit in edits {
+                    text.replace_range(
+                        base_db::range_start(edit.range)..base_db::range_end(edit.range),
+                        &edit.new_text,
+                    );
+                }
+                if !syntax::parse_text(&text).1.is_empty() {
+                    return Err("SSR replacement would leave an invalid Sail file".into());
+                }
+            }
+            Ok(change)
+        })
     }
 
     /// Run a query, turning a salsa cancellation into an error value.
@@ -1648,6 +1803,26 @@ impl Analysis {
         position: ide_db::LineCol,
     ) -> Vec<crate::navigation_target::NavigationTarget> {
         let Some(sf) = self.file(url) else { return Vec::new() };
+
+        // On the path of an `$include`: the file it names.
+        let offset = sf.offset_at(&position);
+        if let Some(target) = self.file_id(url).and_then(|id| {
+            self.include_targets(id).into_iter().find_map(|(range, target)| {
+                (base_db::range_start(range) <= offset && offset <= base_db::range_end(range))
+                    .then_some(target)
+            })
+        }) {
+            let Some(target_url) = self.url_for_file_id(target).cloned() else { return Vec::new() };
+            let name = target_url.path().rsplit('/').next().unwrap_or_default().to_owned();
+            let start = base_db::text_range(0, 0);
+            return vec![crate::navigation_target::NavigationTarget::new(
+                target_url,
+                name,
+                ide_db::ide_types::SymbolKind::Module,
+                start,
+                start,
+            )];
+        }
 
         if sf
             .file_text()

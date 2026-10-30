@@ -97,6 +97,13 @@ pub(super) fn complete_name_ref(
     if let Some(path_ctx) = &name_ref_ctx.path_ctx {
         match &path_ctx.kind {
             context::PathKind::Expr { expr_ctx } => {
+                // A field slot of a record offers its fields and nothing
+                // else; of anything else (`xs[i]`), it is an expression.
+                if let Some(ty) = &expr_ctx.field_of {
+                    if dot::complete_fields(acc, ctx, ty, all_files) {
+                        return;
+                    }
+                }
                 expr::complete_expr_path(
                     acc, ctx, all_files, path_ctx, expr_ctx, keywords, builtins,
                 );
@@ -106,7 +113,7 @@ pub(super) fn complete_name_ref(
                 acc.add_many(record_items);
                 postfix::complete_postfix(acc, ctx);
             }
-            context::PathKind::Type { .. } => {
+            context::PathKind::Type => {
                 let type_names = crate::completions::type_::collect_type_names(ctx, all_files);
                 let type_name_refs: Vec<(&str, ide_db::defs::SymbolKind)> =
                     type_names.iter().map(|(n, k)| (n.as_str(), *k)).collect();

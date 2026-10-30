@@ -111,6 +111,16 @@ def main() -> int:
     )
     args = ap.parse_args()
 
+    # A broken Sail installation must not turn every source into REJECT.
+    with tempfile.TemporaryDirectory(prefix="sail-oracle-check-") as probe_dir:
+        probe = os.path.join(probe_dir, "probe.sail")
+        with open(probe, "w") as f:
+            f.write('default Order dec\n$include <prelude.sail>\nfunction probe() -> int = 1\n')
+        checked = subprocess.run([args.sail, "--no-memo-z3", "--just-check", probe], capture_output=True, text=True, timeout=30)
+        if checked.returncode:
+            print("Upstream oracle preflight failed; existing oracle was not changed:\n" + checked.stderr, file=sys.stderr)
+            return 2
+
     repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     lib_dir = os.path.join(repo, "crates", "sail-lsp", "data", "sail-lib")
     if not os.path.isdir(lib_dir):
@@ -198,7 +208,9 @@ def main() -> int:
             print(f"  {corpus}: {len(rows)} files so far", file=sys.stderr)
 
     rows.sort(key=lambda r: r[1])
+    version = subprocess.run([args.sail, "--version"], capture_output=True, text=True, check=True).stdout.strip()
     with open(args.out, "w") as fh:
+        fh.write(f"# Upstream: {version}; SAIL_DIR={os.environ.get('SAIL_DIR', '(installed default)')}\n")
         fh.write(
             HEADER.format(
                 corpora=",".join(CORPORA),

@@ -40,7 +40,8 @@
   "activationEvents": [
     "workspaceContains:**/*.sail",
     "workspaceContains:*.sail_project",
-    "workspaceContains:sail.proj"
+    "workspaceContains:sail.proj",
+    "onLanguage:sail-project"
   ],
   "main": "./out/main",
   "capabilities": {
@@ -98,6 +99,13 @@
           ".sail"
         ],
         "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "sail-project",
+        "aliases": ["Sail Project", "sail-project"],
+        "extensions": [".sail_project"],
+        "filenames": ["sail.proj"],
+        "configuration": "./language-configuration-project.json"
       }
     ],
     "grammars": [
@@ -105,6 +113,11 @@
         "language": "sail",
         "scopeName": "source.sail",
         "path": "./syntaxes/sail.tmLanguage.json"
+      },
+      {
+        "language": "sail-project",
+        "scopeName": "source.sail-project",
+        "path": "./syntaxes/sail-project.tmLanguage.json"
       }
     ],
     "configuration": {
@@ -263,11 +276,6 @@
           "default": true,
           "description": "Show implementation counts as code lenses."
         },
-        "sail-lsp.codeLens.runnables": {
-          "type": "boolean",
-          "default": true,
-          "description": "Show run lenses for $[test] functions."
-        },
         "sail-lsp.hover.docs": {
           "type": "boolean",
           "default": true,
@@ -311,7 +319,7 @@
           "type": "array",
           "items": { "type": "string" },
           "default": [],
-          "description": "Root modules to load with their children and required modules. Empty selects all modules."
+          "description": "Root modules to load with the modules they transitively require (a child requires its parent; a parent does not bring its children), as `sail --project P A` does. Empty selects all modules."
         },
         "sail-lsp.workspace.generatedFiles": {
           "type": "object",
@@ -349,7 +357,7 @@
         "sail-lsp.flycheck.enable": {
           "type": "boolean",
           "default": false,
-          "description": "Run the upstream Sail compiler (--just-check) on save and show its errors beside the server's own."
+          "description": "Run the upstream Sail compiler (--just-check) on save and show its errors beside the server's own. The saved file's project is checked with its manifest, projectVariables and projectModules; a file outside every project is checked alone."
         },
         "sail-lsp.flycheck.command": {
           "type": "string",
@@ -362,7 +370,7 @@
             "type": "string"
           },
           "default": [],
-          "description": "Arguments passed to the Sail compiler before the file list (for example --config or -D)."
+          "description": "Extra arguments passed to the Sail compiler (for example --config or --strict-bitvector)."
         }
       }
     },
@@ -375,6 +383,21 @@
       {
         "command": "sail-lsp.restartServer",
         "title": "Restart Server",
+        "category": "Sail"
+      },
+      {
+        "command": "sail-lsp.analyzerStatus",
+        "title": "Show Server Status",
+        "category": "Sail"
+      },
+      {
+        "command": "sail-lsp.openProjectManifest",
+        "title": "Open Project Manifest",
+        "category": "Sail"
+      },
+      {
+        "command": "sail-lsp.parentModule",
+        "title": "Go to Parent Module",
         "category": "Sail"
       },
       {

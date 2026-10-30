@@ -1,5 +1,10 @@
 # Editor experience work
 
+Historical snapshot: results below belong to the recorded 2026-10-25 tree and
+corpora. Current measurements and the P2/P3 follow-up are in
+[2026-10-29-editor-p2-p3.json](2026-10-29-editor-p2-p3.json); do not combine
+these counts or treat old completion states as current coverage.
+
 Scope: all items in the requested todo list except P1-1 (remote build identity)
 and P1-4 (Zed-specific integration). Completion requires evidence below; an
 existing implementation alone is not an acceptance result.

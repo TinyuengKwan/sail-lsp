@@ -1,0 +1,769 @@
+{
+  "date": "2026-10-30",
+  "status": "complete",
+  "objective": "Snapshot all previously uncommitted changes, then ablate their mechanisms and remove unnecessary design without losing behavior.",
+  "scope": {
+    "from_commit": "0c9ce4cd705cbc48bef8cd9db93e250a517a18f3",
+    "snapshot_commit": "94e660fc1b8a6db0f3cb1a6c177747687e4c6540",
+    "snapshot_message": "feat: improve incremental analysis and validate editor behavior",
+    "initial_changed_files": [
+      "CLAUDE.md",
+      "Cargo.lock",
+      "README.md",
+      "crates/base-db/src/lib.rs",
+      "crates/base-db/src/parse_cache.rs",
+      "crates/hir-def/src/bodies.rs",
+      "crates/hir-def/src/def_query.rs",
+      "crates/hir-def/src/expr_store/body.rs",
+      "crates/hir-def/src/expr_store/lower.rs",
+      "crates/hir-def/src/item_tree/lower.rs",
+      "crates/hir-ty/src/infer/completion.rs",
+      "crates/hir-ty/src/infer/declaration_constraints.rs",
+      "crates/hir-ty/src/infer/dependencies.rs",
+      "crates/hir-ty/src/infer/expr.rs",
+      "crates/hir-ty/src/infer/mod.rs",
+      "crates/hir-ty/src/infer/pat.rs",
+      "crates/hir-ty/src/infer/semantic_audit.rs",
+      "crates/hir-ty/src/infer/solver.rs",
+      "crates/hir-ty/src/infer/unsupported_audit.rs",
+      "crates/hir-ty/src/query.rs",
+      "crates/hir/src/diagnostics.rs",
+      "crates/hir/src/lib.rs",
+      "crates/hir/src/semantics.rs",
+      "crates/ide-completion/src/completions/expr.rs",
+      "crates/ide-completion/src/context.rs",
+      "crates/ide-db/Cargo.toml",
+      "crates/ide-db/src/apply_change.rs",
+      "crates/ide-db/src/root_database.rs",
+      "crates/ide-diagnostics/src/lib.rs",
+      "crates/ide-diagnostics/src/tests.rs",
+      "crates/ide-ssr/Cargo.toml",
+      "crates/ide-ssr/src/fragments.rs",
+      "crates/ide-ssr/src/from_comment.rs",
+      "crates/ide-ssr/src/lib.rs",
+      "crates/ide-ssr/src/matching.rs",
+      "crates/ide-ssr/src/nester.rs",
+      "crates/ide-ssr/src/parsing.rs",
+      "crates/ide-ssr/src/replacing.rs",
+      "crates/ide-ssr/src/resolving.rs",
+      "crates/ide-ssr/src/search.rs",
+      "crates/ide/src/analysis.rs",
+      "crates/ide/src/completion.rs",
+      "crates/ide/src/fixture.rs",
+      "crates/ide/src/formatting/items.rs",
+      "crates/ide/src/formatting/lists.rs",
+      "crates/ide/src/lib.rs",
+      "crates/ide/src/manifest_mutation_tests.rs",
+      "crates/ide/src/regression_tests.rs",
+      "crates/parser/src/lex_full.rs",
+      "crates/parser/src/lib.rs",
+      "crates/parser/src/shortcuts.rs",
+      "crates/sail-lsp/examples/invalidation_matrix.rs",
+      "crates/sail-lsp/examples/mutation_check.rs",
+      "crates/sail-lsp/examples/reparse_stats.rs",
+      "crates/sail-lsp/examples/support/constraint_stats.rs",
+      "crates/sail-lsp/src/global_state.rs",
+      "crates/sail-lsp/src/handlers/dispatch.rs",
+      "crates/sail-lsp/src/main_loop.rs",
+      "crates/sail-lsp/src/tests.rs",
+      "crates/syntax/src/cst_lower.rs",
+      "crates/syntax/src/lib.rs",
+      "crates/syntax/src/parse_query.rs",
+      "crates/syntax/src/parsing.rs",
+      "crates/syntax/src/parsing/reparsing.rs",
+      "docs/architecture.md",
+      "docs/baselines/2026-10-29-editor-ablation.json",
+      "docs/baselines/2026-10-29-ra-followup.json",
+      "docs/baselines/2026-10-30-diagnostic-audit.json",
+      "docs/baselines/2026-10-30-ra-improvements.json",
+      "scripts/editor_probe.py",
+      "scripts/latency_summary.py"
+    ],
+    "initial_changed_file_count": 71,
+    "note": "The snapshot was committed before any ablation. Historical baseline reports remain historical; this report covers the new experiments."
+  },
+  "accepted_simplifications": [
+    {
+      "area": "SSR single-tree match and edit pipeline",
+      "files": [
+        "crates/ide-ssr/src/lib.rs",
+        "crates/ide-ssr/src/matching.rs",
+        "crates/ide-ssr/src/nester.rs",
+        "crates/ide-ssr/src/replacing.rs",
+        "crates/ide-ssr/src/search.rs"
+      ],
+      "removed": [
+        "Duplicate Match FileRange; the matched CST node already owns its range and each search scans one file.",
+        "FileId plumbing and cross-file sorting from the per-tree search/deduplication helpers.",
+        "Second deduplication Vec, temporary (FileRange, String) edit Vec, and the second reverse-position sort."
+      ],
+      "retained": [
+        "Semantic binding identity, invocation-scope resolution, placeholder constraints.",
+        "Selection filtering before outermost deduplication; comment preservation; reverse edit order.",
+        "The IDE still owns multi-file edits, include-instance ambiguity checks and parse validation."
+      ],
+      "evidence": [
+        "Final SSR protocol regressions in both workspace test modes.",
+        "Three alternating release pairs: 500 edits with identical range/text digest in every run."
+      ],
+      "timing_interpretation": "Paired p50 changes -1.47%, +1.42%, +1.64%; no speedup claimed. Retained for smaller state and fewer intermediate allocations."
+    },
+    {
+      "area": "Definition token selection",
+      "files": [
+        "crates/syntax/src/lib.rs",
+        "crates/syntax/src/cst_lower.rs"
+      ],
+      "removed": [
+        "Duplicate traversal and attribute exclusion logic for name vs name span.",
+        "Three repeated name-span queries in callable lowering, replaced with one local result."
+      ],
+      "invariants": [
+        "Both public APIs select the same token.",
+        "Preserve early None for a present NAME node without an identifier.",
+        "Preserve quoted names, operator names, attribute and termination-measure exclusions."
+      ],
+      "evidence": [
+        "Default and no-SMT workspace tests, including attributed function/type diagnostics and navigation."
+      ]
+    },
+    {
+      "area": "Completion environment ownership",
+      "files": [
+        "crates/hir-ty/src/infer/completion.rs"
+      ],
+      "removed": [
+        "Two ArcTopLevelEnv clones at the environment query boundary."
+      ],
+      "replacement": "Borrow the existing Salsa query result for the duration of semantic compatibility/field lookup.",
+      "evidence": [
+        "All semantic completion and incomplete-code completion tests in final workspace gates."
+      ]
+    }
+  ],
+  "production_diff": {
+    "files": [
+      "crates/hir-ty/src/infer/completion.rs",
+      "crates/ide-ssr/src/lib.rs",
+      "crates/ide-ssr/src/matching.rs",
+      "crates/ide-ssr/src/nester.rs",
+      "crates/ide-ssr/src/replacing.rs",
+      "crates/ide-ssr/src/search.rs",
+      "crates/syntax/src/cst_lower.rs",
+      "crates/syntax/src/lib.rs"
+    ],
+    "insertions": 48,
+    "deletions": 119,
+    "source_sha256": {
+      "crates/hir-ty/src/infer/completion.rs": "70f7494253c19d90e05897506756758f78680dcd57c60570415bec264c3d5418",
+      "crates/ide-ssr/src/lib.rs": "5f9369dc6296e214df4fea6e56117cc9b13ccecb947249cd62979c0abbc4cd70",
+      "crates/ide-ssr/src/matching.rs": "292af229c2fcde517379fe1a0422d10457f6a76e2ea333c331cf2867ea7b658c",
+      "crates/ide-ssr/src/nester.rs": "a671b434b6777480a2277f42b6be44b51f1a7eb27b66a3c828ab4938674c3388",
+      "crates/ide-ssr/src/replacing.rs": "69e41a3f756310fbb9cef5fc10ec5014bcec6bb6a64edc19f6bfae01d57adcd3",
+      "crates/ide-ssr/src/search.rs": "8d82f7dd5be3fa2a51f0cc63d5361ac3cfc04b23117177c94f0c794b0f1d8294",
+      "crates/syntax/src/cst_lower.rs": "4f68662e8acd7e2a14c9e0ae65bd5481e1461ec14740059e60f36df239b7bf6e",
+      "crates/syntax/src/lib.rs": "864015065955a3deb06b97b6235cfc2bdcbf858710d32a7686eac73e10a30cda"
+    }
+  },
+  "negative_controls": [
+    {
+      "name": "without-speculative-syntax",
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "test",
+        "-p",
+        "ide",
+        "completion::tests::",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit": 101,
+      "seconds": 28.98,
+      "summaries": [
+        "test completion::tests::incomplete_arguments_keep_their_expected_types_in_a_project ... FAILED",
+        "test completion::tests::incomplete_record_values_and_dot_access_use_the_owner_type ... FAILED",
+        "test result: FAILED. 15 passed; 2 failed; 0 ignored; 0 measured; 597 filtered out; finished in 0.79s"
+      ]
+    },
+    {
+      "name": "without-type-compatibility",
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "test",
+        "-p",
+        "ide",
+        "completion::tests::",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit": 101,
+      "seconds": 9.06,
+      "summaries": [
+        "test completion::tests::a_generic_expectation_matches_nothing_exactly ... FAILED",
+        "test completion::tests::an_argument_ranks_what_its_parameter_expects ... FAILED",
+        "test completion::tests::expected_width_and_aliases_rank_locals_and_real_return_types ... FAILED",
+        "test completion::tests::incomplete_arguments_keep_their_expected_types_in_a_project ... FAILED",
+        "test completion::tests::incomplete_record_values_and_dot_access_use_the_owner_type ... FAILED",
+        "test completion::tests::project_ranking_uses_aliases_and_overload_returns ... FAILED",
+        "test completion::tests::return_ranking_checks_generic_constraints_and_all_overloads ... FAILED",
+        "test result: FAILED. 10 passed; 7 failed; 0 ignored; 0 measured; 597 filtered out; finished in 0.73s"
+      ]
+    },
+    {
+      "name": "without-trivia-fingerprint",
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "test",
+        "-p",
+        "sail-lsp",
+        "internal_trivia_reuses_inference",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit": 101,
+      "seconds": 15.49,
+      "summaries": [
+        "test tests::internal_trivia_reuses_inference_and_refreshes_source_locations ... FAILED",
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 343 filtered out; finished in 0.04s"
+      ]
+    },
+    {
+      "name": "without-token-relocation",
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "test",
+        "-p",
+        "sail-lsp",
+        "reused_inference_keeps_constraint_related_locations_current",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit": 101,
+      "seconds": 20.14,
+      "summaries": [
+        "test tests::reused_inference_keeps_constraint_related_locations_current ... FAILED",
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 343 filtered out; finished in 0.03s"
+      ]
+    },
+    {
+      "name": "without-divisibility-rule",
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "test",
+        "-p",
+        "hir-ty",
+        "power_of_two_divisibility_from_bounded_element_width_without_smt",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit": 101,
+      "seconds": 8.03,
+      "summaries": [
+        "test infer::solver::tests::power_of_two_divisibility_from_bounded_element_width_without_smt ... FAILED",
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 442 filtered out; finished in 0.01s"
+      ]
+    },
+    {
+      "name": "without-existential-scope",
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "test",
+        "-p",
+        "ide",
+        "manifest_mutation_tests::existential_constructor",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit": 101,
+      "seconds": 10.38,
+      "summaries": [
+        "test manifest_mutation_tests::existential_constructor_checks_witnesses_opened_by_tuple_binding ... FAILED",
+        "test manifest_mutation_tests::existential_constructor_preserves_argument_order_constraints ... FAILED",
+        "test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 612 filtered out; finished in 0.42s"
+      ]
+    },
+    {
+      "name": "without-pattern-provenance",
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "test",
+        "-p",
+        "ide-diagnostics",
+        "type_pattern_errors_highlight_the_failed_written_argument",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit": 101,
+      "summaries": [
+        "test tests::type_pattern_errors_highlight_the_failed_written_argument ... FAILED",
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 112 filtered out; finished in 0.06s"
+      ]
+    }
+  ],
+  "negative_control_decisions": {
+    "without-speculative-syntax": "Retain: removing the temporary marker loses expected types for unfinished arguments and record initializers.",
+    "without-type-compatibility": "Retain semantic subtype/alias/generic constraint matching: replacing it with equality fails seven completion regressions.",
+    "without-trivia-fingerprint": "Retain: a raw-text fingerprint re-infers a callable after an internal comment edit.",
+    "without-token-relocation": "Retain: base-offset-only relocation leaves related constraint locations stale after internal trivia edits.",
+    "without-divisibility-rule": "Retain: the focused no-SMT proof no longer discharges the bounded power-of-two divisibility goal.",
+    "without-existential-scope": "Retain: leaking bound existential names into implicit quantification loses both constructor argument-order rejections.",
+    "without-pattern-provenance": "Retain: discarding alias-to-written-argument provenance highlights the wrong type-pattern range."
+  },
+  "performance_ablations": {
+    "method": "Release builds, CPU 0, three rounds, alternating pair order; no concurrent builds or test jobs during the accepted measurements.",
+    "parse_seed": {
+      "results": [
+        {
+          "all_results_equal": true,
+          "full_ns": {
+            "p50": 12229108,
+            "p95": 14970767
+          },
+          "incremental_ns": {
+            "p50": 5178096,
+            "p95": 6586169
+          },
+          "measured_edits": 100,
+          "source_bytes": 23890,
+          "warmup_edits": 20
+        },
+        {
+          "all_results_equal": true,
+          "full_ns": {
+            "p50": 11520134,
+            "p95": 11894019
+          },
+          "incremental_ns": {
+            "p50": 5074495,
+            "p95": 5254440
+          },
+          "measured_edits": 100,
+          "source_bytes": 23890,
+          "warmup_edits": 20
+        },
+        {
+          "all_results_equal": true,
+          "full_ns": {
+            "p50": 11732981,
+            "p95": 12275446
+          },
+          "incremental_ns": {
+            "p50": 5069823,
+            "p95": 5324828
+          },
+          "measured_edits": 100,
+          "source_bytes": 23890,
+          "warmup_edits": 20
+        }
+      ],
+      "decision": "Retain weak previous-tree seed. Full parsing costs 2.27–2.36x cached p50 on this 23,890-byte/400-function fixture; every tree, token stream and error list is equal."
+    },
+    "compact_fixities": {
+      "results": {
+        "control-fixity-corrected": [
+          {
+            "edits": 40,
+            "fixities_equal": true,
+            "p50_ns": 5960718,
+            "p95_ns": 6408919
+          },
+          {
+            "edits": 40,
+            "fixities_equal": true,
+            "p50_ns": 5993830,
+            "p95_ns": 6525881
+          },
+          {
+            "edits": 40,
+            "fixities_equal": true,
+            "p50_ns": 5935159,
+            "p95_ns": 6355148
+          }
+        ],
+        "without-compact-fixity-corrected": [
+          {
+            "edits": 40,
+            "fixities_equal": true,
+            "p50_ns": 8269918,
+            "p95_ns": 8845909
+          },
+          {
+            "edits": 40,
+            "fixities_equal": true,
+            "p50_ns": 8696691,
+            "p95_ns": 8847614
+          },
+          {
+            "edits": 40,
+            "fixities_equal": true,
+            "p50_ns": 8176579,
+            "p95_ns": 8294643
+          }
+        ]
+      },
+      "decision": "Retain compact projection. Replacing it with full ItemTree lowering raises p50 input update time from 5.94–5.99 ms to 8.18–8.70 ms. Operator contexts are equal after every edit.",
+      "fixture_note": "The initial fixture only installed workspace membership once, so subsequent edits bypassed update_workspace_fixities. Those initial timings are excluded. The corrected fixture installs membership on every edit and times the complete apply_change path."
+    },
+    "direct_speculative_parse": {
+      "results": [
+        [
+          {
+            "baseline_p50_ns": 222684,
+            "case": "foo(va$0lue)",
+            "direct_p50_ns": 123107,
+            "functions": 20,
+            "same_tree": true
+          },
+          {
+            "baseline_p50_ns": 281105,
+            "case": "foo($0",
+            "direct_p50_ns": 111528,
+            "functions": 20,
+            "same_tree": true
+          },
+          {
+            "baseline_p50_ns": 256093,
+            "case": "if $0 then 1 else 2",
+            "direct_p50_ns": 102500,
+            "functions": 20,
+            "same_tree": true
+          },
+          {
+            "baseline_p50_ns": 3320546,
+            "case": "foo(va$0lue)",
+            "direct_p50_ns": 4197314,
+            "functions": 400,
+            "same_tree": true
+          },
+          {
+            "baseline_p50_ns": 6955843,
+            "case": "foo($0",
+            "direct_p50_ns": 4212037,
+            "functions": 400,
+            "same_tree": true
+          },
+          {
+            "baseline_p50_ns": 6950916,
+            "case": "if $0 then 1 else 2",
+            "direct_p50_ns": 4230811,
+            "functions": 400,
+            "same_tree": true
+          }
+        ],
+        [
+          {
+            "baseline_p50_ns": 233168,
+            "case": "foo(va$0lue)",
+            "direct_p50_ns": 127024,
+            "functions": 20,
+            "same_tree": true
+          },
+          {
+            "baseline_p50_ns": 281268,
+            "case": "foo($0",
+            "direct_p50_ns": 115123,
+            "functions": 20,
+            "same_tree": true
+          },
+          {
+            "baseline_p50_ns": 255634,
+            "case": "if $0 then 1 else 2",
+            "direct_p50_ns": 103572,
+            "functions": 20,
+            "same_tree": true
+          },
+          {
+            "baseline_p50_ns": 3352396,
+            "case": "foo(va$0lue)",
+            "direct_p50_ns": 4203882,
+            "functions": 400,
+            "same_tree": true
+          },
+          {
+            "baseline_p50_ns": 6944434,
+            "case": "foo($0",
+            "direct_p50_ns": 4207398,
+            "functions": 400,
+            "same_tree": true
+          },
+          {
+            "baseline_p50_ns": 6933744,
+            "case": "if $0 then 1 else 2",
+            "direct_p50_ns": 4207531,
+            "functions": 400,
+            "same_tree": true
+          }
+        ],
+        [
+          {
+            "baseline_p50_ns": 240544,
+            "case": "foo(va$0lue)",
+            "direct_p50_ns": 133490,
+            "functions": 20,
+            "same_tree": true
+          },
+          {
+            "baseline_p50_ns": 288671,
+            "case": "foo($0",
+            "direct_p50_ns": 120232,
+            "functions": 20,
+            "same_tree": true
+          },
+          {
+            "baseline_p50_ns": 268729,
+            "case": "if $0 then 1 else 2",
+            "direct_p50_ns": 108815,
+            "functions": 20,
+            "same_tree": true
+          },
+          {
+            "baseline_p50_ns": 4258170,
+            "case": "foo(va$0lue)",
+            "direct_p50_ns": 5388600,
+            "functions": 400,
+            "same_tree": true
+          },
+          {
+            "baseline_p50_ns": 8818122,
+            "case": "foo($0",
+            "direct_p50_ns": 5364038,
+            "functions": 400,
+            "same_tree": true
+          },
+          {
+            "baseline_p50_ns": 8825100,
+            "case": "if $0 then 1 else 2",
+            "direct_p50_ns": 5373776,
+            "functions": 400,
+            "same_tree": true
+          }
+        ]
+      ],
+      "decision": "Reject replacing incremental speculative parsing with a direct full syntax parse. Trees agree, but the 400-function identifier case is 25–27% slower despite improvements for small files and incomplete calls. No adaptive thresholds or extra production path added."
+    },
+    "ssr": {
+      "control": [
+        {
+          "count": 500,
+          "digest": 1599559257826088258,
+          "p50_ns": 13914507,
+          "p95_ns": 14525392
+        },
+        {
+          "count": 500,
+          "digest": 1599559257826088258,
+          "p50_ns": 10665278,
+          "p95_ns": 11180644
+        },
+        {
+          "count": 500,
+          "digest": 1599559257826088258,
+          "p50_ns": 10621328,
+          "p95_ns": 11060691
+        }
+      ],
+      "simplified": [
+        {
+          "count": 500,
+          "digest": 1599559257826088258,
+          "p50_ns": 13710344,
+          "p95_ns": 14489786
+        },
+        {
+          "count": 500,
+          "digest": 1599559257826088258,
+          "p50_ns": 10817251,
+          "p95_ns": 11381947
+        },
+        {
+          "count": 500,
+          "digest": 1599559257826088258,
+          "p50_ns": 10795842,
+          "p95_ns": 11401721
+        }
+      ]
+    }
+  },
+  "other_scope_decisions": [
+    {
+      "area": "Parser reparse safety",
+      "decision": "Keep lexer-error propagation, fixity checks, validation refresh and UTF-8 edit/undo fallback; exercised by the retained differential parser tests."
+    },
+    {
+      "area": "Remaining semantic fixes",
+      "decision": "Keep kind-aware constructor arity checking, vector-access dependencies and shared named-call inference. These support the configured-project mutation regressions; removal is not a simplification that preserves behavior."
+    },
+    {
+      "area": "Request scheduling",
+      "decision": "Keep priority separate from cancellation retry. Both policies have real callers; the complete policy-combination and protocol cancellation tests remain in the final gates."
+    },
+    {
+      "area": "Observability and test infrastructure",
+      "decision": "Keep latency tracing, Salsa execution callbacks, editor probes and mutation/diagnostic reports. These are the measurement and regression mechanisms used to distinguish useful optimizations from redundant ones."
+    },
+    {
+      "area": "Prior SSR/formatting simplification",
+      "decision": "Preserve the prior removal of unsupported APIs and formatter duplicate assembly already present in the snapshot; this round removes remaining redundant SSR per-file state."
+    }
+  ],
+  "verification": {
+    "control_default": {
+      "passed": 2463,
+      "failed": 0,
+      "ignored": 18,
+      "exit": 0,
+      "log": "target/ablation-2026-10-30/control-tests.log"
+    },
+    "final_gates": [
+      {
+        "name": "final-default",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "test",
+          "--workspace",
+          "--",
+          "--test-threads=1"
+        ],
+        "exit": 0,
+        "seconds": 209.56,
+        "counts": {
+          "passed": 2463,
+          "failed": 0,
+          "ignored": 18
+        }
+      },
+      {
+        "name": "final-no-smt",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "test",
+          "--workspace",
+          "--no-default-features",
+          "--",
+          "--test-threads=1"
+        ],
+        "exit": 0,
+        "seconds": 203.95,
+        "counts": {
+          "passed": 2447,
+          "failed": 0,
+          "ignored": 18
+        }
+      },
+      {
+        "name": "final-clippy",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "clippy",
+          "--workspace",
+          "--all-targets"
+        ],
+        "exit": 0,
+        "seconds": 21.05,
+        "counts": {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      },
+      {
+        "name": "final-fmt",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit": 0,
+        "seconds": 3.63,
+        "counts": {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      },
+      {
+        "name": "final-diff-check",
+        "command": [
+          "git",
+          "diff",
+          "--check"
+        ],
+        "exit": 0,
+        "seconds": 0.02,
+        "counts": {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      }
+    ],
+    "new_or_deleted_tests": 0,
+    "clippy_warning_count": 40,
+    "clippy_note": "Command succeeds with 40 diagnostic warnings, the same count recorded in the pre-ablation quality report; this task does not clear pre-existing warnings."
+  },
+  "artifacts": {
+    "directory": "target/ablation-2026-10-30",
+    "binary_sha256": {
+      "control-ssr": "c148bcd01fcc4f7cd5165804dfe87254c609c2fe2181394840d9e36e649026a9",
+      "candidate-ssr": "e2a5a8bfec31fa1915c03924ff38d877c3c853c9449ef511f5422b6727c88d93",
+      "control-reparse": "8608614ef94c28700e788d879a443d281efbda28d41415df862ecbb92e827069",
+      "control-fixity-corrected": "c604dd24c5206bf08cf1c1f02b4a026ec007992898c714b0aec02d09d8ecfe89",
+      "without-compact-fixity-corrected": "ee786e64ca7d76e320866ecc2881901e3b162ac4c578be63dbd54345700e6099"
+    },
+    "probe_sources": {
+      "ssr_probe.rs": "use ide_db::{apply_change::Change, root_database::RootDatabase};\nuse std::{\n    hash::{Hash, Hasher},\n    time::Instant,\n};\nfn main() {\n    let source: String =\n        (0..500).map(|i| format!(\"function f{i}(x : int) -> int = (x + 1) + 1\\n\")).collect();\n    let mut db = RootDatabase::default();\n    let id = base_db::FileId::from_raw(0);\n    let mut change = Change::new();\n    change.change_file(id, source);\n    db.apply_change(change);\n    let file = db.files().file_text(id).unwrap();\n    let root = syntax::parse_query::parse_file(&db, file).syntax_node().unwrap();\n    let mut times = Vec::new();\n    let mut hash = 0;\n    let mut count = 0;\n    for i in 0..25 {\n        let start = Instant::now();\n        let finder = ide_ssr::MatchFinder::new(&db, file, 0, \"$x + 1 ==>> $x\").unwrap();\n        let edits = finder.edits_for_tree_in_ranges(&root, file, &[]);\n        if i >= 5 {\n            times.push(start.elapsed().as_nanos());\n        }\n        let mut h = std::collections::hash_map::DefaultHasher::new();\n        for edit in &edits {\n            edit.range.hash(&mut h);\n            edit.new_text.hash(&mut h);\n        }\n        if i > 0 {\n            assert_eq!(hash, h.finish());\n        }\n        hash = h.finish();\n        count = edits.len();\n        assert_eq!(count, 500);\n    }\n    times.sort();\n    println!(\n        \"{}\",\n        serde_json::json!({\"count\":count,\"digest\":hash,\"p50_ns\":times[10],\"p95_ns\":times[18]})\n    );\n}\n",
+      "parse_probe.rs": "use ide_db::root_database::RootDatabase;\nuse std::{sync::Arc, time::Instant};\nfn main() {\n    let mut report = Vec::new();\n    for count in [20, 400] {\n        for end in [\"foo(va$0lue)\", \"foo($0\", \"if $0 then 1 else 2\"] {\n            let mut source: String =\n                (0..count).map(|i| format!(\"function f{i}(x : int) -> int = x + 1\\n\")).collect();\n            source.push_str(&format!(\"function target(value : int) -> int = {end}\\n\"));\n            let offset = source.find(\"$0\").unwrap();\n            source.replace_range(offset..offset + 2, \"\");\n            let db = RootDatabase::default();\n            let file = base_db::FileText::new(\n                &db,\n                Arc::from(source.as_str()),\n                base_db::FileId::from_raw(0),\n            );\n            let parsed = syntax::parse_query::parse_file(&db, file);\n            let mut baseline = Vec::new();\n            let mut direct = Vec::new();\n            for i in 0..40 {\n                let mut a = || {\n                    let t = Instant::now();\n                    let root = parsed\n                        .reparse(\n                            syntax::TextRange::empty((offset as u32).into()),\n                            \"sailCompletionMarker\",\n                        )\n                        .syntax_node()\n                        .unwrap();\n                    if i >= 10 {\n                        baseline.push(t.elapsed().as_nanos());\n                    }\n                    root\n                };\n                let mut b = || {\n                    let t = Instant::now();\n                    let mut edited = source.clone();\n                    edited.insert_str(offset, \"sailCompletionMarker\");\n                    let (root, _) = syntax::parse_text_with_fixities(&edited, Default::default());\n                    if i >= 10 {\n                        direct.push(t.elapsed().as_nanos());\n                    }\n                    root\n                };\n                let (a, b) = if i % 2 == 0 {\n                    (a(), b())\n                } else {\n                    let b = b();\n                    (a(), b)\n                };\n                assert_eq!(a.green(), b.green());\n            }\n            baseline.sort();\n            direct.sort();\n            report.push(serde_json::json!({\"functions\":count,\"case\":end,\"baseline_p50_ns\":baseline[15],\"direct_p50_ns\":direct[15],\"same_tree\":true}));\n        }\n    }\n    println!(\"{}\", serde_json::to_string_pretty(&report).unwrap());\n}\n",
+      "fixity_probe.rs": "use ide_db::{apply_change::Change, root_database::RootDatabase};\nuse std::time::Instant;\nfn main() {\n    let declarations: String =\n        (0..300).map(|i| format!(\"struct S{i} = {{ value : int, flag : bool }}\\n\")).collect();\n    let mut db = RootDatabase::default();\n    let id = base_db::FileId::from_raw(0);\n    let mut times = Vec::new();\n    for i in 0..45 {\n        let mut edit = Change::new();\n        edit.set_workspace_files(vec![id]);\n        edit.change_file(\n            id,\n            format!(\"infixl 6 +\\n{declarations}function f(x : int) -> int = x + {i}\\n\"),\n        );\n        let t = Instant::now();\n        db.apply_change(edit);\n        if i >= 5 {\n            times.push(t.elapsed().as_nanos());\n        }\n        let file = db.files().file_text(id).unwrap();\n        let expected =\n            hir::def_query::file_item_tree(&db, file).as_ref().unwrap().build_fixity_context();\n        assert_eq!(base_db::WorkspaceFixities::try_get(&db).unwrap().fixities(&db), &expected);\n    }\n    times.sort();\n    println!(\n        \"{}\",\n        serde_json::json!({\"p50_ns\":times[20],\"p95_ns\":times[37],\"edits\":40,\"fixities_equal\":true})\n    );\n}\n"
+    },
+    "experiment_driver": "import pathlib,subprocess,json,time\nroot=pathlib.Path.cwd(); out=root/'target/ablation-2026-10-30'\nresults=[]\ndef trial(name,path,transform,args):\n p=root/path; old=p.read_text(); new=transform(old); assert new!=old,name\n p.write_text(new)\n started=time.monotonic()\n try:\n  cmd=['cargo','+1.97.1',*args]\n  with (out/(name+'.log')).open('w') as f:\n   r=subprocess.run(cmd,stdout=f,stderr=subprocess.STDOUT)\n  log=(out/(name+'.log')).read_text()\n  results.append(dict(name=name,command=cmd,exit=r.returncode,seconds=round(time.monotonic()-started,2),summaries=[x for x in log.splitlines() if x.startswith('test result:') or x.endswith(' ... FAILED')]))\n  (out/'experiments.json').write_text(json.dumps(results,indent=2)+'\\n')\n  print(name,r.returncode,flush=True)\n finally: p.write_text(old)\ntrial('without-speculative-syntax','crates/ide-completion/src/context.rs',lambda s:s.replace('speculative_token(db, file_text, offset).or(original_token)','original_token'),['test','-p','ide','completion::tests::','--','--test-threads=1'])\ntrial('without-type-compatibility','crates/hir-ty/src/infer/completion.rs',lambda s:s[:s.index('    if has_recovery(expected)')] + '''    if expected == candidate { Some(TypeMatch::Exact) } else { None }\n}\n\n''' + s[s.index('#[cfg(test)]'):],['test','-p','ide','completion::tests::','--','--test-threads=1'])\ntrial('without-trivia-fingerprint','crates/hir-def/src/def_query.rs',lambda s:s[:s.index('        let parsed = parse_file(db, file);',s.index('pub fn callable_body'))]+'''        text.get(entry.def_span.start..entry.def_span.end).unwrap_or(\"\").hash(&mut h);\n'''+s[s.index('        return Some(ArcCallableBody',s.index('pub fn callable_body')):],['test','-p','sail-lsp','internal_trivia_reuses_inference','--','--test-threads=1'])\ntrial('without-token-relocation','crates/hir-def/src/expr_store/body.rs',lambda s:s[:s.index('        if original_tokens.len()')] + s[s.index('        let delta = self.def_base'):],['test','-p','sail-lsp','reused_inference_keeps_constraint_related_locations_current','--','--test-threads=1'])\ntrial('without-divisibility-rule','crates/hir-ty/src/infer/solver.rs',lambda s:s.replace('&& power_remainder_is_zero(lhs, subst, assumptions)','&& false').replace('&& power_remainder_is_zero(rhs, subst, assumptions)','&& false'),['test','-p','hir-ty','power_of_two_divisibility_from_bounded_element_width_without_smt','--','--test-threads=1'])\ntrial('without-existential-scope','crates/hir-ty/src/infer/expr.rs',lambda s:s[:s.index('            TyKind::Exist { vars, inner, .. } => {',s.index('fn scheme_free_params'))]+'''            TyKind::Exist { inner, .. } => walk(inner, out),\n'''+s[s.index('            TyKind::Bidir',s.index('            TyKind::Exist { vars, inner, .. } => {',s.index('fn scheme_free_params'))):],['test','-p','ide','manifest_mutation_tests::existential_constructor','--','--test-threads=1'])\n",
+    "extra_experiment_driver": "import pathlib,subprocess,json,shutil\nout=pathlib.Path('target/ablation-2026-10-30'); rows=[]\ndef trial(name,file,transform,cmd,artifact=None):\n p=pathlib.Path(file); original=p.read_text();changed=transform(original);assert changed!=original\n p.write_text(changed)\n try:\n  with (out/(name+'.log')).open('w') as log:r=subprocess.run(cmd,stdout=log,stderr=subprocess.STDOUT)\n  rows.append(dict(name=name,command=cmd,exit=r.returncode,summaries=[x for x in (out/(name+'.log')).read_text().splitlines() if x.startswith('test result:') or x.endswith(' ... FAILED')]))\n  (out/'extra-experiments.json').write_text(json.dumps(rows,indent=2)+'\\n')\n  if artifact and r.returncode==0:shutil.copyfile(artifact,out/'without-compact-fixity')\n  print(name,r.returncode,flush=True)\n finally:p.write_text(original)\ntrial('without-compact-fixity','crates/hir-def/src/def_query.rs',lambda s:s.replace('''    parse_file(db, file)\n        .syntax_node()\n        .map(|root| ItemTree::fixity_context_from_cst(&root))''','''    file_item_tree(db, file)\n        .as_ref()\n        .map(|tree| tree.build_fixity_context())'''),['cargo','+1.97.1','build','--release','-p','sail-lsp','--example','ablation_fixity'],'target/release/examples/ablation_fixity')\ntrial('without-pattern-provenance','crates/hir-ty/src/infer/pat.rs',lambda s:s.replace('result.map_err(|path| self.type_pattern_alias_focus(original, &path))','result.map_err(|_| Vec::new())'),['cargo','+1.97.1','test','-p','ide-diagnostics','type_pattern_errors_highlight_the_failed_written_argument','--','--test-threads=1'])\n",
+    "corrected_fixity_driver": "import pathlib,subprocess,shutil,json,os\nout=pathlib.Path('target/ablation-2026-10-30');p=pathlib.Path('crates/hir-def/src/def_query.rs');old=p.read_text()\ntry:\n for name in ['control-fixity-corrected','without-compact-fixity-corrected']:\n  if name.startswith('without'):\n   p.write_text(old.replace('''    parse_file(db, file)\n        .syntax_node()\n        .map(|root| ItemTree::fixity_context_from_cst(&root))''','''    file_item_tree(db, file)\n        .as_ref()\n        .map(|tree| tree.build_fixity_context())'''))\n  with (out/(name+'-build.log')).open('w') as f:subprocess.run(['cargo','+1.97.1','build','--release','-p','sail-lsp','--example','ablation_fixity'],stdout=f,stderr=subprocess.STDOUT,check=True)\n  shutil.copy2('target/release/examples/ablation_fixity',out/name)\nfinally:p.write_text(old)\nresults={};cpu=min(os.sched_getaffinity(0))\nfor i in range(3):\n names=['control-fixity-corrected','without-compact-fixity-corrected']\n if i%2:names.reverse()\n for name in names:results.setdefault(name,[]).append(json.loads(subprocess.check_output(['taskset','-c',str(cpu),str(out/name)],text=True)))\n(out/'fixity-corrected.json').write_text(json.dumps(results,indent=2)+'\\n')\nprint(results)\n"
+  },
+  "limits": [
+    "Local microbenchmarks do not establish end-to-end LSP speedup or Zed SSH experience.",
+    "This is an ablation and behavior-preserving simplification audit, not a fresh upstream corpus/conformance or solver-unknown campaign.",
+    "No claim that every abstraction is removable or that every changed line needs its own ablation; retained semantic guards have negative-control or existing regression evidence.",
+    "The initial speculative probe build failed due to placing the SSR example in a package without an ide-ssr dependency; it was moved to the ide package. Temporary examples were removed after measurements.",
+    "Performance samples collected alongside the initial control test/build are excluded; accepted samples use the isolated CPU-pinned runs."
+  ],
+  "completion_audit": [
+    {
+      "requirement": "Commit current state before experiments",
+      "status": "verified",
+      "evidence": "94e660fc1b8a6db0f3cb1a6c177747687e4c6540",
+      "note": "All 71 initially changed/new/deleted repository paths are in the snapshot; experiment sources were created afterwards."
+    },
+    {
+      "requirement": "Ablate the previous uncommitted design",
+      "status": "verified",
+      "evidence": [
+        "Seven runtime failing negative controls, restored before final gates.",
+        "Three-round cache/fixity/speculative-parse comparisons and paired SSR equivalence measurements.",
+        "Scope decisions record retained semantic, parser, scheduler, harness and prior simplification changes."
+      ]
+    },
+    {
+      "requirement": "Remove unnecessary abstractions and state",
+      "status": "verified",
+      "evidence": "Eight production files, 48 inserted/119 deleted lines; SSR per-file redundant state/pipeline removed, duplicate token traversal shared, completion environment borrowed."
+    },
+    {
+      "requirement": "Verify the final state",
+      "status": "verified",
+      "evidence": "2463 default and 2447 no-SMT tests passed; 18 ignored in each. Clippy, fmt and diff check exit 0. Production source hashes checked after all gates; temporary example sources removed."
+    }
+  ]
+}

@@ -2,13 +2,10 @@
 //!
 //! Warning: variable shadows an existing binding.
 //!
-//! Fix : rename shadowed variable with `_` prefix.
+//! Use semantic rename; changing only the declaration is unsafe.
 
 use crate::Diagnostic;
 use hir::diagnostics::{DiagnosticCode, Severity};
-use ide_db::assists::Assist;
-use ide_db::source_change::SourceChange;
-use ide_db::text_edit::TextEdit;
 
 use crate::{DiagnosticsContext, ShadowedBinding};
 
@@ -18,21 +15,10 @@ pub(crate) fn shadowed_binding(_ctx: &DiagnosticsContext<'_>, d: &ShadowedBindin
         format!("variable `{}` shadows an existing binding", d.name),
         crate::node_file_range(&d.node),
     )
-    .with_fixes(fixes(d))
 }
 
-/// Fix: rename the shadowing variable with a `_` prefix.
-fn fixes(d: &ShadowedBinding) -> Option<Vec<Assist>> {
-    let range: ide_db::line_index::TextRange = d.node.value.text_range();
-    let new_name = format!("_{}", d.name);
-    let edit = TextEdit { range, new_text: new_name.clone() };
-    Some(vec![crate::fix(
-        "rename_shadowed",
-        &format!("Rename to `{new_name}`"),
-        SourceChange::from_text_edit(edit),
-        range,
-    )])
-}
+// Renaming a declaration alone can corrupt syntax or leave references bound
+// to the wrong symbol. Use the semantic rename refactoring instead.
 
 #[cfg(test)]
 mod tests {

@@ -13,6 +13,7 @@ default = []
 test-utils = []
 
 [dependencies]
+tracing.workspace = true
 stdx.workspace = true
 base-db.workspace = true
 vfs.workspace = true

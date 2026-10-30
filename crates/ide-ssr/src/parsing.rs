@@ -9,15 +9,15 @@ use syntax::SyntaxNode;
 use crate::errors::SsrError;
 use crate::fragments;
 
-/// A parsed SSR rule with pattern and optional template as syntax trees.
+/// A parsed SSR rule with pattern and template as syntax trees.
 #[derive(Debug, Clone)]
 pub(crate) struct ParsedRule {
     /// Placeholder metadata, keyed by stand-in name (e.g., `__ssr_0_a`).
     pub(crate) placeholders_by_stand_in: FxHashMap<String, Placeholder>,
     /// The parsed pattern as a syntax tree.
     pub(crate) pattern: SyntaxNode,
-    /// The parsed template (replacement) as a syntax tree, if present.
-    pub(crate) template: Option<SyntaxNode>,
+    /// The parsed template (replacement) as a syntax tree.
+    pub(crate) template: SyntaxNode,
 }
 
 /// A placeholder in an SSR pattern.
@@ -25,9 +25,6 @@ pub(crate) struct ParsedRule {
 pub struct Placeholder {
     /// The user-visible variable (e.g., `Var("a")` for `$a`).
     pub(crate) ident: Var,
-    /// The stand-in identifier used in the parsed tree (e.g., `__ssr_0_a`).
-    #[expect(dead_code)]
-    pub(crate) stand_in_name: String,
     /// Optional constraints on what the placeholder can match.
     pub(crate) constraints: Vec<Constraint>,
 }
@@ -54,96 +51,113 @@ pub(crate) enum NodeKind {
 /// Prefix used to create stand-in identifiers from placeholders.
 pub(crate) const PLACEHOLDER_PREFIX: &str = "__ssr_";
 
-/// Parse an SSR rule string into one or more `ParsedRule`s.
-///
-/// Returns all successful parses (expr, pat, typ, item).
-pub(crate) fn parse_rules(input: &str) -> Result<Vec<ParsedRule>, SsrError> {
-    let parts: Vec<&str> = input.splitn(2, "==>>").collect();
-    if parts.len() != 2 {
-        bail!("Expected `search ==>> replace` syntax");
-    }
-    let search_str = parts[0].trim();
-    let replace_str = parts[1].trim();
-
-    // Tokenize and replace placeholders with stand-in identifiers.
-    let (search_text, placeholders) = replace_placeholders(search_str, 0)?;
-    let (replace_text, _) = replace_placeholders(replace_str, 0)?;
-
-    // Validate: all placeholders in replace exist in search.
-    validate_replace_placeholders(replace_str, &placeholders)?;
-
-    // Try parsing as each fragment kind.
-    let mut rules = Vec::new();
-    let fragment_parsers: &[fn(&str) -> Option<SyntaxNode>] =
-        &[fragments::expr, fragments::typ, fragments::pat, fragments::item];
-
-    for parse_fn in fragment_parsers {
-        if let Some(pattern_node) = parse_fn(&search_text) {
-            let template_node = parse_fn(&replace_text);
-            rules.push(ParsedRule {
-                placeholders_by_stand_in: placeholders.clone(),
-                pattern: pattern_node,
-                template: template_node,
-            });
-            break; // Use the first successful parse.
+/// Split only outside strings and comments, using the Sail lexer.
+pub(crate) fn split_rule(input: &str) -> Result<(&str, &str), SsrError> {
+    // A rule placeholder is not a Sail pragma. Mask its sigil without
+    // changing byte offsets before asking the lexer about trivia/literals.
+    let lexical_input = input.replace('$', "_");
+    let lexed = parser::LexedStr::new(&lexical_input);
+    let mut masked = input.as_bytes().to_vec();
+    let mut offset = 0;
+    for i in 0..lexed.len() {
+        let len = lexed.text(i).len();
+        if matches!(
+            lexed.kind(i),
+            parser::SyntaxKind::STRING_LIT
+                | parser::SyntaxKind::MULTILINE_STRING_LIT
+                | parser::SyntaxKind::LINE_COMMENT
+                | parser::SyntaxKind::BLOCK_COMMENT
+                | parser::SyntaxKind::DOC_COMMENT
+        ) {
+            masked[offset..offset + len].fill(b' ');
+        } else if lexed.kind(i) == parser::SyntaxKind::IDENT
+            && lexed.text(i).starts_with(PLACEHOLDER_PREFIX)
+        {
+            bail!("Identifiers beginning with __ssr_ are reserved in SSR rules");
         }
+        offset += len;
     }
-
-    if rules.is_empty() {
-        // Fall back: parse as expression (wrapping in a dummy context).
-        if let Some(pattern_node) = fragments::expr(&search_text) {
-            let template_node = fragments::expr(&replace_text);
-            rules.push(ParsedRule {
-                placeholders_by_stand_in: placeholders,
-                pattern: pattern_node,
-                template: template_node,
-            });
-        } else {
-            bail!("Failed to parse SSR pattern as any Sail fragment");
-        }
+    let masked = String::from_utf8(masked).expect("mask preserves UTF-8");
+    let separators: Vec<_> = masked.match_indices("==>>").map(|(i, _)| i).collect();
+    if separators.len() != 1 {
+        bail!("Expected exactly one `search ==>> replace` separator");
     }
-
-    Ok(rules)
+    let i = separators[0];
+    let (search, replace) = (input[..i].trim(), input[i + 4..].trim());
+    if search.is_empty() || replace.is_empty() {
+        bail!("Search and replacement must not be empty");
+    }
+    Ok((search, replace))
 }
 
-/// Parse only the search side (for `SsrPattern` — no template).
-pub(crate) fn parse_pattern_only(input: &str) -> Result<Vec<ParsedRule>, SsrError> {
-    let (search_text, placeholders) = replace_placeholders(input.trim(), 0)?;
-
-    let fragment_parsers: &[fn(&str) -> Option<SyntaxNode>] =
-        &[fragments::expr, fragments::typ, fragments::pat, fragments::item];
-
-    let mut rules = Vec::new();
-    for parse_fn in fragment_parsers {
-        if let Some(pattern_node) = parse_fn(&search_text) {
-            rules.push(ParsedRule {
-                placeholders_by_stand_in: placeholders.clone(),
-                pattern: pattern_node,
-                template: None,
-            });
-            break;
+/// Parse the expression pair accepted by the SSR request.
+pub(crate) fn parse_rule(input: &str) -> Result<ParsedRule, SsrError> {
+    let (search, replace) = split_rule(input)?;
+    let (search, placeholders) = replace_placeholders(search)?;
+    let (replace, replacement_placeholders) = replace_placeholders(replace)?;
+    for placeholder in replacement_placeholders.values() {
+        if !placeholders.values().any(|p| p.ident == placeholder.ident) {
+            bail!("Placeholder ${} in replace not found in search", placeholder.ident.0);
         }
     }
-
-    if rules.is_empty() {
-        bail!("Failed to parse SSR pattern as any Sail fragment");
-    }
-    Ok(rules)
+    let (Some(pattern), Some(template)) = (fragments::expr(&search), fragments::expr(&replace))
+    else {
+        bail!("Search and replacement must be valid Sail expressions; item, type and binding-pattern rules are unsupported");
+    };
+    Ok(ParsedRule { placeholders_by_stand_in: placeholders, pattern, template })
 }
 
 /// Replace `$name` and `${name:constraint}` with stand-in identifiers.
 ///
 /// Returns the modified text and a map of stand-in → Placeholder.
-fn replace_placeholders(
-    text: &str,
-    _rule_index: usize,
-) -> Result<(String, FxHashMap<String, Placeholder>), SsrError> {
+fn replace_placeholders(text: &str) -> Result<(String, FxHashMap<String, Placeholder>), SsrError> {
     let mut result = String::new();
-    let mut placeholders = FxHashMap::default();
+    let mut placeholders: FxHashMap<String, Placeholder> = FxHashMap::default();
     let mut chars = text.chars().peekable();
-    let mut counter = 0;
 
     while let Some(ch) = chars.next() {
+        // A dollar inside a string or comment is literal text, not a capture.
+        if ch == '"' {
+            result.push(ch);
+            let mut escaped = false;
+            for next in chars.by_ref() {
+                result.push(next);
+                if next == '"' && !escaped {
+                    break;
+                }
+                escaped = next == '\\' && !escaped;
+            }
+            continue;
+        }
+        if ch == '/' && chars.peek() == Some(&'/') {
+            result.push(ch);
+            for next in chars.by_ref() {
+                result.push(next);
+                if next == '\n' {
+                    break;
+                }
+            }
+            continue;
+        }
+        if ch == '/' && chars.peek() == Some(&'*') {
+            result.push(ch);
+            result.push(chars.next().unwrap());
+            let mut depth = 1;
+            while let Some(next) = chars.next() {
+                result.push(next);
+                if next == '/' && chars.peek() == Some(&'*') {
+                    result.push(chars.next().unwrap());
+                    depth += 1;
+                } else if next == '*' && chars.peek() == Some(&'/') {
+                    result.push(chars.next().unwrap());
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
         if ch == '$' {
             if chars.peek() == Some(&'{') {
                 // Extended syntax: ${name:constraint}
@@ -151,8 +165,10 @@ fn replace_placeholders(
                 let mut name = String::new();
                 let mut constraint_str = String::new();
                 let mut in_constraint = false;
+                let mut closed = false;
                 while let Some(&c) = chars.peek() {
                     if c == '}' {
+                        closed = true;
                         chars.next();
                         break;
                     } else if c == ':' && !in_constraint {
@@ -166,16 +182,19 @@ fn replace_placeholders(
                         chars.next();
                     }
                 }
-                if name.is_empty() {
-                    bail!("Empty placeholder name in ${{}}");
+                if !closed {
+                    bail!("Unclosed placeholder");
                 }
-                let stand_in = format!("{PLACEHOLDER_PREFIX}{counter}_{name}");
-                counter += 1;
+                if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                    bail!("Invalid placeholder name");
+                }
+                let stand_in = format!("{PLACEHOLDER_PREFIX}{name}");
                 let constraints = parse_constraint(&constraint_str)?;
-                placeholders.insert(
-                    stand_in.clone(),
-                    Placeholder { ident: Var(name), stand_in_name: stand_in.clone(), constraints },
-                );
+                placeholders
+                    .entry(stand_in.clone())
+                    .or_insert_with(|| Placeholder { ident: Var(name), constraints: Vec::new() })
+                    .constraints
+                    .extend(constraints);
                 result.push_str(&stand_in);
             } else {
                 // Simple syntax: $name
@@ -193,16 +212,10 @@ fn replace_placeholders(
                     result.push('$');
                     continue;
                 }
-                let stand_in = format!("{PLACEHOLDER_PREFIX}{counter}_{name}");
-                counter += 1;
-                placeholders.insert(
-                    stand_in.clone(),
-                    Placeholder {
-                        ident: Var(name),
-                        stand_in_name: stand_in.clone(),
-                        constraints: Vec::new(),
-                    },
-                );
+                let stand_in = format!("{PLACEHOLDER_PREFIX}{name}");
+                placeholders
+                    .entry(stand_in.clone())
+                    .or_insert(Placeholder { ident: Var(name), constraints: Vec::new() });
                 result.push_str(&stand_in);
             }
         } else {
@@ -242,84 +255,54 @@ fn parse_constraint(s: &str) -> Result<Vec<Constraint>, SsrError> {
     Ok(constraints)
 }
 
-/// Validate that all placeholders referenced in the replacement exist in the search.
-fn validate_replace_placeholders(
-    replace_text: &str,
-    search_placeholders: &FxHashMap<String, Placeholder>,
-) -> Result<(), SsrError> {
-    let search_names: Vec<&str> =
-        search_placeholders.values().map(|p| p.ident.0.as_str()).collect();
-
-    let mut chars = replace_text.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '$' {
-            let mut name = String::new();
-            if chars.peek() == Some(&'{') {
-                chars.next();
-                while let Some(&c) = chars.peek() {
-                    if c == '}' || c == ':' {
-                        break;
-                    }
-                    name.push(c);
-                    chars.next();
-                }
-                // consume rest until '}'
-                while let Some(&c) = chars.peek() {
-                    chars.next();
-                    if c == '}' {
-                        break;
-                    }
-                }
-            } else {
-                while let Some(&c) = chars.peek() {
-                    if c.is_alphanumeric() || c == '_' {
-                        name.push(c);
-                        chars.next();
-                    } else {
-                        break;
-                    }
-                }
-            }
-            if !name.is_empty() && !search_names.contains(&name.as_str()) {
-                bail!("Placeholder ${} in replace not found in search", name);
-            }
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn parse_simple_rule() {
-        let rules = parse_rules("foo($a) ==>> bar($a)").unwrap();
-        assert!(!rules.is_empty());
-        let rule = &rules[0];
-        assert!(rule.template.is_some());
+        let rule = parse_rule("foo($a) ==>> bar($a)").unwrap();
         // Should have one placeholder
         assert_eq!(rule.placeholders_by_stand_in.len(), 1);
     }
 
     #[test]
     fn parse_error_missing_separator() {
-        let result = parse_rules("foo bar");
+        let result = parse_rule("foo bar");
         assert!(result.is_err());
     }
 
     #[test]
     fn parse_error_undefined_placeholder() {
-        let result = parse_rules("foo($a) ==>> bar($b)");
+        let result = parse_rule("foo($a) ==>> bar($b)");
         assert!(result.is_err());
     }
 
     #[test]
     fn parse_constraint_syntax() {
-        let rules = parse_rules("${x:kind(literal)} ==>> $x").unwrap();
-        assert!(!rules.is_empty());
-        let rule = &rules[0];
+        let rule = parse_rule("${x:kind(literal)} ==>> $x").unwrap();
         let ph = rule.placeholders_by_stand_in.values().next().unwrap();
         assert!(!ph.constraints.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod rule_safety_tests {
+    use super::*;
+    #[test]
+    fn literals_and_comments_are_not_rule_syntax() {
+        let (search, replace) = split_rule("\"$a ==>> literal\" ==>> \"$b\"").unwrap();
+        assert_eq!(search, "\"$a ==>> literal\"");
+        assert_eq!(replace, "\"$b\"");
+        assert!(parse_rule("\"$a ==>> literal\" ==>> \"$b\"").is_ok());
+        assert!(
+            parse_rule("foo($a /* $ignored ==>> */) ==>> $a").is_ok(),
+            "{:?}",
+            parse_rule("foo($a /* $ignored ==>> */) ==>> $a")
+        );
+        assert!(parse_rule("foo($a) ==>> $missing").is_err());
+        assert!(parse_rule("foo(${a:kind(literal)) ==>> $a").is_err());
+        assert!(parse_rule("__ssr_a ==>> $a").is_err());
+        assert!(parse_rule("foo($a) ==>> bar($a) ==>> baz($a)").is_err());
     }
 }

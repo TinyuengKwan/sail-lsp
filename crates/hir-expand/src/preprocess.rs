@@ -51,6 +51,10 @@ pub struct Plan {
     pub regions: BTreeMap<FileId, Vec<bool>>,
     pub modules: base_db::module_graph::ModuleGraph,
     pub edges: Vec<(FileId, FileId)>,
+    /// Each active `$include` that resolved: the including file, the
+    /// directive's index among that file's preprocessor events, and the
+    /// file it names. `missing` is the same for those that did not.
+    pub includes: Vec<(FileId, usize, FileId)>,
     pub missing: Vec<(FileId, usize, PathBuf)>,
     pub cycles: Vec<FileId>,
     pub order: Vec<(InstanceKey, usize)>,
@@ -257,6 +261,9 @@ impl Walker<'_> {
                     );
                     if let Some(target) = candidates.iter().find_map(|p| self.paths.get(p)).copied()
                     {
+                        if !self.plan.includes.contains(&(id, event_index, target)) {
+                            self.plan.includes.push((id, event_index, target));
+                        }
                         let recursive = self.stack.iter().any(|state| state.file == target);
                         let cycles = self.plan.cycles.len();
                         let mut child = key.clone();

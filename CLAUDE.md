@@ -14,7 +14,14 @@ scripts/install-server.sh                              # what editors run: vendo
 # Integrated benchmarks (requires sail-riscv checkout)
 RUN_SLOW_BENCHES=1 cargo test -p sail-lsp --lib -- benchmarks
 
-# Corpus validation against sail-riscv (158 files)
+# Project semantics against a real compiler: every case in project-model's
+# recorded table, upstream's test/project and test/typecheck/project manifests
+# (file lists per root + requires graph), and riscv for RMEM=false/true.
+# Fails, never passes vacuously, when the compiler or a checkout is missing.
+SAIL_ORACLE_BIN=sail SAIL_ORACLE_SRC=../sail SAIL_ORACLE_RISCV=../sail-riscv \
+  cargo test -p project-model upstream_oracle -- --ignored --nocapture
+
+# Corpus validation (use the manifest for active-project measurements)
 cargo run --example corpus_check -- /path/to/sail-riscv
 cargo run --example corpus_check -- --workspace /path/to/sail-riscv
 
@@ -25,37 +32,40 @@ cargo run --release --example analysis_stats -- -v /path/to/sail-riscv
 # Completion recall over the corpus (the corpus is the oracle)
 cargo run --release --example completion_check -- /path/to/sail-riscv
 cargo run --release --example completion_check -- --list /path/to/sail-riscv
+cargo run --release --example completion_check -- --ranked /path/to/sail-riscv
 cargo run --release --example completion_check -- --prefix 1 /path/to/sail-riscv
 ```
 
 ## Corpus quality
 
-sail-riscv (158 files): 0 parse, name-resolution or type errors, 0 crashes, 0
-compiler warnings. The remaining diagnostics are true positives (unused
-variables, two style suggestions). A lint reports under its own code only.
+Use [the 2026-10-30 RA audit](docs/baselines/2026-10-30-ra-improvements.json)
+for current verification, gate results and known limitations. The
+[P2/P3 checkpoint](docs/baselines/2026-10-29-editor-p2-p3.json) retains older
+source/corpus hashes and probes not rerun in the follow-up. Do not combine
+project-mode and flat-scope denominators or relabel historical observations.
 
-Each number guards against the others going wrong:
+| Scope | Mode and current result |
+| --- | --- |
+| upstream typecheck | Strict bitvector: 276/276 pass, 217/217 fail; 0 FP/FN |
+| extended corpus | Ordinary Sail: 372 files; 0 FP/FN, 17 scope-only cases excluded from those columns |
+| mutation oracle | Ordinary Sail, complete ordered-project run: 538 mutations; 274 upstream rejects, 274 detected, 0 misses (October 30 follow-up) |
+| active RISC-V manifest | Ordinary Sail: 156 project files + 40 active included/library files; 81,543 expressions, 0 unknown/partially unknown, 0 error diagnostics |
+| numeric proof obligations | Final accepted run: 2,913 proved, 0 refuted, 4 budget-exhausted unknowns (abs bit widths/loop bounds). Repeats observed 0–4 unknowns. Original three divisibility sites are proved by an exact non-SMT rule; do not generalize a zero-unknown checkpoint. |
+| protocol range probe (P2/P3 checkpoint) | All 158 physical model files: 470,394 ranges, 0 mismatches |
+| editor regression gates | Follow-up records default/no-SMT gate status, actual invalidation counts, normal-edit reparsing and burst/cancellation stdio probes |
 
-| what | tool | now |
-|---|---|---|
-| false positives | `corpus_check`, `conformance_check` | 0 on every file upstream accepts |
-| false negatives | `mutation_check` | 98.1% of injected type errors caught |
-| conformance | `conformance_check` | 1 false positive, 0 false negatives over 635 files |
-| inference coverage | `analysis_stats` | 0.008% of expressions untyped |
-| goto-def / hover | `analysis_stats` | 99.7% resolve / 98.8% answer |
-| protocol | `protocol_check` | 0 of 1.2M ranges land on the wrong text |
-| completion | `completion_check` | 62.7% of names the source writes are offered |
-| the server | `server_check` | 18 scenarios through the real loop, ~5.7 s |
-| agreement | `conformance_check --fail-detail` | 130/136 at upstream's caret, 123/131 in its words |
+Completion ranking and latency ablation measurements have their own scope and
+provenance in `docs/baselines/2026-10-29-editor-p0-p1.json`; they are not rerun or
+silently relabelled by the semantic baseline. The updated quick-fix audit is
+`docs/baselines/2026-10-25-quick-fix-coverage.md` (updated 2026-10-29).
 
-`mutation_check` exists because false-positive counts can only improve by
-checking less. It breaks programs upstream accepts and asks whether sail-lsp
-notices, with `sail --just-check` as the oracle (`docs/mutation-oracle.txt`);
-the score is printed per operator (argorder, arity, bits, field, range, ret),
-never as one average. `docs/upstream-accepts.txt` is the conformance
-accept/reject list; `scripts/regen_upstream_accepts.py` regenerates it.
-Rebuild the examples after changing any crate — a stale example binary
-reports the previous run's numbers.
+`mutation_check` exists because silence on accepted sources cannot prove error
+detection. Regenerate `docs/mutation-oracle.txt` against the same upstream build
+and library before measuring mutations. `scripts/regen_upstream_accepts.py`
+regenerates `docs/upstream-accepts.txt`; both generators now preflight an actual
+prelude-using program, so a broken Sail installation cannot masquerade as semantic
+rejection. For an uninstalled upstream build, set `SAIL_DIR` to the source root
+containing `lib/`, not to `lib/` itself. Rebuild examples after source changes.
 
 ## Invariants
 
@@ -377,7 +387,7 @@ DAG mirrors RA: `syntax → hir-expand → hir-def → hir-ty → hir → ide-db
 - **Assist handlers** (ide-assists): AssistContext -> handlers::all() -> Assists accumulator (51 handlers, RA pattern).
 - **Diagnostic handlers** (ide-diagnostics): 40 handlers with `err_recover` pattern, `DiagnosticsContext` with `sema: Semantics`.
 - **Two-stage search** (ide-db/search.rs): index candidate files -> per-file occurrence scan.
-- **SSR** (ide-ssr): structural search-replace with `$name` placeholders, full parse/match/resolve/replace pipeline.
+- **SSR** (ide-ssr): expression-only `experimental/ssr` previews with `$name` placeholders, semantic binding checks, selections and versioned edits. See `docs/architecture.md` for unsupported binding/item/type rules and include-context restrictions.
 - **lsp-types confinement**: only sail-lsp depends on lsp-types; all IDE crates use internal types.
 - **Cancellation**: catch_cancelled in dispatch.rs; salsa::Cancelled -> ContentModified error.
 

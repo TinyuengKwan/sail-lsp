@@ -36,11 +36,6 @@ pub enum AnnotationKind {
         /// Lazily resolved reference count.
         data: Option<usize>,
     },
-    /// Runnable function.
-    Runnable {
-        /// Function name.
-        name: String,
-    },
 }
 
 /// Configuration for which annotations to compute.
@@ -49,8 +44,6 @@ pub struct AnnotationConfig {
     pub annotate_impls: bool,
     /// Whether to show reference count lenses.
     pub annotate_references: bool,
-    /// Whether to show runnable lenses.
-    pub annotate_runnables: bool,
     /// Where to place annotations.
     pub location: AnnotationLocation,
 }
@@ -60,7 +53,6 @@ impl Default for AnnotationConfig {
         Self {
             annotate_impls: true,
             annotate_references: true,
-            annotate_runnables: true,
             location: AnnotationLocation::AboveName,
         }
     }
@@ -125,14 +117,6 @@ pub fn annotations(file: &dyn FileDb, config: &AnnotationConfig) -> Vec<Annotati
                 },
             });
         }
-
-        // Runnable annotation for functions
-        if config.annotate_runnables && decl.kind == SymbolKind::Function {
-            result.push(Annotation {
-                range,
-                kind: AnnotationKind::Runnable { name: decl.name.clone() },
-            });
-        }
     }
 
     result
@@ -150,9 +134,6 @@ pub fn resolve_annotation(
         }
         AnnotationKind::HasImpls { name, data } => {
             *data = Some(impl_counts.get(name.as_str()).copied().unwrap_or(0));
-        }
-        AnnotationKind::Runnable { .. } => {
-            // Nothing to resolve for runnables.
         }
     }
 }
@@ -219,13 +200,6 @@ pub fn code_lens_title(data: &serde_json::Value) -> Option<String> {
     match kind {
         "refs" => Some(pluralize(count, "reference", "references")),
         "impls" => Some(pluralize(count, "implementation", "implementations")),
-        "runnable" => {
-            let runnable_kind = data.get("runnableKind").and_then(|v| v.as_str()).unwrap_or("run");
-            match runnable_kind {
-                "test" => Some("▶ Run Test".to_string()),
-                _ => Some("▶ Run".to_string()),
-            }
-        }
         _ => None,
     }
 }
@@ -239,7 +213,7 @@ pub fn code_lenses_ide(
 ) -> Vec<ide_db::ide_types::Annotation> {
     let mut out = Vec::new();
 
-    if !config.annotate_impls && !config.annotate_references && !config.annotate_runnables {
+    if !config.annotate_impls && !config.annotate_references {
         return out;
     }
     for decl in extract_symbol_decls(file) {
@@ -279,26 +253,6 @@ pub fn code_lenses_ide(
         }
     }
 
-    // Runnable lenses: detect `main` and `$[test]`-annotated functions.
-    if config.annotate_runnables {
-        for runnable in crate::runnables::runnables(file) {
-            let range = base_db::span_to_text_range(&runnable.span);
-            let runnable_kind = match runnable.kind {
-                crate::runnables::RunnableKind::Main => "run",
-                crate::runnables::RunnableKind::Test => "test",
-            };
-            out.push(ide_db::ide_types::Annotation {
-                range,
-                title: String::new(),
-                command: None,
-                data: Some(serde_json::json!({
-                    "kind": "runnable",
-                    "name": runnable.name,
-                    "runnableKind": runnable_kind
-                })),
-            });
-        }
-    }
     out
 }
 mod fn_references;

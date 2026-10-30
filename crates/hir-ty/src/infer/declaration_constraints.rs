@@ -14,6 +14,7 @@ enum Point {
 #[derive(Clone, PartialEq, Eq)]
 struct Definition {
     is_alias: bool,
+    result_kind: Kind,
     category: SK,
     undefined_policy: Option<String>,
     params: Vec<String>,
@@ -43,6 +44,22 @@ fn definition(node: SyntaxNode, strict: bool) -> Option<Definition> {
     let separator =
         node.children_with_tokens().filter_map(|t| t.into_token()).find(|t| t.kind() == SK::EQ)?;
     let eq = usize::from(separator.text_range().start()) - start;
+    let header: Vec<_> = node
+        .descendants_with_tokens()
+        .filter_map(|element| element.into_token())
+        .filter(|token| {
+            !token.kind().is_trivia() && token.text_range().end() <= separator.text_range().start()
+        })
+        .collect();
+    let result_kind = header
+        .last()
+        .and_then(|last| {
+            let previous = header.get(header.len().checked_sub(2)?)?;
+            matches!(previous.kind(), SK::COLON | SK::R_ARROW)
+                .then(|| Kind::from_name(last.text()))
+                .flatten()
+        })
+        .unwrap_or(Kind::Type);
     let parameters =
         node.children().find(|n| matches!(n.kind(), SK::PARAM_LIST | SK::TYPE_PARAM_LIST));
     let mut params = Vec::new();
@@ -127,6 +144,7 @@ fn definition(node: SyntaxNode, strict: bool) -> Option<Definition> {
     let constraint = (!facts.is_empty()).then_some(ConstraintExpr::And(facts));
     Some(Definition {
         is_alias: node.kind() == SK::TYPE_ALIAS_DEF,
+        result_kind,
         category: node
             .children_with_tokens()
             .map(|t| t.kind())
@@ -641,6 +659,65 @@ impl Checker<'_> {
         }
     }
 
+    fn arity_error(&mut self, at: Point, ty: &Ty, depth: usize) -> Option<(Point, String)> {
+        if depth > 64 {
+            return None;
+        }
+        match ty.kind() {
+            TyKind::Named(name, args) | TyKind::App { name, args, .. } => {
+                let origin = self.resolve(at, name);
+                let definition = origin.and_then(|origin| self.metadata(origin));
+                let expected = definition
+                    .as_ref()
+                    .map(|def| def.params.len())
+                    .or_else(|| (name == "vector").then_some(2));
+                // Legacy vector(n, order, element) is elaborated to vector(n, element).
+                let legacy_vector = origin.is_none()
+                    && name == "vector"
+                    && args.len() == 3
+                    && matches!(args.get(1), Some(TyArg::Order(_)));
+                if let Some(expected) = expected {
+                    if args.len() != expected && !legacy_vector {
+                        return Some((
+                            origin.unwrap_or(at),
+                            format!(
+                                "Type constructor {name} expected {expected} arguments, given {}",
+                                args.len()
+                            ),
+                        ));
+                    }
+                }
+                args.iter().enumerate().find_map(|(index, arg)| {
+                    let kind = if let Some(def) = &definition {
+                        def.params.get(index).and_then(|param| def.kinds.get(param)).copied()
+                    } else {
+                        kinds::arguments(name, args.len()).and_then(|ks| ks.get(index)).copied()
+                    };
+                    // Numeric expressions may still use the shared type-expression
+                    // representation. Only Type-kinded arguments contain types.
+                    if matches!(kind, Some(Kind::Int | Kind::Bool | Kind::Order)) {
+                        return None;
+                    }
+                    match arg {
+                        TyArg::Type(ty) => self.arity_error(at, ty, depth + 1),
+                        _ => None,
+                    }
+                })
+            }
+            TyKind::Tuple(items) => items.iter().find_map(|ty| self.arity_error(at, ty, depth + 1)),
+            TyKind::FnPtr(sig) => sig
+                .params
+                .iter()
+                .chain(std::iter::once(&sig.ret))
+                .find_map(|ty| self.arity_error(at, ty, depth + 1)),
+            TyKind::Exist { inner, .. } => self.arity_error(at, inner, depth + 1),
+            TyKind::Bidir { lhs, rhs } => self
+                .arity_error(at, lhs, depth + 1)
+                .or_else(|| self.arity_error(at, rhs, depth + 1)),
+            _ => None,
+        }
+    }
+
     fn check_type(
         &mut self,
         at: Point,
@@ -867,6 +944,7 @@ pub fn check(
         let mut own_facts = global_facts.clone();
         own_facts.extend(metadata.as_ref().and_then(|m| m.constraint.clone()));
         let definition_site = metadata.is_some();
+        let type_valued = metadata.as_ref().is_none_or(|def| def.result_kind == Kind::Type);
         let mut checks = Vec::new();
         if let Some(metadata) = metadata {
             if let Some((name, origin)) =
@@ -919,6 +997,13 @@ pub fn check(
             )
         };
         for root in node.descendants().filter(|n| is_type(n.kind())) {
+            // The grammar also uses type-expression nodes for bitfield numeric
+            // endpoints. Those are checked as ranges, not type applications.
+            if is_bitfield(node)
+                && root.ancestors().take_while(|n| n != node).any(|n| n.kind() == SK::FIELD_INIT)
+            {
+                continue;
+            }
             if root.ancestors().skip(1).take_while(|n| n != node).any(|n| is_type(n.kind())) {
                 continue;
             }
@@ -941,6 +1026,22 @@ pub fn check(
         }
         let mut reported = HashSet::new();
         for (range, ty, facts) in checks {
+            if let Some((origin, message)) =
+                type_valued.then(|| checker.arity_error(at, &ty, 0)).flatten()
+            {
+                let mut diagnostic = Diagnostic::new(
+                    DiagnosticCode::SailError("ill-formed-type"),
+                    message,
+                    range,
+                    Severity::Error,
+                );
+                if origin != at {
+                    checker.related(&mut diagnostic, origin, "type constructor declared here");
+                }
+                diagnostics.push(diagnostic);
+                continue;
+            }
+
             if let Some((origin, constraint)) =
                 checker.check_type(at, &ty, &facts, &mut HashSet::new(), definition_site)
             {

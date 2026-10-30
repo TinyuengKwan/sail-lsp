@@ -19,6 +19,7 @@ use parser::Literal;
 use parser::Span;
 use syntax::ast::{self, AstNode as _};
 
+pub mod completion;
 mod config;
 mod constraint;
 pub mod declaration_constraints;
@@ -456,6 +457,10 @@ pub struct InferenceResult {
     /// belong to that revision. The source map knows where the callable is
     /// now; the difference is how far they have to move.
     pub def_base: usize,
+    /// Significant token positions from the revision actually inferred.
+    /// Unlike a backdated dependency's current value, these remain paired
+    /// with cached raw diagnostic spans across arbitrary trivia edits.
+    pub source_tokens: Vec<Span>,
 }
 
 /// A type adjustment (coercion) applied to an expression.
@@ -503,6 +508,16 @@ pub enum InferenceDiagnostic {
     InvalidTypeUse {
         node: hir_def::ExprOrPatId,
         message: String,
+    },
+    UnboundTypeVariable {
+        pat: hir_def::PatId,
+        name: String,
+    },
+    InvalidTypePattern {
+        pat: hir_def::PatId,
+        message: String,
+        /// Written type argument/tuple indices, after alias provenance mapping.
+        path: Vec<usize>,
     },
     UnresolvedIdent {
         expr: hir_def::ExprId,

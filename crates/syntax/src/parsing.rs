@@ -19,7 +19,9 @@ use rowan::GreenNode;
 use crate::syntax_error::SyntaxError;
 use crate::syntax_node::SyntaxNode;
 
-pub(crate) use crate::parsing::reparsing::incremental_reparse;
+pub(crate) use crate::parsing::reparsing::{
+    incremental_reparse, incremental_reparse_with_fixities,
+};
 
 /// Parse Sail source text into a lossless rowan `SyntaxNode` + errors.
 ///
@@ -171,7 +173,10 @@ fn build_tree_from_output(
                 }
             }
             Step::Error { msg } => {
-                errors.push(ParseError { message: msg.to_string(), offset: byte_offset });
+                errors.push(ParseError {
+                    message: msg.to_string(),
+                    offset: lexed.error_offset(token_idx),
+                });
             }
         }
     }
@@ -255,6 +260,9 @@ pub(crate) fn build_tree(
 
     let (green, build_errors) = builder.finish_raw();
     errors.extend(build_errors);
+    errors.extend(lexed.errors().map(|(offset, message)| {
+        SyntaxError::new_at_offset(message.to_owned(), rowan::TextSize::from(offset as u32))
+    }));
     (green, errors, is_eof)
 }
 
@@ -293,5 +301,17 @@ mod tests {
         let (root, errors) = parse_text("");
         assert_eq!(root.text().to_string(), "");
         assert!(errors.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod error_cursor_tests {
+    #[test]
+    fn full_parse_errors_skip_trivia_like_the_incremental_sink() {
+        let source = "impl /* 注释 */ $[a] foo() = ()";
+        let (root, errors) = super::parse_text(source);
+        let error = errors.iter().find(|e| e.message.contains("not permitted")).unwrap();
+        assert_eq!(error.offset, source.find("$[").unwrap());
+        assert_eq!(root.text().to_string(), source);
     }
 }

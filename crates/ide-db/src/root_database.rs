@@ -64,21 +64,7 @@ impl Drop for RootDatabase {
 
 impl Default for RootDatabase {
     fn default() -> Self {
-        let db = Self {
-            storage: ManuallyDrop::new(salsa::Storage::default()),
-            nonce: Nonce::default(),
-            files: Files::default(),
-            include_instances: Arc::default(),
-        };
-        base_db::LanguageOptions::new(&db, false);
-        base_db::preprocess::WorkspacePreprocessing::new(
-            &db,
-            Default::default(),
-            Default::default(),
-            Default::default(),
-            Default::default(),
-        );
-        db
+        Self::with_event_callback(None)
     }
 }
 
@@ -97,6 +83,28 @@ impl RootDatabase {
     /// Create a new database.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Observe Salsa query execution for reproducible invalidation measurements.
+    /// The callback is shared with snapshots and must not query the database.
+    pub fn with_event_callback(
+        event_callback: Option<Box<dyn Fn(salsa::Event) + Send + Sync + 'static>>,
+    ) -> Self {
+        let db = Self {
+            storage: ManuallyDrop::new(salsa::Storage::new(event_callback)),
+            nonce: Nonce::default(),
+            files: Files::default(),
+            include_instances: Arc::default(),
+        };
+        base_db::LanguageOptions::new(&db, false);
+        base_db::preprocess::WorkspacePreprocessing::new(
+            &db,
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        );
+        db
     }
 
     /// Current nonce value (for GC revision tracking).
@@ -168,6 +176,9 @@ impl base_db::SourceDatabase for RootDatabase {
         let arc_text: Arc<str> = Arc::from(text);
         if let Some(ft) = existing {
             use salsa::Setter;
+            if text.is_empty() {
+                ft.parse_cache(self).clear();
+            }
             ft.set_text(self).to(arc_text);
         } else {
             let ft = FileText::new(self, arc_text, file_id);
@@ -193,6 +204,9 @@ impl base_db::SourceDatabase for RootDatabase {
         let arc_text: Arc<str> = Arc::from(text);
         if let Some(ft) = existing {
             use salsa::Setter;
+            if text.is_empty() {
+                ft.parse_cache(self).clear();
+            }
             ft.set_text(self).with_durability(durability).to(arc_text);
         } else {
             let ft = FileText::builder(arc_text, file_id).durability(durability).new(self);

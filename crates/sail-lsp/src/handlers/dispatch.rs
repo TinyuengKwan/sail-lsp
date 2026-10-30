@@ -124,15 +124,38 @@ impl RequestDispatcher<'_> {
         self
     }
 
-    /// Dispatch request to the thread pool for async execution.
-    /// Creates snapshot, moves it to worker thread, response flows back
-    /// via `Task::Response` or `Task::Retry`.
-    /// `ALLOW_RETRYING`:
-    /// - `true`: on cancellation, the request is re-queued via `Task::Retry`
-    ///   (used for latency-sensitive requests like completion/hover)
-    /// - `false`: on cancellation, returns ServerCancelled error
+    /// Dispatch ordinary background work. Retry policy is independent of priority.
     pub(crate) fn on<const ALLOW_RETRYING: bool, R>(
         &mut self,
+        f: fn(GlobalStateSnapshot, R::Params) -> anyhow::Result<R::Result>,
+    ) -> &mut Self
+    where
+        R: LspRequest,
+        R::Params: for<'de> serde::Deserialize<'de> + Send + 'static,
+        R::Result: serde::Serialize + 'static,
+    {
+        self.on_with_thread_intent::<ALLOW_RETRYING, R>(stdx::thread::ThreadIntent::Worker, f)
+    }
+
+    /// Dispatch interactive work, including requests which must not be retried.
+    pub(crate) fn on_latency_sensitive<const ALLOW_RETRYING: bool, R>(
+        &mut self,
+        f: fn(GlobalStateSnapshot, R::Params) -> anyhow::Result<R::Result>,
+    ) -> &mut Self
+    where
+        R: LspRequest,
+        R::Params: for<'de> serde::Deserialize<'de> + Send + 'static,
+        R::Result: serde::Serialize + 'static,
+    {
+        self.on_with_thread_intent::<ALLOW_RETRYING, R>(
+            stdx::thread::ThreadIntent::LatencySensitive,
+            f,
+        )
+    }
+
+    fn on_with_thread_intent<const ALLOW_RETRYING: bool, R>(
+        &mut self,
+        intent: stdx::thread::ThreadIntent,
         f: fn(GlobalStateSnapshot, R::Params) -> anyhow::Result<R::Result>,
     ) -> &mut Self
     where
@@ -153,21 +176,21 @@ impl RequestDispatcher<'_> {
         if self.global_state.is_completed(&id) {
             return self;
         }
+        let snapshot_started = std::time::Instant::now();
         let snap = self.global_state.snapshot();
-        // A request the user is waiting on, as rust-analyzer classifies
-        // completion and semantic tokens (`main_loop.rs:1299-1304`): the
-        // `ALLOW_RETRYING` requests are the latency-sensitive ones here,
-        // and the flag already said so in its own doc comment.
-        let intent = if ALLOW_RETRYING {
-            stdx::thread::ThreadIntent::LatencySensitive
-        } else {
-            stdx::thread::ThreadIntent::Worker
-        };
+        let snapshot_us = snapshot_started.elapsed().as_micros();
+        let queued = std::time::Instant::now();
         self.global_state.task_pool.spawn(intent, move || {
+            let queue_us = queued.elapsed().as_micros();
+            let handler_started = std::time::Instant::now();
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let _ctx = stdx::panic_context::enter(panic_frame::<R>(&id));
                 f(snap, params)
             }));
+            let handler_us = handler_started.elapsed().as_micros();
+            tracing::debug!(target: "sail_lsp::latency",
+                "request_worker id={id} method={} snapshot_us={snapshot_us} queue_us={queue_us} handler_us={handler_us} panicked={}",
+                R::METHOD, result.is_err());
             match thread_result_to_response::<R>(id.clone(), result) {
                 Ok(response) => crate::main_loop::Task::Response(response),
                 // (dispatch.rs:268): retry on cancellation if allowed.
@@ -352,11 +375,11 @@ where
 #[derive(Debug)]
 pub(crate) struct RequestError {
     pub code: lsp_server::ErrorCode,
-    pub message: &'static str,
+    pub message: String,
 }
 impl std::fmt::Display for RequestError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.message)
+        f.write_str(&self.message)
     }
 }
 impl std::error::Error for RequestError {}
@@ -408,6 +431,65 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    enum Probe {}
+    impl LspRequest for Probe {
+        type Params = bool;
+        type Result = ();
+        const METHOD: &'static str = "test/dispatch-policy";
+    }
+
+    fn probe(_snapshot: GlobalStateSnapshot, cancel: bool) -> anyhow::Result<()> {
+        if cancel {
+            Err(ide_db::ide_types::CancelledError.into())
+        } else {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn cancellation_retry_is_independent_of_dispatch_priority() {
+        let (sender, _messages) = crossbeam_channel::unbounded();
+        let (task_sender, tasks) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender, task_sender);
+        let mut id = 0;
+        for latency_sensitive in [false, true] {
+            for retry in [false, true] {
+                for cancel in [false, true] {
+                    id += 1;
+                    let request = Request::new(id.into(), Probe::METHOD.into(), cancel);
+                    state.register_request(&request);
+                    let mut dispatcher =
+                        RequestDispatcher { req: Some(request), global_state: &mut state };
+                    match (latency_sensitive, retry) {
+                        (false, false) => dispatcher.on::<false, Probe>(probe),
+                        (false, true) => dispatcher.on::<true, Probe>(probe),
+                        (true, false) => dispatcher.on_latency_sensitive::<false, Probe>(probe),
+                        (true, true) => dispatcher.on_latency_sensitive::<true, Probe>(probe),
+                    }
+                    .finish();
+                    let task = tasks
+                        .recv_timeout(std::time::Duration::from_secs(5))
+                        .expect("worker must answer");
+                    match task {
+                        crate::main_loop::Task::Retry(request) => {
+                            assert!(cancel && retry);
+                            assert_eq!(request.id, id.into());
+                        }
+                        crate::main_loop::Task::Response(response) => {
+                            assert!(!cancel || !retry);
+                            assert_eq!(response.id, id.into());
+                            assert_eq!(
+                                response.error.map(|e| e.code),
+                                cancel.then_some(lsp_server::ErrorCode::ServerCancelled as i32)
+                            );
+                        }
+                        _ => panic!("unexpected worker result"),
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn parse_returns_none_on_bad_json() {

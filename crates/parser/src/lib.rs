@@ -174,7 +174,16 @@ impl Reparser {
 
     /// Re-parse the given token range.
     pub fn parse(self, tokens: &Input) -> Output {
-        let mut p = Parser::new(tokens);
+        self.parse_with_fixities(tokens, crate::parser::FixityContext::new())
+    }
+
+    /// Reparse a fragment with the same operator precedences as its source file.
+    pub fn parse_with_fixities(
+        self,
+        tokens: &Input,
+        fixities: crate::parser::FixityContext,
+    ) -> Output {
+        let mut p = Parser::new_with_fixities(tokens, fixities);
         (self.0)(&mut p);
         let events = p.finish();
         crate::event::process(events)

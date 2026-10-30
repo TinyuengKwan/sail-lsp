@@ -226,10 +226,9 @@ pub fn transitive_effects(db: &dyn salsa::Database, input: FileText) -> ArcEffec
 
 use crate::body::{Body, BodySourceMap};
 
-/// One callable's `Body` and `BodySourceMap`, compared by the fingerprint
-/// of the callable it was lowered from — the same one `callable_body` uses,
-/// and for the same reason: `Arc::ptr_eq` can never report equal, so salsa
-/// could never backdate this and every dependent re-ran on any edit.
+/// Current body/source-map view. Equality includes positions and source text,
+/// unlike the semantic-only key of `callable_body`. A trivia edit backdates
+/// inference while invalidating IDE queries that consume source locations.
 #[derive(Clone, Debug)]
 pub struct ArcBodyWithSourceMap(pub Arc<(Body, BodySourceMap)>, u64);
 
@@ -252,26 +251,18 @@ impl std::hash::Hash for ArcBodyWithSourceMap {
 /// every function in it. rust-analyzer's `infer(def)` depends on
 /// `body(def)`; this is that dependency.
 ///
-/// Its equality is a fingerprint of the callable's own source text and
-/// where it starts, which is exactly what its lowering is a function of.
-/// Two consequences worth knowing: an edit that does not touch a callable
-/// leaves its fingerprint alone, so salsa backdates this query and the
-/// callable's `infer` is reused; and an edit that shifts a later callable's
-/// start *does* change it, because the spans recorded in the body moved.
-/// rust-analyzer avoids the second by keeping spans in a separate
-/// `body_with_source_map` query and leaving `body` position-free — the
-/// same split would work here, and `Body` bundling its source map is what
-/// stands in the way.
+/// Equality follows the trivia-free syntax structure. Position-bearing data
+/// is a lowering snapshot used only by inference; IDE queries obtain a fresh
+/// source map through `body_with_source_map` on every source revision.
 #[derive(Clone, Debug)]
 pub struct ArcCallableBody {
     pub body: Arc<crate::bodies::CallableBody>,
     /// The file's text, carried here rather than read from `FileText`
     /// directly. Inference needs it to slice spans, and reading it from the
     /// input would make every `infer` in a file depend on the whole file —
-    /// which is the dependency this query exists to break. Only spans inside
-    /// the callable are ever sliced, and both their content and the
-    /// callable's start are in the fingerprint, so a result that compares
-    /// equal yields the same characters.
+    /// which is the dependency this query exists to break. The body and text
+    /// form one lowering snapshot; current source maps relocate its legacy
+    /// diagnostic spans while semantic IDs retain their identity.
     pub text: Arc<str>,
     fingerprint: u64,
 }
@@ -319,13 +310,38 @@ pub fn callable_body<'db>(
         }
         let text: &Arc<str> = file.text(db);
         let mut h = rustc_hash::FxHasher::default();
-        // The callable's own characters, and nothing about where they are.
-        // Hashing the start too meant a keystroke anywhere above re-inferred
-        // everything below it, which is what
-        // `typing_a_character_does_not_reinfer_the_file` measures. The
-        // positions this value still carries are the ones it was lowered
-        // with; `body_with_source_map` rebases them.
-        text.get(entry.def_span.start..entry.def_span.end).unwrap_or("").hash(&mut h);
+        let parsed = parse_file(db, file);
+        let syntax = parsed.syntax_node().and_then(|root| {
+            let range = rowan::TextRange::new(
+                (entry.def_span.start as u32).into(),
+                (entry.def_span.end as u32).into(),
+            );
+            root.covering_element(range).into_node().filter(|node| node.text_range() == range)
+        });
+        if let Some(node) = syntax.filter(|_| parsed.errors.is_none()) {
+            // Node boundaries matter: a changed operator fixity can change
+            // expression grouping even when all token spellings are equal.
+            for event in node.preorder_with_tokens() {
+                match event {
+                    rowan::WalkEvent::Enter(element) if !element.kind().is_trivia() => {
+                        0u8.hash(&mut h);
+                        element.kind().hash(&mut h);
+                        if let Some(token) = element.as_token() {
+                            token.text().hash(&mut h);
+                        }
+                    }
+                    rowan::WalkEvent::Leave(element) if !element.kind().is_trivia() => {
+                        1u8.hash(&mut h);
+                        element.kind().hash(&mut h);
+                    }
+                    _ => {}
+                }
+            }
+        } else {
+            // Recovery syntax may depend on surrounding trivia. Preserve the
+            // conservative full-text key until a well-formed tree is available.
+            text.get(entry.def_span.start..entry.def_span.end).unwrap_or("").hash(&mut h);
+        }
         return Some(ArcCallableBody {
             body: Arc::new(entry.clone()),
             text: Arc::clone(text),
@@ -335,25 +351,18 @@ pub fn callable_body<'db>(
     None
 }
 
-/// Where this callable starts in the file as it is now.
-///
-/// Read from `callable_bodies`, which re-runs whenever the file changes —
-/// unlike `callable_body`, whose whole point is that it does not.
-fn current_def_start<'db>(db: &'db dyn salsa::Database, id: DefWithBodyId<'db>) -> Option<usize> {
-    let bodies = callable_bodies(db, id.file(db)).as_ref()?;
-    let target_name = id.name(db);
-    let mut clause_idx = 0u32;
-    for entry in bodies.0.entries() {
-        if entry.name != target_name {
-            continue;
-        }
-        if clause_idx != id.clause_index(db) {
-            clause_idx += 1;
-            continue;
-        }
-        return Some(entry.def_span.start);
-    }
-    None
+/// Significant token spans in a callable's lowering snapshot.
+pub fn callable_token_spans(text: &str, span: crate::Span) -> Vec<crate::Span> {
+    let text = text.get(span.start..span.end).unwrap_or("");
+    let lexed = parser::LexedStr::new(text);
+    let mut offset = span.start;
+    (0..lexed.len())
+        .filter_map(|index| {
+            let start = offset;
+            offset += lexed.text(index).len();
+            (!lexed.kind(index).is_trivia()).then_some(crate::Span::new(start, offset))
+        })
+        .collect()
 }
 
 /// Per-callable Body + BodySourceMap query.
@@ -365,30 +374,33 @@ pub fn body_with_source_map<'db>(
     let file = id.file(db);
     let file_id = file.file_id(db);
 
-    // Through `callable_body`, so this inherits its fingerprint: an edit
-    // that leaves a callable alone leaves that query's value equal, and
-    // salsa backdates it instead of re-inferring.
-    //
-    // Positions are the one thing that edit *did* change. `callable_body`
-    // holds the ones the body was lowered with, so this query — which
-    // re-runs whenever the file does, and only clones — moves them to where
-    // the callable sits now. Everything that shows a user a position comes
-    // through here.
+    // The semantic query may be backdated across internal trivia edits.
+    // Source positions must instead come from the current lowering.
     if let Some(cb) = callable_body(db, id).as_ref() {
-        let body = (*cb.body.body).clone();
-        let mut source_map = (*cb.body.source_map).clone();
-        // Populate file_id so BodySourceMap can produce InFile<Span> via
-        // expr_syntax_in_file / pat_syntax_in_file.
-        if source_map.file_id.is_none() {
+        let current = callable_bodies(db, file).as_ref().and_then(|bodies| {
+            bodies
+                .0
+                .entries()
+                .iter()
+                .filter(|entry| entry.name == id.name(db))
+                .nth(id.clause_index(db) as usize)
+        });
+        if let Some(current) = current {
+            use std::hash::{Hash, Hasher};
+            let body = (*current.body).clone();
+            let mut source_map = (*current.source_map).clone();
             source_map.file_id = Some(file_id);
+            source_map.def_base = current.def_span.start;
+            let text = file.text(db);
+            source_map.source_tokens = callable_token_spans(text, current.def_span);
+            // Source-map dependants must not be backdated when byte positions
+            // change, even though inference dependants should be.
+            let mut h = rustc_hash::FxHasher::default();
+            cb.fingerprint().hash(&mut h);
+            current.def_span.hash(&mut h);
+            text.get(current.def_span.start..current.def_span.end).hash(&mut h);
+            return ArcBodyWithSourceMap(Arc::new((body, source_map)), h.finish());
         }
-        // Reading this is what makes this query re-run. Without it every
-        // input verifies unchanged after an edit above the callable and the
-        // memo is returned — with the positions it had before the edit.
-        // `a_reused_body_still_reports_where_it_is_now` fails on exactly
-        // that.
-        source_map.def_base = current_def_start(db, id).unwrap_or(cb.body.def_span.start);
-        return ArcBodyWithSourceMap(Arc::new((body, source_map)), cb.fingerprint());
     }
 
     // No such callable — an empty body, and a fingerprint that says so.
@@ -456,7 +468,17 @@ pub fn set_workspace_files(db: &mut dyn salsa::Database, file_texts: Vec<FileTex
     update_workspace_fixities(db, file_texts);
 }
 
-/// Merge fixity declarations from all files into the `WorkspaceFixities` input.
+/// Project operator declarations without lowering the rest of the item tree.
+#[salsa::tracked(returns(ref))]
+fn file_fixities(db: &dyn salsa::Database, file: FileText) -> syntax::FixityContext {
+    parse_file(db, file)
+        .syntax_node()
+        .map(|root| ItemTree::fixity_context_from_cst(&root))
+        .unwrap_or_default()
+}
+
+/// Update only the compact operator-declaration projection. Function signatures
+/// and generated declarations remain lazy, requested by their IDE consumers.
 pub fn update_workspace_fixities(
     db: &mut dyn salsa::Database,
     file_texts: impl IntoIterator<Item = FileText>,
@@ -467,10 +489,7 @@ pub fn update_workspace_fixities(
     let mut merged = std::collections::HashMap::new();
 
     for ft in file_texts {
-        if let Some(tree) = file_item_tree(db, ft).as_ref() {
-            let ctx = tree.build_fixity_context();
-            merged.extend(ctx);
-        }
+        merged.extend(file_fixities(db, ft).clone());
     }
 
     let mut hasher = DefaultHasher::new();
@@ -508,6 +527,25 @@ mod tests {
 
     #[salsa::db]
     impl salsa::Database for TestDb {}
+
+    #[test]
+    fn compact_fixities_match_item_tree_across_edits() {
+        use salsa::Setter;
+        let mut db = TestDb::default();
+        let file = FileText::new(&db, Arc::from(""), FileId::from_raw(0));
+        for source in [
+            "infixl 6 +\ninfixr 7 **\nfunction f() = 1 + 2 ** 3\n",
+            "infixr 3 +\ninfix 4 ==\nfunction f() = 4 + 5\n",
+            "$ifdef NEVER_DEFINED\ninfixl 2 +\n$else\ninfixr 8 +\n$endif\n",
+            "/* 中文 */\nfunction f() = 1\n",
+        ] {
+            file.set_text(&mut db).to(Arc::from(source));
+            set_workspace_files(&mut db, vec![file]);
+            let expected = file_item_tree(&db, file).as_ref().unwrap().build_fixity_context();
+            assert_eq!(file_fixities(&db, file), &expected, "{source}");
+            assert_eq!(base_db::WorkspaceFixities::try_get(&db).unwrap().fixities(&db), &expected);
+        }
+    }
 
     #[test]
     fn item_tree_for_function() {

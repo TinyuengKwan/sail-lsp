@@ -1,0 +1,1026 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-29",
+  "checkpoint": "0c9ce4cd705cbc48bef8cd9db93e250a517a18f3",
+  "checkpoint_parent": "717a7f19d6b46d4469d1017d7b8e6b5fcb72cc71",
+  "scope": "Ablate the previously uncommitted P0/P1 and P2/P3 increment after committing it; preserve supported editor behavior. No Zed SSH acceptance.",
+  "environment": {
+    "rust": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+    "platform": "Linux-6.8.0-138-generic-x86_64-with-glibc2.39",
+    "benchmark_cpu": 0,
+    "sail": "ac09f8870b9d85e528e2a3436150b03b9d805d40",
+    "riscv": "20690c8a8d6ccbb0e6adea8e2977efd3adaf8391"
+  },
+  "retained_simplifications": [
+    {
+      "area": "SSR",
+      "changes": [
+        "Construct one resolved expression replacement at an explicit invocation offset; remove empty/mutable initialization states and multi-rule indices.",
+        "Remove uncalled search-only, comment-rule, debug and workspace-traversal entry points. ide-ssr is publish=false; repository call-site search found only Analysis as production client.",
+        "IDE owns file traversal; pass FileText and return Vec<TextEdit>, avoiding a cloned workspace file map and single-key result maps.",
+        "Remove SsrMatches/PlaceholderMatch wrappers, dead nested matches/depth/comment/range fields, and mismatch strings consumed only by the removed debug API.",
+        "Require a replacement expression, parse each side once, validate replacement placeholders from the already parsed map; remove type/pattern/item parsing paths that the request rejected.",
+        "Borrow matching placeholder metadata; remove unused url/smol_str dependencies.",
+        "Keep binding identity, placeholder constraints, comments, precedence, selection-before-overlap, inactive-branch filtering, include-instance rejection, cancellation, versioned previews and whole-file parse validation."
+      ]
+    },
+    {
+      "area": "Formatter",
+      "changes": [
+        "Reuse the already joined parameter string instead of reconstructing it through ListFormatting/write_list.",
+        "Remove the now unconstructed SeparatorTactic::Never variant. Keep CST extraction and the existing layout tactic."
+      ]
+    }
+  ],
+  "source_diff": {
+    "added": 159,
+    "deleted": 779,
+    "net_removed": 620,
+    "sha256": "c30d1c2f24f9f31ec980478594cd4fa8ede40452dcef85edf3d49adde2be2404"
+  },
+  "negative_controls": [
+    {
+      "name": "control-signature",
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "test",
+        "-p",
+        "sail-lsp",
+        "signature_help_",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit": 0
+    },
+    {
+      "name": "control-conversion",
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "test",
+        "-p",
+        "ide",
+        "quick_fix_tests",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit": 0
+    },
+    {
+      "name": "without-overload-types",
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "test",
+        "-p",
+        "sail-lsp",
+        "signature_help_",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit": 101,
+      "failing_tests": [
+        "server_check::signature_help_distinguishes_dependent_widths_and_aliases",
+        "server_check::signature_help_uses_types_for_equal_arity_overloads"
+      ],
+      "patch": "diff --git a/crates/ide/src/signature_help.rs b/crates/ide/src/signature_help.rs\nindex 88594f8..e487453 100644\n--- a/crates/ide/src/signature_help.rs\n+++ b/crates/ide/src/signature_help.rs\n@@ -106,16 +106,6 @@ pub(crate) fn signature_help(\n     // Reuse inference's source-order-aware overload resolution (including\n     // aliases, dependent widths and constraints), rather than comparing\n     // rendered parameter strings. In incomplete code, keep the arity fallback.\n-    if let Some(selected) = file.file_text().and_then(|(db, ft)| {\n-        hir::Semantics::new(db)\n-            .resolve_overload_callee(ft, call.callee_span.start)\n-            .map(|definition| definition.name(db).to_string())\n-    }) {\n-        if let Some(index) = all_sigs.iter().position(|sig| sig.name == selected) {\n-            best_active = index;\n-        }\n-    }\n-\n     let active_parameter = {\n         let sig = &all_sigs[best_active];\n         let mut visible_idx = 0;\n"
+    },
+    {
+      "name": "without-binding-identity",
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "test",
+        "-p",
+        "sail-lsp",
+        "ssr_",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit": 101,
+      "failing_tests": [
+        "server_check::ssr_previews_all_matches_and_respects_bindings_selections_and_versions"
+      ],
+      "patch": "diff --git a/crates/ide-ssr/src/lib.rs b/crates/ide-ssr/src/lib.rs\nindex ea0f1a5..a9e197b 100644\n--- a/crates/ide-ssr/src/lib.rs\n+++ b/crates/ide-ssr/src/lib.rs\n@@ -187,7 +187,7 @@ impl<'db> MatchFinder<'db> {\n             let rule_matches = search::search_in_tree(self.db, rule, root, file_id);\n             all.matches.extend(rule_matches.matches.into_iter().filter(|m| {\n                 (ranges.is_empty() || ranges.iter().any(|r| r.contains_range(m.range.range)))\n-                    && self.bindings_match(rule, m)\n+                    && true\n             }));\n         }\n         nester::deduplicate(all)\n"
+    },
+    {
+      "name": "without-comment-guard",
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "test",
+        "-p",
+        "sail-lsp",
+        "ssr_",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit": 101,
+      "failing_tests": [
+        "server_check::ssr_preserves_precedence_comments_and_repeated_capture_constraints"
+      ],
+      "patch": "diff --git a/crates/ide-ssr/src/lib.rs b/crates/ide-ssr/src/lib.rs\nindex ea0f1a5..23297b5 100644\n--- a/crates/ide-ssr/src/lib.rs\n+++ b/crates/ide-ssr/src/lib.rs\n@@ -229,7 +229,7 @@ impl<'db> MatchFinder<'db> {\n             // Do not delete comments outside placeholder captures.\n             let original =\n                 &before[usize::from(range.range.start())..usize::from(range.range.end())];\n-            if !comments_preserved(original, &new_text) {\n+            if false && !comments_preserved(original, &new_text) {\n                 continue;\n             }\n             result\n"
+    },
+    {
+      "name": "without-conversion-scope",
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "test",
+        "-p",
+        "ide",
+        "quick_fix_tests",
+        "--",
+        "--test-threads=1"
+      ],
+      "exit": 101,
+      "failing_tests": [
+        "quick_fix_tests::conversion_fixes_recheck_cleanly_and_missing_conversions_are_not_offered"
+      ],
+      "patch": "diff --git a/crates/ide-diagnostics/src/handlers/type_mismatch.rs b/crates/ide-diagnostics/src/handlers/type_mismatch.rs\nindex 473ce1f..c00da94 100644\n--- a/crates/ide-diagnostics/src/handlers/type_mismatch.rs\n+++ b/crates/ide-diagnostics/src/handlers/type_mismatch.rs\n@@ -164,11 +164,7 @@ fn fixes(ctx: &DiagnosticsContext<'_>, d: &TypeMismatch) -> Option<Vec<Assist>>\n     if d.expected.ctor_name() != Some(\"int\") {\n         return None;\n     }\n-    let fixes = [\"unsigned\", \"signed\"].into_iter().filter(|name| {\n-        ctx.sema.callable_types_at(file, usize::from(range.start()), name).iter().any(|ty| {\n-            matches!(ty.kind(), hir::TyKind::FnPtr(sig) if sig.params.len() == 1 && is_bitvector(&sig.params[0]) && is_integer(&sig.ret))\n-        })\n-    }).map(wrap).collect::<Vec<_>>();\n+    let fixes = [\"unsigned\", \"signed\"].into_iter().map(wrap).collect::<Vec<_>>();\n     (!fixes.is_empty()).then_some(fixes)\n }\n \n"
+    },
+    {
+      "name": "format-without-cst",
+      "exit": 101,
+      "failing_tests": [
+        "formatting::corpus_tests::structural_rewrites_preserve_expression_bodies_comments_and_type_braces"
+      ]
+    },
+    {
+      "name": "foreign-inlay-fallback",
+      "exit": 101,
+      "failing_tests": [
+        "inlay_hints::tests::parameter_hints_do_not_borrow_names_from_an_unresolved_foreign_function"
+      ]
+    }
+  ],
+  "ssr": {
+    "control": {
+      "cold_median_us": 92619,
+      "warm_median_us": 53314,
+      "binary_sha256": "fed21255c51cecfb02ffd8ad16ba3e002bd5c664d6ce79b4fab6daa56cb8a3c1",
+      "edit_count_per_request": 1000,
+      "edit_digest": 15300275287233273454,
+      "runs_us": [
+        [107692, 67661, 67669, 67599, 67862, 68033, 68729, 67780, 67925, 67650, 67553, 67954],
+        [92619, 68180, 67860, 67636, 67819, 53314, 49897, 50560, 50319, 50387, 50196, 50038],
+        [70351, 55990, 51146, 51153, 50770, 51073, 50528, 50679, 50245, 51392, 52408, 52090]
+      ]
+    },
+    "candidate": {
+      "cold_median_us": 90557,
+      "warm_median_us": 65374,
+      "binary_sha256": "9b16d1b992f86f5d6ea6f948c0a2066df0c771f3d846b2c3c952315a93c962fc",
+      "edit_count_per_request": 1000,
+      "edit_digest": 15300275287233273454,
+      "runs_us": [
+        [94312, 66456, 66122, 66144, 66689, 65374, 64981, 64979, 64812, 65056, 65575, 65341],
+        [90557, 66035, 65838, 65724, 66020, 66373, 66060, 66259, 66359, 66181, 66458, 66638],
+        [67566, 49058, 49163, 49115, 50179, 51428, 49493, 49841, 49553, 49951, 49185, 49837]
+      ]
+    },
+    "intermediate": {
+      "cold_median_us": 94163,
+      "warm_median_us": 64658,
+      "binary_sha256": "15fd209c32a283268a1e66db6fdd00446c223c9201679d92124d60d2914ec07e",
+      "edit_count_per_request": 1000,
+      "edit_digest": 15300275287233273454,
+      "runs_us": [
+        [104701, 64314, 63992, 63887, 64421, 64289, 64315, 64262, 64335, 64342, 64215, 63967],
+        [92433, 65062, 64937, 64857, 65372, 64917, 64652, 64658, 64793, 64524, 64862, 66795],
+        [94163, 64287, 64234, 64232, 64812, 90716, 88228, 68245, 68045, 67475, 67490, 67836]
+      ]
+    },
+    "method": "Release binaries; same CPU; 3 alternating paired runs, 12 requests per process (one cold, 11 warm), 10 files / 1000 matches. All edits (file IDs, ranges and replacements) hashed in stable file order; assert 1000 edits. Intermediate is API simplification before removing the remaining match/capture wrappers.",
+    "probe": "//! Temporary ablation probe: real Analysis query, explicit project, all edits hashed.\nuse std::{collections::{HashMap,HashSet},hash::{Hash,Hasher},time::Instant};\nuse base_db::{FileId,module_graph::{ModuleData,ModuleGraph},preprocess::SourceProject};\nuse ide::analysis::{Analysis,AnalysisHost,UrlMap};\nfn main() {\n let mut host=AnalysisHost::new();\n let mut change=ide_db::apply_change::Change::new();\n let mut urls=HashMap::new(); let mut paths=Vec::new(); let mut ids=Vec::new();\n for n in 0..10 {\n  let id=FileId::from_raw(n); ids.push(id);\n  let path=std::path::PathBuf::from(format!(\"/ssr-probe/f{n}.sail\"));\n  urls.insert(url::Url::from_file_path(&path).unwrap(),id); paths.push((path,id));\n  let mut text=if n==0 {\"val combine : (int, int) -> int\\nval flipped : (int, int) -> int\\n\".to_string()} else {String::new()};\n  for i in 0..100 {text.push_str(&format!(\"function f{n}_{i}() -> int = combine(1 + 2, 3)\\n\"));}\n  change.change_file(id,text);\n }\n change.set_source_project(SourceProject { roots:ids.clone(),paths,modules:ModuleGraph{modules:vec![ModuleData{files:ids,requires:vec![]}],globals:vec![]},..Default::default() });\n host.apply_change(change);\n let files=host.raw_database().files().clone();\n let reverse=urls.iter().map(|(u,id)|(*id,u.clone())).collect();\n let analysis=Analysis::with_include_graph(host.raw_database().clone(),files,UrlMap::new(urls,reverse),std::sync::Arc::new(hir::include_graph::IncludeGraph::default()));\n let mut samples=Vec::new();\n for _ in 0..12 {\n  let now=Instant::now();\n  let change=analysis.structural_search_replace(FileId::from_raw(0),ide_db::LineCol{line:2,col:29},\"combine($a, $b) ==>> flipped($b, $a)\",false,&[],&HashSet::new()).unwrap().unwrap();\n  let us=now.elapsed().as_micros();\n  let mut entries:Vec<_>=change.source_file_edits.iter().collect(); entries.sort_by_key(|(id,_)|**id);\n  let mut hash=std::collections::hash_map::DefaultHasher::new();let mut count=0;\n  for (id,edits) in entries {id.hash(&mut hash); for e in edits {e.range.hash(&mut hash);e.new_text.hash(&mut hash);count+=1;}}\n  assert_eq!(count,1000);\n  samples.push(serde_json::json!({\"us\":us,\"edits\":count,\"digest\":hash.finish()}));\n }\n println!(\"{}\",serde_json::json!(samples));\n}\n",
+    "post_gate_repeat": [
+      {
+        "label": "control",
+        "run": 0,
+        "cpu": 0,
+        "command": [
+          "target/ablation-2026-10-29/control-ssr"
+        ],
+        "samples_us": [111769, 67548, 67659, 67656, 67620, 67701, 68081, 67576, 67540, 67695, 67386, 67516],
+        "cold_us": 111769,
+        "warm_median_us": 67620
+      },
+      {
+        "label": "final",
+        "run": 0,
+        "cpu": 0,
+        "command": [
+          "target/ablation-2026-10-29/final-ssr"
+        ],
+        "samples_us": [94585, 66890, 66747, 66498, 66647, 66320, 66249, 66351, 66452, 66789, 66729, 65573],
+        "cold_us": 94585,
+        "warm_median_us": 66498
+      },
+      {
+        "label": "final",
+        "run": 1,
+        "cpu": 0,
+        "command": [
+          "target/ablation-2026-10-29/final-ssr"
+        ],
+        "samples_us": [93634, 66209, 66160, 66162, 66813, 66442, 66429, 66409, 66580, 66473, 66305, 66619],
+        "cold_us": 93634,
+        "warm_median_us": 66429
+      },
+      {
+        "label": "control",
+        "run": 1,
+        "cpu": 0,
+        "command": [
+          "target/ablation-2026-10-29/control-ssr"
+        ],
+        "samples_us": [95609, 65862, 67496, 67603, 67799, 67648, 67379, 67141, 67526, 67556, 67504, 67441],
+        "cold_us": 95609,
+        "warm_median_us": 67504
+      },
+      {
+        "label": "control",
+        "run": 2,
+        "cpu": 0,
+        "command": [
+          "target/ablation-2026-10-29/control-ssr"
+        ],
+        "samples_us": [97847, 67050, 68227, 68181, 67895, 67526, 67922, 68052, 58308, 52862, 53004, 52674],
+        "cold_us": 97847,
+        "warm_median_us": 67526
+      },
+      {
+        "label": "final",
+        "run": 2,
+        "cpu": 0,
+        "command": [
+          "target/ablation-2026-10-29/final-ssr"
+        ],
+        "samples_us": [73209, 51590, 51788, 51764, 51741, 51748, 51841, 51706, 52069, 51793, 51579, 51818],
+        "cold_us": 73209,
+        "warm_median_us": 51764
+      },
+      {
+        "label": "final",
+        "run": 3,
+        "cpu": 0,
+        "command": [
+          "target/ablation-2026-10-29/final-ssr"
+        ],
+        "samples_us": [72295, 50190, 50382, 50897, 50294, 50436, 50303, 50075, 50598, 50412, 50754, 50510],
+        "cold_us": 72295,
+        "warm_median_us": 50412
+      },
+      {
+        "label": "control",
+        "run": 3,
+        "cpu": 0,
+        "command": [
+          "target/ablation-2026-10-29/control-ssr"
+        ],
+        "samples_us": [74483, 52990, 52797, 53660, 53354, 53424, 53292, 53602, 53558, 52628, 53285, 53404],
+        "cold_us": 74483,
+        "warm_median_us": 53354
+      },
+      {
+        "label": "control",
+        "run": 4,
+        "cpu": 0,
+        "command": [
+          "target/ablation-2026-10-29/control-ssr"
+        ],
+        "samples_us": [75030, 52732, 52854, 52364, 52527, 52582, 52897, 52843, 52927, 53103, 52733, 52880],
+        "cold_us": 75030,
+        "warm_median_us": 52843
+      },
+      {
+        "label": "final",
+        "run": 4,
+        "cpu": 0,
+        "command": [
+          "target/ablation-2026-10-29/final-ssr"
+        ],
+        "samples_us": [71739, 51216, 51707, 50647, 50230, 50660, 50557, 50432, 50133, 50255, 50558, 50526],
+        "cold_us": 71739,
+        "warm_median_us": 50557
+      },
+      {
+        "label": "final",
+        "run": 5,
+        "cpu": 0,
+        "command": [
+          "target/ablation-2026-10-29/final-ssr"
+        ],
+        "samples_us": [73251, 51751, 51411, 51960, 51685, 51568, 52060, 51652, 51773, 51700, 51704, 99069],
+        "cold_us": 73251,
+        "warm_median_us": 51704
+      },
+      {
+        "label": "control",
+        "run": 5,
+        "cpu": 0,
+        "command": [
+          "target/ablation-2026-10-29/control-ssr"
+        ],
+        "samples_us": [112063, 66904, 70400, 68282, 68593, 68874, 68377, 68958, 68408, 68515, 68580, 68427],
+        "cold_us": 112063,
+        "warm_median_us": 68515
+      }
+    ],
+    "timing_caution": "The first final paired run crossed a clear wall-time regime shift (both binaries moved from about 65-68 ms to 49-52 ms). Its pooled median is not an effect estimate. Post-gate repeated alternating runs are recorded separately; no stable speedup is claimed."
+  },
+  "completion": {
+    "control": {
+      "runs": [
+        {
+          "top_k": {
+            "1": 1573,
+            "5": 2116,
+            "20": 2624
+          },
+          "offered": 2995,
+          "p50_us": 1632,
+          "p95_us": 2934
+        },
+        {
+          "top_k": {
+            "1": 1573,
+            "5": 2116,
+            "20": 2624
+          },
+          "offered": 2995,
+          "p50_us": 1620,
+          "p95_us": 2768
+        },
+        {
+          "top_k": {
+            "1": 1573,
+            "5": 2116,
+            "20": 2624
+          },
+          "offered": 2995,
+          "p50_us": 1610,
+          "p95_us": 2745
+        }
+      ],
+      "binary_sha256": "7c868231a707c1abebc9f5408d84ac56816565dcace2204b3c6512bb607a1468"
+    },
+    "without_case_prefix": {
+      "runs": [
+        {
+          "top_k": {
+            "1": 1441,
+            "5": 2098,
+            "20": 2580
+          },
+          "offered": 2995,
+          "p50_us": 1668,
+          "p95_us": 2945
+        },
+        {
+          "top_k": {
+            "1": 1441,
+            "5": 2098,
+            "20": 2580
+          },
+          "offered": 2995,
+          "p50_us": 1605,
+          "p95_us": 2805
+        },
+        {
+          "top_k": {
+            "1": 1441,
+            "5": 2098,
+            "20": 2580
+          },
+          "offered": 2995,
+          "p50_us": 1788,
+          "p95_us": 3269
+        }
+      ],
+      "binary_sha256": "0a805d99b522a05f77215df865c499775fd7212cf54bb0d0a230cfbfaf4cc016"
+    },
+    "without_callable_bonus": {
+      "runs": [
+        {
+          "top_k": {
+            "1": 1385,
+            "5": 2116,
+            "20": 2621
+          },
+          "offered": 2995,
+          "p50_us": 1626,
+          "p95_us": 2922
+        },
+        {
+          "top_k": {
+            "1": 1385,
+            "5": 2116,
+            "20": 2621
+          },
+          "offered": 2995,
+          "p50_us": 1647,
+          "p95_us": 2985
+        },
+        {
+          "top_k": {
+            "1": 1385,
+            "5": 2116,
+            "20": 2621
+          },
+          "offered": 2995,
+          "p50_us": 1661,
+          "p95_us": 2889
+        }
+      ],
+      "binary_sha256": "915036322f4a040a0664a2167478f2714702664425a2c2983db00091f536aca9"
+    },
+    "method": "Each candidate removes only one score bonus; release fixed 3000-reference sample, absolute sail-riscv path, same CPU, 3 runs per binary. Candidates restored; both bonuses retained."
+  },
+  "semantic_prefilter": {
+    "control": {
+      "cold_query_ms": [
+        8.224,
+        5.007,
+        4.54,
+        4.389,
+        4.49
+      ],
+      "median_ms": 4.54,
+      "inference_calls_per_query": 1
+    },
+    "without_prefilter": {
+      "cold_query_ms": [
+        19.07,
+        14.071,
+        12.224,
+        11.367,
+        11.188
+      ],
+      "median_ms": 12.224,
+      "inference_calls_per_query": 201
+    },
+    "method": "5 fresh databases, 200 unrelated functions plus one target; identical missing-field result asserted; trace infer events. Restore exact span/file prefilter.",
+    "probe": "use ide_db::{root_database::RootDatabase, apply_change::Change};\nfn main() {\n    tracing_subscriber::fmt().with_ansi(false).with_max_level(tracing::Level::INFO).with_span_events(tracing_subscriber::fmt::format::FmtSpan::NEW).init();\n    for _ in 0..5 {\n        let mut source = String::from(\"struct S = { x : int, enabled : bool }\\n\");\n        for i in 0..200 {\n            source.push_str(&format!(\"function unused_{i}() -> int = 1\\n\"));\n        }\n        let start = source.len() + \"function target() -> S = \".len();\n        source.push_str(\"function target() -> S = struct S { x = 1 }\\n\");\n        let end = source.len() - 1;\n        let id = base_db::FileId::from_raw(0);\n        let mut db = RootDatabase::default();\n        let mut change = Change::new();\n        change.change_file(id, source);\n        db.apply_change(change);\n        let ft = db.files().file_text(id).unwrap();\n        let sema = hir::Semantics::new(&db);\n        let now = std::time::Instant::now();\n        let fields = sema.missing_record_fields(ft, base_db::text_range(start,end));\n        assert_eq!(fields, Some(vec![(\"enabled\".into(), \"bool\".into())]));\n        println!(\"cold_query_ms={:.3}\",now.elapsed().as_secs_f64()*1000.0);\n    }\n}\n"
+  },
+  "formatter": {
+    "corpus": {
+      "changed": 133,
+      "checked": 214,
+      "failures": [],
+      "parse_skipped": [
+        "/home/clair/tinyueng_workplace/sail-lsp/crates/ide/../sail-lsp/data/sail-lib/core/corelib.sail",
+        "/home/clair/tinyueng_workplace/sail-lsp/crates/ide/../sail-lsp/data/sail-lib/hex_bits.sail",
+        "/home/clair/tinyueng_workplace/sail-lsp/crates/ide/../sail-lsp/data/sail-lib/hex_bits_signed.sail"
+      ]
+    },
+    "byte_identical_outputs": 214,
+    "method": "Temporarily dump every raw formatter output before safety fallback in both variants; compare bytes, token preservation, parse success and idempotence. Restore probe-only instrumentation. Old string-based extraction demonstrably turns code following // into comment text."
+  },
+  "retained_designs": [
+    {
+      "area": "Signature help",
+      "reason": "Inference selects equal-arity typed/dependent overloads; removal fails two protocol regressions. Keep incomplete-call arity fallback."
+    },
+    {
+      "area": "Quick-fix",
+      "reason": "Semantic callable scope/type checks prevent nonexistent or incompatible unsigned/signed edits; removal fails the apply/recheck regression. Keep existing diagnostic-owned fixes pipeline and suppression of unsafe duplicate/shadow rename suggestions."
+    },
+    {
+      "area": "Inlay hints",
+      "reason": "Reintroducing the cross-file spelling fallback invents unrelated_name: at an unresolved helper call. Retain semantic identity and local fallback."
+    },
+    {
+      "area": "Completion",
+      "reason": "Both small relevance bonuses improve measured rank; single scope query and cached cursor token avoid repeated lookup. No new ranking layer added."
+    },
+    {
+      "area": "Status/provenance",
+      "reason": "WorkspaceStatus is an immutable request snapshot of roots/config/load errors; eliminating it would spread GlobalState access. Build revision works in archive, nested archive, checkout, worktree and explicit override cases; smoke rerun passed."
+    },
+    {
+      "area": "SSR resolution",
+      "reason": "Keep ResolutionScope and ResolvedPattern for one-time invocation-scope binding resolution shared by pattern and replacement; needed by the identity guard, not speculative workspace state."
+    },
+    {
+      "area": "Quality infrastructure and lifecycle tests",
+      "reason": "Keep project-aware fixtures, oracle freshness preflight, release quality reports and branch/rename/delete/generated-file recovery regressions. These establish scope and detect stale diagnostics; they are not redundant production abstractions."
+    },
+    {
+      "area": "Formatting",
+      "reason": "Keep the list-layout tactic because multiline parameters and width decisions are meaningful; only redundant output assembly was removed."
+    }
+  ],
+  "commands": {
+    "negative-controls": [
+      {
+        "name": "control-signature",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "test",
+          "-p",
+          "sail-lsp",
+          "signature_help_",
+          "--",
+          "--test-threads=1"
+        ],
+        "exit": 0
+      },
+      {
+        "name": "control-conversion",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "test",
+          "-p",
+          "ide",
+          "quick_fix_tests",
+          "--",
+          "--test-threads=1"
+        ],
+        "exit": 0
+      },
+      {
+        "name": "without-overload-types",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "test",
+          "-p",
+          "sail-lsp",
+          "signature_help_",
+          "--",
+          "--test-threads=1"
+        ],
+        "exit": 101
+      },
+      {
+        "name": "without-binding-identity",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "test",
+          "-p",
+          "sail-lsp",
+          "ssr_",
+          "--",
+          "--test-threads=1"
+        ],
+        "exit": 101
+      },
+      {
+        "name": "without-comment-guard",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "test",
+          "-p",
+          "sail-lsp",
+          "ssr_",
+          "--",
+          "--test-threads=1"
+        ],
+        "exit": 101
+      },
+      {
+        "name": "without-conversion-scope",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "test",
+          "-p",
+          "ide",
+          "quick_fix_tests",
+          "--",
+          "--test-threads=1"
+        ],
+        "exit": 101
+      }
+    ],
+    "measure-commands": [
+      {
+        "name": "simple-ssr-build",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "build",
+          "--release",
+          "-p",
+          "sail-lsp",
+          "--example",
+          "ssr_ablation",
+          "--example",
+          "completion_check"
+        ],
+        "cpu": null
+      },
+      {
+        "name": "control-ssr-0",
+        "command": [
+          "target/ablation-2026-10-29/control-ssr"
+        ],
+        "cpu": 0
+      },
+      {
+        "name": "simple-ssr-0",
+        "command": [
+          "target/ablation-2026-10-29/simple-ssr"
+        ],
+        "cpu": 0
+      },
+      {
+        "name": "simple-ssr-1",
+        "command": [
+          "target/ablation-2026-10-29/simple-ssr"
+        ],
+        "cpu": 0
+      },
+      {
+        "name": "control-ssr-1",
+        "command": [
+          "target/ablation-2026-10-29/control-ssr"
+        ],
+        "cpu": 0
+      },
+      {
+        "name": "control-ssr-2",
+        "command": [
+          "target/ablation-2026-10-29/control-ssr"
+        ],
+        "cpu": 0
+      },
+      {
+        "name": "simple-ssr-2",
+        "command": [
+          "target/ablation-2026-10-29/simple-ssr"
+        ],
+        "cpu": 0
+      },
+      {
+        "name": "control-completion",
+        "command": [
+          "target/ablation-2026-10-29/control-completion",
+          "--ranked",
+          "/home/clair/tinyueng_workplace/sail-riscv"
+        ],
+        "cpu": 0
+      },
+      {
+        "name": "without-case-prefix-build",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "build",
+          "--release",
+          "-p",
+          "sail-lsp",
+          "--example",
+          "ssr_ablation",
+          "--example",
+          "completion_check"
+        ],
+        "cpu": null
+      },
+      {
+        "name": "without-case-prefix",
+        "command": [
+          "target/ablation-2026-10-29/without-case-prefix",
+          "--ranked",
+          "/home/clair/tinyueng_workplace/sail-riscv"
+        ],
+        "cpu": 0
+      },
+      {
+        "name": "without-callable-bonus-build",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "build",
+          "--release",
+          "-p",
+          "sail-lsp",
+          "--example",
+          "ssr_ablation",
+          "--example",
+          "completion_check"
+        ],
+        "cpu": null
+      },
+      {
+        "name": "without-callable-bonus",
+        "command": [
+          "target/ablation-2026-10-29/without-callable-bonus",
+          "--ranked",
+          "/home/clair/tinyueng_workplace/sail-riscv"
+        ],
+        "cpu": 0
+      }
+    ],
+    "extra-commands": [
+      {
+        "name": "without-callable-bonus-repeat-0",
+        "command": [
+          "target/ablation-2026-10-29/without-callable-bonus",
+          "--ranked",
+          "/home/clair/tinyueng_workplace/sail-riscv"
+        ],
+        "exit": 0
+      },
+      {
+        "name": "without-case-prefix-repeat-0",
+        "command": [
+          "target/ablation-2026-10-29/without-case-prefix",
+          "--ranked",
+          "/home/clair/tinyueng_workplace/sail-riscv"
+        ],
+        "exit": 0
+      },
+      {
+        "name": "control-completion-repeat-0",
+        "command": [
+          "target/ablation-2026-10-29/control-completion",
+          "--ranked",
+          "/home/clair/tinyueng_workplace/sail-riscv"
+        ],
+        "exit": 0
+      },
+      {
+        "name": "control-completion-repeat-1",
+        "command": [
+          "target/ablation-2026-10-29/control-completion",
+          "--ranked",
+          "/home/clair/tinyueng_workplace/sail-riscv"
+        ],
+        "exit": 0
+      },
+      {
+        "name": "without-case-prefix-repeat-1",
+        "command": [
+          "target/ablation-2026-10-29/without-case-prefix",
+          "--ranked",
+          "/home/clair/tinyueng_workplace/sail-riscv"
+        ],
+        "exit": 0
+      },
+      {
+        "name": "without-callable-bonus-repeat-1",
+        "command": [
+          "target/ablation-2026-10-29/without-callable-bonus",
+          "--ranked",
+          "/home/clair/tinyueng_workplace/sail-riscv"
+        ],
+        "exit": 0
+      },
+      {
+        "name": "format-control",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "test",
+          "-p",
+          "ide",
+          "formatting_corpus_rewrites_preserve_tokens_and_settle",
+          "--",
+          "--ignored"
+        ],
+        "exit": 0
+      },
+      {
+        "name": "format-direct-join",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "test",
+          "-p",
+          "ide",
+          "formatting_corpus_rewrites_preserve_tokens_and_settle",
+          "--",
+          "--ignored"
+        ],
+        "exit": 0
+      },
+      {
+        "name": "format-without-cst",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "test",
+          "-p",
+          "ide",
+          "structural_rewrites_preserve_expression_bodies_comments_and_type_braces"
+        ],
+        "exit": 101
+      },
+      {
+        "name": "prefilter-control-build",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "build",
+          "--release",
+          "-p",
+          "sail-lsp",
+          "--example",
+          "semantic_ablation"
+        ],
+        "exit": 0
+      },
+      {
+        "name": "prefilter-control",
+        "command": [
+          "target/release/examples/semantic_ablation"
+        ],
+        "exit": 0
+      },
+      {
+        "name": "without-prefilter-build",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "build",
+          "--release",
+          "-p",
+          "sail-lsp",
+          "--example",
+          "semantic_ablation"
+        ],
+        "exit": 0
+      },
+      {
+        "name": "without-prefilter",
+        "command": [
+          "target/release/examples/semantic_ablation"
+        ],
+        "exit": 0
+      }
+    ],
+    "final-commands": [
+      {
+        "name": "control-inlay",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "test",
+          "-p",
+          "ide",
+          "parameter_hints_do_not_borrow_names"
+        ],
+        "exit": 0
+      },
+      {
+        "name": "foreign-inlay-fallback",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "test",
+          "-p",
+          "ide",
+          "parameter_hints_do_not_borrow_names"
+        ],
+        "exit": 101
+      },
+      {
+        "name": "build-version-smoke",
+        "command": [
+          "python3",
+          "target/ablation-2026-10-29/build-version-smoke.py"
+        ],
+        "exit": 0
+      },
+      {
+        "name": "final-ssr-build",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "build",
+          "--release",
+          "-p",
+          "sail-lsp",
+          "--example",
+          "ssr_ablation"
+        ],
+        "exit": 0
+      },
+      {
+        "name": "paired-control-ssr-0",
+        "command": [
+          "target/ablation-2026-10-29/control-ssr"
+        ],
+        "exit": 0
+      },
+      {
+        "name": "paired-final-ssr-0",
+        "command": [
+          "target/ablation-2026-10-29/final-ssr"
+        ],
+        "exit": 0
+      },
+      {
+        "name": "paired-final-ssr-1",
+        "command": [
+          "target/ablation-2026-10-29/final-ssr"
+        ],
+        "exit": 0
+      },
+      {
+        "name": "paired-control-ssr-1",
+        "command": [
+          "target/ablation-2026-10-29/control-ssr"
+        ],
+        "exit": 0
+      },
+      {
+        "name": "paired-control-ssr-2",
+        "command": [
+          "target/ablation-2026-10-29/control-ssr"
+        ],
+        "exit": 0
+      },
+      {
+        "name": "paired-final-ssr-2",
+        "command": [
+          "target/ablation-2026-10-29/final-ssr"
+        ],
+        "exit": 0
+      },
+      {
+        "name": "workspace-default",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "test",
+          "--workspace",
+          "--",
+          "--test-threads=1"
+        ],
+        "exit": 0
+      },
+      {
+        "name": "workspace-no-smt",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "test",
+          "--workspace",
+          "--no-default-features",
+          "--",
+          "--test-threads=1"
+        ],
+        "exit": 0
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "clippy",
+          "--workspace",
+          "--all-targets"
+        ],
+        "exit": 0
+      },
+      {
+        "name": "fmt",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit": 0
+      },
+      {
+        "name": "diff-check",
+        "command": [
+          "git",
+          "diff",
+          "--check"
+        ],
+        "exit": 0
+      }
+    ]
+  },
+  "limits": [
+    "This is focused ablation, not a new upstream conformance or mutation campaign; prior corpus quality counts are not relabeled as current measurements.",
+    "Timing is local microbenchmark evidence, not a Zed SSH latency claim or general performance guarantee.",
+    "Formatter corpus skips three already unparsable sources; output equivalence covers the 214 valid files.",
+    "Four wrapper/search-only parser tests were removed with those unsupported APIs; five actual replacement parser safety tests and all protocol SSR regressions remain.",
+    "Unused Rust APIs removed from the non-published internal crate; experimental/ssr request/response schema is unchanged."
+  ],
+  "gates": {
+    "workspace-default": {
+      "passed": 2426,
+      "failed": 0,
+      "ignored": 18
+    },
+    "workspace-no-smt": {
+      "passed": 2411,
+      "failed": 0,
+      "ignored": 18
+    }
+  }
+}

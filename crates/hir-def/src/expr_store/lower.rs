@@ -786,7 +786,12 @@ fn finish_body_with_guard(
     let (store, store_source_map) = ctx.builder.finish();
 
     let body = Body { store, params: params.into_boxed_slice(), body_expr, mapping_arms, guard };
-    let source_map = BodySourceMap { file_id: None, store: store_source_map, def_base: 0 };
+    let source_map = BodySourceMap {
+        file_id: None,
+        store: store_source_map,
+        def_base: 0,
+        source_tokens: Vec::new(),
+    };
     (body, source_map)
 }
 
@@ -2126,7 +2131,12 @@ pub fn lower_mapping_clause_text(
     };
     Some((
         body,
-        BodySourceMap { file_id: None, store: store_source_map, def_base: 0 },
+        BodySourceMap {
+            file_id: None,
+            store: store_source_map,
+            def_base: 0,
+            source_tokens: Vec::new(),
+        },
         lhs_expr,
         rhs_expr,
         guard_expr,

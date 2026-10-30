@@ -247,6 +247,7 @@ pub fn snippet_workspace_edit_from_plain(
                 })
                 .collect()
         }),
+        change_annotations: edit.change_annotations.clone(),
     }
 }
 

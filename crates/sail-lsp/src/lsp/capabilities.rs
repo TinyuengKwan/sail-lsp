@@ -43,6 +43,16 @@ impl ClientCapabilities {
                         .is_some_and(|ops| ops.contains(&ResourceOperationKind::Create))
             })
     }
+    /// Whether the client can ask the user to confirm an annotated edit.
+    pub(crate) fn change_annotation_support(&self) -> bool {
+        (|| -> Option<_> {
+            let edit = self.0.workspace.as_ref()?.workspace_edit.as_ref()?;
+            (edit.document_changes == Some(true)).then_some(())?;
+            edit.change_annotation_support.as_ref()
+        })()
+        .is_some()
+    }
+
     /// Whether the client pulls diagnostics (`textDocument/diagnostic`).
     ///
     /// Such a client keeps what it pulls apart from what is published —
@@ -257,12 +267,7 @@ pub(crate) fn server_capabilities(client: &ClientCapabilities) -> ServerCapabili
         code_lens_provider: Some(CodeLensOptions { resolve_provider: Some(true) }),
         document_on_type_formatting_provider: Some(DocumentOnTypeFormattingOptions {
             first_trigger_character: "}".to_string(),
-            more_trigger_character: Some(vec![
-                ";".to_string(),
-                "\n".to_string(),
-                "=".to_string(),
-                ">".to_string(),
-            ]),
+            more_trigger_character: Some(vec![">".to_string(), "\n".to_string()]),
         }),
         inlay_hint_provider: Some(OneOf::Left(true)),
         signature_help_provider: Some(SignatureHelpOptions {
@@ -307,11 +312,11 @@ pub(crate) fn server_capabilities(client: &ClientCapabilities) -> ServerCapabili
         // them here — rust-analyzer advertises its own the same way, and a
         // client that does not see the flag will not send the request.
         experimental: Some(serde_json::json!({
+            "ssr": true,
             "matchingBrace": true,
             "joinLines": true,
             "onEnter": true,
             "moveItem": true,
-            "ssr": true,
         })),
         ..Default::default()
     }

@@ -99,7 +99,7 @@ features can be ported between the two projects with minimal friction.
 | `ide-completion` | Provider-based completion: `context.rs` (CompletionContext with `sema: Semantics`, `db`, `expected_type`, `DotAccess` with `receiver_ty`), `completions.rs` (Completions accumulator + `complete_name_ref` dispatcher), `completions/` directory with 11 providers (dot, expr, flyimport, item_list, keyword, pattern, postfix, pragma, record, snippet, type_). Entry: `completions()`. |
 | `ide-diagnostics` | Diagnostic rendering + 40 handlers: `DiagnosticsContext` with `sema: Semantics`, handlers import `AnyDiagnostic` from `hir::diagnostics`. Parse errors via `parse_errors()` firewall query. `err_recover` pattern. `new_with_syntax_node_ptr()` for precise ranges. **LSP-free**. |
 | `ide-assists` | Code actions: `assist_context.rs` (AssistId, AssistKind, Assist, AssistContext, Assists accumulator, Handler type), `handlers/` (51 registered handlers via `all()` static array), `assists()` entry point (RA pattern). |
-| `ide-ssr` | Structural search-replace: `parsing` ($name placeholder syntax), `matching` (AST pattern match), `resolving` (semantic resolution), `replacing` (substitution), `nester` (nested match handling), `fragments` (partial-tree matching), `search` (workspace-wide SSR), `errors`, `from_comment` (SSR patterns in comments). |
+| `ide-ssr` | Structural search-replace: `parsing` ($name placeholder syntax), `matching` (AST pattern match), `resolving` (semantic resolution), `replacing` (substitution), `nester` (overlap removal), `fragments` (expression parsing), `search` (per-tree matching), `errors`. |
 
 ### Transport layer
 
@@ -118,12 +118,15 @@ RA's pattern for in-crate benchmarks.
 
 ### Async dispatch (RA pattern)
 
-`RequestDispatcher` has two execution modes:
+`RequestDispatcher` separates execution priority from cancellation retry policy:
 - **`on_sync`**: runs on main thread with `&GlobalStateSnapshot` (fast, for formatting/symbols)
-- **`on`**: clones snapshot, spawns on rayon thread pool (for hover/goto/completion)
+- **`on`**: clones a snapshot and dispatches ordinary worker tasks.
+- **`on_latency_sensitive`**: dispatches interactive requests; its retry flag is independent of priority. Thread intent is a platform scheduling hint, not a separate Linux priority queue.
 
 Responses from async handlers flow back as `Task::Response` through the unified Task enum.
-Main loop never blocks on handler execution. Cancellation via `salsa::Cancelled` panic catching.
+The main loop completes the request queue entry before sending an async response.
+Responses and retries for already completed or client-cancelled requests are discarded.
+Handlers run outside the main loop; cancellation uses `salsa::Cancelled` panic catching.
 
 ### process_changes (RA pattern)
 
@@ -183,11 +186,34 @@ events feed a pure preprocessing plan. `Change` applies its active file set,
 module ownership and `WorkspacePreprocessing` regions together. Semantic CSTs
 preserve offsets while removing inactive nodes; raw CSTs remain available for
 editing. Body-only changes backdate the event projection and reuse the plan.
+Workspace operator precedence is refreshed through a compact `file_fixities`
+query over the semantic CST. This uses the same declaration extraction as
+ItemTree, without eagerly lowering signatures and generated declarations on
+the input-update thread. Changes to precedence still invalidate parsing.
 
 Per-item inference: a body edit reuses other callable results while their
 body-query dependencies remain cached. LRU eviction can require revalidating
 another callable in the edited file; it must not invalidate unrelated files.
-`body_with_source_map_query` has LRU=512 (matching RA).
+`body_with_source_map` has LRU=512. The semantic callable key hashes node
+boundaries and non-trivia token kinds/text; internal comments and whitespace
+therefore reuse inference, while operator regrouping changes the key. Recovery
+syntax uses a conservative text key. Source-map queries read current lowering
+and use a position-sensitive key. Legacy raw diagnostic spans carry their
+origin token positions in `InferenceResult` and are relocated against the
+current source tokens; ExprId/PatId diagnostics use the current map directly.
+The origin belongs to the inference result: Salsa can update an equal body
+query value while keeping its dependants backdated.
+
+Cache policy is based on end-to-end editing workloads, not RA's capacities
+alone. Both per-callable body queries retain their 512-entry LRU; expensive
+inference results and physical/semantic parses are not capped by an arbitrary
+file count. The 2026-10-30 experiment capped both parse queries at 128: on 158
+model files, six sweeps ended at 969 MiB estimated heap rather than 734 MiB,
+and took about 204 seconds rather than 152 seconds to reach the last sweep.
+The cap was rejected. The uncapped run plateaued across late sweeps and three
+reloads, but this finite workload does not prove a universal memory bound.
+See `baselines/2026-10-30-ra-improvements.json` for artifacts, binary hashes,
+RSS versus allocator estimates, and cancellation retries.
 
 Type inference and type navigation use an incremental declaration index in
 `hir-ty/src/infer/dependencies/index.rs`. The complete `workspace_context` query
@@ -252,6 +278,22 @@ parsing only for a `FileDb` implementation that cannot provide these caches.
 `incremental_stats` checks body-edit reuse and signature-edit invalidation,
 including actual diagnostic changes in a cross-file consumer. The body-query
 LRU can require revalidating another callable in the edited file.
+
+`invalidation_matrix` additionally captures Salsa `WillExecute` events through
+`RootDatabase::with_event_callback`, checking execution counts against inference
+result replacement in an ordered project. It covers internal/leading comments,
+bodies, signatures, include targets/contents and manifest membership. Unrelated
+results must remain shared; dependent caller diagnostics must change.
+
+The physical `parse_file` query keeps one optional previous text/fixity seed per
+file. Its weak green-tree reference does not pin trees after database disposal;
+empty file updates clear the seed. Safe token/block edits reparse locally, rebuild
+tokens and validation, and retain parser errors separately. Changed fixities or
+unsafe syntax use full parsing. The cache is not semantic state: text and fixities
+fully determine results, regardless of which snapshot last populated the seed.
+`reparse_stats` compares this normal path with the same query after clearing its
+seed, checking trees, tokens and errors on every edit. Measurements and scope are
+recorded in `baselines/2026-10-29-ra-followup.json`.
 
 ### Type inference state and applied types
 
@@ -364,6 +406,18 @@ RA pattern: `CompletionContext` (with `sema: Semantics`) -> `Completions` accumu
 
 All providers follow `(acc: &mut Completions, ctx: &CompletionContext, ...)` parameter order (RA convention).
 
+Expected-type ranking goes through `Semantics` to the inference subtype relation,
+including aliases, generic identity and numeric constraints. Recovery types do
+not count as matches. Completion checks use the non-SMT solver and preserve the
+weaker `CouldUnify` rank for unresolved obligations. Functions are ranked by their
+semantic return schemes, including overload alternatives.
+
+Outside comments and literals, completion inserts a temporary identifier into a
+reparsed tree to classify incomplete calls, field initializers and dot access.
+The real database and text edits retain original source coordinates; the marker
+never enters the user's buffer. Locals are resolved at a real preceding token
+when the cursor lies beyond an incomplete body's current semantic range.
+
 ### Assist handler architecture (ide-assists)
 
 RA pattern: `AssistContext` -> `handlers::all()` -> `Assists` accumulator.
@@ -386,13 +440,28 @@ use type-specific defaults and pattern fixes use wildcards.
 
 ### SSR engine (ide-ssr)
 
-Full structural search-replace pipeline:
-1. **Parsing**: `$name` placeholder syntax -> SSR pattern AST
-2. **Matching**: pattern AST matched against code AST
-3. **Resolving**: semantic resolution of matched nodes
-4. **Replacing**: substitution with placeholder bindings
-5. **Nesting**: handles nested match occurrences
-6. **Search**: workspace-wide SSR via two-stage search
+The `experimental/ssr` request returns versioned `WorkspaceEdit` previews for
+Sail expressions. Its parameters follow RA: `query`, `parseOnly`, flattened
+`textDocument`/`position`, and `selections` (empty means project sources).
+For example, `combine($a, $b) ==>> flipped($b, $a)` swaps captured arguments.
+
+Rules resolve fixed names in the invocation scope and compare definition/local
+binding identity at each match. Captures and whole replacements are parenthesized
+to preserve precedence; all disjoint matches are returned. Nested matches keep
+the outermost match within the selected ranges. Search has cancellation points;
+selection filtering precedes overlap removal. The client applies the preview.
+
+`MatchFinder::new` parses and resolves one replacement rule at an explicit
+invocation position. The IDE owns workspace traversal and passes each file and
+its active syntax tree to the finder, which returns a vector of edits. There is
+no separate workspace cache, search-only mode or comment-rule entry point.
+
+Current limits are explicit: expression rules cannot introduce bindings; item,
+type and binding-pattern rules are rejected. Library sources are excluded.
+Shared tokens active in multiple include contexts are rejected. Matches that
+would discard comments are skipped, and replacements that leave invalid file
+syntax are rejected. SSR validates syntax and binding identity, not equivalence
+or all dependent type obligations. `parseOnly` validates without editing.
 
 ### FileDb trait (ide-db)
 
@@ -456,7 +525,9 @@ rebuild include graph + SourceRoots + WorkspaceSymbolIndex. Progress reported.
 ### Cancellation
 
 `dispatch.rs::catch_cancelled` wraps handlers in `std::panic::catch_unwind`.
-`salsa::Cancelled` panic -> LSP `ContentModified` error response.
+A `salsa::Cancelled` panic either retries a live request or produces a server
+cancellation response, according to the handler policy. Client cancellation
+completes the request with `RequestCanceled` and prevents later retries/responses.
 Async handlers on thread pool can be effectively cancelled when `on_did_change`
 modifies salsa inputs (snapshot revision mismatch triggers Cancelled).
 

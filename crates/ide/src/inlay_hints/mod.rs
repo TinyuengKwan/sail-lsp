@@ -114,7 +114,7 @@ pub fn inlay_hints_ide(
 /// Added `transitive_effects` parameter for salsa-cached effects.
 pub fn inlay_hints_ide_with_types(
     all_files: &[(&Url, &dyn FileDb)],
-    current_uri: &Url,
+    _current_uri: &Url,
     current_file: &dyn FileDb,
     range: TextRange,
     type_check: Option<&hir::TypeCheckResult>,
@@ -132,14 +132,7 @@ pub fn inlay_hints_ide_with_types(
     // were parsed by the server, converted, and then dropped: turning inlay
     // hints off in the editor did nothing.
     if config.parameter_hints {
-        param_name::collect_hir_parameter_hints(
-            all_files,
-            current_uri,
-            current_file,
-            begin,
-            end,
-            &mut hints,
-        );
+        param_name::collect_hir_parameter_hints(current_file, begin, end, &mut hints);
     }
     if config.caller_count_hints {
         caller_count::collect_callgraph_caller_hints(
@@ -263,6 +256,18 @@ mod tests {
                 .unwrap();
             assert_eq!(hints.iter().any(|hint| hint.label.contains("// long_function")), expected);
         }
+    }
+
+    #[test]
+    fn parameter_hints_do_not_borrow_names_from_an_unresolved_foreign_function() {
+        let file = TestFile::new("function main() -> int = helper(1)\n");
+        let foreign =
+            TestFile::new("function helper(unrelated_name : int) -> int = unrelated_name\n");
+        let uri = Url::parse("file:///tmp/main.sail").unwrap();
+        let foreign_uri = Url::parse("file:///tmp/unrelated.sail").unwrap();
+        let all: Vec<(&Url, &dyn FileDb)> = vec![(&uri, &file), (&foreign_uri, &foreign)];
+        let hints = inlay_hints_ide(&all, &uri, &file, full_range(&file));
+        assert!(hints.iter().all(|hint| hint.kind != InlayHintKind::Parameter), "{hints:?}");
     }
 
     fn full_range(file: &TestFile) -> TextRange {

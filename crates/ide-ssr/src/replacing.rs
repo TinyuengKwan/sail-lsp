@@ -8,7 +8,7 @@ use rowan::NodeOrToken;
 use rustc_hash::FxHashMap;
 use syntax::SyntaxNode;
 
-use crate::matching::{Match, PlaceholderMatch, SsrMatches};
+use crate::matching::Match;
 use crate::parsing::{Var, PLACEHOLDER_PREFIX};
 use crate::resolving::ResolvedRule;
 
@@ -16,8 +16,8 @@ use crate::resolving::ResolvedRule;
 /// placeholder captures from an AST-level match.
 ///
 /// replaces placeholder nodes/tokens with captured text.
-pub(crate) fn render_template(rule: &ResolvedRule, m: &Match) -> Option<String> {
-    let template = rule.template.as_ref()?;
+pub(crate) fn render_template(rule: &ResolvedRule, m: &Match) -> String {
+    let template = &rule.template;
     let mut output = String::new();
     render_node(
         &template.node,
@@ -25,20 +25,20 @@ pub(crate) fn render_template(rule: &ResolvedRule, m: &Match) -> Option<String> 
         &template.placeholders_by_stand_in,
         &mut output,
     );
-    Some(output)
+    format!("({output})")
 }
 
 /// Recursively render a template node, substituting placeholders.
 fn render_node(
     node: &SyntaxNode,
-    captures: &FxHashMap<Var, PlaceholderMatch>,
+    captures: &FxHashMap<Var, SyntaxNode>,
     placeholders: &FxHashMap<String, crate::parsing::Placeholder>,
     output: &mut String,
 ) {
     // Check if this node is itself a placeholder wrapper.
     if let Some(ph) = get_placeholder_for_node(node, placeholders) {
         if let Some(captured) = captures.get(&ph.ident) {
-            output.push_str(&captured.node.text().to_string());
+            output.push_str(&format!("({})", captured.text()));
             return;
         }
     }
@@ -50,7 +50,7 @@ fn render_node(
                     // Token-level placeholder.
                     if let Some(ph) = placeholders.get(tok.text()) {
                         if let Some(captured) = captures.get(&ph.ident) {
-                            output.push_str(&captured.node.text().to_string());
+                            output.push_str(&format!("({})", captured.text()));
                             continue;
                         }
                     }
@@ -81,24 +81,4 @@ fn get_placeholder_for_node<'a>(
     } else {
         None
     }
-}
-
-/// Compute text edits from AST-level matches.
-///
-/// Returns (FileRange, replacement_text) pairs.
-pub(crate) fn compute_edits_from_matches(
-    rules: &[ResolvedRule],
-    matches: &SsrMatches,
-) -> Vec<(hir::FileRange, String)> {
-    let mut edits = Vec::new();
-    for m in &matches.matches {
-        if let Some(rule) = rules.get(m.rule_index) {
-            if let Some(replacement) = render_template(rule, m) {
-                edits.push((m.range, replacement));
-            }
-        }
-    }
-    // Sort in reverse order so applying from end→start doesn't invalidate ranges.
-    edits.sort_by_key(|b| std::cmp::Reverse(b.0.range.start()));
-    edits
 }

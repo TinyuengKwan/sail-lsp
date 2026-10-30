@@ -8,8 +8,8 @@
 //! completes, and where a name is being *defined* the only candidates are
 //! declarations still waiting for it (`completions/name.rs`).
 //!
-//! Five `#[expect(dead_code)]` are left, on `PathKind::Type`, `ExprCtx`,
-//! `TypeLocation`, `ItemListKind` and `PatternContext`: the analyzer fills them in and no
+//! Three `#[expect(dead_code)]` are left, on `ExprCtx`, `ItemListKind` and
+//! `PatternContext`: the analyzer fills them in and no
 //! provider asks. Each names a distinction Sail's completion could draw —
 //! `then`/`else` belong in a condition, `end` in a block — and drawing it
 //! is provider work, not analyzer work. What is deleted rather than left
@@ -105,9 +105,8 @@ pub(crate) enum Qualified {
 pub(crate) enum PathKind {
     /// Expression position: value expected.
     Expr { expr_ctx: ExprCtx },
-    /// Type annotation position: type expected.
-    #[expect(dead_code)]
-    Type { location: TypeLocation },
+    /// Type position: a type expected, wherever the tree puts one.
+    Type,
     /// Item list position: top-level or block-level item.
     Item { kind: ItemListKind },
     /// Pattern position: pattern expected.
@@ -128,23 +127,9 @@ pub(crate) struct ExprCtx {
     /// After an `if` expression (for `else` suggestion).
     #[expect(dead_code)]
     pub(crate) after_if_expr: bool,
-}
-
-/// Where in a type annotation the completion is.
-pub(crate) enum TypeLocation {
-    /// After `:` in a let/var binding.
-    TypeAscription,
-    /// After `->` in a function return type.
-    FunctionReturn,
-    /// In a function parameter type position.
-    #[expect(dead_code)]
-    FunctionParam,
-    /// In a type alias RHS.
-    #[expect(dead_code)]
-    TypeAlias,
-    /// Other type position.
-    #[expect(dead_code)]
-    Other,
+    /// The type whose field this position names, when it is a field slot:
+    /// the index of `v[F]` or a name before `=` in `[o with F = ..]`.
+    pub(crate) field_of: Option<hir::Ty>,
 }
 
 /// Item list context.
@@ -204,7 +189,7 @@ fn position_from_analysis(analysis: &CompletionAnalysis) -> CompletionPosition {
         CompletionAnalysis::NameRef(nr) => {
             if let Some(path) = &nr.path_ctx {
                 match &path.kind {
-                    PathKind::Type { .. } => CompletionPosition::TypeAnnotation,
+                    PathKind::Type => CompletionPosition::TypeAnnotation,
                     PathKind::Item { kind: ItemListKind::SourceFile } => {
                         CompletionPosition::TopLevel
                     }
@@ -254,6 +239,7 @@ pub(crate) struct CompletionContext<'a> {
     ///
     /// Usually the parameter name of the function argument we are completing.
     pub(crate) expected_name: Option<String>,
+    pub(crate) is_callee: bool,
 
     /// Current file.
     pub(crate) file: &'a dyn FileDb,
@@ -269,6 +255,9 @@ pub(crate) struct CompletionContext<'a> {
     pub(crate) is_top_level: bool,
     /// Qualification state (backward compat).
     pub(crate) qualified: Qualified,
+    /// What the cursor names inside an `instantiation`, if it is in one.
+    /// Fixed for the request; visibility asks it once per candidate.
+    instantiation_role: Option<syntax::InstantiationReference>,
 }
 
 impl<'a> CompletionContext<'a> {
@@ -297,14 +286,27 @@ impl<'a> CompletionContext<'a> {
         // module scanned the raw characters for an unterminated quote —
         // beside a lossless CST that has a `STRING_LIT` token covering
         // exactly that text. And nothing asked about comments at all.
-        let mut analysis = match token_before(file, offset) {
-            Some(t) if ide_db::syntax_helpers::node_ext::is_in_comment(&t) => {
+        let original_token = token_before(file, offset);
+        let in_literal = original_token.as_ref().is_some_and(|token| {
+            ide_db::syntax_helpers::node_ext::is_in_comment(token)
+                || ide_db::syntax_helpers::node_ext::is_in_string(token)
+        });
+        // Parse a temporary identifier at the cursor, as RA does. The real
+        // source and semantic database stay unchanged. Nodes before the marker
+        // keep their original offsets, so callee/receiver queries remain valid.
+        let token = if in_literal {
+            original_token
+        } else {
+            speculative_token(db, file_text, offset).or(original_token)
+        };
+        let mut analysis = match token.as_ref() {
+            Some(t) if ide_db::syntax_helpers::node_ext::is_in_comment(t) => {
                 CompletionAnalysis::Comment
             }
-            Some(t) if ide_db::syntax_helpers::node_ext::is_in_string(&t) => {
+            Some(t) if ide_db::syntax_helpers::node_ext::is_in_string(t) => {
                 CompletionAnalysis::String
             }
-            token => analyze(token.as_ref(), text, offset, prefix),
+            token => analyze(token, text, offset, prefix),
         };
 
         // Resolve receiver type for dot access using sema.
@@ -312,20 +314,60 @@ impl<'a> CompletionContext<'a> {
         if let CompletionAnalysis::NameRef(ref mut nr) = analysis {
             if let Some(ref mut dot) = nr.dot_access {
                 if let Some(ft) = file_text {
-                    // Resolve type at the receiver expression offset
-                    let receiver_end = offset.saturating_sub(prefix.len()).saturating_sub(1); // before the dot
-                    dot.receiver_ty = sema.type_of_expr(ft, receiver_end);
+                    // The receiver's last byte, the one before the dot: the
+                    // dot's own offset answered with the type of whatever
+                    // follows it — an inference variable, so this path
+                    // never matched and every field came from the text
+                    // fallback.
+                    let dot_at = offset.saturating_sub(prefix.len()).saturating_sub(1);
+                    dot.receiver_ty = sema.type_of_expr(ft, dot_at.saturating_sub(1));
                 }
             }
         }
 
-        // Compute expected type and name.
-        let (expected_type, expected_name) = expected_type_and_name(text, offset, &analysis);
+        // A field slot asks for the type of the expression it belongs to.
+        if let CompletionAnalysis::NameRef(NameRefContext {
+            path_ctx: Some(PathCompletionCtx { kind: PathKind::Expr { ref mut expr_ctx }, .. }),
+            ..
+        }) = analysis
+        {
+            expr_ctx.field_of = token
+                .as_ref()
+                .and_then(field_slot_base)
+                .zip(file_text)
+                // An offset inside the base: its end is the next token's.
+                .and_then(|(base, ft)| {
+                    sema.type_of_expr(ft, usize::from(base.text_range().end()) - 1)
+                });
+        }
 
+        // Compute expected type and name.
+        let (expected_type, expected_name) = match &analysis {
+            CompletionAnalysis::NameRef(NameRefContext {
+                path_ctx: Some(PathCompletionCtx { kind: PathKind::Expr { .. }, .. }),
+                ..
+            }) => expected_type_and_name(&sema, db, file_text, token.as_ref()),
+            _ => (None, None),
+        };
+
+        let instantiation_role = token.as_ref().and_then(|token| {
+            let node = token
+                .parent_ancestors()
+                .find(|n| n.kind() == syntax::SyntaxKind::INSTANTIATION_DEF)?;
+            syntax::instantiation_reference(&node, offset.saturating_sub(1))
+        });
         let position = position_from_analysis(&analysis);
         let is_top_level = position == CompletionPosition::TopLevel;
         let qualified = qualified_from_analysis(&analysis);
+        let is_callee = token.as_ref().and_then(|t| t.parent()).is_some_and(|name| {
+            name.kind() == syntax::SyntaxKind::IDENT_EXPR
+                && name.parent().is_some_and(|call| {
+                    call.kind() == syntax::SyntaxKind::CALL_EXPR
+                        && call.first_child().as_ref() == Some(&name)
+                })
+        });
         let ctx = Self {
+            is_callee,
             sema,
             db,
             file_text,
@@ -339,8 +381,20 @@ impl<'a> CompletionContext<'a> {
             position,
             is_top_level,
             qualified,
+            instantiation_role,
         };
         (ctx, analysis)
+    }
+
+    /// Anchor semantic queries in original syntax when the speculative name
+    /// lies past an unfinished node's end, possibly after trailing whitespace.
+    pub(crate) fn semantic_offset(&self) -> usize {
+        let start = self.offset.saturating_sub(self.prefix.len());
+        if self.prefix.is_empty() {
+            self.text[..start].trim_end().len().saturating_sub(1)
+        } else {
+            start
+        }
     }
 
     /// Lowercase prefix for case-insensitive matching.
@@ -363,6 +417,53 @@ fn token_before(file: &dyn FileDb, offset: usize) -> Option<syntax::SyntaxToken>
     let at =
         syntax::TextSize::new(u32::try_from(offset).ok()?.min(u32::from(root.text_range().end())));
     root.token_at_offset(at).left_biased()
+}
+
+fn speculative_token(
+    db: &dyn salsa::Database,
+    file: Option<base_db::FileText>,
+    offset: usize,
+) -> Option<syntax::SyntaxToken> {
+    const MARKER: &str = "sailCompletionMarker";
+    let parsed = syntax::parse_query::parse_file(db, file?);
+    let at = syntax::TextSize::new(u32::try_from(offset).ok()?);
+    let root = parsed.reparse(syntax::TextRange::empty(at), MARKER).syntax_node()?;
+    root.token_at_offset(at + syntax::TextSize::new(1)).right_biased()
+}
+
+/// Whether `token` is a name inside a type: its nearest enclosing node is
+/// one of the type forms, not an expression, pattern or effect set.
+fn in_type(token: &syntax::SyntaxToken) -> bool {
+    use syntax::SyntaxKind as SK;
+    token.kind() == SK::IDENT
+        && token.parent().is_some_and(|node| {
+            matches!(node.kind(), SK::TYPE_NAMED | SK::TYPE_APP)
+                && node.ancestors().all(|n| n.kind() != SK::TYPE_EFFECT)
+        })
+}
+
+/// The expression whose field the name at `token` is, if it is in a field
+/// slot: the index of `v[F]`, or a name directly before `=` in
+/// `[o with F = ..]`. Both parse as a plain `IDENT_EXPR`; only the position
+/// says it names a field.
+fn field_slot_base(token: &syntax::SyntaxToken) -> Option<syntax::SyntaxNode> {
+    use syntax::SyntaxKind as SK;
+    let name = token.parent().filter(|n| n.kind() == SK::IDENT_EXPR)?;
+    let parent = name.parent()?;
+    let base = parent.first_child()?;
+    if base == name {
+        return None;
+    }
+    match parent.kind() {
+        SK::INDEX_EXPR => Some(base),
+        SK::VECTOR_UPDATE_EXPR => {
+            let next = name.next_sibling_or_token();
+            let next = std::iter::successors(next, |e| e.next_sibling_or_token())
+                .find(|e| !e.kind().is_trivia())?;
+            (next.kind() == SK::EQ).then_some(base)
+        }
+        _ => None,
+    }
 }
 
 /// Whether `before` ends inside an unterminated string literal.
@@ -423,15 +524,14 @@ fn analyze(
     }) {
         let role = syntax::instantiation_reference(&node, offset.saturating_sub(1));
         let kind = match role {
-            Some(syntax::InstantiationReference::Type) => {
-                PathKind::Type { location: TypeLocation::TypeAscription }
-            }
+            Some(syntax::InstantiationReference::Type) => PathKind::Type,
             Some(syntax::InstantiationReference::Callable) => PathKind::Expr {
                 expr_ctx: ExprCtx {
                     in_block_expr: false,
                     in_condition: false,
                     in_match_guard: false,
                     after_if_expr: false,
+                    field_of: None,
                 },
             },
             Some(syntax::InstantiationReference::Outcome) => PathKind::Expr {
@@ -440,6 +540,7 @@ fn analyze(
                     in_condition: false,
                     in_match_guard: false,
                     after_if_expr: false,
+                    field_of: None,
                 },
             },
             None => return CompletionAnalysis::Name(NameContext { kind: NameKind::Let }),
@@ -458,19 +559,16 @@ fn analyze(
         });
     }
 
-    // Type annotation: after `:` or `->`
-    if trimmed.ends_with(':') || trimmed.ends_with("->") {
-        let location = if trimmed.ends_with("->") {
-            TypeLocation::FunctionReturn
-        } else {
-            TypeLocation::TypeAscription
-        };
+    // A type position: the name being typed is inside a type the tree
+    // has parsed — a `val` signature's parameter, an `option(..)`
+    // argument, a tuple element — or nothing is typed yet after `:` or
+    // `->`. Only the text check existed, so every type position that did
+    // not directly follow `:` or `->` read as the top level of the file and
+    // offered item keywords: 288 of 873 type names in sail-riscv.
+    if token.is_some_and(in_type) || trimmed.ends_with(':') || trimmed.ends_with("->") {
         return CompletionAnalysis::NameRef(NameRefContext {
             dot_access: None,
-            path_ctx: Some(PathCompletionCtx {
-                qualified: Qualified::No,
-                kind: PathKind::Type { location },
-            }),
+            path_ctx: Some(PathCompletionCtx { qualified: Qualified::No, kind: PathKind::Type }),
         });
     }
 
@@ -519,6 +617,7 @@ fn analyze(
                         in_condition: false,
                         in_match_guard: false,
                         after_if_expr: trimmed.ends_with("else"),
+                        field_of: None,
                     },
                 },
             }),
@@ -583,6 +682,7 @@ fn analyze(
                     in_condition: false,
                     in_match_guard: false,
                     after_if_expr: trimmed.ends_with("else"),
+                    field_of: None,
                 },
             },
         }),
@@ -639,167 +739,93 @@ fn detect_qualification(text: &str, offset: usize, prefix: &str) -> Qualified {
     }
 }
 
-// Sail uses text heuristics to infer common expected-type patterns.
-
-/// Infer expected type and name from the completion context.
+/// What the position being completed expects, read from the tree: the
+/// parameter of the call it is an argument of, or `bool` in a condition.
+///
+/// This read the text before the cursor, and the commonest answer was
+/// wrong: `rfind("->")` found the enclosing function's own return type, so
+/// every position in a body expected that type and every function
+/// returning it scored higher, while a call argument produced no type at
+/// all, only a `"f#1"` that no candidate's name could equal.
 fn expected_type_and_name(
-    text: &str,
-    offset: usize,
-    analysis: &CompletionAnalysis,
+    sema: &hir::Semantics<'_>,
+    db: &dyn salsa::Database,
+    file_text: Option<base_db::FileText>,
+    token: Option<&syntax::SyntaxToken>,
 ) -> (Option<hir::Ty>, Option<String>) {
-    let before = text[..offset].trim_end();
-
-    // If in a type annotation position, no expected *value* type.
-    if let CompletionAnalysis::NameRef(nr) = analysis {
-        if let Some(path) = &nr.path_ctx {
-            if matches!(path.kind, PathKind::Type { .. }) {
+    use syntax::SyntaxKind as SK;
+    let Some(name) = token.and_then(|t| t.parent()).filter(|n| n.kind() == SK::IDENT_EXPR) else {
+        return (None, None);
+    };
+    let Some(parent) = name.parent() else { return (None, None) };
+    let is_first = parent.first_child().as_ref() == Some(&name);
+    match parent.kind() {
+        SK::IF_EXPR | SK::WHILE_EXPR if is_first => {
+            (Some(hir::Ty::scalar(hir::Scalar::Bool)), None)
+        }
+        SK::FIELD_INIT => {
+            let Some(ft) = file_text else { return (None, None) };
+            let Some(eq) = parent.children_with_tokens().find(|e| e.kind() == SK::EQ) else {
+                return (None, None);
+            };
+            if name.text_range().start() < eq.text_range().end() {
                 return (None, None);
             }
+            let field = parent
+                .children_with_tokens()
+                .filter_map(|e| e.into_token())
+                .find(|t| t.kind() == SK::IDENT)
+                .map(|t| t.text().to_owned());
+            let record = parent.parent();
+            let ty = record.as_ref().zip(field.as_ref()).and_then(|(record, field)| {
+                let at = usize::from(record.text_range().start());
+                let owner = sema.type_of_expr(ft, at)?;
+                sema.record_field_type(ft, at, &owner, field)
+            });
+            (ty, field)
         }
-    }
-
-    // `if | then` → expected bool (condition position)
-    if before.ends_with("if") || before.ends_with("else if") {
-        return (Some(hir::Ty::scalar(hir::Scalar::Bool)), None);
-    }
-
-    // `while | do` → expected bool
-    if before.ends_with("while") {
-        return (Some(hir::Ty::scalar(hir::Scalar::Bool)), None);
-    }
-
-    // `assert(|)` or `constraint(|)` → expected bool
-    if before.ends_with("assert(") || before.ends_with("constraint(") {
-        return (Some(hir::Ty::scalar(hir::Scalar::Bool)), None);
-    }
-
-    // `let x : T = |` or `var x : T = |` → expected T
-    // Scan backwards for `= ` preceded by `: TYPE`
-    if let Some(eq_pos) = before.rfind('=') {
-        let pre_eq = before[..eq_pos].trim_end();
-        if let Some(colon_pos) = pre_eq.rfind(':') {
-            let type_str = pre_eq[colon_pos + 1..].trim();
-            if !type_str.is_empty() {
-                let name = extract_binding_name(pre_eq, colon_pos);
-                return (Some(hir::Ty::named(type_str)), name);
-            }
+        SK::ARG_LIST => {
+            let Some(index) = parent.children().position(|n| n == name) else {
+                return (None, None);
+            };
+            let Some(callee) = parent.parent().and_then(|call| call.first_child()) else {
+                return (None, None);
+            };
+            let Some(ft) = file_text else { return (None, None) };
+            let at = usize::from(callee.text_range().end()) - 1;
+            let ty = match sema.type_of_expr(ft, at).as_ref().map(hir::Ty::kind) {
+                Some(hir::TyKind::FnPtr(sig)) => sig.params.get(index).cloned(),
+                _ => None,
+            };
+            let param_name =
+                ide_db::signatures::callable_signatures_at(db, ft, at, &callee.text().to_string())
+                    .and_then(|sigs| sigs.into_iter().next())
+                    .and_then(|sig| sig.params.into_iter().nth(index))
+                    .map(|p| p.name.split(':').next().unwrap_or(&p.name).trim().to_owned());
+            (ty, param_name)
         }
+        _ => (None, None),
     }
-
-    // `-> T` return position: detect `{ | }` or `= |` after function header
-    // with `-> T`. Scan backwards for `->` to find expected return type.
-    if let Some(arrow_pos) = before.rfind("->") {
-        let after_arrow = before[arrow_pos + 2..].trim_start();
-        // The return type extends until `=` or `{`
-        if let Some(end) = after_arrow.find(['=', '{']) {
-            let ret_ty = after_arrow[..end].trim();
-            if !ret_ty.is_empty()
-                && ret_ty.chars().all(|c| {
-                    c.is_alphanumeric() || c == '_' || c == '\'' || c == '(' || c == ')' || c == ','
-                })
-            {
-                return (Some(hir::Ty::named(ret_ty)), None);
-            }
-        }
-    }
-
-    // Function argument position: `fname(arg1, |` → try to find expected param type
-    // This is a heuristic: find the enclosing call and count comma-separated args.
-    if let Some((fn_name, arg_index)) = find_enclosing_call(before) {
-        return (None, Some(format!("{fn_name}#{arg_index}")));
-    }
-
-    (None, None)
 }
 
-/// Extract binding name from `let name : T` or `var name : T`.
-fn extract_binding_name(pre_eq: &str, colon_pos: usize) -> Option<String> {
-    let before_colon = pre_eq[..colon_pos].trim_end();
-    // Last word before the colon is the variable name
-    before_colon
-        .rsplit(|c: char| c.is_whitespace())
-        .next()
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-}
-
-/// Find the enclosing function call and the argument index at the cursor.
-///
-/// Given `foo(a, b, |`, returns `Some(("foo", 2))`.
-fn find_enclosing_call(before: &str) -> Option<(String, usize)> {
-    let mut depth = 0i32;
-    let mut commas = 0usize;
-    for ch in before.chars().rev() {
-        match ch {
-            ')' => depth += 1,
-            '(' => {
-                if depth == 0 {
-                    // Found the opening paren — extract function name
-                    let paren_offset = before.rfind('(')?;
-                    let fn_part = before[..paren_offset].trim_end();
-                    let fn_name = fn_part
-                        .rsplit(|c: char| !c.is_alphanumeric() && c != '_')
-                        .next()
-                        .filter(|s| !s.is_empty())?;
-                    return Some((fn_name.to_string(), commas));
-                }
-                depth -= 1;
-            }
-            ',' if depth == 0 => commas += 1,
-            _ => {}
-        }
+pub(crate) fn relevance_type_match(
+    matched: hir::CompletionTypeMatch,
+) -> CompletionRelevanceTypeMatch {
+    match matched {
+        hir::CompletionTypeMatch::Exact => CompletionRelevanceTypeMatch::Exact,
+        hir::CompletionTypeMatch::CouldUnify => CompletionRelevanceTypeMatch::CouldUnify,
     }
-    None
 }
 
-/// Compute how well a candidate type matches the expected type.
-///
-/// Returns `Exact` for identical types, `CouldUnify` for compatible
-/// base types (e.g., same ADT name with different args), or `None`
-/// if the types are unrelated.
+/// Ask the semantic layer; display labels are never type identities.
 pub(crate) fn compute_type_match(
+    ctx: &CompletionContext<'_>,
     expected: &hir::Ty,
     candidate: &hir::Ty,
 ) -> Option<CompletionRelevanceTypeMatch> {
-    if expected.is_error() || candidate.is_error() {
-        return None;
-    }
-    let exp_text = expected.display_text();
-    let cand_text = candidate.display_text();
-    if exp_text == cand_text {
-        Some(CompletionRelevanceTypeMatch::Exact)
-    } else if could_types_unify(expected, candidate) {
-        Some(CompletionRelevanceTypeMatch::CouldUnify)
-    } else {
-        None
-    }
-}
-
-/// Check if two types could potentially unify.
-///
-/// Returns true if the types share the same base name (e.g., `bits(32)`
-/// and `bits(64)` both have base `bits`) or if either is a type parameter.
-fn could_types_unify(a: &hir::Ty, b: &hir::Ty) -> bool {
-    use hir::TyKind;
-    match (a.kind(), b.kind()) {
-        // Type parameters can unify with anything.
-        (TyKind::Param(_), _) | (_, TyKind::Param(_)) => true,
-        // Same scalar types always unify (handled by exact match above,
-        // but different scalars do not).
-        (TyKind::Scalar(sa), TyKind::Scalar(sb)) => sa == sb,
-        // Same base name → could unify (args may differ).
-        (TyKind::Named(na, _), TyKind::Named(nb, _)) => na == nb,
-        // Same App base name → could unify.
-        (TyKind::App { name: na, .. }, TyKind::App { name: nb, .. }) => na == nb,
-        // Named vs App with the same name: the same type written two ways.
-        (TyKind::Named(n, _), TyKind::App { name, .. })
-        | (TyKind::App { name, .. }, TyKind::Named(n, _)) => n == name,
-        // Tuples: same arity.
-        (TyKind::Tuple(a_items), TyKind::Tuple(b_items)) => a_items.len() == b_items.len(),
-        // Function types: same param count.
-        (TyKind::FnPtr(fa), TyKind::FnPtr(fb)) => fa.params.len() == fb.params.len(),
-        _ => false,
-    }
+    ctx.sema
+        .completion_type_match(ctx.file_text?, ctx.semantic_offset(), expected, candidate)
+        .map(relevance_type_match)
 }
 
 /// Check if the cursor is inside a function parameter list.
@@ -855,10 +881,7 @@ pub fn completion_prefix(text: &str, offset: usize) -> &str {
 
 impl CompletionContext<'_> {
     pub(crate) fn instantiation_role(&self) -> Option<syntax::InstantiationReference> {
-        let token = token_before(self.file, self.offset)?;
-        let node =
-            token.parent_ancestors().find(|n| n.kind() == syntax::SyntaxKind::INSTANTIATION_DEF)?;
-        syntax::instantiation_reference(&node, self.offset.saturating_sub(1))
+        self.instantiation_role
     }
 
     pub(crate) fn can_see_member(&self, target: &dyn FileDb, member: &hir::FieldDecl) -> bool {

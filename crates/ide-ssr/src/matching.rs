@@ -8,102 +8,26 @@ use rowan::NodeOrToken;
 use rustc_hash::FxHashMap;
 use syntax::{SyntaxNode, SyntaxToken};
 
-use hir::FileRange;
-
 use crate::parsing::{Constraint, NodeKind, Placeholder, Var, PLACEHOLDER_PREFIX};
-use crate::resolving::SyntaxNodeKey;
-
-/// A comment token in a match (preserved for replacement).
-///
-/// with kind LINE_COMMENT, BLOCK_COMMENT, or DOC_COMMENT.
-pub(crate) type Comment = syntax::SyntaxToken;
 
 /// A single match found by AST-level SSR.
 #[derive(Debug, Clone)]
-pub struct Match {
-    /// Location of the matched node.
-    pub(crate) range: FileRange,
+pub(crate) struct Match {
     /// The matched syntax node.
     pub(crate) matched_node: SyntaxNode,
     /// Captured placeholder values.
-    pub(crate) placeholder_values: FxHashMap<Var, PlaceholderMatch>,
-    /// Comments inside the matched node that should be preserved in replacement.
-    #[expect(dead_code)]
-    pub(crate) ignored_comments: Vec<Comment>,
-    /// Paths in the replacement template pre-rendered for the match context.
-    #[expect(dead_code)]
-    pub(crate) rendered_template_paths: FxHashMap<SyntaxNodeKey, String>,
-    /// Which rule (by index) produced this match.
-    pub(crate) rule_index: usize,
-    /// Nesting depth (for overlap resolution).
-    #[expect(dead_code)]
-    pub(crate) depth: usize,
-}
-
-/// A single placeholder's captured value.
-#[derive(Debug, Clone)]
-pub(crate) struct PlaceholderMatch {
-    /// Location of the captured code.
-    #[expect(dead_code)]
-    pub(crate) range: FileRange,
-    /// The captured syntax node (or token wrapped in a node).
-    pub(crate) node: SyntaxNode,
-    /// Matches found within the captured node (for nested patterns).
-    pub(crate) inner_matches: SsrMatches,
-}
-
-/// Collection of matches.
-#[derive(Debug, Clone, Default)]
-pub struct SsrMatches {
-    pub(crate) matches: Vec<Match>,
-}
-
-impl SsrMatches {
-    /// Flatten nested matches into a single list.
-    pub fn flattened(self) -> impl Iterator<Item = Match> {
-        self.matches.into_iter().flat_map(|m| {
-            let inner: Vec<Match> = m
-                .placeholder_values
-                .values()
-                .flat_map(|pm| pm.inner_matches.clone().flattened())
-                .collect();
-            std::iter::once(m).chain(inner)
-        })
-    }
-}
-
-impl Match {
-    /// Return the text of the matched node.
-    pub fn matched_text(&self) -> String {
-        self.matched_node.text().to_string()
-    }
-}
-
-/// Result of a failed match attempt.
-#[derive(Debug)]
-pub(crate) struct MatchFailed {
-    pub(crate) reason: Option<String>,
-}
-
-impl MatchFailed {
-    fn new(reason: impl Into<String>) -> Self {
-        Self { reason: Some(reason.into()) }
-    }
+    pub(crate) placeholder_values: FxHashMap<Var, SyntaxNode>,
 }
 
 /// CST-level matcher.
-pub(crate) struct Matcher {
+pub(crate) struct Matcher<'a> {
     /// Placeholders keyed by stand-in name.
-    pub(crate) placeholders: FxHashMap<String, Placeholder>,
-    /// Rule index for tagging matches.
-    #[expect(dead_code)]
-    pub(crate) rule_index: usize,
+    pub(crate) placeholders: &'a FxHashMap<String, Placeholder>,
 }
 
-impl Matcher {
-    /// Create a matcher from placeholder metadata.
-    pub(crate) fn new(placeholders: FxHashMap<String, Placeholder>, rule_index: usize) -> Self {
-        Self { placeholders, rule_index }
+impl<'a> Matcher<'a> {
+    pub(crate) fn new(placeholders: &'a FxHashMap<String, Placeholder>) -> Self {
+        Self { placeholders }
     }
 
     /// Attempt to match `code` node against `pattern` node.
@@ -113,7 +37,7 @@ impl Matcher {
         &self,
         pattern: &SyntaxNode,
         code: &SyntaxNode,
-    ) -> Result<FxHashMap<Var, PlaceholderMatch>, MatchFailed> {
+    ) -> Result<FxHashMap<Var, SyntaxNode>, ()> {
         let mut captures = FxHashMap::default();
         self.attempt_match_node(pattern, code, &mut captures)?;
         Ok(captures)
@@ -130,8 +54,8 @@ impl Matcher {
         &self,
         pattern: &SyntaxNode,
         code: &SyntaxNode,
-        captures: &mut FxHashMap<Var, PlaceholderMatch>,
-    ) -> Result<(), MatchFailed> {
+        captures: &mut FxHashMap<Var, SyntaxNode>,
+    ) -> Result<(), ()> {
         // Check if the entire pattern node is a placeholder wrapper.
         if let Some(placeholder) = self.get_placeholder_for_node(pattern) {
             return self.attempt_match_placeholder(&placeholder, code, captures);
@@ -139,11 +63,7 @@ impl Matcher {
 
         // Node kinds must match.
         if pattern.kind() != code.kind() {
-            return Err(MatchFailed::new(format!(
-                "Node kind mismatch: pattern {:?} vs code {:?}",
-                pattern.kind(),
-                code.kind()
-            )));
+            return Err(());
         }
 
         // Iterate children in parallel, skipping trivia.
@@ -157,10 +77,10 @@ impl Matcher {
             match (pat_children.peek(), code_children.peek()) {
                 (None, None) => return Ok(()),
                 (Some(_), None) => {
-                    return Err(MatchFailed::new("Code has fewer children than pattern"));
+                    return Err(());
                 }
                 (None, Some(_)) => {
-                    return Err(MatchFailed::new("Code has more children than pattern"));
+                    return Err(());
                 }
                 (Some(pat_elem), Some(code_elem)) => {
                     match (pat_elem.clone(), code_elem.clone()) {
@@ -183,23 +103,11 @@ impl Matcher {
                                 pat_children.next();
                                 code_children.next();
                             } else {
-                                return Err(MatchFailed::new(
-                                    "Pattern token vs code node mismatch",
-                                ));
+                                return Err(());
                             }
                         }
-                        // Pattern is node, code is token — check if pattern is placeholder wrapper.
-                        (NodeOrToken::Node(pn), NodeOrToken::Token(_ct)) => {
-                            if self.get_placeholder_for_node(&pn).is_some() {
-                                // Placeholder matching a token — bind the parent node.
-                                // We need the code *node* but we only have a token.
-                                // This case is unusual; fail gracefully.
-                                return Err(MatchFailed::new(
-                                    "Placeholder node vs code token mismatch",
-                                ));
-                            }
-                            return Err(MatchFailed::new("Pattern node vs code token mismatch"));
-                        }
+                        // A captured expression needs a syntax node.
+                        (NodeOrToken::Node(_), NodeOrToken::Token(_)) => return Err(()),
                     }
                 }
             }
@@ -211,33 +119,21 @@ impl Matcher {
         &self,
         pattern_token: &SyntaxToken,
         code_token: &SyntaxToken,
-        captures: &mut FxHashMap<Var, PlaceholderMatch>,
-    ) -> Result<(), MatchFailed> {
+        captures: &mut FxHashMap<Var, SyntaxNode>,
+    ) -> Result<(), ()> {
         // Check if pattern token is a placeholder.
         if let Some(placeholder) = self.get_placeholder_for_token(pattern_token) {
-            let range = FileRange::from(code_token.text_range());
-            let node = code_token.parent().unwrap_or_else(|| {
-                // Fallback: shouldn't happen in practice.
-                code_token.parent().unwrap()
-            });
-            let pm = PlaceholderMatch { range, node, inner_matches: SsrMatches::default() };
+            let node = code_token.parent().ok_or(())?;
+            let pm = node;
             return self.record_binding(&placeholder, pm, captures);
         }
 
         // Exact text match for literal tokens.
         if pattern_token.kind() != code_token.kind() {
-            return Err(MatchFailed::new(format!(
-                "Token kind mismatch: {:?} vs {:?}",
-                pattern_token.kind(),
-                code_token.kind()
-            )));
+            return Err(());
         }
         if pattern_token.text() != code_token.text() {
-            return Err(MatchFailed::new(format!(
-                "Token text mismatch: {:?} vs {:?}",
-                pattern_token.text(),
-                code_token.text()
-            )));
+            return Err(());
         }
         Ok(())
     }
@@ -247,19 +143,14 @@ impl Matcher {
         &self,
         placeholder: &Placeholder,
         code: &SyntaxNode,
-        captures: &mut FxHashMap<Var, PlaceholderMatch>,
-    ) -> Result<(), MatchFailed> {
+        captures: &mut FxHashMap<Var, SyntaxNode>,
+    ) -> Result<(), ()> {
         // Check constraints.
         if !self.check_constraints(&placeholder.constraints, code) {
-            return Err(MatchFailed::new(format!(
-                "Constraint check failed for placeholder ${}",
-                placeholder.ident.0
-            )));
+            return Err(());
         }
 
-        let range = FileRange::from(code.text_range());
-        let pm =
-            PlaceholderMatch { range, node: code.clone(), inner_matches: SsrMatches::default() };
+        let pm = code.clone();
         self.record_binding(placeholder, pm, captures)
     }
 
@@ -267,19 +158,14 @@ impl Matcher {
     fn record_binding(
         &self,
         placeholder: &Placeholder,
-        new_match: PlaceholderMatch,
-        captures: &mut FxHashMap<Var, PlaceholderMatch>,
-    ) -> Result<(), MatchFailed> {
+        new_match: SyntaxNode,
+        captures: &mut FxHashMap<Var, SyntaxNode>,
+    ) -> Result<(), ()> {
         let var = placeholder.ident.clone();
         if let Some(existing) = captures.get(&var) {
             // Same placeholder must match same text.
-            if existing.node.text() != new_match.node.text() {
-                return Err(MatchFailed::new(format!(
-                    "Inconsistent binding for ${}: {:?} vs {:?}",
-                    var.0,
-                    existing.node.text(),
-                    new_match.node.text()
-                )));
+            if existing.text() != new_match.text() {
+                return Err(());
             }
         } else {
             captures.insert(var, new_match);

@@ -1,0 +1,74 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Sail Project",
+  "scopeName": "source.sail-project",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    {
+      "comment": "A module header: a name followed by `{` on the same line.",
+      "match": "\\b([A-Za-z_][A-Za-z0-9_]*)[ \\t]*(?=\\{)",
+      "captures": { "1": { "name": "entity.name.namespace.sail-project" } }
+    },
+    {
+      "match": "\\b(files|directory|requires|after|before|implicit)\\b",
+      "name": "keyword.other.sail-project"
+    },
+    {
+      "match": "\\b(if|then|else)\\b",
+      "name": "keyword.control.sail-project"
+    },
+    {
+      "match": "\\b(variable|__test|__virtual)\\b",
+      "name": "storage.type.sail-project"
+    },
+    {
+      "match": "\\b(true|false)\\b",
+      "name": "constant.language.boolean.sail-project"
+    },
+    {
+      "match": "\\b(only|tree|error)(?=\\s*\\()",
+      "name": "support.function.sail-project"
+    },
+    {
+      "match": "\\$[A-Za-z0-9_]+",
+      "name": "variable.other.sail-project"
+    },
+    {
+      "comment": "Sail's project lexer rejects these words outside a module header.",
+      "match": "\\b(default|extension|import|namespace|open|optional|use|version|versions)\\b",
+      "name": "invalid.illegal.reserved.sail-project"
+    },
+    {
+      "match": "(?:\\.\\.|[A-Za-z0-9_]+)(?:/(?:\\.\\.|[A-Za-z0-9_]+))*/?[A-Za-z0-9_]*\\.[A-Za-z0-9_]+",
+      "name": "string.unquoted.path.sail-project"
+    },
+    {
+      "match": "==|!=|<=|>=|<|>|=",
+      "name": "keyword.operator.sail-project"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        { "begin": "//", "end": "$", "name": "comment.line.double-slash.sail-project" },
+        { "include": "#block-comment" }
+      ]
+    },
+    "block-comment": {
+      "begin": "/\\*",
+      "end": "\\*/",
+      "name": "comment.block.sail-project",
+      "patterns": [{ "include": "#block-comment" }]
+    },
+    "strings": {
+      "begin": "\"",
+      "end": "\"",
+      "name": "string.quoted.double.sail-project",
+      "patterns": [
+        { "match": "\\\\(?:[\\\\\"'ntbr]|[0-9]{3}|x[0-9A-Fa-f]{2})", "name": "constant.character.escape.sail-project" },
+        { "match": "\\\\.", "name": "invalid.illegal.escape.sail-project" }
+      ]
+    }
+  }
+}

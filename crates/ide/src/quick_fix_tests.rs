@@ -8,7 +8,7 @@ use crate::fixture;
 /// fixture file and return `(title, resulting text)` for each.
 #[track_caller]
 fn fixes_for(fixture: &str, code: &str) -> Vec<(String, String)> {
-    let (analysis, files) = fixture::analysis(fixture);
+    let (analysis, files) = fixture::project_analysis(fixture);
     let (file_id, _) = files[0];
     let url = analysis.url_for_file_id(file_id).expect("fixture file has a URL").clone();
     let text = analysis
@@ -103,4 +103,57 @@ function f() -> int = { let x : int = 1; 2 }
     );
     assert_eq!(fixes.len(), 1, "{fixes:#?}");
     assert!(fixes[0].1.contains("let _x : int"), "{}", fixes[0].1);
+}
+
+#[test]
+fn conversion_fixes_recheck_cleanly_and_missing_conversions_are_not_offered() {
+    let source = "default Order dec\n$include <prelude.sail>\nfunction f(v : bits(8)) -> int = v\n";
+    let fixes = fixes_for(&format!("//- prelude\n//- /main.sail\n{source}"), "type-error");
+    assert_eq!(fixes.len(), 2);
+    for (title, fixed) in fixes {
+        let (analysis, files) =
+            fixture::project_analysis(&format!("//- prelude\n//- /main.sail\n{fixed}"));
+        let diagnostics = analysis
+            .file_diagnostics(files[0].0, &ide_diagnostics::DiagnosticsConfig::new())
+            .unwrap();
+        assert!(
+            diagnostics.iter().all(|d| d.severity != ide_diagnostics::Severity::Error),
+            "{title}: {diagnostics:?}"
+        );
+    }
+    assert!(fixes_for(
+        "//- /main.sail\ndefault Order dec\nfunction f(v : bits(8)) -> int = v\n",
+        "type-error"
+    )
+    .is_empty());
+    assert!(fixes_for("//- /main.sail\ndefault Order dec\nval unsigned : bool -> bool\nfunction f(v : bits(8)) -> int = v\n", "type-error").is_empty());
+
+    assert!(fixes_for("//- prelude\n//- /main.sail\ndefault Order dec\n$include <prelude.sail>\nfunction f(v : bits(8)) -> range(0, 3) = v\n", "type-error").is_empty());
+}
+
+#[test]
+fn duplicate_declarations_do_not_offer_a_whole_node_rename() {
+    assert!(fixes_for("//- /main.sail\ntype T = int\ntype T = bool\n", "duplicate-definition")
+        .is_empty());
+}
+
+#[test]
+fn unreachable_code_fixes_recheck_statement_boundaries() {
+    for source in [
+        "function f() -> int = { return 1; 2 }\n",
+        "function f() -> int = { return 1; let x = 2; x }\n",
+    ] {
+        let fixes = fixes_for(&format!("//- /main.sail\n{source}"), "unreachable-code");
+        assert!(!fixes.is_empty());
+        for (title, fixed) in fixes {
+            let (analysis, files) = fixture::project_analysis(&format!("//- /main.sail\n{fixed}"));
+            let diagnostics = analysis
+                .file_diagnostics(files[0].0, &ide_diagnostics::DiagnosticsConfig::new())
+                .unwrap();
+            assert!(
+                diagnostics.iter().all(|d| d.severity != ide_diagnostics::Severity::Error),
+                "{title}: {fixed}: {diagnostics:?}"
+            );
+        }
+    }
 }

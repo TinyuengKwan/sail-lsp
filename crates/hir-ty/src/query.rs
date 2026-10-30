@@ -70,6 +70,24 @@ pub fn top_level_env(db: &dyn salsa::Database, input: FileText) -> ArcTopLevelEn
     ArcTopLevelEnv(Arc::new(TopLevelEnvData { env, pattern_constants }))
 }
 
+/// Declared function shapes for IDE proposals. Quantified obligations are not
+/// discharged here; callers must not treat this as proof of a conversion.
+pub fn declared_callable_types(
+    db: &dyn salsa::Database,
+    file: FileText,
+    name: &str,
+) -> Vec<crate::ty::Ty> {
+    top_level_env(db, file)
+        .0
+        .env
+        .functions
+        .get(name)
+        .into_iter()
+        .flatten()
+        .map(|scheme| crate::ty::Ty::function(scheme.params.clone(), scheme.ret.clone()))
+        .collect()
+}
+
 /// Workspace query boundary. Compare semantic data, not a partial hash of
 /// signatures: records, mappings, overloads and declaration locations also
 /// affect consumers. Derived equality covers new fields automatically.
@@ -220,6 +238,7 @@ pub fn infer<'db>(
         db.report_untracked_read();
     }
     result.def_base = entry.def_span.start;
+    result.source_tokens = hir_def::def_query::callable_token_spans(text, entry.def_span);
     ArcInferenceResult(Arc::new(result))
 }
 
@@ -1037,6 +1056,7 @@ mod tests {
                     && !result.0.inference_diagnostics().iter().any(|d| matches!(
                         d,
                         crate::infer::InferenceDiagnostic::InvalidTypeUse { .. }
+                            | crate::infer::InferenceDiagnostic::InvalidTypePattern { .. }
                     )),
                 valid,
                 "{source}\n{:?}",

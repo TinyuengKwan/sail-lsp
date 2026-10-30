@@ -10,8 +10,6 @@ pub(crate) enum ErrorKind {
     LineOverflow(usize, usize),
     /// Trailing whitespace found.
     TrailingWhitespace,
-    /// A comment was lost during formatting.
-    LostComment,
 }
 
 /// Single formatting error with location.

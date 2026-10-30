@@ -73,6 +73,15 @@ impl<'a> LexedStr<'a> {
         &self.text[span.start..span.end]
     }
 
+    /// Byte position of the non-trivia parser cursor for an error event.
+    /// Both full-file and incremental tree sinks use this projection.
+    pub fn error_offset(&self, token_idx: usize) -> usize {
+        self.tokens[token_idx..]
+            .iter()
+            .find(|(token, _)| !token.is_trivia())
+            .map_or(self.text.len(), |(_, span)| span.start)
+    }
+
     /// Build an `Input` from non-trivia tokens (for feeding to the parser).
     pub fn to_input(&self) -> crate::Input {
         let mut input = crate::Input::with_capacity(self.tokens.len());
@@ -150,11 +159,11 @@ impl<'a> LexedStr<'a> {
                     sink(StrStep::Exit);
                 }
                 Step::Error { msg } => {
-                    let pos = if token_idx < self.tokens.len() {
-                        self.tokens[token_idx].1.start
-                    } else {
-                        self.text.len()
-                    };
+                    // Parser events refer to the non-trivia input cursor.
+                    // Trivia has not necessarily been emitted yet: reporting
+                    // its start underlined whitespace before the bad token.
+                    // Do not consume it here; tree construction still needs it.
+                    let pos = self.error_offset(token_idx);
                     sink(StrStep::Error { msg, pos });
                     error = true;
                 }
@@ -200,6 +209,24 @@ mod tests {
         let input = ls.to_input();
         // Should have 4 non-trivia tokens: val, x, :, int
         assert_eq!(input.len(), 4);
+    }
+
+    #[test]
+    fn errors_point_at_the_parser_cursor_after_trivia() {
+        for trivia in [" ", "\n  ", " /* 注释 */ "] {
+            let source = format!("impl{trivia}$[a] foo() = ()");
+            let lexed = LexedStr::new(&source);
+            let output = crate::TopEntryPoint::SourceFile.parse(&lexed.to_input());
+            let mut positions = Vec::new();
+            let mut rebuilt = String::new();
+            lexed.intersperse_trivia(&output, &mut |step| match step {
+                StrStep::Error { msg, pos } if msg.contains("not permitted") => positions.push(pos),
+                StrStep::Token { text, .. } => rebuilt.push_str(text),
+                _ => {}
+            });
+            assert_eq!(positions, vec![source.find("$[").unwrap()]);
+            assert_eq!(rebuilt, source);
+        }
     }
 
     #[test]

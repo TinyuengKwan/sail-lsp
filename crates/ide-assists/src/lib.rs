@@ -249,12 +249,7 @@ mod lib_tests {
         assert!(edits.is_some(), "should inline call");
         let edits = edits.unwrap();
         assert!(!edits.is_empty());
-        // The inlined text should contain "5 + 5" (x replaced with 5)
-        assert!(
-            edits[0].new_text.contains("5"),
-            "should substitute arg, got: {}",
-            edits[0].new_text
-        );
+        assert_eq!(edits[0].new_text, "(5 + 5)");
     }
 
     #[test]

@@ -698,6 +698,7 @@ dependencies = [
  "serde_json",
  "stdx",
  "syntax",
+ "tracing",
  "url",
  "vfs",
 ]
@@ -728,9 +729,7 @@ dependencies = [
  "rowan",
  "rustc-hash 2.1.2",
  "salsa",
- "smol_str 0.3.6 (registry+https://github.com/rust-lang/crates.io-index)",
  "syntax",
- "url",
 ]
 
 [[package]]
@@ -1569,7 +1568,6 @@ dependencies = [
  "ide-assists",
  "ide-db",
  "ide-diagnostics",
- "ide-ssr",
  "include_dir",
  "log",
  "lsp-server 0.7.9 (registry+https://github.com/rust-lang/crates.io-index)",

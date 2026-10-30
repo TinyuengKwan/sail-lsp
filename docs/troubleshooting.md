@@ -4,8 +4,18 @@
 
 Check the executable path used by the editor, especially for remote sessions:
 it may differ from the server on your terminal's `PATH`. After installing a
-new build, restart the language server. The LSP `initialize` response includes
-the package version in `serverInfo`; it does not distinguish local commits.
+new build, restart the language server. `sail-lsp --version` (or `-V`) prints the package version and build revision,
+including `-dirty` for tracked local changes. The LSP `initialize` response's
+`serverInfo.version` reports the same identity. Source archive builds without
+Git report `unknown (source archive)`; packagers can supply
+`SAIL_LSP_BUILD_REVISION` at build time.
+
+In VS Code, run `Sail: Show Server Status` (or click the Sail status bar item).
+Other clients can request `sail-lsp/analyzerStatus` with `null` parameters to inspect the actual
+running executable, workspace roots, loaded manifests, standard library path
+and origin, reload state, load/configuration errors and effective settings.
+After a failed reload, the previous project model can remain loaded: the
+status distinguishes its manifests from the current requested settings.
 
 ## Check the logs
 
@@ -67,14 +77,25 @@ the failing path or configuration, and whether analysis is incomplete or still
 uses the previous project model. Identical failures are not repeatedly shown
 during reloads.
 
+The problem is also published as a diagnostic on the manifest itself, at the
+token that fails to parse, the module name that is unknown, duplicated or
+cyclic, the `$variable` that is undefined, the expression of the wrong kind,
+or the `files` entry that names a missing file. Its code says which
+(`manifest-syntax`, `unknown-module`, `cyclic-modules`,
+`duplicate-declaration`, `unknown-variable`, `manifest-type-error`,
+`missing-file`, ...). An undeclared module in `workspace.projectModules` is a
+setting, not text, and is reported at the start of the manifest. Diagnostics
+reflect the manifest on disk: they update when it is saved.
+
 * A missing source listed in a valid manifest does not discard the entire
   project. Available files remain linked in manifest order. The error lists
   the missing paths and their manifest; analysis may produce further errors
   where declarations from those files are needed. Missing paths stay watched,
   so restoring a file triggers another load.
 * An invalid manifest, unknown project variable/module, or nonexistent
-  `workspace.projectFile` prevents constructing a new project model. An
-  existing model is retained. On initial failure, files remain unlinked and
+  `workspace.projectFile` prevents constructing a new project model for that
+  workspace folder. Its existing model is retained; other folders load
+  normally. On initial failure, files remain unlinked and
   their `unlinked-file` diagnostics also include the actual loading error.
 * Correcting the manifest or changing workspace settings triggers a reload.
   A successful load clears the failure from status and diagnostics and logs

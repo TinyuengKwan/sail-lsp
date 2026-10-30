@@ -8,6 +8,19 @@ use crate::type_ref::type_ref_from_text;
 use syntax::ast::{traits::HasVisibility, AstNode};
 
 impl ItemTree {
+    /// Read only operator declarations. Input updates need this projection
+    /// before scheduling IDE work; lowering every declaration here would put
+    /// generated items and signature hashing on the main thread's edit path.
+    pub(crate) fn fixity_context_from_cst(root: &syntax::SyntaxNode) -> syntax::FixityContext {
+        let mut tree = Self::empty();
+        tree.fixities = root
+            .children()
+            .filter(|node| syntax::ast::FixityDef::can_cast(node.kind()))
+            .filter_map(|node| extract_fixity_decl(&node))
+            .collect();
+        tree.build_fixity_context()
+    }
+
     /// Build an `ItemTree` from a rowan CST root node.
     ///
     /// This is the CST-native path . It walks the typed AST

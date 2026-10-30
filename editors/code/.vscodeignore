@@ -2,6 +2,7 @@
 **/*
 !icon.png
 !language-configuration.json
+!language-configuration-project.json
 !syntaxes/*.json
 !out/main.js
 !server/**

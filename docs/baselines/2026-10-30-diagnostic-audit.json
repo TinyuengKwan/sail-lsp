@@ -1,0 +1,601 @@
+{
+  "status": "complete",
+  "source": "target/ra-improvements-2026-10-30/diagnostic-audit.log",
+  "expectations": 216,
+  "range_differences": [
+    {
+      "actual": [
+        {
+          "code": "bitfield-reversed-range",
+          "message": "Bitfield range must have its high index greater than or equal to its low index",
+          "start": 74
+        },
+        {
+          "code": "bitfield-index-out-of-range",
+          "message": "Bitvector index 15 is outside the bitfield's bounds",
+          "start": 74
+        }
+      ],
+      "expected_message": "Error while checking bitfield",
+      "expected_offset": 44,
+      "file": "bitfield_error.sail",
+      "upstream_gensym": false,
+      "classification": "intentional_precise_range",
+      "rationale": "Points at the invalid field rather than the entire bitfield declaration.",
+      "final": {
+        "actual": [
+          {
+            "code": "bitfield-reversed-range",
+            "message": "Bitfield range must have its high index greater than or equal to its low index",
+            "start": 74
+          },
+          {
+            "code": "bitfield-index-out-of-range",
+            "message": "Bitvector index 15 is outside the bitfield's bounds",
+            "start": 74
+          }
+        ],
+        "expected_message": "Error while checking bitfield",
+        "expected_offset": 44,
+        "file": "bitfield_error.sail",
+        "upstream_gensym": false
+      }
+    },
+    {
+      "actual": [
+        {
+          "code": "config-key-conflict",
+          "message": "Configuration key foo is used as both a value and an object (subkey foo.bar)",
+          "start": 122
+        }
+      ],
+      "expected_message": "Attempting to access key foo.bar, but various subkeys have already been used",
+      "expected_offset": 89,
+      "file": "config_issue1775.sail",
+      "upstream_gensym": false,
+      "classification": "intentional_related_location",
+      "rationale": "Points at the conflicting parent access and links the subkey access as related information.",
+      "final": {
+        "actual": [
+          {
+            "code": "config-key-conflict",
+            "message": "Configuration key foo is used as both a value and an object (subkey foo.bar)",
+            "start": 122
+          }
+        ],
+        "expected_message": "Attempting to access key foo.bar, but various subkeys have already been used",
+        "expected_offset": 89,
+        "file": "config_issue1775.sail",
+        "upstream_gensym": false
+      }
+    },
+    {
+      "actual": [
+        {
+          "code": "type-error",
+          "message": "Function Z not found",
+          "start": 195
+        }
+      ],
+      "expected_message": "Cannot infer width here, as there are multiple subpatterns with unclear width in vector concatenation pattern",
+      "expected_offset": 191,
+      "file": "encdec_unknown_and_error.sail",
+      "upstream_gensym": false,
+      "classification": "intentional_precise_range",
+      "rationale": "Points at the unresolved constructor Z rather than the entire concatenated pattern.",
+      "final": {
+        "actual": [
+          {
+            "code": "type-error",
+            "message": "Function Z not found",
+            "start": 195
+          }
+        ],
+        "expected_message": "Cannot infer width here, as there are multiple subpatterns with unclear width in vector concatenation pattern",
+        "expected_offset": 191,
+        "file": "encdec_unknown_and_error.sail",
+        "upstream_gensym": false
+      }
+    },
+    {
+      "actual": [
+        {
+          "code": "syntax-error",
+          "message": "Syntax Error: Attributes or documentation comment not permitted here",
+          "start": 94
+        }
+      ],
+      "expected_message": "Attributes or documentation comment not permitted here",
+      "expected_offset": 95,
+      "file": "impl_attribute.sail",
+      "upstream_gensym": false,
+      "classification": "fixed_and_verified",
+      "rationale": "Parser error cursor now skips trivia to point at the forbidden attribute.",
+      "after": {
+        "actual": [
+          {
+            "code": "syntax-error",
+            "message": "Syntax Error: Attributes or documentation comment not permitted here",
+            "start": 95
+          }
+        ],
+        "expected_message": "Attributes or documentation comment not permitted here",
+        "expected_offset": 95,
+        "file": "impl_attribute.sail",
+        "upstream_gensym": false
+      },
+      "recheck": "target/ra-improvements-2026-10-30/attribute-cursor.log",
+      "final": {
+        "actual": [
+          {
+            "code": "syntax-error",
+            "message": "Syntax Error: Attributes or documentation comment not permitted here",
+            "start": 95
+          }
+        ],
+        "expected_message": "Attributes or documentation comment not permitted here",
+        "expected_offset": 95,
+        "file": "impl_attribute.sail",
+        "upstream_gensym": false
+      }
+    },
+    {
+      "actual": [
+        {
+          "code": "type-error",
+          "message": "Function f not found",
+          "start": 40
+        },
+        {
+          "code": "type-error",
+          "message": "Function g not found",
+          "start": 49
+        }
+      ],
+      "expected_message": "Could not infer type for if-statement",
+      "expected_offset": 30,
+      "file": "infer_if_error.sail",
+      "upstream_gensym": false,
+      "classification": "intentional_precise_range",
+      "rationale": "Reports the two unresolved calls instead of the enclosing if expression.",
+      "final": {
+        "actual": [
+          {
+            "code": "type-error",
+            "message": "Function f not found",
+            "start": 40
+          },
+          {
+            "code": "type-error",
+            "message": "Function g not found",
+            "start": 49
+          }
+        ],
+        "expected_message": "Could not infer type for if-statement",
+        "expected_offset": 30,
+        "file": "infer_if_error.sail",
+        "upstream_gensym": false
+      }
+    },
+    {
+      "actual": [
+        {
+          "code": "type-error",
+          "message": "Nested existentials are not allowed",
+          "start": 81
+        }
+      ],
+      "expected_message": "Well-formedness check failed for type here",
+      "expected_offset": 43,
+      "file": "nested_existential.sail",
+      "upstream_gensym": false,
+      "classification": "intentional_precise_range",
+      "rationale": "Points at the nested existential rather than the entire function.",
+      "final": {
+        "actual": [
+          {
+            "code": "type-error",
+            "message": "Nested existentials are not allowed",
+            "start": 81
+          }
+        ],
+        "expected_message": "Well-formedness check failed for type here",
+        "expected_offset": 43,
+        "file": "nested_existential.sail",
+        "upstream_gensym": false
+      }
+    },
+    {
+      "actual": [
+        {
+          "code": "scattered-clause-after-end",
+          "message": "Cannot add clause to scattered enum E as it has already been ended",
+          "start": 98
+        }
+      ],
+      "expected_message": "Cannot add clause to scattered enum E as it has already been ended",
+      "expected_offset": 86,
+      "file": "scattered_enum_clause_after_end.sail",
+      "upstream_gensym": false,
+      "classification": "intentional_precise_range",
+      "rationale": "Points at the offending scattered name and links the previous end location.",
+      "final": {
+        "actual": [
+          {
+            "code": "scattered-clause-after-end",
+            "message": "Cannot add clause to scattered enum E as it has already been ended",
+            "start": 98
+          }
+        ],
+        "expected_message": "Cannot add clause to scattered enum E as it has already been ended",
+        "expected_offset": 86,
+        "file": "scattered_enum_clause_after_end.sail",
+        "upstream_gensym": false
+      }
+    },
+    {
+      "actual": [
+        {
+          "code": "scattered-clause-after-end",
+          "message": "Cannot add clause to scattered function f as it has already been ended",
+          "start": 133
+        }
+      ],
+      "expected_message": "Cannot add clause to scattered function f as it has already been ended",
+      "expected_offset": 117,
+      "file": "scattered_function_clause_after_end.sail",
+      "upstream_gensym": false,
+      "classification": "intentional_precise_range",
+      "rationale": "Points at the offending scattered name and links the previous end location.",
+      "final": {
+        "actual": [
+          {
+            "code": "scattered-clause-after-end",
+            "message": "Cannot add clause to scattered function f as it has already been ended",
+            "start": 133
+          }
+        ],
+        "expected_message": "Cannot add clause to scattered function f as it has already been ended",
+        "expected_offset": 117,
+        "file": "scattered_function_clause_after_end.sail",
+        "upstream_gensym": false
+      }
+    },
+    {
+      "actual": [
+        {
+          "code": "scattered-clause-after-end",
+          "message": "Cannot add clause to scattered mapping m as it has already been ended",
+          "start": 139
+        }
+      ],
+      "expected_message": "Cannot add clause to scattered mapping m as it has already been ended",
+      "expected_offset": 124,
+      "file": "scattered_mapping_clause_after_end.sail",
+      "upstream_gensym": false,
+      "classification": "intentional_precise_range",
+      "rationale": "Points at the offending scattered name and links the previous end location.",
+      "final": {
+        "actual": [
+          {
+            "code": "scattered-clause-after-end",
+            "message": "Cannot add clause to scattered mapping m as it has already been ended",
+            "start": 139
+          }
+        ],
+        "expected_message": "Cannot add clause to scattered mapping m as it has already been ended",
+        "expected_offset": 124,
+        "file": "scattered_mapping_clause_after_end.sail",
+        "upstream_gensym": false
+      }
+    },
+    {
+      "actual": [
+        {
+          "code": "scattered-clause-after-end",
+          "message": "Cannot add clause to scattered union U as it has already been ended",
+          "start": 157
+        }
+      ],
+      "expected_message": "Cannot add clause to scattered union U as it has already been ended",
+      "expected_offset": 144,
+      "file": "scattered_union_clause_after_end.sail",
+      "upstream_gensym": false,
+      "classification": "intentional_precise_range",
+      "rationale": "Points at the offending scattered name and links the previous end location.",
+      "final": {
+        "actual": [
+          {
+            "code": "scattered-clause-after-end",
+            "message": "Cannot add clause to scattered union U as it has already been ended",
+            "start": 157
+          }
+        ],
+        "expected_message": "Cannot add clause to scattered union U as it has already been ended",
+        "expected_offset": 144,
+        "file": "scattered_union_clause_after_end.sail",
+        "upstream_gensym": false
+      }
+    },
+    {
+      "actual": [
+        {
+          "code": "type-error",
+          "message": "Type pattern bitvector(int('n)) does not match type bitvector(4)",
+          "start": 97
+        }
+      ],
+      "expected_message": "Couldn't bind type argument 4 with atom('n)",
+      "expected_offset": 107,
+      "file": "typ_pat_arg_mismatch.sail",
+      "upstream_gensym": false,
+      "classification": "fixed_and_verified",
+      "rationale": "Matcher returns the failing argument path; aliases map it back to the written argument. Ambiguous provenance keeps the enclosing pattern range.",
+      "after": {
+        "actual": [
+          {
+            "code": "type-error",
+            "message": "Type pattern bitvector(int('n)) does not match type bitvector(4)",
+            "start": 107
+          }
+        ],
+        "expected_message": "Couldn't bind type argument 4 with atom('n)",
+        "expected_offset": 107,
+        "file": "typ_pat_arg_mismatch.sail",
+        "upstream_gensym": false
+      },
+      "recheck": "target/ra-improvements-2026-10-30/type-pattern-locations.log",
+      "final": {
+        "actual": [
+          {
+            "code": "type-error",
+            "message": "Type pattern bitvector(int('n)) does not match type bitvector(4)",
+            "start": 107
+          }
+        ],
+        "expected_message": "Couldn't bind type argument 4 with atom('n)",
+        "expected_offset": 107,
+        "file": "typ_pat_arg_mismatch.sail",
+        "upstream_gensym": false
+      }
+    },
+    {
+      "actual": [
+        {
+          "code": "type-error",
+          "message": "Type patterns require binders or wildcards instead of literal arguments",
+          "start": 92
+        }
+      ],
+      "expected_message": "Unexpected type in type pattern",
+      "expected_offset": 97,
+      "file": "typ_pat_literal.sail",
+      "upstream_gensym": false,
+      "classification": "fixed_and_verified",
+      "rationale": "Matcher returns the failing argument path; aliases map it back to the written argument. Ambiguous provenance keeps the enclosing pattern range.",
+      "after": {
+        "actual": [
+          {
+            "code": "type-error",
+            "message": "Type patterns require binders or wildcards instead of literal arguments",
+            "start": 97
+          }
+        ],
+        "expected_message": "Unexpected type in type pattern",
+        "expected_offset": 97,
+        "file": "typ_pat_literal.sail",
+        "upstream_gensym": false
+      },
+      "recheck": "target/ra-improvements-2026-10-30/type-pattern-locations.log",
+      "final": {
+        "actual": [
+          {
+            "code": "type-error",
+            "message": "Type patterns require binders or wildcards instead of literal arguments",
+            "start": 97
+          }
+        ],
+        "expected_message": "Unexpected type in type pattern",
+        "expected_offset": 97,
+        "file": "typ_pat_literal.sail",
+        "upstream_gensym": false
+      }
+    },
+    {
+      "actual": [
+        {
+          "code": "type-error",
+          "message": "Type pattern bits(int('n)) does not match type bits(4)",
+          "start": 93
+        }
+      ],
+      "expected_message": "Type pattern atom('n) cannot be used for a parameter of kind Int",
+      "expected_offset": 98,
+      "file": "typ_pat_synonym_kind.sail",
+      "upstream_gensym": false,
+      "classification": "fixed_and_verified",
+      "rationale": "Matcher returns the failing argument path; aliases map it back to the written argument. Ambiguous provenance keeps the enclosing pattern range.",
+      "after": {
+        "actual": [
+          {
+            "code": "type-error",
+            "message": "Type pattern bits(int('n)) does not match type bits(4)",
+            "start": 98
+          }
+        ],
+        "expected_message": "Type pattern atom('n) cannot be used for a parameter of kind Int",
+        "expected_offset": 98,
+        "file": "typ_pat_synonym_kind.sail",
+        "upstream_gensym": false
+      },
+      "recheck": "target/ra-improvements-2026-10-30/type-pattern-locations.log",
+      "final": {
+        "actual": [
+          {
+            "code": "type-error",
+            "message": "Type pattern bits(int('n)) does not match type bits(4)",
+            "start": 98
+          }
+        ],
+        "expected_message": "Type pattern atom('n) cannot be used for a parameter of kind Int",
+        "expected_offset": 98,
+        "file": "typ_pat_synonym_kind.sail",
+        "upstream_gensym": false
+      }
+    },
+    {
+      "actual": [
+        {
+          "code": "type-error",
+          "message": "Type pattern dup(int('n)) does not match type (int(1), int(2))",
+          "start": 133
+        }
+      ],
+      "expected_message": "Cannot bind type pattern atom('n) as the corresponding parameter of dup is used multiple times in its definition",
+      "expected_offset": 137,
+      "file": "typ_pat_synonym_repeated_param.sail",
+      "upstream_gensym": false,
+      "classification": "fixed_and_verified",
+      "rationale": "Matcher returns the failing argument path; aliases map it back to the written argument. Ambiguous provenance keeps the enclosing pattern range.",
+      "after": {
+        "actual": [
+          {
+            "code": "type-error",
+            "message": "Type pattern dup(int('n)) does not match type (int(1), int(2))",
+            "start": 137
+          }
+        ],
+        "expected_message": "Cannot bind type pattern atom('n) as the corresponding parameter of dup is used multiple times in its definition",
+        "expected_offset": 137,
+        "file": "typ_pat_synonym_repeated_param.sail",
+        "upstream_gensym": false
+      },
+      "recheck": "target/ra-improvements-2026-10-30/type-pattern-locations.log",
+      "final": {
+        "actual": [
+          {
+            "code": "type-error",
+            "message": "Type pattern dup(int('n)) does not match type (int(1), int(2))",
+            "start": 137
+          }
+        ],
+        "expected_message": "Cannot bind type pattern atom('n) as the corresponding parameter of dup is used multiple times in its definition",
+        "expected_offset": 137,
+        "file": "typ_pat_synonym_repeated_param.sail",
+        "upstream_gensym": false
+      }
+    },
+    {
+      "actual": [
+        {
+          "code": "type-error",
+          "message": "Unbound type variable 'a in annotation",
+          "start": 72
+        }
+      ],
+      "expected_message": "Well-formedness check failed for type",
+      "expected_offset": 76,
+      "file": "unbound_type_var_in_let.sail",
+      "upstream_gensym": false,
+      "classification": "fixed_and_verified",
+      "rationale": "Structured unbound-variable diagnostic now resolves the type variable token without parsing message text.",
+      "after": {
+        "actual": [
+          {
+            "code": "type-error",
+            "message": "Unbound type variable 'a in annotation",
+            "start": 76
+          }
+        ],
+        "expected_message": "Well-formedness check failed for type",
+        "expected_offset": 76,
+        "file": "unbound_type_var_in_let.sail",
+        "upstream_gensym": false
+      },
+      "final": {
+        "actual": [
+          {
+            "code": "type-error",
+            "message": "Unbound type variable 'a in annotation",
+            "start": 76
+          }
+        ],
+        "expected_message": "Well-formedness check failed for type",
+        "expected_offset": 76,
+        "file": "unbound_type_var_in_let.sail",
+        "upstream_gensym": false
+      }
+    },
+    {
+      "actual": [
+        {
+          "code": "ill-formed-type",
+          "message": "Well-formedness check failed for type",
+          "start": 65
+        }
+      ],
+      "expected_message": "Well-formedness check failed for type here",
+      "expected_offset": 47,
+      "file": "unbound_tyvar.sail",
+      "upstream_gensym": false,
+      "classification": "intentional_precise_range",
+      "rationale": "Points at the ill-formed return annotation rather than the entire function.",
+      "final": {
+        "actual": [
+          {
+            "code": "ill-formed-type",
+            "message": "Well-formedness check failed for type",
+            "start": 65
+          }
+        ],
+        "expected_message": "Well-formedness check failed for type here",
+        "expected_offset": 47,
+        "file": "unbound_tyvar.sail",
+        "upstream_gensym": false
+      }
+    },
+    {
+      "actual": [
+        {
+          "code": "type-error",
+          "message": "U has no scattered declaration",
+          "start": 56
+        }
+      ],
+      "expected_message": "No scattered union declaration found for U",
+      "expected_offset": 43,
+      "file": "union_clause_not_scattered.sail",
+      "upstream_gensym": false,
+      "classification": "intentional_precise_range",
+      "rationale": "Points at the undeclared scattered union name rather than the entire clause.",
+      "final": {
+        "actual": [
+          {
+            "code": "type-error",
+            "message": "U has no scattered declaration",
+            "start": 56
+          }
+        ],
+        "expected_message": "No scattered union declaration found for U",
+        "expected_offset": 43,
+        "file": "union_clause_not_scattered.sail",
+        "upstream_gensym": false
+      }
+    }
+  ],
+  "wording_policy": "Keep actionable Sail-specific messages and process-independent witness names; exact upstream text is not a correctness target. Full expected/actual messages are preserved in the source artifact.",
+  "counts": {
+    "fixed_and_verified": 6,
+    "intentional_precise_range": 10,
+    "intentional_related_location": 1
+  },
+  "recheck_source": "target/ra-improvements-2026-10-30/conformance-type-pattern.log",
+  "rechecked_totals": {
+    "located": 205,
+    "with_expectation": 216,
+    "worded": 127,
+    "pass_clean": 276,
+    "fail_rejected": 217
+  },
+  "final_recheck_source": "target/ra-improvements-2026-10-30/conformance-final.log"
+}

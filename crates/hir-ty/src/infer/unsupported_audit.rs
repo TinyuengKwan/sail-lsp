@@ -41,7 +41,7 @@ fn workspace(sources: &[&str], owner: &str) -> std::sync::Arc<InferenceResult> {
 fn symbolic_slice_retains_width() {
     clean(&workspace(
         &[
-            "type bits('n) = bitvector('n)\nval audit : forall 'n, 'n > 0. bits(2 * 'n) -> bits('n)\nfunction audit(x) = x['n - 1 .. 0]",
+            "type bits('n) = bitvector('n)\nval audit : forall 'n, 'n > 0. (implicit('n), bits(2 * 'n)) -> bits('n)\nfunction audit(n, x) = x['n - 1 .. 0]",
         ],
         "audit",
     ));

@@ -12,6 +12,10 @@ use ide_db::defs::CompletionItemKind;
 pub struct CompletionRelevance {
     /// Identifier name exactly matches expected parameter/variable name.
     pub exact_name_match: bool,
+    /// Candidate preserves the case of the prefix the user typed.
+    pub case_sensitive_prefix: bool,
+    /// A callable candidate at the callee of an existing call.
+    pub callable_context: bool,
     /// Type matches the expected type at cursor position.
     pub type_match: Option<CompletionRelevanceTypeMatch>,
     /// Item is a local variable (not workspace-level).
@@ -83,6 +87,12 @@ impl CompletionRelevance {
 
         if self.exact_name_match {
             score += 20;
+        }
+        if self.case_sensitive_prefix {
+            score += 2;
+        }
+        if self.callable_context {
+            score += 6;
         }
         if self.is_local {
             score += 3;
@@ -236,8 +246,9 @@ impl CompletionItem {
 /// 1. Deduplicate by label
 /// 2. Sort by `relevance.score()` (descending), then alphabetical
 /// 3. Assign hex sort_text via XOR-inversion (`score ^ 0xFFFFFFFF`)
-/// 4. Truncate to MAX_COMPLETIONS
-pub(crate) fn deduplicate_and_sort(items: &mut Vec<CompletionItem>, _prefix: &str) {
+///
+/// The cut is `CompletionConfig::limit`'s, applied by the caller.
+pub(crate) fn deduplicate_and_sort(items: &mut Vec<CompletionItem>, prefix: &str) {
     // A type and value can share a spelling, including generated enum names.
     // Locals still take precedence over same-named global values.
     let mut seen = std::collections::HashSet::new();
@@ -253,6 +264,10 @@ pub(crate) fn deduplicate_and_sort(items: &mut Vec<CompletionItem>, _prefix: &st
             item.import.as_ref().map(|request| request.target),
         ))
     });
+
+    for item in items.iter_mut() {
+        item.relevance.case_sensitive_prefix = !prefix.is_empty() && item.label.starts_with(prefix);
+    }
 
     // Sort by relevance score (descending), then alphabetical
     items.sort_by(|a, b| {

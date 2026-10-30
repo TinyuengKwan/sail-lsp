@@ -36,6 +36,10 @@ pub struct ParsedFileData {
     ///
     /// `None` when there are no errors (common case — avoids Arc alloc).
     pub errors: Option<Arc<[SyntaxError]>>,
+    // Validation errors depend on the whole updated tree. Only parser errors
+    // may be shifted/merged when replacing a token or subtree.
+    parser_errors: Arc<[SyntaxError]>,
+    fixities: Arc<parser::FixityContext>,
 }
 
 impl ParsedFileData {
@@ -50,7 +54,7 @@ impl ParsedFileData {
     /// tries incremental first, falls back to full reparse.
     ///
     /// Returns a new `ParsedFileData` with updated green tree + errors.
-    /// Tokens are NOT updated (caller should re-lex if needed).
+    /// The token stream always describes the same source as the green tree.
     pub fn reparse(&self, delete: rowan::TextRange, insert: &str) -> ParsedFileData {
         if let Some(result) = self.incremental_reparse(delete, insert) {
             return result;
@@ -65,50 +69,71 @@ impl ParsedFileData {
         insert: &str,
     ) -> Option<ParsedFileData> {
         let node = self.syntax_node()?;
-        let old_errors = self.errors.as_deref().map(|e| e.to_vec()).unwrap_or_default();
-
-        let (green, errors, _range) =
-            crate::parsing::incremental_reparse(&node, delete, insert, old_errors)?;
-
-        Some(ParsedFileData {
-            tokens: self.tokens.clone(), // tokens not re-lexed in incremental path
-            green: Some(Arc::new(green)),
-            errors: if errors.is_empty() { None } else { Some(errors.into()) },
-        })
+        let (green, parser_errors, _range) = crate::parsing::incremental_reparse_with_fixities(
+            &node,
+            delete,
+            insert,
+            self.parser_errors.iter().cloned(),
+            &self.fixities,
+        )?;
+        let root = crate::syntax_node::SyntaxNode::new_root(green);
+        let text = root.text().to_string();
+        Some(Self::from_root(&text, root, parser_errors, self.fixities.clone()))
     }
 
-    /// Full reparse fallback.
-    fn full_reparse(&self, delete: rowan::TextRange, insert: &str) -> ParsedFileData {
-        let node = self.syntax_node();
-        let old_text = node.as_ref().map(|n| n.text().to_string()).unwrap_or_default();
+    fn from_root(
+        text: &str,
+        root: crate::SyntaxNode,
+        parser_errors: Vec<SyntaxError>,
+        fixities: Arc<parser::FixityContext>,
+    ) -> Self {
+        let mut errors = parser_errors.clone();
+        crate::validation::validate(&root, &mut errors);
+        // A subtree's errors are merged after the untouched regions. Present
+        // the same deterministic order for incremental and complete parses.
+        errors.sort_by(|a, b| {
+            (a.range().start(), a.range().end(), a.message()).cmp(&(
+                b.range().start(),
+                b.range().end(),
+                b.message(),
+            ))
+        });
+        Self {
+            tokens: Arc::new(parser::tokenize(text)),
+            green: Some(Arc::new(root.green().into())),
+            errors: (!errors.is_empty()).then(|| errors.into()),
+            parser_errors: parser_errors.into(),
+            fixities,
+        }
+    }
 
-        let mut text = old_text;
+    fn from_text(text: &str, fixities: Arc<parser::FixityContext>) -> Self {
+        let (root, raw_errors) =
+            crate::parsing::parse_text_with_fixities(text, (*fixities).clone());
+        let parser_errors = raw_errors
+            .iter()
+            .map(|e| crate::parsing::parse_error_to_syntax_error(e, text))
+            .collect();
+        Self::from_root(text, root, parser_errors, fixities)
+    }
+
+    /// Full reparse fallback, preserving the file's operator context.
+    fn full_reparse(&self, delete: rowan::TextRange, insert: &str) -> ParsedFileData {
+        let mut text = self.syntax_node().map(|n| n.text().to_string()).unwrap_or_default();
         let start: usize = delete.start().into();
         let end: usize = delete.end().into();
-        if start <= text.len() && end <= text.len() {
+        if text.is_char_boundary(start) && text.is_char_boundary(end) && start <= end {
             text.replace_range(start..end, insert);
         }
-
-        let tokens = parser::tokenize(&text);
-        let (root, raw_errors) = crate::parsing::parse_text(&text);
-        let green = Some(Arc::new(root.green().into()));
-        let errors = if raw_errors.is_empty() {
-            None
-        } else {
-            let syntax_errors: Vec<SyntaxError> = raw_errors
-                .iter()
-                .map(|e| crate::parsing::parse_error_to_syntax_error(e, &text))
-                .collect();
-            Some(syntax_errors.into())
-        };
-
-        ParsedFileData { tokens: Arc::new(tokens), green, errors }
+        Self::from_text(&text, self.fixities.clone())
     }
 }
 
 impl PartialEq for ParsedFileData {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.tokens, &other.tokens)
+        self.fixities == other.fixities
+            && self.parser_errors == other.parser_errors
+            && Arc::ptr_eq(&self.tokens, &other.tokens)
             && match (&self.green, &other.green) {
                 (Some(a), Some(b)) => Arc::ptr_eq(a, b),
                 (None, None) => true,
@@ -147,37 +172,77 @@ pub fn parse_file(db: &dyn salsa::Database, input: FileText) -> ParsedFileData {
     }
     let text = input.text(db);
 
-    // Step 1: lex (hand-written tokenizer)
-    let tokens: Vec<(Token, Span)> = parser::tokenize(text.as_ref());
-
-    // Step 2: CST parse (lossless rowan GreenNode)
-    // Use workspace fixities for dynamic operator precedence if available.
-    // Establishes salsa dependency: WorkspaceFixities changes → re-parse.
-    let (root, raw_errors) = if let Some(ws_fix) = base_db::WorkspaceFixities::try_get(db) {
-        let fixities = ws_fix.fixities(db);
-        if fixities.is_empty() {
-            crate::parsing::parse_text(text.as_ref())
-        } else {
-            crate::parsing::parse_text_with_fixities(text.as_ref(), fixities.clone())
+    let fixities = base_db::WorkspaceFixities::try_get(db)
+        .map(|context| context.fixities(db).clone())
+        .unwrap_or_default();
+    let fixities = Arc::new(fixities);
+    let cache = input.parse_cache(db);
+    // Do not hold the cache lock while lexing/parsing. Concurrent snapshots
+    // may replace the seed in either order; its complete key makes that affect
+    // only reuse, never the result computed for this snapshot's inputs.
+    let reused = cache.get().filter(|seed| seed.fixities == fixities).and_then(|seed| {
+        if seed.text.as_ref() == text.as_ref() {
+            // A newly installed singleton may invalidate the query without a
+            // text change. There is no edit to reparse in this case.
+            return None;
         }
-    } else {
-        crate::parsing::parse_text(text.as_ref())
-    };
-    let green = Some(Arc::new(root.green().into()));
+        let green = seed.green.upgrade()?;
+        let previous = ParsedFileData {
+            tokens: Arc::default(),
+            green: Some(green),
+            errors: None,
+            parser_errors: seed
+                .parser_errors
+                .iter()
+                .map(|(message, range)| SyntaxError::new(message.clone(), *range))
+                .collect(),
+            fixities: fixities.clone(),
+        };
+        let (delete, insert) = text_difference(&seed.text, text)?;
+        previous.incremental_reparse(delete, insert)
+    });
+    let parsed = reused.unwrap_or_else(|| ParsedFileData::from_text(text, fixities.clone()));
+    if let Some(green) = &parsed.green {
+        cache.store(base_db::parse_cache::ParseSeed {
+            text: text.clone(),
+            green: Arc::downgrade(green),
+            parser_errors: parsed
+                .parser_errors
+                .iter()
+                .map(|error| (error.message().to_owned(), error.range()))
+                .collect(),
+            fixities,
+        });
+    }
+    parsed
+}
 
-    // Step 3: parse errors + tree-level validation, in one set.
-    //
-    // `Parse::errors()` runs validation for callers that hold a `Parse`, but
-    // this query is the one the server and the diagnostics pipeline read, so
-    // validation has to happen here too or it never runs at all.
-    let mut syntax_errors: Vec<SyntaxError> = raw_errors
-        .iter()
-        .map(|e| crate::parsing::parse_error_to_syntax_error(e, text.as_ref()))
-        .collect();
-    crate::validation::validate(&root, &mut syntax_errors);
-    let errors = if syntax_errors.is_empty() { None } else { Some(syntax_errors.into()) };
-
-    ParsedFileData { tokens: Arc::new(tokens), green, errors }
+/// A single covering edit for a batch of LSP changes, with UTF-8 boundaries.
+/// Large/disjoint edits naturally fall back to a complete parse if no safe
+/// token or block contains the changed region.
+fn text_difference<'a>(before: &str, after: &'a str) -> Option<(rowan::TextRange, &'a str)> {
+    let mut start = before.bytes().zip(after.bytes()).take_while(|(a, b)| a == b).count();
+    while !before.is_char_boundary(start) || !after.is_char_boundary(start) {
+        start -= 1;
+    }
+    let mut suffix = before[start..]
+        .bytes()
+        .rev()
+        .zip(after[start..].bytes().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    while !before.is_char_boundary(before.len() - suffix)
+        || !after.is_char_boundary(after.len() - suffix)
+    {
+        suffix -= 1;
+    }
+    Some((
+        rowan::TextRange::new(
+            u32::try_from(start).ok()?.into(),
+            u32::try_from(before.len() - suffix).ok()?.into(),
+        ),
+        &after[start..after.len() - suffix],
+    ))
 }
 
 /// Keep source positions while removing declarations in inactive branches.
@@ -221,6 +286,8 @@ pub fn semantic_parse_file(db: &dyn salsa::Database, input: FileText) -> ParsedF
         tokens: Arc::new(parser::tokenize(&text)),
         green: Some(Arc::new(root.green().into())),
         errors: parsed.errors.clone(),
+        parser_errors: parsed.parser_errors.clone(),
+        fixities: parsed.fixities.clone(),
     }
 }
 
@@ -384,6 +451,96 @@ mod tests {
     }
 
     #[test]
+    fn normal_text_updates_reuse_trees_and_fixity_changes_do_not() {
+        use salsa::Setter;
+        let mut db = TestDb::default();
+        let fixities = base_db::WorkspaceFixities::new(&db, 0, Default::default());
+        let before = "function f(x) = { x =^ 2 + 3 }\nfunction untouched() = 4\n";
+        let input = FileText::new(&db, Arc::from(before), FileId::from_raw(0));
+        let untouched_before = parse_file(&db, input)
+            .syntax_node()
+            .unwrap()
+            .children()
+            .nth(1)
+            .unwrap()
+            .green()
+            .into_owned();
+        let after = before.replace("2", "5 * 6");
+        input.set_text(&mut db).to(Arc::from(after.as_str()));
+        let parsed = parse_file(&db, input).clone();
+        let untouched_after =
+            parsed.syntax_node().unwrap().children().nth(1).unwrap().green().into_owned();
+        assert!(
+            std::ptr::eq(&*untouched_before, &*untouched_after),
+            "normal editing did not reuse the unaffected subtree"
+        );
+        let full = ParsedFileData::from_text(&after, Arc::default());
+        assert_eq!(parsed.green, full.green);
+        assert_eq!(parsed.tokens, full.tokens);
+        assert_eq!(parsed.errors, full.errors);
+
+        let context = std::collections::HashMap::from([("=^".into(), (19, 20))]);
+        fixities.set_fixities(&mut db).to(context.clone());
+        let updated = parse_file(&db, input);
+        let full = ParsedFileData::from_text(&after, Arc::new(context));
+        assert_eq!(updated.green, full.green);
+        assert_ne!(updated.green, parsed.green, "new operator precedence must change the tree");
+        assert_eq!(updated.tokens, full.tokens);
+        assert_eq!(updated.errors, full.errors);
+    }
+
+    #[test]
+    fn unchanged_mapping_text_retains_clause_grammar_after_context_installation() {
+        let mut db = TestDb::default();
+        let source = "mapping m : int <-> bool = { forwards x if x > 0 => true when x < 5, backwards _ => 0 }";
+        let input = FileText::new(&db, Arc::from(source), FileId::from_raw(0));
+        let before = parse_file(&db, input).clone();
+        base_db::WorkspaceFixities::new(&db, 0, Default::default());
+        // Force a revision just as workspace registration does.
+        use salsa::Database;
+        db.trigger_cancellation();
+        let after = parse_file(&db, input);
+        assert_eq!(before.green, after.green);
+        assert_eq!(before.errors, after.errors);
+    }
+
+    #[test]
+    fn reparse_seed_does_not_keep_an_evicted_tree_alive() {
+        let db = TestDb::default();
+        let input = FileText::new(&db, Arc::from("function f() = 1"), FileId::from_raw(0));
+        parse_file(&db, input);
+        let cache = input.parse_cache(&db).clone();
+        let seed = cache.get().unwrap();
+        assert!(seed.green.upgrade().is_some());
+        drop(db);
+        assert!(seed.green.upgrade().is_none(), "seed pinned a tree after database disposal");
+        cache.clear();
+        assert!(cache.get().is_none());
+    }
+
+    #[test]
+    fn cached_normal_edits_match_full_parse_after_unicode_and_undo() {
+        use salsa::Setter;
+        let mut db = TestDb::default();
+        let before = "// café\nfunction f(x) = { x + 1 }\n";
+        let input = FileText::new(&db, Arc::from(before), FileId::from_raw(0));
+        parse_file(&db, input);
+        for after in [
+            before.replace("café", "茶"),
+            before.replace("x + 1", "(x +"),
+            before.replace("x + 1", "x + 2 + 3"),
+            before.to_owned(),
+        ] {
+            input.set_text(&mut db).to(Arc::from(after.as_str()));
+            let actual = parse_file(&db, input);
+            let full = ParsedFileData::from_text(&after, Arc::default());
+            assert_eq!(actual.green, full.green, "{after}");
+            assert_eq!(actual.tokens, full.tokens, "{after}");
+            assert_eq!(actual.errors, full.errors, "{after}");
+        }
+    }
+
+    #[test]
     fn incremental_reparse_ident() {
         let db = TestDb::default();
         let input = FileText::new(
@@ -404,6 +561,88 @@ mod tests {
         let text = node.text().to_string();
         assert!(text.contains("bar"), "reparsed tree should contain 'bar': {text}");
         assert!(!text.contains("foo"), "reparsed tree should not contain 'foo': {text}");
+        assert_eq!(*reparsed.tokens, parser::tokenize(&text));
+
+        // A different byte length must also shift following token spans.
+        let reparsed = reparsed.reparse(delete, "longer_name");
+        let text = reparsed.syntax_node().unwrap().text().to_string();
+        assert_eq!(*reparsed.tokens, parser::tokenize(&text));
+    }
+
+    #[test]
+    fn reparsing_preserves_fixities_and_refreshes_validation() {
+        let fixities = Arc::new(std::collections::HashMap::from([("=^".into(), (19, 20))]));
+        for (before, needle, replacement) in [
+            ("function f(x) = { x =^ 2 + 3 }\n", "2", "4 * 5"),
+            ("function f(x) = x =^ 2 + 3\n", "x =^ 2", "(x =^ 2)"),
+            ("/// first\n\n/// second\nfunction f() = ()\n", "second", "updated comment"),
+            ("function target(x) = { if x { 1 } }\n", "target", "longer_name"),
+            ("function f(x) = { if x { 1 } }\n", "1", "2 + 3"),
+        ] {
+            let parsed = ParsedFileData::from_text(before, fixities.clone());
+            let start = before.find(needle).unwrap();
+            let range = rowan::TextRange::new(
+                (start as u32).into(),
+                ((start + needle.len()) as u32).into(),
+            );
+            if needle == "2" {
+                assert!(
+                    parsed.incremental_reparse(range, replacement).is_some(),
+                    "incremental path not exercised: {before}"
+                );
+            }
+            let actual = parsed.reparse(range, replacement);
+            let after = before.replacen(needle, replacement, 1);
+            let expected = ParsedFileData::from_text(&after, fixities.clone());
+            assert_eq!(actual.green, expected.green, "{after}");
+            assert_eq!(actual.tokens, expected.tokens, "{after}");
+            assert_eq!(actual.errors, expected.errors, "{after}");
+        }
+    }
+
+    #[test]
+    fn incremental_edits_match_full_parse_and_undo() {
+        let fixities = Arc::new(std::collections::HashMap::from([("=^".into(), (19, 20))]));
+        for before in [
+            "mapping m : int <-> bool = { forwards x if x > 0 => true when x < 5, backwards _ => 0 }",
+            "mapping m : (int, int) <-> bool = { (1, 2, 3) <-> true }",
+            "mapping m : int <-> bool = {}",
+            "function f(x) = { x =^ 2 + 3 }\n",
+            "// café\nfunction f() = \"α\"\n",
+            "function f(x) = { if x then (1 }\n",
+            "function a() = { é }\nfunction b() = { é }\n",
+            "function a() = { if true }\nfunction b() = { if false }\n",
+            "/// doc\n\n/// another\nval f : int -> int\n",
+        ] {
+            let parsed = ParsedFileData::from_text(before, fixities.clone());
+            for start in before.char_indices().map(|(i, _)| i).chain([before.len()]) {
+                let next = before[start..].chars().next().map_or(start, |c| start + c.len_utf8());
+                for end in [start, next] {
+                    for replacement in ["", " ", "\n", "x", "{", "}", "//", "\"", "é"] {
+                        let range =
+                            rowan::TextRange::new((start as u32).into(), (end as u32).into());
+                        let actual = parsed.reparse(range, replacement);
+                        let mut after = before.to_owned();
+                        after.replace_range(start..end, replacement);
+                        let expected = ParsedFileData::from_text(&after, fixities.clone());
+                        assert_eq!(
+                            actual.green, expected.green,
+                            "edit {start}..{end} -> {replacement:?}: {before:?}"
+                        );
+                        assert_eq!(actual.tokens, expected.tokens, "{after:?}");
+                        assert_eq!(actual.errors, expected.errors, "{after:?}");
+                        let undo_range = rowan::TextRange::new(
+                            (start as u32).into(),
+                            ((start + replacement.len()) as u32).into(),
+                        );
+                        let undone = actual.reparse(undo_range, &before[start..end]);
+                        assert_eq!(undone.green, parsed.green, "undo {after:?}");
+                        assert_eq!(undone.tokens, parsed.tokens, "undo {after:?}");
+                        assert_eq!(undone.errors, parsed.errors, "undo {after:?}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]

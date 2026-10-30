@@ -50,6 +50,7 @@ pub use semantics::{Semantics, TopLevelNames};
 /// anything a feature has to name comes through here. Re-exporting is what
 /// keeps that true without forcing every type to be redefined.
 pub use hir_ty::display::HirDisplay;
+pub use hir_ty::infer::completion::TypeMatch as CompletionTypeMatch;
 pub use hir_ty::infer::{InferenceResult, SubrangeProblem, TypeCheckResult};
 
 /// Type inference, driven per callable. Sail's numeric and bitvector

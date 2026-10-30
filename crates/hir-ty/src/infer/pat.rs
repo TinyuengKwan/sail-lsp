@@ -92,46 +92,60 @@ impl<'db> InferenceContext<'db> {
         actual: &Ty,
         subst: &mut Subst,
         depth: usize,
-    ) -> bool {
+    ) -> Result<(), Vec<usize>> {
         if depth > 64 || pattern.is_unknown() || actual.is_unknown() {
-            return true;
+            return Ok(());
         }
+        let original = pattern;
         let pattern = self.expand_type_pattern_alias(pattern);
         let actual = self.expand_type_pattern_alias(actual);
         if pattern.is_named("_") {
-            return true;
+            return Ok(());
         }
-        match (pattern.kind(), actual.kind()) {
-            (
-                TyKind::Param(_),
-                TyKind::Scalar(
-                    crate::ty::Scalar::String | crate::ty::Scalar::Unit | crate::ty::Scalar::Real,
-                ),
-            ) if depth == 0 => false,
-            (TyKind::Param(name), _) => {
-                if let Some(bound) = subst.types.get(name).cloned() {
-                    self.match_type_pattern(&bound, &actual, subst, depth + 1)
-                } else {
-                    subst.types.insert(name.clone(), actual);
-                    true
+        let at = |index: usize, mut path: Vec<usize>| {
+            path.insert(0, index);
+            path
+        };
+        let result = (|| -> Result<(), Vec<usize>> {
+            match (pattern.kind(), actual.kind()) {
+                (
+                    TyKind::Param(_),
+                    TyKind::Scalar(
+                        crate::ty::Scalar::String
+                        | crate::ty::Scalar::Unit
+                        | crate::ty::Scalar::Real,
+                    ),
+                ) if depth == 0 => Err(Vec::new()),
+                (TyKind::Param(name), _) => {
+                    if let Some(bound) = subst.types.get(name).cloned() {
+                        self.match_type_pattern(&bound, &actual, subst, depth + 1)
+                            .map_err(|_| Vec::new())
+                    } else {
+                        subst.types.insert(name.clone(), actual.clone());
+                        Ok(())
+                    }
                 }
-            }
-            (TyKind::Tuple(ps), TyKind::Tuple(ts)) => {
-                ps.len() == ts.len()
-                    && ps
-                        .iter()
-                        .zip(ts)
-                        .all(|(p, t)| self.match_type_pattern(p, t, subst, depth + 1))
-            }
-            (
-                TyKind::App { name: pn, args: ps, .. } | TyKind::Named(pn, ps),
-                TyKind::App { name: tn, args: ts, .. } | TyKind::Named(tn, ts),
-            ) if type_pattern_head(pn) == type_pattern_head(tn) => {
-                ps.len() == ts.len()
-                    && ps.iter().zip(ts).enumerate().all(|(i, (p, t))| {
+                (TyKind::Tuple(ps), TyKind::Tuple(ts)) => {
+                    if ps.len() != ts.len() {
+                        return Err(Vec::new());
+                    }
+                    for (index, (p, t)) in ps.iter().zip(ts).enumerate() {
+                        self.match_type_pattern(p, t, subst, depth + 1)
+                            .map_err(|path| at(index, path))?;
+                    }
+                    Ok(())
+                }
+                (
+                    TyKind::App { name: pn, args: ps, .. } | TyKind::Named(pn, ps),
+                    TyKind::App { name: tn, args: ts, .. } | TyKind::Named(tn, ts),
+                ) if type_pattern_head(pn) == type_pattern_head(tn) => {
+                    if ps.len() != ts.len() {
+                        return Err(Vec::new());
+                    }
+                    for (index, (p, t)) in ps.iter().zip(ts).enumerate() {
                         let numeric = match pn.as_str() {
                             "bits" | "bitvector" | "int" | "atom" | "range" | "implicit" => true,
-                            "vector" => i == 0,
+                            "vector" => index == 0,
                             _ => matches!(p, TyArg::Nexp(_)) || matches!(t, TyArg::Nexp(_)),
                         };
                         let text = |arg: &TyArg| match arg {
@@ -141,25 +155,23 @@ impl<'db> InferenceContext<'db> {
                             TyArg::Order(v) | TyArg::Value(v) => v.clone(),
                         };
                         if text(p) == "_" {
-                            return true;
+                            continue;
                         }
                         if numeric {
                             let (Some(p), Some(t)) = (
                                 crate::ty::NumericExpr::parse(&text(p)),
                                 crate::ty::NumericExpr::parse(&text(t)),
                             ) else {
-                                return false;
+                                return Err(vec![index]);
                             };
-                            // A nested type application in an Int slot has the
-                            // wrong kind (e.g. `bits(int('n))`).
                             if matches!(p, crate::ty::NumericExpr::App { ref name, .. }
-                            if matches!(name.as_str(), "int" | "bits" | "vector" | "bool"))
+                                if matches!(name.as_str(), "int" | "bits" | "vector" | "bool"))
                             {
-                                return false;
+                                return Err(vec![index]);
                             }
                             match super::numeric::numeric_equality(&p, &t, subst, &[]) {
-                                super::ConstraintStatus::Satisfied => true,
-                                super::ConstraintStatus::Failed => false,
+                                super::ConstraintStatus::Satisfied => {}
+                                super::ConstraintStatus::Failed => return Err(vec![index]),
                                 super::ConstraintStatus::Unknown => {
                                     let p = constraint::subst_numeric_expr(&p, subst);
                                     let t = constraint::subst_numeric_expr(&t, subst);
@@ -167,41 +179,95 @@ impl<'db> InferenceContext<'db> {
                                         if let Some(Err(())) =
                                             super::nexp_simplify::solve_linear(&p, value)
                                         {
-                                            return false;
+                                            return Err(vec![index]);
                                         }
                                     }
                                     self.table.push_subtype_obligation(
                                         super::Obligation::WidthEquality(p, t),
                                     );
-                                    true
                                 }
                             }
                         } else {
                             match (p, t) {
-                                (TyArg::Type(p), TyArg::Type(t)) => {
-                                    self.match_type_pattern(p, t, subst, depth + 1)
+                                (TyArg::Type(p), TyArg::Type(t)) => self
+                                    .match_type_pattern(p, t, subst, depth + 1)
+                                    .map_err(|path| at(index, path))?,
+                                _ if !constraint::unify_value(&text(p), &text(t), subst) => {
+                                    return Err(vec![index])
                                 }
-                                _ => constraint::unify_value(&text(p), &text(t), subst),
+                                _ => {}
                             }
                         }
-                    })
-            }
-            (
-                TyKind::App { name, args, .. },
-                TyKind::Scalar(crate::ty::Scalar::Int | crate::ty::Scalar::Nat),
-            ) if matches!(name.as_str(), "atom" | "int") && args.len() == 1 => true,
-            (TyKind::App { name, .. }, TyKind::Scalar(crate::ty::Scalar::Bool))
-                if matches!(name.as_str(), "bool" | "atom_bool") =>
-            {
-                true
-            }
-            _ => {
-                if !constraint::collect_type_bindings(&pattern, &actual, subst) {
-                    return false;
+                    }
+                    Ok(())
                 }
-                let instantiated = constraint::apply_subst(&pattern, subst);
-                self.table.check_type_equality(&instantiated, &actual).is_compatible()
+                (
+                    TyKind::App { name, args, .. },
+                    TyKind::Scalar(crate::ty::Scalar::Int | crate::ty::Scalar::Nat),
+                ) if matches!(name.as_str(), "atom" | "int") && args.len() == 1 => Ok(()),
+                (TyKind::App { name, .. }, TyKind::Scalar(crate::ty::Scalar::Bool))
+                    if matches!(name.as_str(), "bool" | "atom_bool") =>
+                {
+                    Ok(())
+                }
+                _ => {
+                    if !constraint::collect_type_bindings(&pattern, &actual, subst) {
+                        return Err(Vec::new());
+                    }
+                    let instantiated = constraint::apply_subst(&pattern, subst);
+                    self.table
+                        .check_type_equality(&instantiated, &actual)
+                        .is_compatible()
+                        .then_some(())
+                        .ok_or_else(Vec::new)
+                }
             }
+        })();
+        if original == &pattern {
+            return result;
+        }
+        // Relate an expanded synonym's failing component back to the written
+        // argument that supplied it. Never use expanded indices as source paths.
+        result.map_err(|path| self.type_pattern_alias_focus(original, &path))
+    }
+
+    fn type_pattern_alias_focus(&self, original: &Ty, path: &[usize]) -> Vec<usize> {
+        let (TyKind::App { name, .. } | TyKind::Named(name, _)) = original.kind() else {
+            return Vec::new();
+        };
+        let Some(scheme) = self.table.alias_scheme(name) else { return Vec::new() };
+        let focus =
+            |name: &str| scheme.params.iter().position(|p| p == name).map(|index| vec![index]);
+        let mut node = &scheme.body;
+        for &index in path {
+            if let TyKind::Param(name) = node.kind() {
+                return focus(name).unwrap_or_default();
+            }
+            node = match node.kind() {
+                TyKind::Tuple(items) => match items.get(index) {
+                    Some(t) => t,
+                    None => return Vec::new(),
+                },
+                TyKind::App { name, args, .. } | TyKind::Named(name, args) => {
+                    // Another synonym needs another provenance mapping. Fall
+                    // back to the enclosing written pattern rather than guess.
+                    if self.table.alias_scheme(name).is_some() {
+                        return Vec::new();
+                    }
+                    match args.get(index) {
+                        Some(TyArg::Type(t)) => t,
+                        Some(TyArg::Nexp(NumericExpr::Var(name))) | Some(TyArg::Value(name)) => {
+                            return focus(name).unwrap_or_default()
+                        }
+                        _ => return Vec::new(),
+                    }
+                }
+                _ => return Vec::new(),
+            };
+        }
+        match node.kind() {
+            TyKind::Param(name) => focus(name).unwrap_or_default(),
+            _ => Vec::new(),
         }
     }
 
@@ -555,9 +621,8 @@ impl<'db> InferenceContext<'db> {
                                 && !locals.type_variables.contains(&name)
                                 && !self.table.is_rigid(&name)
                             {
-                                self.invalid_pattern(
-                                    pat_id,
-                                    format!("Unbound type variable {name} in annotation"),
+                                self.push_inference_diagnostic(
+                                    InferenceDiagnostic::UnboundTypeVariable { pat: pat_id, name },
                                 );
                             }
                         }
@@ -584,12 +649,14 @@ impl<'db> InferenceContext<'db> {
                     locals.define_type_variable(&name);
                 }
                 let mut subst = Subst::default();
-                if !is_type_pattern_syntax(&pattern, 0) {
-                    self.invalid_pattern(
-                        pat_id,
-                        "Type patterns require binders or wildcards instead of literal arguments",
-                    );
-                } else if !self.match_type_pattern(&pattern, expected, &mut subst, 0) {
+                if let Some(path) = invalid_type_pattern_path(&pattern, 0) {
+                    self.push_inference_diagnostic(InferenceDiagnostic::InvalidTypePattern {
+                        pat: pat_id,
+                        message: "Type patterns require binders or wildcards instead of literal arguments".into(),
+                        path,
+                    });
+                } else if let Err(path) = self.match_type_pattern(&pattern, expected, &mut subst, 0)
+                {
                     let actual = self.expand_type_pattern_alias(expected);
                     let message = if matches!(pattern.kind(), TyKind::Param(_))
                         && matches!(
@@ -612,7 +679,11 @@ impl<'db> InferenceContext<'db> {
                             expected.display_text()
                         )
                     };
-                    self.invalid_pattern(pat_id, message);
+                    self.push_inference_diagnostic(InferenceDiagnostic::InvalidTypePattern {
+                        pat: pat_id,
+                        message,
+                        path,
+                    });
                 } else {
                     // Bind the newly introduced names to their actual rigid
                     // identities; textual aliases must not conflate shadowed witnesses.
@@ -1598,19 +1669,30 @@ pub(super) fn contains_type_pattern(
 /// Source type patterns contain binders, wildcards and applications, never
 /// literal numeric arguments. Constants introduced by alias expansion are
 /// allowed, so this check runs before expansion.
-fn is_type_pattern_syntax(ty: &Ty, depth: usize) -> bool {
+fn invalid_type_pattern_path(ty: &Ty, depth: usize) -> Option<Vec<usize>> {
     if depth > 64 {
-        return true;
+        return None;
     }
+    let prepend = |index, mut path: Vec<usize>| {
+        path.insert(0, index);
+        path
+    };
     match ty.kind() {
-        TyKind::App { args, .. } | TyKind::Named(_, args) => args.iter().all(|arg| match arg {
-            TyArg::Type(t) => is_type_pattern_syntax(t, depth + 1),
-            TyArg::Nexp(crate::ty::NumericExpr::Var(_)) => true,
-            TyArg::Nexp(crate::ty::NumericExpr::Symbol(s)) => s == "_",
-            TyArg::Value(v) => v == "_" || v.starts_with('\''),
-            _ => false,
+        TyKind::App { args, .. } | TyKind::Named(_, args) => {
+            args.iter().enumerate().find_map(|(index, arg)| {
+                let path = match arg {
+                    TyArg::Type(t) => invalid_type_pattern_path(t, depth + 1),
+                    TyArg::Nexp(NumericExpr::Var(_)) => None,
+                    TyArg::Nexp(NumericExpr::Symbol(s)) if s == "_" => None,
+                    TyArg::Value(v) if v == "_" || v.starts_with('\'') => None,
+                    _ => Some(Vec::new()),
+                };
+                path.map(|path| prepend(index, path))
+            })
+        }
+        TyKind::Tuple(items) => items.iter().enumerate().find_map(|(index, t)| {
+            invalid_type_pattern_path(t, depth + 1).map(|path| prepend(index, path))
         }),
-        TyKind::Tuple(items) => items.iter().all(|t| is_type_pattern_syntax(t, depth + 1)),
-        _ => true,
+        _ => None,
     }
 }

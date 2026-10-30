@@ -89,6 +89,17 @@ impl SourceAnalyzer {
         file: base_db::FileText,
         offset: usize,
     ) -> Vec<hir_def::Name> {
+        self.locals_at(db, file, offset).into_iter().map(|local| local.name).collect()
+    }
+
+    /// The locals in scope at `offset`, innermost first, each with the span
+    /// of the pattern that binds it.
+    pub(crate) fn locals_at(
+        &self,
+        db: &dyn salsa::Database,
+        file: base_db::FileText,
+        offset: usize,
+    ) -> Vec<crate::Local> {
         let Some(BodyOrSig::Body { body, source_map, .. }) = &self.body_or_sig else {
             return Vec::new();
         };
@@ -115,7 +126,13 @@ impl SourceAnalyzer {
         let mut out = Vec::new();
         for scope in scopes.scope_chain(Some(scope)) {
             for entry in scopes.entries(scope) {
-                out.push(entry.name().clone());
+                let Some(span) = source_map.pat_syntax(entry.pat()) else { continue };
+                let is_param = body.params.iter().any(|p| {
+                    source_map
+                        .pat_syntax(*p)
+                        .is_some_and(|s| s.start <= span.start && span.end <= s.end)
+                });
+                out.push(crate::Local { name: entry.name().clone(), span, is_param });
             }
         }
         out

@@ -19,14 +19,14 @@ impl ConstraintReport {
         text: &str,
         body: &hir::Body,
         source_map: &hir::BodySourceMap,
-        original_base: usize,
+        _original_base: usize,
         result: &InferenceResult,
     ) {
         self.totals.merge(result.obligation_stats);
         // Byte offsets are zero-based, line/column are one-based (UTF-8 bytes).
         let location = |expr| {
             source_map.expr_syntax(expr).map(|span| {
-                let span = source_map.rebase(span, original_base);
+                // Semantic IDs resolve through the current source map already.
                 let at = span.start.min(text.len());
                 let prefix = &text[..at];
                 let line_start = prefix.rfind('\n').map_or(0, |p| p + 1);

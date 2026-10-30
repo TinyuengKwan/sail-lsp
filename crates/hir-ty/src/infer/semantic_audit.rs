@@ -8,6 +8,23 @@ fn ty(s: &str) -> Ty {
     TopLevelEnv::from_cst(&root).0.functions["audit"][0].ret.clone()
 }
 
+/// These tests assert logical results, not editor latency. Give their SMT
+/// checks a separate outer budget so concurrent test threads do not turn
+/// scheduler delays into semantic failures. Budget/cancellation behavior has
+/// dedicated tests with explicit small limits; production defaults are unchanged.
+#[cfg(feature = "z3-solver")]
+fn proof_budget() -> crate::solver_budget::SolverBudget {
+    use crate::solver_budget::{SolverBudget, SolverLimits};
+    SolverBudget::enter(
+        crate::CancellationToken::never(),
+        SolverLimits {
+            total: std::time::Duration::from_secs(10),
+            per_check: std::time::Duration::from_secs(2),
+            checks: 64,
+        },
+    )
+}
+
 #[test]
 fn numeric_division_matches_sail_euclidean_semantics() {
     for (expression, expected) in [("-5 / 2", -3), ("-5 % 2", 1), ("5 / -2", -2), ("-5 % -2", 1)] {
@@ -92,6 +109,7 @@ fn opaque_numeric_applications_keep_their_arguments() {
 #[test]
 #[cfg(feature = "z3-solver")]
 fn exponential_facts_do_not_overflow_or_restrict_the_exponent() {
+    let _budget = proof_budget();
     for (goal, assumptions) in
         [("2 ^ 'n == 1", "'n == 64"), ("2 ^ 'n < 0", "'n > 64"), ("2 ^ 63 < 0", "true")]
     {
@@ -1036,6 +1054,7 @@ fn reflexive_width_equality_does_not_need_opaque_assumptions() {
 #[test]
 #[cfg(feature = "z3-solver")]
 fn opaque_assumptions_do_not_block_supported_entailment() {
+    let _budget = proof_budget();
     let bound = parse_constraint_text("'n in {8,16,32} & 'n <= 16");
     let facts = [ConstraintExpr::And(vec![bound, ConstraintExpr::Unsupported])];
     for (goal, status) in [
@@ -1059,6 +1078,7 @@ fn opaque_assumptions_do_not_block_supported_entailment() {
 #[test]
 #[cfg(feature = "z3-solver")]
 fn negated_disjunction_retains_each_supported_negative_fact() {
+    let _budget = proof_budget();
     let comparison = parse_constraint_text("'n > 5");
     for (inner, expected) in [
         (
@@ -1084,6 +1104,7 @@ fn negated_disjunction_retains_each_supported_negative_fact() {
 #[test]
 #[cfg(feature = "z3-solver")]
 fn focused_smt_context_keeps_transitive_facts_and_checks_unreachable_paths() {
+    let _budget = proof_budget();
     let facts = ["'n == 'k", "'k == 'm", "'m == 8", "'unrelated >= 0", "'other <= 100"]
         .map(parse_constraint_text);
     for (goal, expected) in
@@ -1263,6 +1284,7 @@ fn positive_integer_factor_is_bounded_by_its_product() {
 #[test]
 #[cfg(feature = "z3-solver")]
 fn vector_length_power_bound_uses_linear_exponent_premises() {
+    let _budget = proof_budget();
     let facts = [
         parse_constraint_text("3 <= 'elen & 'elen <= 'vlen & 'vlen <= 16"),
         parse_constraint_text("-4 <= 'lmul & 'lmul <= 3"),
@@ -1282,6 +1304,7 @@ fn vector_length_power_bound_uses_linear_exponent_premises() {
 #[test]
 #[cfg(feature = "z3-solver")]
 fn vector_element_count_uses_product_quotient_premises() {
+    let _budget = proof_budget();
     let facts = [
         "-3 <= 'lmul & 'lmul <= 3",
         "3 <= 'vlen & 'vlen <= 16",

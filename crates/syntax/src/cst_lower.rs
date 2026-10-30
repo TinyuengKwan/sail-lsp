@@ -126,7 +126,7 @@ fn lower_definition(node: &SyntaxNode, parsed: &mut ParsedFile, text: &str) {
 
 fn lower_callable_def(node: &SyntaxNode, parsed: &mut ParsedFile, _text: &str) {
     let span = node_span(node);
-    let name = match first_ident(node) {
+    let name = match crate::definition_name(node) {
         Some(n) => n,
         None => return,
     };
@@ -138,10 +138,11 @@ fn lower_callable_def(node: &SyntaxNode, parsed: &mut ParsedFile, _text: &str) {
         _ => DeclKind::Function,
     };
 
-    push_decl(parsed, decl_kind, DeclRole::Definition, &name, span, first_ident_span(node), false);
+    let name_span = crate::definition_name_span(node);
+    push_decl(parsed, decl_kind, DeclRole::Definition, &name, span, name_span, false);
 
     // Record function name as top-level symbol occurrence for resolve_symbol_at.
-    if let Some(ns) = first_ident_span(node) {
+    if let Some(ns) = name_span {
         parsed.symbol_occurrences.push(SymbolOccurrence {
             name: name.clone(),
             kind: SymbolOccurrenceKind::Value,
@@ -153,7 +154,7 @@ fn lower_callable_def(node: &SyntaxNode, parsed: &mut ParsedFile, _text: &str) {
     }
 
     // Extract callable head
-    let name_span = first_ident_span(node).unwrap_or(span);
+    let name_span = name_span.unwrap_or(span);
     let params = extract_params(node);
 
     // Record typed bindings for function parameters with type annotations.

@@ -1,0 +1,510 @@
+{
+  "date": "2026-10-29",
+  "base_commit": "717a7f19d6b46d4469d1017d7b8e6b5fcb72cc71",
+  "scope": "All requested P0/P1 implementation and local validation; Zed SSH acceptance explicitly excluded.",
+  "p0": {
+    "retained": "Exact source-map prefilter before inference; remove workspace-wide spelling-only parameter-hint fallback while retaining local fallback. Fresh validation replaces historical numbers.",
+    "baseline": "2026-10-29-editor-baseline.json"
+  },
+  "formatting": {
+    "changed": 133,
+    "checked": 214,
+    "failures": [],
+    "parse_skipped": [
+      "/home/clair/tinyueng_workplace/sail-lsp/crates/ide/../sail-lsp/data/sail-lib/core/corelib.sail",
+      "/home/clair/tinyueng_workplace/sail-lsp/crates/ide/../sail-lsp/data/sail-lib/hex_bits.sail",
+      "/home/clair/tinyueng_workplace/sail-lsp/crates/ide/../sail-lsp/data/sail-lib/hex_bits_signed.sail"
+    ]
+  },
+  "completion": {
+    "method": "Same release build features, 3000 reference-prefix samples, 5 alternating runs each pinned to one CPU; only the three completion source files replaced by HEAD for the control. Directory-loader benchmark, not manifest or editor end-to-end latency. The benchmark keeps the rest of the existing identifier in the buffer; incomplete-name behavior is covered separately by IDE tests.",
+    "control": {
+      "runs": [
+        {
+          "asked": 3000,
+          "offered": 2995,
+          "top1": 1353,
+          "top5": 2098,
+          "top20": 2649,
+          "p50_us": 1714,
+          "p95_us": 3154,
+          "max_us": 183008
+        },
+        {
+          "asked": 3000,
+          "offered": 2995,
+          "top1": 1353,
+          "top5": 2098,
+          "top20": 2649,
+          "p50_us": 1729,
+          "p95_us": 3007,
+          "max_us": 143405
+        },
+        {
+          "asked": 3000,
+          "offered": 2995,
+          "top1": 1353,
+          "top5": 2098,
+          "top20": 2649,
+          "p50_us": 1731,
+          "p95_us": 3014,
+          "max_us": 143327
+        },
+        {
+          "asked": 3000,
+          "offered": 2995,
+          "top1": 1353,
+          "top5": 2098,
+          "top20": 2649,
+          "p50_us": 1717,
+          "p95_us": 2968,
+          "max_us": 142217
+        },
+        {
+          "asked": 3000,
+          "offered": 2995,
+          "top1": 1353,
+          "top5": 2098,
+          "top20": 2649,
+          "p50_us": 1698,
+          "p95_us": 2951,
+          "max_us": 135550
+        }
+      ],
+      "median_p50_us": 1717,
+      "median_p95_us": 3007,
+      "by_syntax": {
+        "TYPE_NAMED": {
+          "asked": 873,
+          "offered": 870,
+          "top1": 293,
+          "top5": 634,
+          "top20": 870
+        },
+        "IDENT_EXPR": {
+          "asked": 2127,
+          "offered": 2125,
+          "top1": 1060,
+          "top5": 1464,
+          "top20": 1779
+        }
+      }
+    },
+    "candidate": {
+      "runs": [
+        {
+          "asked": 3000,
+          "offered": 2995,
+          "top1": 1573,
+          "top5": 2116,
+          "top20": 2624,
+          "p50_us": 1623,
+          "p95_us": 3155,
+          "max_us": 139118
+        },
+        {
+          "asked": 3000,
+          "offered": 2995,
+          "top1": 1573,
+          "top5": 2116,
+          "top20": 2624,
+          "p50_us": 1669,
+          "p95_us": 2880,
+          "max_us": 184725
+        },
+        {
+          "asked": 3000,
+          "offered": 2995,
+          "top1": 1573,
+          "top5": 2116,
+          "top20": 2624,
+          "p50_us": 1665,
+          "p95_us": 2876,
+          "max_us": 143381
+        },
+        {
+          "asked": 3000,
+          "offered": 2995,
+          "top1": 1573,
+          "top5": 2116,
+          "top20": 2624,
+          "p50_us": 1691,
+          "p95_us": 3537,
+          "max_us": 143691
+        },
+        {
+          "asked": 3000,
+          "offered": 2995,
+          "top1": 1573,
+          "top5": 2116,
+          "top20": 2624,
+          "p50_us": 1642,
+          "p95_us": 2828,
+          "max_us": 138639
+        }
+      ],
+      "median_p50_us": 1665,
+      "median_p95_us": 2880,
+      "by_syntax": {
+        "TYPE_NAMED": {
+          "asked": 873,
+          "offered": 870,
+          "top1": 291,
+          "top5": 634,
+          "top20": 870
+        },
+        "IDENT_EXPR": {
+          "asked": 2127,
+          "offered": 2125,
+          "top1": 1282,
+          "top5": 1482,
+          "top20": 1754
+        }
+      }
+    },
+    "provenance": [
+      {
+        "label": "control",
+        "run": 0,
+        "cpu": 0,
+        "sha256": "95c768a0b47955122e8be891ac9c1d165ad0ee2e83d51ee136742beb1b29c918",
+        "command": [
+          "/home/clair/tinyueng_workplace/sail-lsp/target/p0-p1-2026-10-29/pinned-control.bin",
+          "--ranked",
+          "/home/clair/tinyueng_workplace/sail-riscv"
+        ]
+      },
+      {
+        "label": "candidate",
+        "run": 0,
+        "cpu": 0,
+        "sha256": "ed7e4426a57d3d03bbccd59188d5b2fb8b2e8a7e2b6c90c0bb36e73c9ea09f0d",
+        "command": [
+          "/home/clair/tinyueng_workplace/sail-lsp/target/p0-p1-2026-10-29/pinned-candidate.bin",
+          "--ranked",
+          "/home/clair/tinyueng_workplace/sail-riscv"
+        ]
+      },
+      {
+        "label": "candidate",
+        "run": 1,
+        "cpu": 0,
+        "sha256": "ed7e4426a57d3d03bbccd59188d5b2fb8b2e8a7e2b6c90c0bb36e73c9ea09f0d",
+        "command": [
+          "/home/clair/tinyueng_workplace/sail-lsp/target/p0-p1-2026-10-29/pinned-candidate.bin",
+          "--ranked",
+          "/home/clair/tinyueng_workplace/sail-riscv"
+        ]
+      },
+      {
+        "label": "control",
+        "run": 1,
+        "cpu": 0,
+        "sha256": "95c768a0b47955122e8be891ac9c1d165ad0ee2e83d51ee136742beb1b29c918",
+        "command": [
+          "/home/clair/tinyueng_workplace/sail-lsp/target/p0-p1-2026-10-29/pinned-control.bin",
+          "--ranked",
+          "/home/clair/tinyueng_workplace/sail-riscv"
+        ]
+      },
+      {
+        "label": "control",
+        "run": 2,
+        "cpu": 0,
+        "sha256": "95c768a0b47955122e8be891ac9c1d165ad0ee2e83d51ee136742beb1b29c918",
+        "command": [
+          "/home/clair/tinyueng_workplace/sail-lsp/target/p0-p1-2026-10-29/pinned-control.bin",
+          "--ranked",
+          "/home/clair/tinyueng_workplace/sail-riscv"
+        ]
+      },
+      {
+        "label": "candidate",
+        "run": 2,
+        "cpu": 0,
+        "sha256": "ed7e4426a57d3d03bbccd59188d5b2fb8b2e8a7e2b6c90c0bb36e73c9ea09f0d",
+        "command": [
+          "/home/clair/tinyueng_workplace/sail-lsp/target/p0-p1-2026-10-29/pinned-candidate.bin",
+          "--ranked",
+          "/home/clair/tinyueng_workplace/sail-riscv"
+        ]
+      },
+      {
+        "label": "candidate",
+        "run": 3,
+        "cpu": 0,
+        "sha256": "ed7e4426a57d3d03bbccd59188d5b2fb8b2e8a7e2b6c90c0bb36e73c9ea09f0d",
+        "command": [
+          "/home/clair/tinyueng_workplace/sail-lsp/target/p0-p1-2026-10-29/pinned-candidate.bin",
+          "--ranked",
+          "/home/clair/tinyueng_workplace/sail-riscv"
+        ]
+      },
+      {
+        "label": "control",
+        "run": 3,
+        "cpu": 0,
+        "sha256": "95c768a0b47955122e8be891ac9c1d165ad0ee2e83d51ee136742beb1b29c918",
+        "command": [
+          "/home/clair/tinyueng_workplace/sail-lsp/target/p0-p1-2026-10-29/pinned-control.bin",
+          "--ranked",
+          "/home/clair/tinyueng_workplace/sail-riscv"
+        ]
+      },
+      {
+        "label": "control",
+        "run": 4,
+        "cpu": 0,
+        "sha256": "95c768a0b47955122e8be891ac9c1d165ad0ee2e83d51ee136742beb1b29c918",
+        "command": [
+          "/home/clair/tinyueng_workplace/sail-lsp/target/p0-p1-2026-10-29/pinned-control.bin",
+          "--ranked",
+          "/home/clair/tinyueng_workplace/sail-riscv"
+        ]
+      },
+      {
+        "label": "candidate",
+        "run": 4,
+        "cpu": 0,
+        "sha256": "ed7e4426a57d3d03bbccd59188d5b2fb8b2e8a7e2b6c90c0bb36e73c9ea09f0d",
+        "command": [
+          "/home/clair/tinyueng_workplace/sail-lsp/target/p0-p1-2026-10-29/pinned-candidate.bin",
+          "--ranked",
+          "/home/clair/tinyueng_workplace/sail-riscv"
+        ]
+      }
+    ],
+    "causes_fixed": [
+      "Global symbols incorrectly receiving a local-variable bonus",
+      "Case-insensitive filtering followed by case-blind ranking",
+      "Callable position missing a callable-candidate ranking signal",
+      "Repeated token/scope lookups within a single request"
+    ],
+    "remaining": [
+      "Top-20 decreases although Top-1 and Top-5 improve; see counts above.",
+      "The same 5 references remain unoffered: ext (2), mod (2), implicit (1).",
+      "Most type-position ties remain; no corpus-specific name-frequency table was introduced."
+    ],
+    "pilot_note": "Unpinned sequential and alternating pilot samples were noisy (up to 8 ms p95); they are retained under target/p0-p1-2026-10-29 and are not used to claim a speedup."
+  },
+  "runtime": {
+    "changes": [
+      "Shared package/revision identity in --version, -V, initialize and analyzerStatus",
+      "Startup executable/version log; status includes actual executable, roots, loaded manifests, stdlib origin, load/configuration errors and effective settings",
+      "Source archive and nested-archive fallback; Git worktree/ref watch paths and packager revision override"
+    ],
+    "stdio": {
+      "version": "sail-lsp 0.2.0 (717a7f19d6b4-dirty)",
+      "initialize": {
+        "name": "sail-lsp",
+        "version": "0.2.0 (717a7f19d6b4-dirty)"
+      },
+      "status": "sail-lsp status\n  version:          0.2.0 (717a7f19d6b4-dirty)\n  executable:       /home/clair/tinyueng_workplace/sail-lsp/target/release/sail-lsp\n  workspace loaded: true\n  reload pending:   false\n  workspace roots:\n    file:///home/clair/tinyueng_workplace/sail-riscv\n  loaded manifests:\n    /home/clair/tinyueng_workplace/sail-riscv/model/riscv.sail_project\n  standard library: /tmp/sail-lsp-stdlib-ac09f8870b9d85e528e2a3436150b03b9d805d40 (embedded standard library)\n  effective settings (project changes require a successful reload):\n{\n  \"diagnostics\": {\n    \"enable\": true,\n    \"effectMismatch\": true,\n    \"disabled\": [],\n    \"disableExperimental\": false,\n    \"warningsAsHint\": [],\n    \"warningsAsInfo\": [],\n    \"maxDiagnosticsPerFile\": 128\n  },\n  \"inlayHints\": {\n    \"enable\": true,\n    \"typeHints\": true,\n    \"parameterHints\": true,\n    \"effectHints\": true,\n    \"maxLength\": 25,\n    \"closingBraceHintsMinLines\": 6\n  },\n  \"completion\": {\n    \"enable\": true,\n    \"addCallParenthesis\": true,\n    \"postfix\": true,\n    \"snippets\": true,\n    \"autoimport\": false,\n    \"limit\": 200,\n    \"fullFunctionSignatures\": false\n  },\n  \"codeLens\": {\n    \"enable\": true,\n    \"references\": true,\n    \"implementations\": true\n  },\n  \"hover\": {\n    \"docs\": true,\n    \"maxFieldsCount\": 10,\n    \"maxEnumVariantsCount\": 10,\n    \"maxOverloadsCount\": 10\n  },\n  \"semanticTokens\": {\n    \"enable\": true\n  },\n  \"workspace\": {\n    \"strictBitvector\": false,\n    \"projectFile\": null,\n    \"projectVariables\": {},\n    \"projectModules\": [],\n    \"generatedFiles\": {},\n    \"target\": null,\n    \"includePaths\": [],\n    \"primeCachesNumThreads\": 0\n  },\n  \"flycheck\": {\n    \"enable\": false,\n    \"command\": \"sail\",\n    \"extraArgs\": []\n  }\n}\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   128 MiB (estimate)\n"
+    },
+    "build_provenance_smoke": [
+      {
+        "case": "archive",
+        "revision": "cargo:rustc-env=SAIL_LSP_BUILD_REVISION=unknown (source archive)",
+        "override": "passed",
+        "watch_paths": [
+          "cargo:rerun-if-changed=/tmp/sail-build-version-tvqx8aco/archive/crates/sail-lsp/../../crates",
+          "cargo:rerun-if-changed=/tmp/sail-build-version-tvqx8aco/archive/crates/sail-lsp/../../Cargo.toml",
+          "cargo:rerun-if-changed=/tmp/sail-build-version-tvqx8aco/archive/crates/sail-lsp/../../Cargo.lock"
+        ]
+      },
+      {
+        "case": "nested-archive",
+        "revision": "cargo:rustc-env=SAIL_LSP_BUILD_REVISION=unknown (source archive)",
+        "override": "passed",
+        "watch_paths": [
+          "cargo:rerun-if-changed=/tmp/sail-build-version-tvqx8aco/repo/archive/crates/sail-lsp/../../crates",
+          "cargo:rerun-if-changed=/tmp/sail-build-version-tvqx8aco/repo/archive/crates/sail-lsp/../../Cargo.toml",
+          "cargo:rerun-if-changed=/tmp/sail-build-version-tvqx8aco/repo/archive/crates/sail-lsp/../../Cargo.lock"
+        ]
+      },
+      {
+        "case": "checkout",
+        "revision": "cargo:rustc-env=SAIL_LSP_BUILD_REVISION=ee8b5dddca4b",
+        "override": "passed",
+        "watch_paths": [
+          "cargo:rerun-if-changed=../../.git/HEAD",
+          "cargo:rerun-if-changed=../../.git/index",
+          "cargo:rerun-if-changed=../../.git/packed-refs",
+          "cargo:rerun-if-changed=../../.git/refs/heads/master",
+          "cargo:rerun-if-changed=/tmp/sail-build-version-tvqx8aco/repo/crates/sail-lsp/../../crates",
+          "cargo:rerun-if-changed=/tmp/sail-build-version-tvqx8aco/repo/crates/sail-lsp/../../Cargo.toml",
+          "cargo:rerun-if-changed=/tmp/sail-build-version-tvqx8aco/repo/crates/sail-lsp/../../Cargo.lock"
+        ]
+      },
+      {
+        "case": "worktree",
+        "revision": "cargo:rustc-env=SAIL_LSP_BUILD_REVISION=ee8b5dddca4b",
+        "override": "passed",
+        "watch_paths": [
+          "cargo:rerun-if-changed=/tmp/sail-build-version-tvqx8aco/repo/.git/worktrees/worktree/HEAD",
+          "cargo:rerun-if-changed=/tmp/sail-build-version-tvqx8aco/repo/.git/worktrees/worktree/index",
+          "cargo:rerun-if-changed=/tmp/sail-build-version-tvqx8aco/repo/.git/packed-refs",
+          "cargo:rerun-if-changed=/tmp/sail-build-version-tvqx8aco/worktree/crates/sail-lsp/../../crates",
+          "cargo:rerun-if-changed=/tmp/sail-build-version-tvqx8aco/worktree/crates/sail-lsp/../../Cargo.toml",
+          "cargo:rerun-if-changed=/tmp/sail-build-version-tvqx8aco/worktree/crates/sail-lsp/../../Cargo.lock"
+        ]
+      }
+    ]
+  },
+  "validation": {
+    "tests": {
+      "default": {
+        "passed": 2418,
+        "failed": 0,
+        "ignored": 18
+      },
+      "no-smt": {
+        "passed": 2403,
+        "failed": 0,
+        "ignored": 18
+      }
+    },
+    "conformance": {
+      "pass_clean": 276,
+      "pass_total": 276,
+      "fail_rejected": 217,
+      "fail_total": 217
+    },
+    "stages": [
+      {
+        "name": "default",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "test",
+          "--workspace",
+          "--",
+          "--test-threads=1"
+        ],
+        "status": "passed",
+        "exit_code": 0,
+        "elapsed_seconds": 202.19657104602084
+      },
+      {
+        "name": "format-corpus",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "test",
+          "-p",
+          "ide",
+          "formatting_corpus",
+          "--",
+          "--ignored"
+        ],
+        "status": "passed",
+        "exit_code": 0,
+        "elapsed_seconds": 9.995422636973672
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "clippy",
+          "--workspace",
+          "--all-targets"
+        ],
+        "status": "passed",
+        "exit_code": 0,
+        "elapsed_seconds": 33.18319637607783
+      },
+      {
+        "name": "no-smt",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "test",
+          "--workspace",
+          "--no-default-features",
+          "--",
+          "--test-threads=1"
+        ],
+        "status": "passed",
+        "exit_code": 0,
+        "elapsed_seconds": 188.19389563600998
+      },
+      {
+        "name": "release",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "build",
+          "--release",
+          "-p",
+          "sail-lsp",
+          "--bin",
+          "sail-lsp",
+          "--example",
+          "conformance_check",
+          "--example",
+          "completion_check",
+          "--example",
+          "analysis_stats"
+        ],
+        "status": "passed",
+        "exit_code": 0,
+        "elapsed_seconds": 10.370535354944877
+      },
+      {
+        "name": "strict",
+        "command": [
+          "target/release/examples/conformance_check",
+          "--typecheck-only",
+          "../sail/test/typecheck"
+        ],
+        "status": "passed",
+        "exit_code": 0,
+        "elapsed_seconds": 60.232938315020874
+      },
+      {
+        "name": "stdio",
+        "command": [
+          "python3",
+          "target/p0-p1-2026-10-29/stdio-smoke.py"
+        ],
+        "status": "passed",
+        "exit_code": 0,
+        "elapsed_seconds": 2.200059871072881
+      }
+    ],
+    "clippy_note": "Ordinary workspace/all-targets clippy passes. -D warnings is not clean at base HEAD: existing warnings include hir-def needless_borrow/type_complexity/filter_map_bool_then. New formatter warnings were fixed, with a final targeted recheck.",
+    "final_recheck": {
+      "formatter": "71 passed, including the explicit corpus audit",
+      "clippy": "cargo +1.97.1 clippy -p ide -p sail-lsp --all-targets: exit 0; no remaining warnings at newly introduced code",
+      "rustfmt": "cargo +1.97.1 fmt --all --check: exit 0",
+      "git_diff_check": "exit 0"
+    }
+  },
+  "remaining_acceptance": [
+    "Zed SSH real-editor installation, restart and daily workflow acceptance"
+  ],
+  "implementation_sha256": {
+    "crates/hir/src/semantics.rs": "460a57c9359f5ced94bf2ea0785f75a8518d67efc2f386e48204e56d129e470a",
+    "crates/ide-completion/src/completions/expr.rs": "e0e08a133f269e32c984c2258d98593ef7022453cc2fa274c257c2218cb8c4a5",
+    "crates/ide-completion/src/context.rs": "600e45abad851433b36c3327e14f94ad0dda3871130eed5a82b7997465673d4e",
+    "crates/ide-completion/src/item.rs": "e06e81a35613b1382ce2011015a700d61471f7114e4d6fe4681e7b00a2301e0a",
+    "crates/ide/src/completion.rs": "3e15f1dcf37858c8b01797de6ba46eb731538d134168232a3dbaeb009ac95edb",
+    "crates/ide/src/formatting/corpus_tests.rs": "c427f6420d846b53261ea89817d5af6a5267a92409f6ebac766a4c7374ba1d3d",
+    "crates/ide/src/formatting/items.rs": "4c3bb2e90cf40b9d68a7518cecc6510053c690a95e2b457a79e2357bc4551e2b",
+    "crates/ide/src/formatting/mod.rs": "056c4a5b6f07d9b9ca77334167ac624bc495aef0df348c81f529f857510e827d",
+    "crates/ide/src/formatting/vertical.rs": "724dd54f422dd183260baf8199d7d7d21868c9f98c3aea0f1e4927339b87e119",
+    "crates/ide/src/formatting/visitor.rs": "c6f32a903920d32fdee625a0af3f7baaa7e389d9dd18b2dc792a867492eda618",
+    "crates/ide/src/inlay_hints/mod.rs": "6c3d007f70ab6dca2ab0d3a9f3b3dec19e5c2ec7334a3356ab2739267386bda6",
+    "crates/ide/src/inlay_hints/param_name.rs": "b732ba4eff5e554c22192b6da11d83e3cc93ca7c50e95b4d382cbc1df23f2b27",
+    "crates/sail-lsp/build.rs": "7e09220e83767ffd40f66c6ab2f34c4876c92e9574dc58e897bc75201870d1be",
+    "crates/sail-lsp/examples/completion_check.rs": "dd84287a0e46d4a9940a92c3d2d8b16ce7aaf4fcb127c437a5d732704271bfa1",
+    "crates/sail-lsp/src/config.rs": "e5dc319884b1a47442d6b9f0a2f33980c8d672e5749fb73416baff9f6db2c614",
+    "crates/sail-lsp/src/global_state.rs": "4a9c232f9cd814207b1fdcddb747860761bc4b6d822d42e909f58c08425915e1",
+    "crates/sail-lsp/src/handlers/request.rs": "752d356e5fbbff88b0465507abe9720a3d72e965ac027450816f44c354671077",
+    "crates/sail-lsp/src/lib.rs": "c3d76fd20eeaff5ddcb193ef737a7d9c2370a0e738d526b5a5b7001d38b13866",
+    "crates/sail-lsp/src/main_loop.rs": "ea12bbc3a04df2873dcf72f819d033a764e1ff451a04932d2041b53dfd1999b9",
+    "crates/sail-lsp/src/server_check.rs": "125a59175679bba142ca255dca888b53a4a66df16f3418629ada693cf86b4ffe",
+    "crates/sail-lsp/src/version.rs": "be8cacf18ce787ec41c6d8c356f67bc97d5c87b2676bb5fafe6f93a241096d46"
+  }
+}

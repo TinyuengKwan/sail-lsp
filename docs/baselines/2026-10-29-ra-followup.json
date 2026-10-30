@@ -1,0 +1,1211 @@
+{
+  "date": "2026-10-29",
+  "base_commit": "0c9ce4cd705cbc48bef8cd9db93e250a517a18f3",
+  "working_tree": "dirty; includes pre-existing editor ablation",
+  "scope": "RA follow-up: semantic and speculative completion, five manifest-mode mutation fixes, normal-edit reparsing, cancellation dispatch, actual query invalidation measurements. No Zed SSH acceptance.",
+  "commands": {
+    "invalidation": "cargo +1.97.1 run --release -p sail-lsp --example invalidation_matrix",
+    "reparse": "cargo +1.97.1 run --release -p sail-lsp --example reparse_stats",
+    "burst": "python3 scripts/editor_probe.py --server target/release/sail-lsp --workspace ../sail-riscv --cycles 20 --cancel-every 1 --burst --idle-seconds 2 --output target/ra-followup-2026-10-29/editor-burst-verified.json",
+    "conformance": "target/release/examples/conformance_check --list ../sail/test/typecheck",
+    "mutation": "target/release/examples/mutation_check ../sail/test/typecheck/pass --oracle docs/mutation-oracle.txt --dump-missed target/ra-followup-2026-10-29/missed-verified",
+    "riscv_diagnostics": "target/release/examples/analysis_stats --diagnostics-only ../sail-riscv/model/riscv.sail_project",
+    "riscv_inference": "target/release/examples/analysis_stats --infer-only --constraint-report target/ra-followup-2026-10-29/constraints-verified.json ../sail-riscv/model/riscv.sail_project",
+    "settled": "python3 scripts/editor_probe.py --server target/release/sail-lsp --workspace ../sail-riscv --cycles 20 --cancel-every 2 --settle --idle-seconds 2 --output target/ra-followup-2026-10-29/editor-settled-verified.json"
+  },
+  "invalidation": {
+    "body": {
+      "elapsed_us": 637,
+      "executions": {
+        "callable_bodies": 1,
+        "callable_body": 1,
+        "content_regions": 1,
+        "file_contributions": 1,
+        "file_def_with_body_ids": 1,
+        "file_default_order": 1,
+        "file_events": 2,
+        "file_item_tree": 1,
+        "file_regions": 1,
+        "for_body": 1,
+        "infer": 1,
+        "parse_file": 1,
+        "semantic_parse_file": 1
+      },
+      "reinferred": [
+        "f"
+      ],
+      "unrelated_reused": true,
+      "warm_executions": 0
+    },
+    "comment": {
+      "elapsed_us": 1303,
+      "executions": {
+        "callable_bodies": 1,
+        "callable_body": 1,
+        "content_regions": 1,
+        "file_contributions": 1,
+        "file_def_with_body_ids": 1,
+        "file_default_order": 1,
+        "file_events": 2,
+        "file_item_tree": 1,
+        "file_regions": 1,
+        "for_body": 1,
+        "infer": 1,
+        "parse_file": 1,
+        "semantic_parse_file": 1
+      },
+      "reinferred": [
+        "f"
+      ],
+      "unrelated_reused": true,
+      "warm_executions": 0
+    },
+    "include": {
+      "elapsed_us": 1145,
+      "executions": {
+        "callable_bodies": 1,
+        "callable_body": 1,
+        "content_regions": 2,
+        "contribution": 1,
+        "directory": 1,
+        "enum_vectors_impl": 1,
+        "environment": 3,
+        "file_contributions": 2,
+        "file_def_with_body_ids": 1,
+        "file_default_order": 2,
+        "file_events": 3,
+        "file_item_tree": 2,
+        "file_names": 1,
+        "file_regions": 2,
+        "for_body": 1,
+        "infer": 2,
+        "is_project_member": 4,
+        "module_file_scope": 3,
+        "ordered": 1,
+        "parse_file": 1,
+        "projected_regions": 4,
+        "select_prefix": 7,
+        "semantic_parse_file": 2,
+        "workspace_default_order": 1,
+        "workspace_plan": 1
+      },
+      "reinferred": [
+        "caller",
+        "f"
+      ],
+      "unrelated_reused": true,
+      "warm_executions": 0
+    },
+    "include_content": {
+      "elapsed_us": 746,
+      "executions": {
+        "content_regions": 1,
+        "contribution": 1,
+        "environment": 2,
+        "file_contributions": 1,
+        "file_default_order": 1,
+        "file_events": 2,
+        "file_item_tree": 1,
+        "file_names": 1,
+        "file_regions": 1,
+        "infer": 2,
+        "parse_file": 1,
+        "select_prefix": 3,
+        "semantic_parse_file": 1
+      },
+      "reinferred": [
+        "caller",
+        "f"
+      ],
+      "unrelated_reused": true,
+      "warm_executions": 0
+    },
+    "leading_comment": {
+      "elapsed_us": 502,
+      "executions": {
+        "callable_bodies": 1,
+        "callable_body": 1,
+        "content_regions": 1,
+        "file_contributions": 1,
+        "file_def_with_body_ids": 1,
+        "file_default_order": 1,
+        "file_events": 2,
+        "file_item_tree": 1,
+        "file_regions": 1,
+        "for_body": 1,
+        "parse_file": 1,
+        "semantic_parse_file": 1
+      },
+      "reinferred": [],
+      "unrelated_reused": true,
+      "warm_executions": 0
+    },
+    "manifest": {
+      "elapsed_us": 903,
+      "executions": {
+        "directory": 1,
+        "enum_vectors_impl": 1,
+        "environment": 2,
+        "file_contributions": 2,
+        "file_function_names": 2,
+        "file_symbols": 2,
+        "function_names": 2,
+        "infer": 1,
+        "is_project_member": 3,
+        "module_file_scope": 2,
+        "ordered": 1,
+        "projected_regions": 2,
+        "select_prefix": 2,
+        "top_level_env": 2,
+        "workspace_default_order": 1,
+        "workspace_plan": 1
+      },
+      "reinferred": [
+        "caller"
+      ],
+      "unrelated_reused": true,
+      "warm_executions": 0
+    },
+    "signature": {
+      "elapsed_us": 921,
+      "executions": {
+        "callable_bodies": 1,
+        "callable_body": 1,
+        "content_regions": 1,
+        "contribution": 1,
+        "environment": 2,
+        "file_contributions": 1,
+        "file_def_with_body_ids": 1,
+        "file_default_order": 1,
+        "file_events": 2,
+        "file_item_tree": 1,
+        "file_names": 1,
+        "file_regions": 1,
+        "for_body": 1,
+        "infer": 2,
+        "parse_file": 1,
+        "select_prefix": 2,
+        "semantic_parse_file": 1
+      },
+      "reinferred": [
+        "caller",
+        "f"
+      ],
+      "unrelated_reused": true,
+      "warm_executions": 0
+    }
+  },
+  "reparse": {
+    "all_results_equal": true,
+    "full_ns": {
+      "p50": 11290957,
+      "p95": 11963621
+    },
+    "incremental_ns": {
+      "p50": 6340646,
+      "p95": 6435577
+    },
+    "measured_edits": 100,
+    "source_bytes": 23890,
+    "warmup_edits": 20
+  },
+  "editor_burst": {
+    "server_sha256": "72784032832d67c07ab322e932dcdfe710952b242c805df9c8d6b4e1e53600fc",
+    "scope": "stdio, unsaved edits only; cold means fresh process, not cold OS cache",
+    "settle": false,
+    "ready_ms": 1079.542,
+    "exit_code": 0,
+    "failure": null,
+    "cycles": 20,
+    "cancel_every": 1,
+    "unique_responses": 115,
+    "summary": {
+      "startup:initialize": {
+        "count": 1,
+        "p50_ms": 13.788,
+        "p95_ms": 13.788,
+        "p99_ms": 13.788,
+        "max_ms": 13.788,
+        "errors": []
+      },
+      "cold:textDocument/hover": {
+        "count": 1,
+        "p50_ms": 58.092,
+        "p95_ms": 58.092,
+        "p99_ms": 58.092,
+        "max_ms": 58.092,
+        "errors": []
+      },
+      "cold:textDocument/completion": {
+        "count": 1,
+        "p50_ms": 4.774,
+        "p95_ms": 4.774,
+        "p99_ms": 4.774,
+        "max_ms": 4.774,
+        "errors": []
+      },
+      "cold:textDocument/definition": {
+        "count": 1,
+        "p50_ms": 1.857,
+        "p95_ms": 1.857,
+        "p99_ms": 1.857,
+        "max_ms": 1.857,
+        "errors": []
+      },
+      "warm:textDocument/hover": {
+        "count": 10,
+        "p50_ms": 16.328,
+        "p95_ms": 554.671,
+        "p99_ms": 554.671,
+        "max_ms": 554.671,
+        "errors": []
+      },
+      "warm:textDocument/completion": {
+        "count": 10,
+        "p50_ms": 14.82,
+        "p95_ms": 252.712,
+        "p99_ms": 252.712,
+        "max_ms": 252.712,
+        "errors": []
+      },
+      "warm:textDocument/definition": {
+        "count": 10,
+        "p50_ms": 1.48,
+        "p95_ms": 1.547,
+        "p99_ms": 1.547,
+        "max_ms": 1.547,
+        "errors": []
+      },
+      "editing-burst:textDocument/hover": {
+        "count": 20,
+        "p50_ms": 530.592,
+        "p95_ms": 784.835,
+        "p99_ms": 824.726,
+        "max_ms": 824.726,
+        "errors": []
+      },
+      "editing-burst:textDocument/completion": {
+        "count": 20,
+        "p50_ms": 530.742,
+        "p95_ms": 797.475,
+        "p99_ms": 810.599,
+        "max_ms": 810.599,
+        "errors": []
+      },
+      "editing-burst:textDocument/definition": {
+        "count": 20,
+        "p50_ms": 527.498,
+        "p95_ms": 762.256,
+        "p99_ms": 788.716,
+        "max_ms": 788.716,
+        "errors": []
+      },
+      "client-cancel:textDocument/references": {
+        "count": 20,
+        "p50_ms": 506.722,
+        "p95_ms": 762.025,
+        "p99_ms": 788.801,
+        "max_ms": 788.801,
+        "errors": [
+          {
+            "code": -32800,
+            "message": "canceled by client"
+          },
+          {
+            "code": -32800,
+            "message": "canceled by client"
+          },
+          {
+            "code": -32800,
+            "message": "canceled by client"
+          },
+          {
+            "code": -32800,
+            "message": "canceled by client"
+          },
+          {
+            "code": -32800,
+            "message": "canceled by client"
+          },
+          {
+            "code": -32800,
+            "message": "canceled by client"
+          },
+          {
+            "code": -32800,
+            "message": "canceled by client"
+          },
+          {
+            "code": -32800,
+            "message": "canceled by client"
+          },
+          {
+            "code": -32800,
+            "message": "canceled by client"
+          },
+          {
+            "code": -32800,
+            "message": "canceled by client"
+          },
+          {
+            "code": -32800,
+            "message": "canceled by client"
+          },
+          {
+            "code": -32800,
+            "message": "canceled by client"
+          },
+          {
+            "code": -32800,
+            "message": "canceled by client"
+          },
+          {
+            "code": -32800,
+            "message": "canceled by client"
+          },
+          {
+            "code": -32800,
+            "message": "canceled by client"
+          },
+          {
+            "code": -32800,
+            "message": "canceled by client"
+          },
+          {
+            "code": -32800,
+            "message": "canceled by client"
+          },
+          {
+            "code": -32800,
+            "message": "canceled by client"
+          },
+          {
+            "code": -32800,
+            "message": "canceled by client"
+          },
+          {
+            "code": -32800,
+            "message": "canceled by client"
+          }
+        ]
+      },
+      "shutdown:shutdown": {
+        "count": 1,
+        "p50_ms": 0.789,
+        "p95_ms": 0.789,
+        "p99_ms": 0.789,
+        "max_ms": 0.789,
+        "errors": []
+      }
+    },
+    "memory": [
+      {
+        "phase": "ready",
+        "elapsed_ms": 1079.573,
+        "VmHWM": "107440 kB",
+        "VmRSS": "107440 kB",
+        "Threads": "54"
+      },
+      {
+        "phase": "edit-0",
+        "elapsed_ms": 2189.403,
+        "VmHWM": "497596 kB",
+        "VmRSS": "497596 kB",
+        "Threads": "72"
+      },
+      {
+        "phase": "edit-1",
+        "elapsed_ms": 2189.931,
+        "VmHWM": "498144 kB",
+        "VmRSS": "498144 kB",
+        "Threads": "72"
+      },
+      {
+        "phase": "edit-2",
+        "elapsed_ms": 2190.267,
+        "VmHWM": "498856 kB",
+        "VmRSS": "498856 kB",
+        "Threads": "72"
+      },
+      {
+        "phase": "edit-3",
+        "elapsed_ms": 2190.571,
+        "VmHWM": "498920 kB",
+        "VmRSS": "498920 kB",
+        "Threads": "72"
+      },
+      {
+        "phase": "edit-4",
+        "elapsed_ms": 2190.911,
+        "VmHWM": "498920 kB",
+        "VmRSS": "498920 kB",
+        "Threads": "72"
+      },
+      {
+        "phase": "edit-5",
+        "elapsed_ms": 2191.189,
+        "VmHWM": "498920 kB",
+        "VmRSS": "498920 kB",
+        "Threads": "72"
+      },
+      {
+        "phase": "edit-6",
+        "elapsed_ms": 2191.456,
+        "VmHWM": "498920 kB",
+        "VmRSS": "498920 kB",
+        "Threads": "72"
+      },
+      {
+        "phase": "edit-7",
+        "elapsed_ms": 2191.763,
+        "VmHWM": "498920 kB",
+        "VmRSS": "498920 kB",
+        "Threads": "72"
+      },
+      {
+        "phase": "edit-8",
+        "elapsed_ms": 2192.05,
+        "VmHWM": "498920 kB",
+        "VmRSS": "498920 kB",
+        "Threads": "72"
+      },
+      {
+        "phase": "edit-9",
+        "elapsed_ms": 2192.317,
+        "VmHWM": "498920 kB",
+        "VmRSS": "498920 kB",
+        "Threads": "72"
+      },
+      {
+        "phase": "edit-10",
+        "elapsed_ms": 2192.575,
+        "VmHWM": "498920 kB",
+        "VmRSS": "498920 kB",
+        "Threads": "72"
+      },
+      {
+        "phase": "edit-11",
+        "elapsed_ms": 2192.89,
+        "VmHWM": "498920 kB",
+        "VmRSS": "498920 kB",
+        "Threads": "72"
+      },
+      {
+        "phase": "edit-12",
+        "elapsed_ms": 2193.155,
+        "VmHWM": "498920 kB",
+        "VmRSS": "498920 kB",
+        "Threads": "72"
+      },
+      {
+        "phase": "edit-13",
+        "elapsed_ms": 2193.413,
+        "VmHWM": "498920 kB",
+        "VmRSS": "498920 kB",
+        "Threads": "72"
+      },
+      {
+        "phase": "edit-14",
+        "elapsed_ms": 2193.719,
+        "VmHWM": "498920 kB",
+        "VmRSS": "498920 kB",
+        "Threads": "72"
+      },
+      {
+        "phase": "edit-15",
+        "elapsed_ms": 2193.988,
+        "VmHWM": "498920 kB",
+        "VmRSS": "498920 kB",
+        "Threads": "72"
+      },
+      {
+        "phase": "edit-16",
+        "elapsed_ms": 2194.252,
+        "VmHWM": "498920 kB",
+        "VmRSS": "498920 kB",
+        "Threads": "72"
+      },
+      {
+        "phase": "edit-17",
+        "elapsed_ms": 2194.513,
+        "VmHWM": "498920 kB",
+        "VmRSS": "498920 kB",
+        "Threads": "72"
+      },
+      {
+        "phase": "edit-18",
+        "elapsed_ms": 2194.806,
+        "VmHWM": "498920 kB",
+        "VmRSS": "498920 kB",
+        "Threads": "72"
+      },
+      {
+        "phase": "edit-19",
+        "elapsed_ms": 2195.071,
+        "VmHWM": "498920 kB",
+        "VmRSS": "498920 kB",
+        "Threads": "72"
+      },
+      {
+        "phase": "closed",
+        "elapsed_ms": 6020.275,
+        "VmHWM": "562520 kB",
+        "VmRSS": "562520 kB",
+        "Threads": "71"
+      }
+    ]
+  },
+  "limitations": [
+    "A fixed 400-function synthetic file demonstrates local-edit reparse benefit, not whole-project end-to-end speedup.",
+    "Function-internal comment edits still re-infer that function; leading comments do not.",
+    "Burst probe queues 20 edits and 80 requests without waiting; its latency is not a per-keystroke typical latency estimate. Cache priming was not awaited.",
+    "ThreadIntent affects platform scheduling only where implemented; no claim of Linux OS priority changes.",
+    "Two existential constructor argument-order mutation misses remain after the five requested project-mode fixes.",
+    "3 RISC-V numeric obligations exhausted the solver budget; this is distinct from unknown expression types.",
+    "Strict -D warnings clippy remains unsuccessful due to existing warnings; regular clippy succeeds."
+  ],
+  "artifacts": {
+    "workspace-default-verified.log": "9db6aa6fa6512226d550c8c2d3f65f6cb169f6a8288ac1837d4d8f76dba2d437",
+    "workspace-no-smt-final.log": "b5970ff07339f39c6fa47296dd319b1896b469fcdd9623ee8c78dd283c6e63ac",
+    "lint-fix-regression.log": "1afcefcd11764dfabe4b6f664d3116f140306afad9359cbd8e1d5313c48108cb",
+    "clippy-check-final.log": "6c7d796c0fe069caa8064b7bb0e6a45f3834884a618010ff39ce3f8a4c60862d",
+    "clippy-warning-inventory-final.json": "92905cea07a5d49e16b62109d9c475143ef492d9e3d21dfb4d81662d699fb851",
+    "conformance-verified.log": "9d4978402e5f1ed0fa5fe090883cf56dcdc5190bebfbf95a8c1bc66fa7137d1f",
+    "mutation-verified.log": "8f72993761f004b5900f0bf9e18da16b66eeeaeb4895af6084cf6adea7b0a6ca",
+    "riscv-verified.log": "335dd5961c688424fb1f97f9bb3fe3713c6465be557f1df92aa6b8c517387c40",
+    "inference-verified.log": "2147be6a6e6811cdc1babb8390dd7409b036fc7886a333e547d71f9bf034ce76",
+    "constraints-verified.json": "63961368a1d3737b4a23305e9d13b96b227a9abfd000f690d3d030c6e8fd304b",
+    "invalidation-matrix-verified.json": "68957ce76575d235bf7cfd4b7107221170f8d017c3bd566440392135868ffd95",
+    "reparse-stats-verified.json": "a9cdf6f8528227af69b5615f48700333ad3e3db826534e4a9c8014d60174e470",
+    "editor-burst-verified.json": "0a07bb0ed88da56973cd35a2bbe2bd6f39677d596fd946efcd0ff40d6141dc98",
+    "editor-settled-verified.json": "6d013521fc9a66efba5a599d83253a66826d1a989d8c88ed0fb97e6b122bbdbc"
+  },
+  "verification_notes": [
+    "Parallel SMT tests initially produced six Unknown results; all 439 hir-ty tests passed in the serial workspace gates.",
+    "Full gates exposed mapping blocks incorrectly reparsed as ordinary expression blocks. Contextual fallback and mapping differential fixtures fixed this; subsequent workspace gates passed.",
+    "The architecture pointer-equality audit now explicitly distinguishes ParseCache, a stable per-file input cache, from fresh query result wrappers.",
+    "Final equivalent comparator cleanup is covered by targeted tests and the rebuilt release probes; full workspace totals were collected immediately before that lint-only cleanup."
+  ],
+  "source": {
+    "code_sha256": "26dd6aa56f7208b2db7f7db8223040474fcda7fba8aa2a20c68c5d06f893f372",
+    "files": 585,
+    "algorithm": "SHA256 of sorted rg-visible .rs/.toml/.py and Cargo.lock path NUL content-sha256 LF records",
+    "rust": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+    "sail_commit": "ac09f8870b9d85e528e2a3436150b03b9d805d40",
+    "riscv_commit": "20690c8a8d6ccbb0e6adea8e2977efd3adaf8391",
+    "corpora_dirty": false,
+    "oracle_sha256": {
+      "docs/mutation-oracle.txt": "6e26003d412de652294c7d79b5411caa59ccacd5ec9447bf441614f924765c6d",
+      "docs/upstream-accepts.txt": "0d5430be3f8cbf0f9742241c28eaaf315b0e9ec2f17b89ecf12c9da0bd9cab59"
+    },
+    "binaries_sha256": {
+      "target/release/sail-lsp": "72784032832d67c07ab322e932dcdfe710952b242c805df9c8d6b4e1e53600fc",
+      "target/release/examples/analysis_stats": "d7c556c24f13ae190d50b94d8ff46b1f8a25546afe2ba1f6d1492666971f21ce",
+      "target/release/examples/conformance_check": "18ef30ace8302c5f3491ea315516269e2b806d35002f978952abaac501650cd3",
+      "target/release/examples/mutation_check": "0f3b3ccced131b10c6733b6894a9a4ae1d707c91ad71ee945de833ad09a84265",
+      "target/release/examples/invalidation_matrix": "f23b05f98961e2ed7e70cbb8b6fb2635d93a8ca051c541a7e7fcd2ac9efedf57",
+      "target/release/examples/reparse_stats": "9c3430e5262b05cce883b7bf2ee62140377f87b05c828509301c78a8cfba627b"
+    },
+    "upstream_sail_binary_sha256": "969fa94269431015e4929d06bb97ed2aab961f4cf8057d4366a4e27fe9834f86",
+    "z3": "Z3 version 4.8.12 - 64 bit"
+  },
+  "editor_settled": {
+    "server_sha256": "72784032832d67c07ab322e932dcdfe710952b242c805df9c8d6b4e1e53600fc",
+    "scope": "stdio, unsaved edits only; cold means fresh process, not cold OS cache",
+    "settle": true,
+    "ready_ms": 1088.907,
+    "exit_code": 0,
+    "failure": null,
+    "cycles": 20,
+    "cancel_every": 2,
+    "unique_responses": 105,
+    "summary": {
+      "startup:initialize": {
+        "count": 1,
+        "p50_ms": 9.987,
+        "p95_ms": 9.987,
+        "p99_ms": 9.987,
+        "max_ms": 9.987,
+        "errors": []
+      },
+      "cold:textDocument/hover": {
+        "count": 1,
+        "p50_ms": 46.122,
+        "p95_ms": 46.122,
+        "p99_ms": 46.122,
+        "max_ms": 46.122,
+        "errors": []
+      },
+      "cold:textDocument/completion": {
+        "count": 1,
+        "p50_ms": 5.503,
+        "p95_ms": 5.503,
+        "p99_ms": 5.503,
+        "max_ms": 5.503,
+        "errors": []
+      },
+      "cold:textDocument/definition": {
+        "count": 1,
+        "p50_ms": 1.436,
+        "p95_ms": 1.436,
+        "p99_ms": 1.436,
+        "max_ms": 1.436,
+        "errors": []
+      },
+      "warm:textDocument/hover": {
+        "count": 10,
+        "p50_ms": 17.163,
+        "p95_ms": 29.791,
+        "p99_ms": 29.791,
+        "max_ms": 29.791,
+        "errors": []
+      },
+      "warm:textDocument/completion": {
+        "count": 10,
+        "p50_ms": 14.767,
+        "p95_ms": 260.467,
+        "p99_ms": 260.467,
+        "max_ms": 260.467,
+        "errors": []
+      },
+      "warm:textDocument/definition": {
+        "count": 10,
+        "p50_ms": 2.097,
+        "p95_ms": 2.27,
+        "p99_ms": 2.27,
+        "max_ms": 2.27,
+        "errors": []
+      },
+      "editing:textDocument/hover": {
+        "count": 20,
+        "p50_ms": 54.237,
+        "p95_ms": 55.878,
+        "p99_ms": 141.441,
+        "max_ms": 141.441,
+        "errors": []
+      },
+      "editing:textDocument/completion": {
+        "count": 20,
+        "p50_ms": 19.148,
+        "p95_ms": 20.171,
+        "p99_ms": 20.631,
+        "max_ms": 20.631,
+        "errors": []
+      },
+      "editing:textDocument/definition": {
+        "count": 20,
+        "p50_ms": 2.164,
+        "p95_ms": 2.305,
+        "p99_ms": 2.395,
+        "max_ms": 2.395,
+        "errors": []
+      },
+      "client-cancel:textDocument/references": {
+        "count": 10,
+        "p50_ms": 1.084,
+        "p95_ms": 1.242,
+        "p99_ms": 1.242,
+        "max_ms": 1.242,
+        "errors": [
+          {
+            "code": -32800,
+            "message": "canceled by client"
+          },
+          {
+            "code": -32800,
+            "message": "canceled by client"
+          },
+          {
+            "code": -32800,
+            "message": "canceled by client"
+          },
+          {
+            "code": -32800,
+            "message": "canceled by client"
+          },
+          {
+            "code": -32800,
+            "message": "canceled by client"
+          },
+          {
+            "code": -32800,
+            "message": "canceled by client"
+          },
+          {
+            "code": -32800,
+            "message": "canceled by client"
+          },
+          {
+            "code": -32800,
+            "message": "canceled by client"
+          },
+          {
+            "code": -32800,
+            "message": "canceled by client"
+          },
+          {
+            "code": -32800,
+            "message": "canceled by client"
+          }
+        ]
+      },
+      "shutdown:shutdown": {
+        "count": 1,
+        "p50_ms": 0.862,
+        "p95_ms": 0.862,
+        "p99_ms": 0.862,
+        "max_ms": 0.862,
+        "errors": []
+      }
+    },
+    "memory": [
+      {
+        "phase": "ready",
+        "elapsed_ms": 1088.94,
+        "VmHWM": "108132 kB",
+        "VmRSS": "108132 kB",
+        "Threads": "54"
+      },
+      {
+        "phase": "initial-prime-complete",
+        "elapsed_ms": 16334.941,
+        "VmHWM": "658136 kB",
+        "VmRSS": "436652 kB",
+        "Threads": "55"
+      },
+      {
+        "phase": "edit-0",
+        "elapsed_ms": 17111.718,
+        "VmHWM": "658136 kB",
+        "VmRSS": "454080 kB",
+        "Threads": "55"
+      },
+      {
+        "phase": "edit-1",
+        "elapsed_ms": 17191.159,
+        "VmHWM": "658136 kB",
+        "VmRSS": "457240 kB",
+        "Threads": "55"
+      },
+      {
+        "phase": "edit-2",
+        "elapsed_ms": 17268.537,
+        "VmHWM": "658136 kB",
+        "VmRSS": "459348 kB",
+        "Threads": "55"
+      },
+      {
+        "phase": "edit-3",
+        "elapsed_ms": 17347.497,
+        "VmHWM": "658136 kB",
+        "VmRSS": "461692 kB",
+        "Threads": "55"
+      },
+      {
+        "phase": "edit-4",
+        "elapsed_ms": 17422.747,
+        "VmHWM": "658136 kB",
+        "VmRSS": "463200 kB",
+        "Threads": "55"
+      },
+      {
+        "phase": "edit-5",
+        "elapsed_ms": 17499.937,
+        "VmHWM": "658136 kB",
+        "VmRSS": "465256 kB",
+        "Threads": "55"
+      },
+      {
+        "phase": "edit-6",
+        "elapsed_ms": 17577.276,
+        "VmHWM": "658136 kB",
+        "VmRSS": "467208 kB",
+        "Threads": "55"
+      },
+      {
+        "phase": "edit-7",
+        "elapsed_ms": 17654.17,
+        "VmHWM": "658136 kB",
+        "VmRSS": "469132 kB",
+        "Threads": "55"
+      },
+      {
+        "phase": "edit-8",
+        "elapsed_ms": 17730.574,
+        "VmHWM": "658136 kB",
+        "VmRSS": "470536 kB",
+        "Threads": "55"
+      },
+      {
+        "phase": "edit-9",
+        "elapsed_ms": 17808.107,
+        "VmHWM": "658136 kB",
+        "VmRSS": "471884 kB",
+        "Threads": "55"
+      },
+      {
+        "phase": "edit-10",
+        "elapsed_ms": 17884.534,
+        "VmHWM": "658136 kB",
+        "VmRSS": "473492 kB",
+        "Threads": "55"
+      },
+      {
+        "phase": "edit-11",
+        "elapsed_ms": 17962.637,
+        "VmHWM": "658136 kB",
+        "VmRSS": "475040 kB",
+        "Threads": "55"
+      },
+      {
+        "phase": "edit-12",
+        "elapsed_ms": 18039.543,
+        "VmHWM": "658136 kB",
+        "VmRSS": "476108 kB",
+        "Threads": "55"
+      },
+      {
+        "phase": "edit-13",
+        "elapsed_ms": 18118.4,
+        "VmHWM": "658136 kB",
+        "VmRSS": "477584 kB",
+        "Threads": "55"
+      },
+      {
+        "phase": "edit-14",
+        "elapsed_ms": 18198.13,
+        "VmHWM": "658136 kB",
+        "VmRSS": "478180 kB",
+        "Threads": "55"
+      },
+      {
+        "phase": "edit-15",
+        "elapsed_ms": 18276.192,
+        "VmHWM": "658136 kB",
+        "VmRSS": "479676 kB",
+        "Threads": "55"
+      },
+      {
+        "phase": "edit-16",
+        "elapsed_ms": 18350.691,
+        "VmHWM": "658136 kB",
+        "VmRSS": "479772 kB",
+        "Threads": "55"
+      },
+      {
+        "phase": "edit-17",
+        "elapsed_ms": 18429.265,
+        "VmHWM": "658136 kB",
+        "VmRSS": "480360 kB",
+        "Threads": "55"
+      },
+      {
+        "phase": "edit-18",
+        "elapsed_ms": 18506.286,
+        "VmHWM": "658136 kB",
+        "VmRSS": "480536 kB",
+        "Threads": "55"
+      },
+      {
+        "phase": "edit-19",
+        "elapsed_ms": 18584.843,
+        "VmHWM": "658136 kB",
+        "VmRSS": "480640 kB",
+        "Threads": "55"
+      },
+      {
+        "phase": "closed",
+        "elapsed_ms": 21585.68,
+        "VmHWM": "658136 kB",
+        "VmRSS": "480652 kB",
+        "Threads": "55"
+      }
+    ]
+  },
+  "quality": {
+    "typecheck": {
+      "mode": "strict-bitvector",
+      "pass_clean": 276,
+      "pass_total": 276,
+      "fail_rejected": 217,
+      "fail_total": 217,
+      "located": 199,
+      "worded": 127,
+      "with_expectation": 216
+    },
+    "extended": {
+      "mode": "default-bitvector",
+      "files": 372,
+      "agree": 355,
+      "scope_only": 17,
+      "false_positives": 0,
+      "false_negatives": 0
+    },
+    "mutation": {
+      "mode": "default-bitvector, explicit ordered SourceProject per mutant",
+      "generated": 538,
+      "upstream_rejected": 274,
+      "caught": 272,
+      "missed": 2,
+      "remaining": [
+        "existential_ast3.sail_argorder_0",
+        "existential_ast3.sail_argorder_1"
+      ],
+      "original_five_project_misses_fixed": true,
+      "original_five_project_misses": [
+        "arm_FPEXC1.sail_ret_0.sail",
+        "bool_constraint.sail_arity_1.sail",
+        "funcl_attribute.sail_ret_0.sail",
+        "phantom_num.sail_arity_0.sail",
+        "typ_pat_synonym.sail_arity_0.sail"
+      ]
+    },
+    "riscv": {
+      "mode": "default-bitvector, actual riscv.sail_project",
+      "files": 156,
+      "active_included_library_files": 40,
+      "lines": 29968,
+      "callables": 3318,
+      "expressions": 81543,
+      "unknown_types": 0,
+      "partially_unknown_types": 0,
+      "type_mismatches": 0,
+      "diagnostics": {
+        "Error": 0,
+        "Warning": 62,
+        "Hint": 6
+      },
+      "deferred_constraints": {
+        "proved": 2915,
+        "refuted": 0,
+        "total": 2918,
+        "unknown": 3
+      },
+      "unknown_by_reason": {
+        "budget_exhausted": 3
+      },
+      "unknown_sites": [
+        {
+          "assumptions": [
+            "3 <= vlen_exp & vlen_exp <= 16",
+            "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+            "xlen in {32, 64}",
+            "'sew in {8, 16, 32, 64}",
+            "0 <= '_sk1_index",
+            "'sew <= vlen",
+            "EEW <= vlen",
+            "'sew <= 2 ^ vlen_exp",
+            "EEW <= 2 ^ vlen_exp"
+          ],
+          "callable": "read_single_element",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_control.sail",
+          "goal": "2 ^ vlen_exp % 'sew == 0",
+          "location": {
+            "column": 3,
+            "end": 3007,
+            "line": 46,
+            "source": "static_assert(vlen % EEW == 0);",
+            "start": 2977
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk1_index"
+          ],
+          "status": "unknown"
+        },
+        {
+          "assumptions": [
+            "3 <= vlen_exp & vlen_exp <= 16",
+            "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+            "xlen in {32, 64}",
+            "'sew in {8, 16, 32, 64}",
+            "0 <= '_sk1_index",
+            "'sew <= vlen",
+            "EEW <= vlen",
+            "'sew <= 2 ^ vlen_exp",
+            "EEW <= 2 ^ vlen_exp"
+          ],
+          "callable": "write_single_element",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_control.sail",
+          "goal": "2 ^ vlen_exp % 'sew == 0",
+          "location": {
+            "column": 3,
+            "end": 4753,
+            "line": 88,
+            "source": "static_assert(vlen % EEW == 0);",
+            "start": 4723
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk1_index"
+          ],
+          "status": "unknown"
+        },
+        {
+          "assumptions": [
+            "3 <= vlen_exp & vlen_exp <= 16",
+            "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+            "xlen in {32, 64}",
+            "'n >= 0 & 'sew in {8, 16, 32, 64}",
+            "-3 <= '_sk1_LMUL_pow & '_sk1_LMUL_pow <= 3",
+            "'_sk1_LMUL_pow >= 0 & '_sk3_z == '_sk1_LMUL_pow | '_sk1_LMUL_pow < 0 & '_sk3_z == 0",
+            "('_sk1_LMUL_pow >= 0 & '_sk4__sk3_z == '_sk1_LMUL_pow | '_sk1_LMUL_pow < 0 & '_sk4__sk3_z == 0)",
+            "'sew <= vlen",
+            "SEW <= vlen",
+            "'sew <= 2 ^ vlen_exp",
+            "SEW <= 2 ^ vlen_exp"
+          ],
+          "callable": "write_vreg",
+          "cause": "Compatibility",
+          "clause": 0,
+          "compatibility_types": null,
+          "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_control.sail",
+          "goal": "2 ^ vlen_exp % 'sew == 0",
+          "location": {
+            "column": 3,
+            "end": 6106,
+            "line": 123,
+            "source": "static_assert(vlen % SEW == 0);",
+            "start": 6076
+          },
+          "origin_is_fallback": false,
+          "reason": "budget_exhausted",
+          "recovery_types": null,
+          "rigid_variables": [
+            "'_sk1_LMUL_pow",
+            "'_sk3_z",
+            "'_sk4__sk3_z"
+          ],
+          "status": "unknown"
+        }
+      ]
+    }
+  },
+  "gates": {
+    "no_smt": {
+      "command": "cargo +1.97.1 test --workspace --no-default-features -- --test-threads=1",
+      "exit": 0,
+      "passed": 2434,
+      "ignored": 18
+    },
+    "default": {
+      "command": "cargo +1.97.1 test --workspace -- --test-threads=1",
+      "exit": 0,
+      "passed": 2449,
+      "ignored": 18
+    },
+    "clippy": {
+      "command": "cargo +1.97.1 clippy --workspace --all-targets --message-format=json",
+      "exit": 0,
+      "distinct_warnings": 40,
+      "warnings_on_modified_primary_spans": 0,
+      "inventory": "clippy-warning-inventory-final.json"
+    },
+    "clippy_strict": {
+      "command": "cargo +1.97.1 clippy --workspace --all-targets -- -D warnings",
+      "exit": 101,
+      "reason": "Stopped at seven warnings in three hir-def files unchanged from HEAD. The complete nonfatal run reports 40 distinct warnings, all on unchanged primary spans; inventory retained. This is not a warning-free clippy claim."
+    },
+    "lint_cleanup_regression": {
+      "command": "cargo +1.97.1 test -p ide manifest_mutation_tests -- --test-threads=1",
+      "exit": 0,
+      "passed": 6,
+      "note": "After the full default/no-SMT suites, replaced a newly copied sort comparator with the equivalent sort_unstable_by_key form. Targeted regressions and all release quality/performance probes were rerun after this one-line lint cleanup."
+    },
+    "fmt": {
+      "command": "cargo +1.97.1 fmt --all -- --check",
+      "exit": 0
+    },
+    "diff_check": {
+      "command": "git diff --check",
+      "exit": 0
+    }
+  },
+  "artifact_directory": "target/ra-followup-2026-10-29",
+  "requirements": [
+    {
+      "item": "Semantic completion ranking",
+      "implementation": [
+        "crates/hir-ty/src/infer/completion.rs",
+        "crates/hir/src/semantics.rs",
+        "crates/ide-completion/src/context.rs",
+        "crates/ide-completion/src/completions/expr.rs"
+      ],
+      "evidence": [
+        "hir-ty completion compatibility tests",
+        "ide completion project ranking, aliases, generic constraints and overload tests"
+      ]
+    },
+    {
+      "item": "Speculative completion for incomplete code",
+      "implementation": [
+        "crates/ide-completion/src/context.rs"
+      ],
+      "evidence": [
+        "ide::completion::tests::incomplete_arguments_keep_their_expected_types_in_a_project",
+        "ide::completion::tests::incomplete_record_values_and_dot_access_use_the_owner_type"
+      ]
+    },
+    {
+      "item": "Fix five confirmed manifest-mode mutation misses and migrate the harness",
+      "implementation": [
+        "crates/ide/src/manifest_mutation_tests.rs",
+        "crates/sail-lsp/examples/mutation_check.rs"
+      ],
+      "evidence": [
+        "six reduced positive/negative project regression tests",
+        "full mutation project-mode score and unchanged upstream acceptance/rejection"
+      ]
+    },
+    {
+      "item": "Normal-edit reparsing with full-parse equivalence and measured benefit",
+      "implementation": [
+        "crates/base-db/src/parse_cache.rs",
+        "crates/syntax/src/parse_query.rs",
+        "crates/syntax/src/parsing/reparsing.rs"
+      ],
+      "evidence": [
+        "syntax differential edits/undo including mapping clauses and Unicode",
+        "normal input updates reuse unaffected green subtrees; fixity changes rebuild",
+        "weak seed ownership test",
+        "reparse_stats: identical trees, tokens and errors for every measured edit"
+      ]
+    },
+    {
+      "item": "Independent request priority and retry policies; cancellation and responsiveness",
+      "implementation": [
+        "crates/sail-lsp/src/handlers/dispatch.rs",
+        "crates/sail-lsp/src/main_loop.rs",
+        "scripts/editor_probe.py"
+      ],
+      "evidence": [
+        "all priority/retry/cancellation combinations through real task pool",
+        "late responses and retries cannot revive completed/cancelled requests",
+        "stdio burst and settled editing probes with duplicate detection and receive timestamps"
+      ]
+    },
+    {
+      "item": "Incremental invalidation measurements",
+      "implementation": [
+        "crates/ide-db/src/root_database.rs",
+        "crates/sail-lsp/examples/invalidation_matrix.rs"
+      ],
+      "evidence": [
+        "Salsa WillExecute counts for comment/body/signature/include/manifest edits",
+        "warm lookups execute no queries; unrelated inference Arc remains shared",
+        "signature/include edits refresh caller diagnostics; manifest removal reports missing f"
+      ]
+    }
+  ],
+  "verification_status": "complete"
+}

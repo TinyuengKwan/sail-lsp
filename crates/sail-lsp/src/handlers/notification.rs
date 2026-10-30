@@ -20,6 +20,10 @@ pub(crate) fn handle_did_open_text_document(
 ) -> anyhow::Result<()> {
     let uri = params.text_document.uri;
     let text = params.text_document.text;
+    if crate::manifest_editing::is_manifest(&uri) {
+        std::sync::Arc::make_mut(&mut state.manifest_texts).insert(uri, text);
+        return Ok(());
+    }
 
     state.sync_to_salsa(&uri, &text);
     state
@@ -35,6 +39,15 @@ pub(crate) fn handle_did_change_text_document(
     params: DidChangeTextDocumentParams,
 ) -> anyhow::Result<()> {
     let uri = params.text_document.uri;
+    if crate::manifest_editing::is_manifest(&uri) {
+        let texts = std::sync::Arc::make_mut(&mut state.manifest_texts);
+        if let Some(text) = texts.get_mut(&uri) {
+            let mut doc = DocumentData::new(params.text_document.version, std::mem::take(text));
+            doc.apply_changes(&params.content_changes);
+            *text = doc.data;
+        }
+        return Ok(());
+    }
 
     if let Some(doc) = state.mem_docs.get_mut(&uri) {
         doc.apply_changes(&params.content_changes);
@@ -51,6 +64,10 @@ pub(crate) fn handle_did_close_text_document(
     params: DidCloseTextDocumentParams,
 ) -> anyhow::Result<()> {
     let uri = params.text_document.uri;
+    if crate::manifest_editing::is_manifest(&uri) {
+        std::sync::Arc::make_mut(&mut state.manifest_texts).remove(&uri);
+        return Ok(());
+    }
     state.mem_docs.remove(&uri);
 
     // The buffer stops being authoritative here, so what salsa holds goes
@@ -90,12 +107,14 @@ pub(crate) fn handle_did_close_text_document(
 
 pub(crate) fn handle_did_save_text_document(
     state: &mut GlobalState,
-    _params: DidSaveTextDocumentParams,
+    params: DidSaveTextDocumentParams,
 ) -> anyhow::Result<()> {
     // On save, as rust-analyzer runs `cargo check` on save: upstream
     // re-reads whole files from disk, so running it against a buffer the
     // editor has not written would report the previous save.
-    state.request_flycheck();
+    if let Ok(path) = params.text_document.uri.to_file_path() {
+        state.request_flycheck(&path);
+    }
     Ok(())
 }
 

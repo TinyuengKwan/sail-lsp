@@ -85,7 +85,10 @@ impl RootDatabase {
             return false;
         }
         use salsa::Database as _;
+        let cancel_started = std::time::Instant::now();
         self.trigger_cancellation();
+        let cancel_us = cancel_started.elapsed().as_micros();
+        let inputs_started = std::time::Instant::now();
 
         if let Some(enabled) = change.strict_bitvector {
             use salsa::Setter;
@@ -130,6 +133,8 @@ impl RootDatabase {
                 WorkspaceSourceProject::new(self, project, files);
             }
         }
+        let inputs_us = inputs_started.elapsed().as_micros();
+        let plan_started = std::time::Instant::now();
         if let Some(project) = base_db::preprocess::WorkspaceSourceProject::try_get(self) {
             let plan = hir::preprocess::workspace_plan(self, project).clone();
             let mut regions = plan.regions;
@@ -187,6 +192,9 @@ impl RootDatabase {
                 file_ids.into_iter().filter_map(|fid| self.files().file_text(fid)).collect();
             hir::def_query::set_workspace_files(self, file_texts);
         }
+        tracing::debug!(target: "sail_lsp::latency",
+            "apply_change cancel_us={cancel_us} inputs_us={inputs_us} plan_us={}",
+            plan_started.elapsed().as_micros());
         anything_written || graph_changed || membership_changed
     }
 }

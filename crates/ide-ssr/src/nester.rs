@@ -1,33 +1,20 @@
-//! Overlap deduplication for SSR matches.
-//!
-//! When matches overlap, keeps only the outermost match.
+//! Keep outermost matches within a single syntax tree.
+use crate::matching::Match;
 
-use crate::matching::{Match, SsrMatches};
-
-/// Remove overlapping AST-level matches, keeping only the outermost.
-pub(crate) fn deduplicate(mut matches: SsrMatches) -> SsrMatches {
-    if matches.matches.len() <= 1 {
-        return matches;
-    }
-
-    matches.matches.sort_by(|a, b| {
-        a.range
-            .range
-            .start()
-            .cmp(&b.range.range.start())
-            .then_with(|| b.range.range.len().cmp(&a.range.range.len()))
+pub(crate) fn deduplicate(mut matches: Vec<Match>) -> Vec<Match> {
+    matches.sort_by_key(|m| {
+        let range = m.matched_node.text_range();
+        (range.start(), std::cmp::Reverse(range.end()))
     });
-
-    let mut accepted: Vec<Match> = Vec::new();
-    for m in matches.matches {
-        let overlaps = accepted.iter().any(|existing| {
-            existing.range.file_id == m.range.file_id
-                && existing.range.range.start() <= m.range.range.start()
-                && m.range.range.end() <= existing.range.range.end()
-        });
-        if !overlaps {
-            accepted.push(m);
+    let mut previous: Option<syntax::TextRange> = None;
+    matches.retain(|m| {
+        let range = m.matched_node.text_range();
+        if previous.is_some_and(|outer| outer.contains_range(range)) {
+            false
+        } else {
+            previous = Some(range);
+            true
         }
-    }
-    SsrMatches { matches: accepted }
+    });
+    matches
 }

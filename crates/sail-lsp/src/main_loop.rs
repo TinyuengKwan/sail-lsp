@@ -26,7 +26,12 @@ pub(crate) enum Task {
     /// DiagnosticsTaskKind carries `(generation, Vec<(FileId, diags)>)`.
     Diagnostics(DiagnosticsTaskKind),
     /// What `sail --just-check` said, by the path it named.
-    Flycheck(crate::flycheck::FlycheckResult),
+    Flycheck {
+        target: crate::flycheck::CheckTarget,
+        /// Only the latest run of a target is believed.
+        generation: u64,
+        found: crate::flycheck::FlycheckResult,
+    },
 }
 
 /// Progress for prime_caches background task.
@@ -189,18 +194,39 @@ impl GlobalState {
                 return;
             }
         }
-        self.report_project_error((!inputs.source_errors.is_empty()).then(|| {
-            format!(
+        let mut problems: Vec<_> = inputs
+            .project_errors
+            .iter()
+            .map(|error| format!(
+                "Failed to load Sail project: {error}\nFix the manifest or workspace.projectFile/projectVariables/projectModules settings and reload."
+            ))
+            .collect();
+        if !inputs.source_errors.is_empty() {
+            problems.push(format!(
                 "Sail project loaded with source file errors; analysis is incomplete.\n{}\nCheck the manifest paths or restore the missing files. The project will reload when they change.",
                 inputs.source_errors.join("\n"),
-            )
-        }));
-        self.project_manifests = inputs.manifests.into_keys().collect();
-        if self.project_manifests.is_empty() {
+            ));
+        }
+        self.report_project_error((!problems.is_empty()).then(|| problems.join("\n")));
+        self.publish_manifest_diagnostics(inputs.manifest_diagnostics);
+        self.projects = std::sync::Arc::new(inputs.projects);
+        // An unloaded project's last check no longer describes anything.
+        let manifests: std::collections::HashSet<_> =
+            self.projects.values().map(|p| p.manifest.clone()).collect();
+        let keep = |t: &crate::flycheck::CheckTarget| match t {
+            crate::flycheck::CheckTarget::Project(manifest) => manifests.contains(manifest),
+            crate::flycheck::CheckTarget::File(_) => true,
+        };
+        self.diagnostics.retain_check_targets(keep);
+        self.flycheck_latest.retain(|t, _| keep(t));
+        if self.projects.is_empty() {
             self.log_message(MessageType::WARNING,
                 "No Sail project loaded. Set sail-lsp.workspace.projectFile; unlinked files receive syntax diagnostics only.");
         } else {
-            for manifest in self.project_manifests.clone() {
+            let mut manifests: Vec<_> =
+                self.projects.values().map(|p| p.manifest.clone()).collect();
+            manifests.sort();
+            for manifest in manifests {
                 self.log_message(
                     MessageType::INFO,
                     format!("Loaded Sail project: {}", manifest.display()),
@@ -314,34 +340,87 @@ impl GlobalState {
             self.fetch_workspaces_queue.op_completed(());
         }
     }
-    /// Ask upstream Sail what it thinks, if the user turned it on.
+    /// Forget published results and tickets; generations remain monotonic.
+    pub(crate) fn invalidate_flycheck(&mut self) {
+        self.flycheck_latest.clear();
+        self.diagnostics.retain_check_targets(|_| false);
+    }
+
+    /// Ask upstream Sail what it thinks of the program `saved` belongs to,
+    /// if the user turned it on.
     ///
     /// rust-analyzer runs this on save, and so does this: `--just-check`
     /// re-reads whole files from disk, so a run against a buffer the editor
-    /// has not written yet would report the previous save.
-    pub(crate) fn request_flycheck(&mut self) {
-        if !self.config.flycheck.enable {
+    /// has not written yet would report the previous save. Like its
+    /// per-workspace `cargo check`, a run checks the project that lists the
+    /// file, with that project's manifest, variables and roots; a file no
+    /// project knows is checked alone.
+    pub(crate) fn request_flycheck(&mut self, saved: &std::path::Path) {
+        use crate::flycheck::CheckTarget;
+        if !self.config.flycheck.enable
+            || self.fetch_workspaces_queue.op_requested()
+            || self.fetch_workspaces_queue.op_in_progress()
+            || self.loading_project_config.is_some()
+        {
             return;
         }
-        let files: Vec<std::path::PathBuf> =
-            self.subscribed_files().iter().filter_map(|(url, _)| url.to_file_path().ok()).collect();
-        if files.is_empty() {
-            return;
+        let saved = syntax::preprocess::normalize_path(saved);
+        let lists = |p: &crate::reload::FolderProject| {
+            p.files.iter().any(|(_, f)| syntax::preprocess::normalize_path(f) == saved)
+        };
+        let mut targets: Vec<_> = self
+            .projects
+            .values()
+            .filter(|p| lists(p))
+            .map(|p| CheckTarget::Project(p.manifest.clone()))
+            .collect();
+        if targets.is_empty() {
+            // An `$include`d file belongs to the project that includes it,
+            // but no manifest lists it.
+            let member = lsp_types::Url::from_file_path(&saved)
+                .ok()
+                .and_then(|url| self.vfs.lookup_file_id_by_url(&url))
+                .is_some_and(|file_id| {
+                    base_db::preprocess::project_membership(
+                        self.analysis_host.raw_database(),
+                        file_id,
+                    ) == Some(true)
+                });
+            targets = if member {
+                self.projects.values().map(|p| CheckTarget::Project(p.manifest.clone())).collect()
+            } else if crate::reload::is_sail_file(&saved) {
+                vec![CheckTarget::File(saved)]
+            } else {
+                Vec::new()
+            };
         }
-        // Upstream prints the path it was given; relative ones resolve
-        // against the first workspace folder.
-        let cwd = self
-            .workspace_folders
-            .iter()
-            .next()
-            .and_then(|u| u.to_file_path().ok())
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
-        let command = self.config.flycheck.command.clone();
-        let extra_args = self.config.flycheck.extra_args.clone();
-        self.task_pool.spawn_with_sender(stdx::thread::ThreadIntent::Worker, move |sender| {
-            let found = crate::flycheck::run(&command, &extra_args, &files, &cwd);
-            let _ = sender.send(Task::Flycheck(found));
-        });
+        for target in targets {
+            self.flycheck_generation += 1;
+            let generation = self.flycheck_generation;
+            self.flycheck_latest.insert(target.clone(), generation);
+            let invocation = crate::flycheck::command_line(
+                &target,
+                &self.config.workspace,
+                &self.config.flycheck.extra_args,
+            );
+            let (args, cwd) = match invocation {
+                Ok(invocation) => invocation,
+                Err(reason) => {
+                    self.flycheck_latest.remove(&target);
+                    self.diagnostics.retain_check_targets(|t| t != &target);
+                    self.log_message(
+                        lsp_types::MessageType::WARNING,
+                        format!("Flycheck skipped for {target:?}: {reason}"),
+                    );
+                    continue;
+                }
+            };
+            let command = self.config.flycheck.command.clone();
+            self.task_pool.spawn_with_sender(stdx::thread::ThreadIntent::Worker, move |sender| {
+                let found = crate::flycheck::run(&command, &args, &cwd);
+                let _ = sender.send(Task::Flycheck { target, generation, found });
+            });
+        }
     }
 }
 
@@ -349,6 +428,10 @@ impl GlobalState {
 pub fn main() {
     // CLI subcommand dispatch before starting the LSP server.
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).is_some_and(|arg| arg == "--version" || arg == "-V") {
+        crate::version::print_version();
+        return;
+    }
     if args.len() >= 2 && !args[1].starts_with('-') {
         let cmd = args[1].as_str();
         let path_arg = args.get(2).map(|s| std::path::Path::new(s.as_str()));
@@ -434,7 +517,7 @@ pub fn run_server(connection: Connection) {
         capabilities: crate::lsp::capabilities::server_capabilities(&client_caps),
         server_info: Some(lsp_types::ServerInfo {
             name: "sail-lsp".to_owned(),
-            version: Some(env!("CARGO_PKG_VERSION").to_owned()),
+            version: Some(crate::version::version()),
         }),
     };
     if connection
@@ -449,6 +532,16 @@ pub fn run_server(connection: Connection) {
     // Background task channel
     let (task_sender, task_receiver) = crossbeam_channel::unbounded();
     let mut state = GlobalState::new(connection.sender.clone(), task_sender);
+    state.log_message(
+        MessageType::INFO,
+        format!(
+            "sail-lsp {} — executable: {}",
+            crate::version::version(),
+            std::env::current_exe()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|e| format!("unavailable: {e}"))
+        ),
+    );
     // Like RA, apply initialization settings before discovering projects.
     // Clients need not send a later didChangeConfiguration notification.
     if let Some(options) = init_params.initialization_options {
@@ -580,8 +673,15 @@ fn main_loop(
             }
         }
 
+        let drain_started = std::time::Instant::now();
+        let mut drained = 0usize;
         while let Ok(task) = task_receiver.try_recv() {
             on_task(state, task);
+            drained += 1;
+        }
+        if drained != 0 {
+            tracing::debug!(target: "sail_lsp::latency",
+                "task_drain count={drained} duration_us={}", drain_started.elapsed().as_micros());
         }
 
         // Sail: fetch_workspaces_queue completion is equivalent to vfs_done.
@@ -763,11 +863,12 @@ fn on_task(state: &mut GlobalState, task: Task) {
             let files = match scan.files {
                 Ok(files) => files,
                 Err(error) => {
+                    state.publish_manifest_diagnostics(scan.inputs.manifest_diagnostics);
                     state.discovery_watch_files.extend(scan.inputs.watch_files);
                     state.discovery_watch_files.sort();
                     state.discovery_watch_files.dedup();
                     state.request_workspace_load(&[]);
-                    let context = if state.project_manifests.is_empty() {
+                    let context = if state.projects.is_empty() {
                         "No project model is available; unlinked files receive syntax diagnostics only."
                     } else {
                         "Keeping the previous project model; project configuration may be out of date."
@@ -872,16 +973,27 @@ fn on_task(state: &mut GlobalState, task: Task) {
         }
 
         Task::Response(response) => {
-            // Async handler completed → forward response to client.
-            state.sender.send(Message::Response(response)).ok();
+            // Client cancellation may have completed this request while its
+            // worker was running. Every request gets exactly one response.
+            if !state.is_completed(&response.id) {
+                state.respond(response);
+            }
         }
         Task::Retry(req) => {
-            // (dispatch.rs:268): request was cancelled, re-dispatch.
-            // This happens after process_changes() has applied the new revision,
-            // so the handler will see the latest state.
-            on_request(state, req);
+            // Retry with the current snapshot only while the client still
+            // wants the request. A queued retry must not revive cancellation.
+            if !state.is_completed(&req.id) {
+                on_request(state, req);
+            }
         }
-        Task::Flycheck(found) => {
+        Task::Flycheck { target, generation, found } => {
+            if state.flycheck_latest.get(&target) != Some(&generation)
+                || state.fetch_workspaces_queue.op_requested()
+                || state.fetch_workspaces_queue.op_in_progress()
+                || state.loading_project_config.is_some()
+            {
+                return;
+            }
             // Group by file. A path the workspace does not know is dropped
             // rather than guessed at — upstream may name a prelude file.
             let mut by_file: HashMap<base_db::FileId, Vec<lsp_types::Diagnostic>> = HashMap::new();
@@ -890,7 +1002,7 @@ fn on_task(state: &mut GlobalState, task: Task) {
                 let Some(fid) = state.vfs.lookup_file_id_by_url(&url) else { continue };
                 by_file.entry(fid).or_default().push(diag);
             }
-            state.diagnostics.set_check_diagnostics(by_file.into_iter().collect());
+            state.diagnostics.set_check_diagnostics(&target, by_file.into_iter().collect());
         }
         Task::PrimeCaches(progress) => match progress {
             PrimeCachesProgress::Begin => {
@@ -996,22 +1108,32 @@ fn on_request(state: &mut GlobalState, req: Request) {
         .on_sync::<crate::lsp_ext::MatchingBrace>(handlers::handle_matching_brace)
         .on_sync::<crate::lsp_ext::JoinLines>(handlers::handle_join_lines)
         .on_sync::<crate::lsp_ext::OnEnter>(handlers::handle_on_enter)
-        // ALLOW_RETRYING = true: latency-sensitive, client will re-request on cancel
-        // ALLOW_RETRYING = false: user-triggered, show error on cancel
-        .on::<true, request::Completion>(handlers::handle_completion)
-        .on::<true, request::ResolveCompletionItem>(handlers::handle_resolve_completion_item)
-        .on::<true, request::InlayHintRequest>(handlers::handle_inlay_hint)
-        .on::<true, request::SignatureHelpRequest>(handlers::handle_signature_help)
-        .on::<true, request::HoverRequest>(handlers::handle_hover)
+        // Priority and cancellation retry policy are selected independently.
+        .on_latency_sensitive::<true, request::Completion>(handlers::handle_completion)
+        .on_latency_sensitive::<true, request::ResolveCompletionItem>(
+            handlers::handle_resolve_completion_item,
+        )
+        .on_latency_sensitive::<true, request::InlayHintRequest>(handlers::handle_inlay_hint)
+        .on::<false, crate::lsp_ext::Ssr>(handlers::handle_ssr)
+        .on_latency_sensitive::<true, request::SignatureHelpRequest>(
+            handlers::handle_signature_help,
+        )
+        .on_latency_sensitive::<true, request::HoverRequest>(handlers::handle_hover)
         // Semantic tokens are redrawn on every edit, so a cancelled one is
         // worth retrying rather than reporting — RA marks the same three
         // latency-sensitive, and the range request no-retry.
-        .on::<true, request::SemanticTokensFullRequest>(handlers::handle_semantic_tokens_full)
-        .on::<true, request::SemanticTokensFullDeltaRequest>(
+        .on_latency_sensitive::<true, request::SemanticTokensFullRequest>(
+            handlers::handle_semantic_tokens_full,
+        )
+        .on_latency_sensitive::<true, request::SemanticTokensFullDeltaRequest>(
             handlers::handle_semantic_tokens_full_delta,
         )
-        .on::<false, request::SemanticTokensRangeRequest>(handlers::handle_semantic_tokens_range)
-        .on::<true, crate::lsp::ext::CodeActionResolveRequest>(handlers::handle_code_action_resolve)
+        .on_latency_sensitive::<false, request::SemanticTokensRangeRequest>(
+            handlers::handle_semantic_tokens_range,
+        )
+        .on_latency_sensitive::<true, crate::lsp::ext::CodeActionResolveRequest>(
+            handlers::handle_code_action_resolve,
+        )
         .on::<false, request::DocumentSymbolRequest>(handlers::handle_document_symbol)
         .on::<false, request::DocumentDiagnosticRequest>(handlers::handle_document_diagnostic)
         .on::<false, request::DocumentHighlightRequest>(handlers::handle_document_highlight)
@@ -1046,9 +1168,10 @@ fn on_request(state: &mut GlobalState, req: Request) {
         .on::<false, crate::lsp_ext::ExpandInclude>(handlers::handle_expand_include)
         .on::<false, crate::lsp_ext::EffectAnnotations>(handlers::handle_effect_annotations)
         .on::<false, crate::lsp_ext::SailLspStatus>(handlers::handle_sail_lsp_status)
+        .on::<false, crate::lsp_ext::OpenProjectManifest>(handlers::handle_open_project_manifest)
+        .on::<false, crate::lsp_ext::ParentModule>(handlers::handle_parent_module)
         .on::<false, crate::lsp_ext::ViewIncludeGraph>(handlers::handle_view_include_graph)
         .on::<false, crate::lsp_ext::MoveItem>(handlers::handle_move_item)
-        .on::<false, crate::lsp_ext::Ssr>(handlers::handle_ssr)
         .finish();
 }
 
@@ -1097,6 +1220,156 @@ fn noop_response(_state: &mut GlobalState, response: lsp_server::Response) {
 #[cfg(test)]
 mod project_reload_tests {
     use super::*;
+
+    #[test]
+    fn late_worker_results_and_retries_do_not_revive_completed_requests() {
+        let (sender, messages) = crossbeam_channel::unbounded();
+        let (task_sender, tasks) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender, task_sender);
+        for cancelled in [false, true] {
+            let request = Request::new(i32::from(cancelled).into(), "test/completed".into(), ());
+            state.register_request(&request);
+            if cancelled {
+                state.cancel(request.id.clone());
+            } else {
+                on_task(
+                    &mut state,
+                    Task::Response(lsp_server::Response::new_ok(request.id.clone(), ())),
+                );
+            }
+            assert!(state.is_completed(&request.id));
+            let Message::Response(response) = messages.try_recv().unwrap() else {
+                panic!("expected response")
+            };
+            assert_eq!(response.id, request.id);
+            assert_eq!(
+                response.error.map(|error| error.code),
+                cancelled.then_some(lsp_server::ErrorCode::RequestCanceled as i32)
+            );
+            on_task(
+                &mut state,
+                Task::Response(lsp_server::Response::new_ok(request.id.clone(), ())),
+            );
+            on_task(&mut state, Task::Retry(request));
+            assert!(messages.try_recv().is_err(), "duplicate response after completion");
+            assert!(tasks.try_recv().is_err(), "completed request scheduled new work");
+        }
+    }
+
+    /// A save starts a run per target; an earlier run that finishes later
+    /// describes files as they no longer are, and is not believed.
+    #[test]
+    fn only_the_latest_check_of_a_target_is_believed() {
+        let (sender, _messages) = crossbeam_channel::unbounded();
+        let (task_sender, _tasks) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender, task_sender);
+        let path = std::env::temp_dir().join("flycheck-stale/a.sail");
+        let url = lsp_types::Url::from_file_path(&path).unwrap();
+        let file_id = state.vfs.file_id_for_url(&url);
+        let target = crate::flycheck::CheckTarget::Project(path.with_file_name("p.sail_project"));
+        let finding = |message: &str| {
+            vec![(
+                path.clone(),
+                lsp_types::Diagnostic { message: message.into(), ..Default::default() },
+            )]
+        };
+        state.flycheck_latest.insert(target.clone(), 2);
+        let result = |generation, message| Task::Flycheck {
+            target: target.clone(),
+            generation,
+            found: finding(message),
+        };
+        on_task(&mut state, result(2, "current"));
+        on_task(&mut state, result(1, "stale"));
+        let shown: Vec<_> =
+            state.diagnostics.diagnostics_for(file_id).map(|d| d.message.clone()).collect();
+        assert_eq!(shown, ["current"]);
+    }
+
+    #[test]
+    fn an_unrepresentable_check_is_reported_and_clears_old_results() {
+        let (sender, messages) = crossbeam_channel::unbounded();
+        let (task_sender, _tasks) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender, task_sender);
+        state.config.flycheck.enable = true;
+        state.config.workspace.include_paths.push("lib".into());
+        let path = std::env::temp_dir().join("flycheck-skipped.sail");
+        let file_id = state.vfs.file_id_for_url(&Url::from_file_path(&path).unwrap());
+        let target = crate::flycheck::CheckTarget::File(path.clone());
+        state.flycheck_latest.insert(target.clone(), 1);
+        state.diagnostics.set_check_diagnostics(
+            &target,
+            vec![(
+                file_id,
+                vec![lsp_types::Diagnostic { message: "obsolete".into(), ..Default::default() }],
+            )],
+        );
+        state.request_flycheck(&path);
+        assert!(state.flycheck_latest.is_empty());
+        assert_eq!(state.diagnostics.diagnostics_for(file_id).count(), 0);
+        let messages: Vec<_> =
+            messages.try_iter().map(|m| serde_json::to_value(m).unwrap()).collect();
+        assert!(
+            messages.iter().any(|m| m["method"] == "window/logMessage"
+                && m["params"]["message"]
+                    .as_str()
+                    .is_some_and(|s| s.contains("Flycheck skipped") && s.contains("includePaths"))),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    fn flycheck_configuration_and_reload_invalidate_published_and_pending_results() {
+        for change in ["disable", "command", "arguments", "variables", "roots", "reload"] {
+            let (sender, _messages) = crossbeam_channel::unbounded();
+            let (task_sender, _tasks) = crossbeam_channel::unbounded();
+            let mut state = GlobalState::new(sender, task_sender);
+            state.config.flycheck.enable = true;
+            let path = std::env::temp_dir().join("flycheck-invalidation/a.sail");
+            let url = Url::from_file_path(&path).unwrap();
+            let file_id = state.vfs.file_id_for_url(&url);
+            let target = crate::flycheck::CheckTarget::Project(path.with_file_name("sail.proj"));
+            let result = || Task::Flycheck {
+                target: target.clone(),
+                generation: 1,
+                found: vec![(
+                    path.clone(),
+                    lsp_types::Diagnostic { message: "obsolete".into(), ..Default::default() },
+                )],
+            };
+            state.flycheck_latest.insert(target.clone(), 1);
+            on_task(&mut state, result());
+            assert_eq!(state.diagnostics.diagnostics_for(file_id).count(), 1);
+            state.diagnostics.take_changes();
+            let mut config = state.config.clone();
+            match change {
+                "disable" => config.flycheck.enable = false,
+                "command" => config.flycheck.command = "other-sail".into(),
+                "arguments" => config.flycheck.extra_args.push("--strict-bitvector".into()),
+                "variables" => {
+                    config
+                        .workspace
+                        .project_variables
+                        .insert("RMEM".into(), crate::config::ProjectVariableValue::Bool(true));
+                }
+                "roots" => config.workspace.project_modules.push("Main".into()),
+                "reload" => state.fetch_workspaces("manifest changed at same path".into()),
+                _ => unreachable!(),
+            }
+            state.update_configuration(config);
+            assert!(
+                state.diagnostics.take_changes().unwrap().contains(&file_id),
+                "{change}: publish clearing"
+            );
+            on_task(&mut state, result());
+            assert_eq!(
+                state.diagnostics.diagnostics_for(file_id).count(),
+                0,
+                "{change}: reject late result"
+            );
+            assert!(!state.flycheck_latest.contains_key(&target));
+        }
+    }
 
     #[test]
     fn failed_cache_priming_ends_progress_and_allows_a_later_reload() {

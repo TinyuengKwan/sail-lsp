@@ -1,103 +1,74 @@
-//! Semantic resolution for SSR rules.
-//! For Sail: path resolution means resolving identifiers to their
-//! definitions (functions, types, registers). Two paths match if they
-//! resolve to the same definition.
-//!
-//! Currently a stub — always returns "no resolution". Will be filled in
-//! once the SSR infrastructure is integrated with actual semantic queries.
-
+//! Resolve fixed rule identifiers once in the invocation scope.
+use crate::{
+    errors::SsrError,
+    parsing::{ParsedRule, Placeholder},
+};
 use rustc_hash::FxHashMap;
-
 use syntax::SyntaxNode;
 
-use crate::parsing::{ParsedRule, Placeholder};
-
-/// A fully resolved SSR rule, ready for matching.
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedRule {
-    /// The resolved pattern (search side).
     pub(crate) pattern: ResolvedPattern,
-    /// The resolved template (replacement side), if present.
-    pub(crate) template: Option<ResolvedPattern>,
-    /// Index of this rule in the MatchFinder's rule list.
-    pub(crate) index: usize,
+    pub(crate) template: ResolvedPattern,
 }
 
-/// A pattern with resolved path information.
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedPattern {
-    /// Placeholder metadata, keyed by stand-in name.
     pub(crate) placeholders_by_stand_in: FxHashMap<String, Placeholder>,
-    /// The parsed syntax node for this pattern.
     pub(crate) node: SyntaxNode,
-    /// Path nodes that resolved to a definition.
-    /// Currently empty — stub for future semantic matching.
-    #[expect(dead_code)]
-    pub(crate) resolved_paths: FxHashMap<SyntaxNodeKey, ResolvedPath>,
+    pub(crate) resolved_paths: FxHashMap<String, hir::PathResolution>,
 }
 
-/// A resolved path — points to a definition.
-#[derive(Debug, Clone)]
-pub(crate) struct ResolvedPath {
-    /// The semantic resolution of this path.
-    #[expect(dead_code)]
-    pub(crate) resolution: hir::PathResolution,
-    /// Depth of this path in the AST (for resolution priority).
-    #[expect(dead_code)]
-    pub(crate) depth: u32,
+pub(crate) struct ResolutionScope<'a, 'db> {
+    sema: &'a hir::Semantics<'db>,
+    db: &'db dyn salsa::Database,
+    file: base_db::FileText,
+    offset: usize,
 }
 
-/// Key for SyntaxNode in HashMap (by text range, since SyntaxNode doesn't impl Hash).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct SyntaxNodeKey {
-    range: rowan::TextRange,
-    kind: parser::SyntaxKind,
-}
-
-impl SyntaxNodeKey {
-    #[expect(dead_code)]
-    pub(crate) fn from_node(node: &SyntaxNode) -> Self {
-        Self { range: node.text_range(), kind: node.kind() }
-    }
-}
-
-/// Scope in which resolution happens.
-pub(crate) struct ResolutionScope<'db> {
-    pub(crate) _phantom: std::marker::PhantomData<&'db ()>,
-}
-
-impl<'db> ResolutionScope<'db> {
-    pub(crate) fn new(_sema: &'db hir::Semantics<'db>) -> Self {
-        Self { _phantom: std::marker::PhantomData }
+impl<'a, 'db> ResolutionScope<'a, 'db> {
+    pub(crate) fn new(
+        sema: &'a hir::Semantics<'db>,
+        db: &'db dyn salsa::Database,
+        file: base_db::FileText,
+        offset: usize,
+    ) -> Self {
+        Self { sema, db, file, offset }
     }
 
-    /// Resolve a parsed rule into a resolved rule.
-    ///
-    /// Currently a stub: does not perform actual path resolution.
-    /// The resolved_paths map will be empty.
-    pub(crate) fn resolve_rule(&self, parsed: &ParsedRule, index: usize) -> ResolvedRule {
-        let pattern = self.resolve_pattern(&parsed.pattern, &parsed.placeholders_by_stand_in);
-        let template = parsed
-            .template
-            .as_ref()
-            .map(|t| self.resolve_pattern(t, &parsed.placeholders_by_stand_in));
-        ResolvedRule { pattern, template, index }
+    pub(crate) fn resolve_rule(&self, parsed: &ParsedRule) -> Result<ResolvedRule, SsrError> {
+        let pattern = self.resolve_pattern(&parsed.pattern, &parsed.placeholders_by_stand_in)?;
+        let template = self.resolve_pattern(&parsed.template, &parsed.placeholders_by_stand_in)?;
+        Ok(ResolvedRule { pattern, template })
     }
 
-    /// Resolve paths within a pattern node.
-    ///
-    /// Stub: returns empty resolved_paths. Future: walk the tree, find
-    /// path/name nodes, use sema.resolve_path() to get definitions.
     fn resolve_pattern(
         &self,
         node: &SyntaxNode,
         placeholders: &FxHashMap<String, Placeholder>,
-    ) -> ResolvedPattern {
-        let _ = &self._phantom; // Will use sema for actual resolution later.
-        ResolvedPattern {
+    ) -> Result<ResolvedPattern, SsrError> {
+        let mut resolved_paths = FxHashMap::default();
+        for reference in node.descendants().filter(|n| n.kind() == parser::SyntaxKind::IDENT_EXPR) {
+            let name = reference.text().to_string();
+            let name = name.trim();
+            if placeholders.contains_key(name) {
+                continue;
+            }
+            let Some(resolution) =
+                self.sema.resolve_path(self.db, self.file, self.offset, name).or_else(|| {
+                    self.sema
+                        .resolve_callable_at(self.file, self.offset, name)
+                        .map(hir::PathResolution::Def)
+                })
+            else {
+                bail!("Cannot resolve `{}` in the SSR invocation scope", name);
+            };
+            resolved_paths.insert(name.to_owned(), resolution);
+        }
+        Ok(ResolvedPattern {
             placeholders_by_stand_in: placeholders.clone(),
             node: node.clone(),
-            resolved_paths: FxHashMap::default(),
-        }
+            resolved_paths,
+        })
     }
 }

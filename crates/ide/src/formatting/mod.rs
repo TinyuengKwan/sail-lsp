@@ -1,4 +1,6 @@
 pub(crate) mod comment;
+#[cfg(test)]
+mod corpus_tests;
 pub(crate) mod expr;
 pub(crate) mod items;
 pub(crate) mod lists;
@@ -12,7 +14,7 @@ pub(crate) mod visitor;
 
 use ide_db::ide_types::{DocumentLink, FormatOptions, IdeTextEdit, LinkedEditingRanges};
 use ide_db::line_index::TextRange;
-use ide_db::{token_symbol_key, FileDb};
+use ide_db::FileDb;
 use std::path::Path;
 use url::Url;
 
@@ -94,8 +96,6 @@ pub fn format_document_cst(text: &str, options: &FormatOptions) -> String {
     post_process_text(&mut result, text, options);
 
     // Phase 5: Report.
-    check_lost_comments(text, &result, &mut vis.report);
-
     // Consume the report (future: surface via LSP diagnostics).
     let _has_issues = vis.report.has_errors();
     for err in &vis.report.errors {
@@ -103,13 +103,56 @@ pub fn format_document_cst(text: &str, options: &FormatOptions) -> String {
             report::ErrorKind::LineOverflow(actual, max) => {
                 let _ = (actual, max, err.range);
             }
-            report::ErrorKind::TrailingWhitespace | report::ErrorKind::LostComment => {
+            report::ErrorKind::TrailingWhitespace => {
                 let _ = err.range;
             }
         }
     }
 
+    // Phase 6: A formatter moves whitespace and nothing else. If any other
+    // token — a comment included — differs, the source is returned as it
+    // was. A lost comment used to be recorded in the report, which nothing
+    // reads, and the text that had lost it was returned.
+    if significant_tokens(text) != significant_tokens(&result) {
+        return text.to_string();
+    }
     result
+}
+
+/// What formatting must keep: every token but whitespace, each comment with
+/// its lines' trailing whitespace trimmed (which formatting may remove).
+///
+/// Breaking a list across lines adds a trailing comma, and upstream accepts
+/// one — `forall 'n 'm. (\n int('n),\n int('m),\n) -> bool` type-checks —
+/// so a comma directly before a closing delimiter is dropped from both
+/// sides. It is the one token the grammar lets a formatter add.
+pub(crate) fn significant_tokens(text: &str) -> Vec<(syntax::SyntaxKind, String)> {
+    use syntax::SyntaxKind as SK;
+    let (root, _) = syntax::parse_text(text);
+    let raw: Vec<(SK, String)> = root
+        .descendants_with_tokens()
+        .filter_map(|el| el.into_token())
+        .filter(|t| t.kind() != SK::WHITESPACE)
+        .map(|t| {
+            let text = if t.kind().is_trivia() {
+                t.text().lines().map(str::trim_end).collect::<Vec<_>>().join("\n")
+            } else {
+                t.text().to_string()
+            };
+            (t.kind(), text)
+        })
+        .collect();
+    raw.iter()
+        .enumerate()
+        .filter(|(i, (kind, _))| {
+            *kind != SK::COMMA
+                || !matches!(
+                    raw[i + 1..].iter().find(|(k, _)| !k.is_trivia()).map(|(k, _)| *k),
+                    Some(SK::R_PAREN | SK::R_CURLY | SK::R_BRACK)
+                )
+        })
+        .map(|(_, t)| t.clone())
+        .collect()
 }
 
 /// Check each line for overflow and trailing whitespace.
@@ -135,34 +178,6 @@ fn format_lines(text: &mut str, options: &FormatOptions, report: &mut report::Fo
     }
 }
 
-/// Check if a comment present in `original` was lost in `formatted`.
-///
-/// Scans for `//` and `/*` tokens in the original that don't appear
-/// in the formatted output, and records `ErrorKind::LostComment`.
-fn check_lost_comments(original: &str, formatted: &str, report: &mut report::FormatReport) {
-    // Extract comment snippets from original: first 40 chars of each comment.
-    for (i, line) in original.lines().enumerate() {
-        let trimmed = line.trim();
-        let comment_text = if trimmed.starts_with("//") || trimmed.starts_with("/*") {
-            Some(trimmed)
-        } else {
-            None
-        };
-        if let Some(snippet) = comment_text {
-            // Use a short prefix to match (comments may be reflowed).
-            let key = &snippet[..snippet.len().min(30)];
-            if !formatted.contains(key) {
-                // Approximate offset: line number × average line length.
-                let approx_offset = original.lines().take(i).map(|l| l.len() + 1).sum::<usize>();
-                report.push(
-                    report::ErrorKind::LostComment,
-                    base_db::text_range(approx_offset, approx_offset + snippet.len()),
-                );
-            }
-        }
-    }
-}
-
 /// CST-based formatting with line-range restriction.
 ///
 /// Nodes outside `file_lines` are emitted verbatim by the visitor.
@@ -184,7 +199,10 @@ pub fn format_document_cst_range(
 
     let mut result = vis.buffer;
     post_process_text(&mut result, text, options);
-    check_lost_comments(text, &result, &mut vis.report);
+    // The same guard as the whole-document path: whitespace only.
+    if significant_tokens(text) != significant_tokens(&result) {
+        return text.to_string();
+    }
     result
 }
 
@@ -277,32 +295,28 @@ pub fn range_format_document_edits(
     }])
 }
 
-/// Linked editing ranges — returns internal type.
+/// Ranges to edit together as the name at `position` is typed: the binding
+/// of a local and every mention of that binding.
+///
+/// This linked every token in the file that spelled the same name, so with
+/// `editor.linkedEditing` on, typing in one function's `x` rewrote every
+/// other `x` in the file. A top-level name is not offered at all: its other
+/// mentions may be in other files, which linked editing cannot reach —
+/// rename is the operation for that, as in rust-analyzer, which offers no
+/// linked editing for Rust.
 pub fn linked_editing_ranges_for_position(
     file: &dyn FileDb,
     position: ide_db::LineCol,
 ) -> Option<LinkedEditingRanges> {
-    let (token, _) = file.token_at(position)?;
-    let symbol_key = token_symbol_key(token)?;
-    let tokens = file.tokens()?;
-
-    let mut ranges = Vec::new();
-    for (candidate, span) in tokens {
-        let Some(candidate_key) = token_symbol_key(candidate) else {
-            continue;
-        };
-        if candidate_key != symbol_key {
-            continue;
-        }
-        ranges.push(base_db::text_range(span.start, span.end));
-    }
-
-    if ranges.len() < 2 {
+    let spans = crate::references::local_spans_through_hir(file, position)?;
+    if spans.len() < 2 {
         return None;
     }
-
     Some(LinkedEditingRanges {
-        ranges,
+        ranges: spans
+            .into_iter()
+            .map(|(span, _)| base_db::text_range(span.start, span.end))
+            .collect(),
         word_pattern: Some("[_A-Za-z][_A-Za-z0-9'~?]*".to_string()),
     })
 }
@@ -827,6 +841,29 @@ function bar(x : int) -> int = {
     /// The comparison is the non-trivia token stream, which is what "the same
     /// program" means for a formatter — whitespace is exactly what it is
     /// allowed to change.
+    /// A formatter that would change more than whitespace returns the
+    /// source as it was. This one joined a parameter list onto one line,
+    /// and the comment between two parameters then commented out the rest
+    /// of the header: `function f(a : int, // the flag b : bool) -> int = a`.
+    #[test]
+    fn a_format_that_would_change_a_token_changes_nothing() {
+        let src = "function f(\n  a : int,\n  // the flag\n  b : bool\n) -> int = a\n";
+        assert_eq!(format_document_cst(src, &FormatOptions::default()), src);
+    }
+
+    /// A `forwards`/`backwards` clause is part of the mapping. Aligning the
+    /// `<->` arms rebuilt the body from those arms alone and dropped it.
+    #[test]
+    fn a_mapping_keeps_its_one_way_clauses() {
+        let src = "mapping m : bits(2) <-> int = {\n  0b01 <-> 1,\n  backwards 0b00 => 0\n}\n\
+                   struct S = {\n  a     : int,\n  bb : bool,\n}\n";
+        let out = format_document_cst(src, &FormatOptions::default());
+        assert!(out.contains("backwards 0b00 => 0"), "{out}");
+        // And the rest of the file is still formatted: the guard did not
+        // have to discard the whole result.
+        assert!(out.contains("    a  : int,\n    bb : bool,"), "{out}");
+    }
+
     #[test]
     fn formatting_keeps_every_token_and_settles() {
         let dir =
@@ -835,36 +872,9 @@ function bar(x : int) -> int = {
             return; // the bundle moved; the other tests still run
         };
         let opts = FormatOptions::default();
-        // Breaking a list across lines adds a trailing comma, and upstream
-        // accepts one — `forall 'n 'm. (\n int('n),\n int('m),\n) -> bool`
-        // type-checks — so a comma immediately before a closing delimiter is
-        // dropped from both sides. That is not a "compare loosely"
-        // allowance: it is the one token the grammar lets a formatter add,
-        // and the first version of this test reported it as corruption.
-        let tokens = |text: &str| -> Vec<(parser::SyntaxKind, String)> {
-            let (root, _) = syntax::parse_text(text);
-            let raw: Vec<(parser::SyntaxKind, String)> = root
-                .descendants_with_tokens()
-                .filter_map(|el| el.into_token())
-                .filter(|t| !t.kind().is_trivia())
-                .map(|t| (t.kind(), t.text().to_string()))
-                .collect();
-            raw.iter()
-                .enumerate()
-                .filter(|(i, (kind, _))| {
-                    *kind != parser::SyntaxKind::COMMA
-                        || !matches!(
-                            raw.get(i + 1).map(|(k, _)| *k),
-                            Some(
-                                parser::SyntaxKind::R_PAREN
-                                    | parser::SyntaxKind::R_CURLY
-                                    | parser::SyntaxKind::R_BRACK
-                            )
-                        )
-                })
-                .map(|(_, t)| t.clone())
-                .collect()
-        };
+        // Every token but whitespace, comments included: what the
+        // formatter's own guard compares.
+        let tokens = significant_tokens;
 
         let mut checked = 0usize;
         for entry in entries.flatten() {

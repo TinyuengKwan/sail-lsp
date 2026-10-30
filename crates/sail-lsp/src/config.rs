@@ -9,13 +9,13 @@
 
 use std::collections::HashSet;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Top-level Sail LSP configuration.
 /// has its own sub-config struct.
 /// Deserialized from JSON via `workspace/didChangeConfiguration`.
 /// Missing fields retain defaults via `#[serde(default)]`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 #[derive(Default)]
 pub struct SailLspConfig {
@@ -41,14 +41,14 @@ pub struct SailLspConfig {
 ///
 /// Off by default: it shells out to a binary that may not be installed, and
 /// a language server that spawns processes nobody asked for is a surprise.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct FlycheckConfig {
     /// Whether to run it at all.
     pub enable: bool,
     /// The binary. `sail` on `PATH` unless the user says otherwise.
     pub command: String,
-    /// Arguments before the file list — `--config`, `-D`, an `$include` path.
+    /// Extra compiler arguments — `--config`, `--strict-bitvector`, an `$include` path.
     pub extra_args: Vec<String>,
 }
 
@@ -59,7 +59,7 @@ impl Default for FlycheckConfig {
 }
 
 /// Diagnostics-related settings.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct DiagnosticsConfig {
     /// Master enable/disable for diagnostics.
@@ -80,7 +80,7 @@ pub struct DiagnosticsConfig {
 }
 
 /// Inlay hints settings.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct InlayHintsConfig {
     /// Master enable for inlay hints.
@@ -98,7 +98,7 @@ pub struct InlayHintsConfig {
 }
 
 /// Completion settings.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct CompletionConfig {
     /// Master enable for completions.
@@ -118,7 +118,7 @@ pub struct CompletionConfig {
 }
 
 /// Code lens settings.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct CodeLensConfig {
     /// Master enable for code lenses.
@@ -127,12 +127,10 @@ pub struct CodeLensConfig {
     pub references: bool,
     /// Show implementation counts.
     pub implementations: bool,
-    /// Show runnable lenses for `main` and `$[test]` functions.
-    pub runnables: bool,
 }
 
 /// Hover display settings.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct HoverConfig {
     /// Show documentation in hover.
@@ -146,14 +144,16 @@ pub struct HoverConfig {
 }
 
 /// Semantic tokens settings.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct SemanticTokensConfig {
     pub enable: bool,
 }
 
-/// Project variables have the same boolean/string values as Sail assignments.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+/// A manifest variable's value. A JSON boolean is a boolean and a JSON
+/// string is a string, even `"true"`: unlike `sail --variable`, which reads a
+/// bare `true`/`false` as a boolean, the JSON type says which one is meant.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum ProjectVariableValue {
     Bool(bool),
@@ -161,7 +161,7 @@ pub enum ProjectVariableValue {
 }
 
 /// Workspace settings.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct WorkspaceConfig {
     /// Match Sail's --strict-bitvector mode (natural-number vector lengths).
@@ -322,7 +322,7 @@ impl Default for CompletionConfig {
 
 impl Default for CodeLensConfig {
     fn default() -> Self {
-        Self { enable: true, references: true, implementations: true, runnables: true }
+        Self { enable: true, references: true, implementations: true }
     }
 }
 
@@ -442,6 +442,25 @@ impl SailLspConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What the VS Code extension sends — the whole `sail-lsp` section, as
+    /// `package.json` declares it — is read without a complaint, so the
+    /// extension's settings and the server's cannot drift apart silently.
+    #[test]
+    fn the_extension_settings_section_is_understood() {
+        let package: serde_json::Value =
+            serde_json::from_str(include_str!("../../../editors/code/package.json")).unwrap();
+        let properties = package["contributes"]["configuration"]["properties"].as_object().unwrap();
+        let mut section = serde_json::Map::new();
+        for (key, schema) in properties {
+            let (group, field) = key.strip_prefix("sail-lsp.").unwrap().split_once('.').unwrap();
+            let group = section.entry(group).or_insert_with(|| serde_json::json!({}));
+            group[field] = schema["default"].clone();
+        }
+        let (config, errors) = SailLspConfig::from_json(&serde_json::Value::Object(section));
+        assert_eq!(errors, Vec::<String>::new());
+        assert!(!config.flycheck.enable);
+    }
 
     #[test]
     fn default_config() {

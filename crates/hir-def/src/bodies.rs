@@ -639,8 +639,12 @@ impl CallableBodies {
                 let id = builder.alloc_expr(Expr::Missing, Span::new(0, 0));
                 let (store, expr_source_map) = builder.finish();
                 let body = Body::new(store, vec![], id);
-                let source_map =
-                    BodySourceMap { file_id: None, store: expr_source_map, def_base: 0 };
+                let source_map = BodySourceMap {
+                    file_id: None,
+                    store: expr_source_map,
+                    def_base: 0,
+                    source_tokens: Vec::new(),
+                };
                 CallableBody {
                     name,
                     def_span: span,

@@ -187,20 +187,20 @@ fn complete_unqualified(
             // The cursor may sit exactly at the exclusive end of a body.
             // Resolve at the identifier being completed, which is still inside
             // that body's scope, rather than losing all local candidates.
-            let scope_offset = ctx.offset.saturating_sub(ctx.prefix.len());
-            let scope_names = if hir::source_order::declarations_for(ctx.db, file_text).is_some() {
-                ctx.sema.local_names_in_scope(file_text, scope_offset)
-            } else {
-                ctx.sema.names_in_scope(file_text, scope_offset)
-            };
-            for name in &scope_names {
-                let name_str: &str = name.as_str();
+            let locals = ctx.sema.locals_in_scope(file_text, ctx.semantic_offset());
+            for local in &locals {
+                let name_str: &str = local.name.as_str();
                 if !prefix_lower.is_empty()
                     && !name_str.to_ascii_lowercase().starts_with(&prefix_lower)
                 {
                     continue;
                 }
-                // Scope-aware names get high relevance (is_local = true)
+                // Scope-aware names get high relevance (is_local = true),
+                // and, like any candidate, a match with the expected type.
+                let type_match = ctx.expected_type.as_ref().and_then(|expected| {
+                    let ty = ctx.sema.type_of_pat(file_text, local.span.start)?;
+                    context::compute_type_match(ctx, expected, &ty)
+                });
                 acc.add(
                     crate::item::CompletionItem::new(
                         ide_db::defs::CompletionItemKind::Variable,
@@ -209,7 +209,12 @@ fn complete_unqualified(
                     .detail("scope")
                     .insert_text(name_str)
                     .filter_text(name_str)
-                    .relevance(CompletionRelevance { is_local: true, ..Default::default() }),
+                    .relevance(CompletionRelevance {
+                        is_local: true,
+                        exact_name_match: ctx.expected_name.as_deref() == Some(name_str),
+                        type_match,
+                        ..Default::default()
+                    }),
                 );
             }
         }
@@ -271,10 +276,24 @@ fn complete_unqualified(
                         if !seen.insert((member.clone(), false)) {
                             continue;
                         }
+                        // A member is a value of its owner, so a position
+                        // expecting the owner wants it.
+                        let type_match = ctx.expected_type.as_ref().and_then(|expected| {
+                            context::compute_type_match(
+                                ctx,
+                                expected,
+                                &hir::Ty::named(owner.as_str()),
+                            )
+                        });
                         acc.add(
                             CompletionItem::new(kind, member.clone())
                                 .detail(format!("{what} of {owner}"))
-                                .filter_text(member),
+                                .filter_text(member)
+                                .relevance(CompletionRelevance {
+                                    callable_context: ctx.is_callee && what == "constructor",
+                                    type_match,
+                                    ..Default::default()
+                                }),
                         );
                     }
                 }
@@ -350,9 +369,12 @@ fn complete_unqualified(
                     .and_then(|_| sig_info)
                     .map(|sig| ide_db::function_snippet(&decl.name, &sig.params));
                 // Populate CompletionRelevanceFn for functions + type_match.
-                let type_match = compute_fn_type_match(ctx, sig_info);
+                let type_match = (kind == CompletionItemKind::Function)
+                    .then(|| compute_fn_type_match(ctx, &decl.name))
+                    .flatten();
                 let relevance = if let Some(sig) = sig_info {
                     CompletionRelevance {
+                        callable_context: ctx.is_callee,
                         function: Some(CompletionRelevanceFn {
                             has_params: !sig.params.is_empty(),
                             has_self_param: false, // Sail has no self params
@@ -364,6 +386,8 @@ fn complete_unqualified(
                     }
                 } else {
                     CompletionRelevance {
+                        callable_context: ctx.is_callee && kind == CompletionItemKind::Function,
+                        type_match,
                         exact_name_match: ctx.expected_name.as_deref() == Some(&decl.name),
                         ..Default::default()
                     }
@@ -423,14 +447,14 @@ fn def_kind_to_completion(kind: hir::DefKind) -> Option<(CompletionItemKind, Str
 /// with the expected type in the completion context.
 fn compute_fn_type_match(
     ctx: &CompletionContext<'_>,
-    sig_info: Option<&ide_db::CallableSignature>,
+    name: &str,
 ) -> Option<CompletionRelevanceTypeMatch> {
-    let expected = ctx.expected_type.as_ref()?;
-    let sig = sig_info?;
-    let ret_str = sig.return_type.as_deref()?;
-    if ret_str.is_empty() {
-        return None;
-    }
-    let candidate_ty = hir::Ty::named(ret_str);
-    context::compute_type_match(expected, &candidate_ty)
+    ctx.sema
+        .completion_return_type_match(
+            ctx.file_text?,
+            ctx.semantic_offset(),
+            ctx.expected_type.as_ref()?,
+            name,
+        )
+        .map(context::relevance_type_match)
 }

@@ -1,7 +1,5 @@
-//! Type position completion — suggests types after `:` or `->`.
-//! Triggers when the cursor is in a type annotation context:
-//! - After `:` in `let x : |`, `val f : |`, function params
-//! - After `->` in return type position
+//! Type position completion — suggests types wherever the tree puts one
+//! (see `context::in_type`), or after a bare `:` or `->`.
 //!
 //! Suggests:
 //! - Built-in types (int, nat, bool, string, unit, real, bits, etc.)
@@ -9,7 +7,6 @@
 
 use crate::item::CompletionItem;
 use ide_db::defs::{CompletionItemKind, SymbolKind};
-use parser::Token;
 
 #[allow(unused_imports)]
 use ide_db::FileDb;
@@ -66,22 +63,6 @@ pub fn complete_type_pos(
     items
 }
 
-/// Check if the cursor is in a type-annotation position.
-///
-/// Returns true if the token before the cursor suggests a type context:
-/// - After `:` (type annotation)
-/// - After `->` (return type)
-/// - After `<->` (bidir mapping type)
-#[allow(dead_code)] // WIP: used by type-position completion provider
-pub fn is_type_position(prev_token: Option<&Token>) -> bool {
-    match prev_token {
-        Some(Token::Colon) => true,
-        Some(Token::RightArrow) => true,  // ->
-        Some(Token::DoubleArrow) => true, // <->
-        _ => false,
-    }
-}
-
 /// Collect type names from all workspace files.
 pub(crate) fn collect_type_names(
     ctx: &crate::context::CompletionContext<'_>,
@@ -91,6 +72,12 @@ pub(crate) fn collect_type_names(
     for (_, f) in all_files {
         let Some(tree) = f.item_tree() else { continue };
         for &id in tree.top_level_items() {
+            // Prefix rejection first: it is a comparison, and visibility is
+            // a resolution per item. Asking visibility of every type in the
+            // workspace cost 66 ms per type-position query on sail-riscv.
+            if !id.name(tree).as_str().starts_with(ctx.prefix) {
+                continue;
+            }
             if !ctx.can_see_item(*f, tree, id) {
                 continue;
             }
@@ -119,30 +106,5 @@ mod tests {
     #[test]
     fn builtin_type_count() {
         assert_eq!(BUILTIN_TYPES.len(), 14);
-    }
-
-    #[test]
-    fn is_type_pos_after_colon() {
-        assert!(is_type_position(Some(&Token::Colon)));
-    }
-
-    #[test]
-    fn is_type_pos_after_right_arrow() {
-        assert!(is_type_position(Some(&Token::RightArrow)));
-    }
-
-    #[test]
-    fn is_type_pos_after_double_arrow() {
-        assert!(is_type_position(Some(&Token::DoubleArrow)));
-    }
-
-    #[test]
-    fn is_type_pos_not_after_keyword() {
-        assert!(!is_type_position(Some(&Token::KwFunction)));
-    }
-
-    #[test]
-    fn is_type_pos_none() {
-        assert!(!is_type_position(None));
     }
 }

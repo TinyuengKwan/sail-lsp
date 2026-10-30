@@ -1,3 +1,4 @@
+# Regenerated 2026-10-29; Sail ac09f8870b9d85e528e2a3436150b03b9d805d40, default bitvector mode, SAIL_DIR=/home/clair/tinyueng_workplace/sail.
 # Which mutants upstream Sail rejects — the oracle for `mutation_check`.
 #
 # Regenerate with:
@@ -87,6 +88,7 @@ REJECTED bv_simple_index_bit.sail#arity#0	dropped last arg `bit`
 REJECTED bv_simple_index_bit.sail#arity#2	dropped last arg `bit`
 ACCEPTED bv_simple_index_bit.sail#ret#0	-> bit became -> bool
 REJECTED bv_simple_index_bit.sail#ret#2	-> bit became -> bool
+REJECTED case_attribute.sail#ret#0	-> int became -> bool
 REJECTED cast_lexp1.sail#ret#0	-> int became -> bool
 REJECTED cast_lexp2.sail#ret#0	-> int became -> bool
 REJECTED cast_simple.sail#range#0	range(.., 10) -> range(.., 9)
@@ -235,6 +237,8 @@ REJECTED foreach_var_updates.sail#ret#2	-> int became -> bool
 REJECTED fpthreesimp.sail#bits#0	bits(1) -> bits(2)
 REJECTED fpthreesimp.sail#argorder#0	(N, sign) -> (sign, N)
 REJECTED fpthreesimp.sail#arity#0	dropped last arg `sign`
+REJECTED funcl_attribute.sail#ret#0	-> int became -> bool
+REJECTED funcl_doc.sail#ret#0	-> int became -> bool
 REJECTED funcl_guard.sail#bits#0	bits(4) -> bits(5)
 REJECTED funcl_guard.sail#ret#0	-> int became -> bool
 REJECTED guards.sail#ret#0	-> int became -> bool
@@ -335,7 +339,6 @@ ACCEPTED overload_int_nat.sail#ret#1	-> string became -> bool
 REJECTED phantom_bitlist_struct.sail#field#0	field `bits` renamed away
 REJECTED phantom_num.sail#argorder#0	(n, _) -> (_, n)
 REJECTED phantom_num.sail#arity#0	dropped last arg `_`
-REJECTED phantom_num.sail#ret#0	-> int became -> bool
 REJECTED plus_one_unify.sail#ret#0	-> int became -> bool
 REJECTED poly_struct_infer.sail#field#0	field `f1` renamed away
 REJECTED poly_struct_infer.sail#field#2	field `f3` renamed away
@@ -372,6 +375,7 @@ ACCEPTED pure_record3.sail#arity#0	dropped last arg `dec`
 ACCEPTED pure_record3.sail#arity#1	dropped last arg `dec`
 REJECTED pure_record3.sail#field#0	field `N` renamed away
 REJECTED pure_record3.sail#field#1	field `Z` renamed away
+REJECTED rec_measure.sail#ret#0	-> nat became -> bool
 REJECTED recursion.sail#ret#0	-> int became -> bool
 SKIPPED reg_32_64/v1.sail#bits#0
 SKIPPED reg_32_64/v1.sail#bits#4
@@ -403,7 +407,6 @@ ACCEPTED reg_ref.sail#range#0	range(.., 10) -> range(.., 9)
 REJECTED reg_ref.sail#range#1	range(.., 10) -> range(.., 9)
 ACCEPTED return_simple3.sail#argorder#0	(N, x) -> (x, N)
 REJECTED return_simple3.sail#arity#0	dropped last arg `x`
-REJECTED return_simple3.sail#ret#0	-> int became -> bool
 REJECTED scattered_mapping_doc.sail#ret#0	-> int became -> bool
 REJECTED set_constraint.sail#ret#0	-> int became -> bool
 ACCEPTED shadow_leak_check.sail#argorder#0	(x, y) -> (y, x)
@@ -475,6 +478,12 @@ REJECTED tuple_type_cast.sail#arity#0	dropped last arg `n`
 REJECTED tuple_type_cast.sail#arity#1	dropped last arg `n`
 REJECTED tuple_type_cast.sail#ret#0	-> int became -> bool
 REJECTED tuple_type_cast.sail#ret#1	-> int became -> bool
+REJECTED typ_pat_bitvector.sail#bits#0	bits(4) -> bits(5)
+REJECTED typ_pat_synonym.sail#bits#0	bits(4) -> bits(5)
+ACCEPTED typ_pat_synonym.sail#bits#3	bits(4) -> bits(5)
+REJECTED typ_pat_synonym.sail#arity#0	dropped last arg `int`
+REJECTED typ_pat_synonym.sail#arity#2	dropped last arg `int`
+REJECTED typ_pat_synonym.sail#ret#0	-> int became -> bool
 REJECTED type_div.sail#ret#0	-> int became -> bool
 REJECTED type_div.sail#ret#1	-> int became -> bool
 REJECTED type_if_then_else.sail#ret#0	-> int became -> bool

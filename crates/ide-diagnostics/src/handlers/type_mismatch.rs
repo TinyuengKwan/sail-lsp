@@ -159,7 +159,17 @@ fn fixes(ctx: &DiagnosticsContext<'_>, d: &TypeMismatch) -> Option<Vec<Assist>> 
             range,
         )
     };
-    Some(vec![wrap("unsigned"), wrap("signed")])
+    // Do not propose a call that is absent or shadowed by a local binding.
+    // Constrained numeric destinations require a proof we do not have here.
+    if d.expected.ctor_name() != Some("int") {
+        return None;
+    }
+    let fixes = ["unsigned", "signed"].into_iter().filter(|name| {
+        ctx.sema.callable_types_at(file, usize::from(range.start()), name).iter().any(|ty| {
+            matches!(ty.kind(), hir::TyKind::FnPtr(sig) if sig.params.len() == 1 && is_bitvector(&sig.params[0]) && is_integer(&sig.ret))
+        })
+    }).map(wrap).collect::<Vec<_>>();
+    (!fixes.is_empty()).then_some(fixes)
 }
 
 fn is_integer(ty: &hir::Ty) -> bool {
@@ -190,12 +200,23 @@ mod tests {
     #[test]
     fn if_diagnostic_highlights_keyword_but_keeps_the_full_fix_target() {
         use syntax::AstNode;
-        let source = "function f() = if true then 0x1 else 0x2\n";
-        let file = ide_db::test_utils::TestFile::new(source);
+        let source = "val unsigned : bits(4) -> int\nfunction f() = if true then 0x1 else 0x2\n";
+        let mut db = ide_db::root_database::RootDatabase::default();
+        let id = base_db::FileId::from_raw(0);
+        let mut change = ide_db::apply_change::Change::new();
+        change.change_file(id, source);
+        change.set_source_project(base_db::preprocess::SourceProject {
+            roots: vec![id],
+            paths: vec![("/main.sail".into(), id)],
+            modules: base_db::module_graph::ModuleGraph { globals: vec![id], ..Default::default() },
+            ..Default::default()
+        });
+        db.apply_change(change);
+        let input = db.files().file_text(id).unwrap();
         let config = crate::DiagnosticsConfig::new();
-        let mut ctx = crate::tests::test_ctx(file.db(), &config);
-        ctx.file = Some(file.input());
-        let root = ctx.sema.parse(file.input()).unwrap();
+        let mut ctx = crate::tests::test_ctx(&db, &config);
+        ctx.file = Some(input);
+        let root = ctx.sema.parse(input).unwrap();
         let node = root.descendants().find_map(syntax::ast::IfExpr::cast).unwrap();
         let ptr = syntax::SyntaxNodePtr::new(node.syntax());
         let diagnostic = super::type_mismatch(

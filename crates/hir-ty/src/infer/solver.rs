@@ -226,6 +226,17 @@ fn solve_finite(
     if !assumptions.is_empty() && entailed(expr, subst, assumptions) {
         return ConstraintStatus::Satisfied;
     }
+    // Refute the entire goal as well as proving its conjuncts. A nested
+    // constructor predicate may contradict a symbolic caller bound even
+    // when neither index has a concrete value (n < d versus d < n).
+    // Contradictory assumptions were handled above, before adding the goal.
+    if !assumptions.is_empty() {
+        let mut with_goal = assumptions.to_vec();
+        with_goal.push(expr.clone());
+        if super::integer::contradictory(&with_goal, subst) {
+            return ConstraintStatus::Failed;
+        }
+    }
     // Split only domains explicitly supplied by positive membership facts.
     // Every member must prove the goal; a partial enumeration is never proof.
     // One shared state budget bounds the entire Cartesian search.
@@ -674,6 +685,42 @@ fn arithmetic_ordering(
     false
 }
 
+/// For nonnegative integer e and positive d = 2^k, d <= 2^e
+/// implies k <= e, hence d divides 2^e. Do not materialize the power:
+/// configuration exponents may be arbitrarily large.
+fn power_remainder_is_zero(
+    remainder: &crate::ty::NumericExpr,
+    subst: &Subst,
+    assumptions: &[ConstraintExpr],
+) -> bool {
+    use crate::ty::NumericExpr as N;
+    let N::Mod(power, divisor) = remainder else { return false };
+    let N::Exp(exponent) = power.as_ref() else { return false };
+    let Some(divisor_value) = eval_numeric_expr(divisor, subst, assumptions) else { return false };
+    if divisor_value <= 0 || !(divisor_value as u64).is_power_of_two() {
+        return false;
+    }
+    let nonnegative =
+        ConstraintExpr::Compare { lhs: N::Const(0), op: CompareOp::Lte, rhs: (**exponent).clone() };
+    if solve_inner(&nonnegative, subst, assumptions) != ConstraintStatus::Satisfied {
+        return false;
+    }
+    let enough_exponent = ConstraintExpr::Compare {
+        lhs: N::Const((divisor_value as u64).trailing_zeros().into()),
+        op: CompareOp::Lte,
+        rhs: (**exponent).clone(),
+    };
+    if solve_inner(&enough_exponent, subst, assumptions) == ConstraintStatus::Satisfied {
+        return true;
+    }
+    let enough_width = ConstraintExpr::Compare {
+        lhs: (**divisor).clone(),
+        op: CompareOp::Lte,
+        rhs: (**power).clone(),
+    };
+    constraint_implied_by_assumptions(assumptions, &enough_width, subst)
+}
+
 fn solve_inner(
     expr: &ConstraintExpr,
     subst: &Subst,
@@ -693,6 +740,18 @@ fn solve_inner(
         ConstraintExpr::Bool(true) => ConstraintStatus::Satisfied,
         ConstraintExpr::Bool(false) => ConstraintStatus::Failed,
         ConstraintExpr::Compare { lhs, op, rhs } => {
+            if matches!(op, CompareOp::Eq | CompareOp::Neq)
+                && ((eval_numeric_expr(rhs, subst, assumptions) == Some(0)
+                    && power_remainder_is_zero(lhs, subst, assumptions))
+                    || (eval_numeric_expr(lhs, subst, assumptions) == Some(0)
+                        && power_remainder_is_zero(rhs, subst, assumptions)))
+            {
+                return if *op == CompareOp::Eq {
+                    ConstraintStatus::Satisfied
+                } else {
+                    ConstraintStatus::Failed
+                };
+            }
             let left = super::constraint::subst_numeric_expr(lhs, subst);
             let right = super::constraint::subst_numeric_expr(rhs, subst);
             if arithmetic_ordering(&left, *op, &right, subst, assumptions) {
@@ -820,6 +879,75 @@ mod tests {
     }
 
     #[test]
+    fn power_of_two_divisibility_from_bounded_element_width_without_smt() {
+        let facts: Vec<_> = [
+            "3 <= vlen_exp & vlen_exp <= 16",
+            "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+            "xlen in {32, 64}",
+            "'sew in {8, 16, 32, 64}",
+            "'sew <= 2 ^ vlen_exp",
+        ]
+        .iter()
+        .map(|s| parse_constraint_text(s))
+        .collect();
+        let goal = parse_constraint_text("2 ^ vlen_exp % 'sew == 0");
+        assert_eq!(
+            super::solve_without_smt(&goal, &Subst::default(), &facts),
+            ConstraintStatus::Satisfied
+        );
+    }
+
+    #[test]
+    fn power_divisibility_rule_requires_its_premises() {
+        let prove = |goal: &str, facts: &[&str]| {
+            let facts: Vec<_> = facts.iter().map(|s| parse_constraint_text(s)).collect();
+            super::solve_without_smt(&parse_constraint_text(goal), &Subst::default(), &facts)
+        };
+        assert_eq!(prove("2 ^ n % 8 == 0", &["n >= 3"]), ConstraintStatus::Satisfied);
+        assert_eq!(prove("0 != 2 ^ n % 8", &["n >= 3"]), ConstraintStatus::Failed);
+        assert_ne!(prove("2 ^ n % 8 == 0", &["n >= 0"]), ConstraintStatus::Satisfied);
+        assert_ne!(prove("2 ^ n % 3 == 0", &["n >= 3"]), ConstraintStatus::Satisfied);
+        assert_ne!(prove("2 ^ n % 0 == 0", &["n >= 3"]), ConstraintStatus::Satisfied);
+        assert_ne!(prove("2 ^ n % 8 == 0", &["n == 2"]), ConstraintStatus::Satisfied);
+        assert_eq!(prove("2 ^ n % 64 == 0", &["n >= 1000000"]), ConstraintStatus::Satisfied);
+        // Check the sufficient rule against exact arithmetic, including the
+        // d <= 2^e premise that comes from a constructor's dependent bounds.
+        for exponent in 0..10 {
+            for divisor in 0..70 {
+                let remainder = parse_constraint_text(&format!("2 ^ n % {divisor} == 0"));
+                let crate::ty::ConstraintExpr::Compare { lhs, .. } = remainder else {
+                    unreachable!()
+                };
+                let facts = [parse_constraint_text(&format!("n == {exponent}"))];
+                if super::power_remainder_is_zero(&lhs, &Subst::default(), &facts) {
+                    assert!(divisor != 0 && (1u64 << exponent).is_multiple_of(divisor));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nested_goal_contradicts_symbolic_bounds_without_smt() {
+        let facts = [parse_constraint_text("'n < 'd")];
+        let goal = parse_constraint_text("'n in {32, 64} & (0 <= 'd & 'd < 'n)");
+        assert_eq!(
+            super::solve_without_smt(&goal, &Subst::default(), &facts),
+            ConstraintStatus::Failed
+        );
+        // Satisfiable alternatives must not be flattened into a conjunction.
+        let alternative = parse_constraint_text("'d < 'n | 'n < 'd");
+        assert_eq!(
+            super::solve_without_smt(&alternative, &Subst::default(), &facts),
+            ConstraintStatus::Satisfied
+        );
+        let impossible = [parse_constraint_text("'n < 'd & 'd < 'n")];
+        assert_eq!(
+            super::solve_without_smt(&goal, &Subst::default(), &impossible),
+            ConstraintStatus::Satisfied
+        );
+    }
+
+    #[test]
     #[cfg(feature = "z3-solver")]
     fn quotient_premises_are_sufficient_on_signed_integer_domains() {
         for source in ["1 <= div('a * 'b, 'd)", "div('a * 'b, 'd) <= 'b", "div('b * 'a, 'd) <= 'b"]
@@ -871,13 +999,14 @@ mod tests {
         assert_eq!(check("'n <= 'd", &["'n <= 'd"]), ConstraintStatus::Satisfied);
     }
 
-    /// One assumption at a time. `'a < 'b` and `'b < 'c` do not chain in
-    /// the arithmetic-free path, and saying `Unknown` is the honest answer
-    /// rather than a guess. Z3 does chain them, which is what the optional
-    /// feature is for — so this holds only without it.
+    /// Difference constraints prove this contradiction without SMT, including
+    /// in builds that also provide the optional SMT backend.
     #[test]
-    #[cfg(not(feature = "z3-solver"))]
-    fn orderings_do_not_chain() {
-        assert_eq!(check("'c < 'a", &["'a < 'b", "'b < 'c"]), ConstraintStatus::Unknown);
+    fn transitive_difference_bounds_refute_reverse_ordering_without_smt() {
+        let facts = [parse_constraint_text("'a < 'b"), parse_constraint_text("'b < 'c")];
+        assert_eq!(
+            super::solve_without_smt(&parse_constraint_text("'c < 'a"), &Subst::default(), &facts),
+            ConstraintStatus::Failed,
+        );
     }
 }

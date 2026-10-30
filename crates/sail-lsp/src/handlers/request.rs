@@ -611,51 +611,36 @@ pub(crate) fn handle_folding_range(
 /// Uses `editor.action.showReferences` — a standard LSP command
 /// supported by VS Code, neovim, and other LSP clients.
 pub(crate) fn handle_code_lens_resolve(
-    _snap: GlobalStateSnapshot,
+    snap: GlobalStateSnapshot,
     mut params: CodeLens,
 ) -> anyhow::Result<CodeLens> {
-    if let Some(data) = params.data.as_ref() {
-        if let Some(title) = _snap.analysis.code_lens_title(data)? {
-            let kind = data.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-            let name = data.get("name").and_then(|v| v.as_str()).unwrap_or("");
-
-            // Try to build a showReferences command with the lens position.
-            // This requires resolving the symbol's URI + position.
-            let command = if !name.is_empty() && (kind == "refs" || kind == "impls") {
-                // The code lens range start is the position to show references for.
-                // The URI comes from the original request (stored in data or inferred).
-                // For now, use the position from the lens range itself.
-                let uri = data
-                    .get("uri")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| lsp_types::Url::parse(s).ok());
-
-                if let Some(uri) = uri {
-                    // Full showReferences: uri, position, locations
-                    Command {
-                        title,
-                        command: "editor.action.showReferences".to_string(),
-                        arguments: Some(vec![
-                            serde_json::to_value(&uri).unwrap(),
-                            serde_json::to_value(params.range.start).unwrap(),
-                            serde_json::to_value::<Vec<lsp_types::Location>>(vec![]).unwrap(),
-                        ]),
-                    }
-                } else {
-                    // Fallback: display-only (no URI available for command)
-                    Command { title, command: String::new(), arguments: None }
-                }
-            } else if kind == "runnable" {
-                // Runnable lens: display-only title for now.
-                // A future integration could wire this to a Sail test runner
-                // command (e.g. `sail.runTest` / `sail.runMain`).
-                Command { title, command: String::new(), arguments: None }
-            } else {
-                Command { title, command: String::new(), arguments: None }
-            };
-            params.command = Some(command);
-        }
-    }
+    let Some(data) = params.data.as_ref() else { return Ok(params) };
+    let Some((title, sites)) = snap.analysis.resolve_code_lens(data)? else {
+        return Ok(params);
+    };
+    let uri = data.get("uri").and_then(|v| v.as_str()).and_then(|s| Url::parse(s).ok());
+    let locations: Vec<lsp_types::Location> = sites
+        .into_iter()
+        .filter_map(|(file_id, range)| {
+            let url = snap.analysis.url_for_file_id(file_id)?.clone();
+            let line_index = line_index_for(&snap, &url);
+            Some(lsp_types::Location::new(url, crate::to_proto::range(&line_index, range)))
+        })
+        .collect();
+    // `showReferences` with the sites the title counted; a lens with nothing
+    // to show is a title alone.
+    params.command = Some(match uri {
+        Some(uri) if !locations.is_empty() => Command {
+            title,
+            command: "editor.action.showReferences".to_string(),
+            arguments: Some(vec![
+                serde_json::to_value(&uri)?,
+                serde_json::to_value(params.range.start)?,
+                serde_json::to_value(locations)?,
+            ]),
+        },
+        _ => Command { title, command: String::new(), arguments: None },
+    });
     Ok(params)
 }
 
@@ -671,8 +656,7 @@ pub(crate) fn handle_on_type_formatting(
         &line_index_for(&snap, uri),
         params.text_document_position.position,
     );
-    let opts = crate::from_proto::format_options(&params.options);
-    match snap.analysis.on_type_formatting(uri, lc, &params.ch, &opts)? {
+    match snap.analysis.on_type_formatting(uri, lc, &params.ch)? {
         Some(edits) => Ok(Some(ide_edits_to_lsp(edits, &sf))),
         None => Ok(None),
     }
@@ -727,7 +711,7 @@ pub(crate) fn handle_code_action(
     };
     let source_fingerprint = crate::code_action_helpers::source_fingerprint(sf.text());
     let fix_all_kind = crate::code_action_helpers::sail_source_fix_all_kind();
-    let actions: Vec<crate::lsp::ext::CodeAction> = snap
+    let mut actions: Vec<crate::lsp::ext::CodeAction> = snap
         .analysis
         .code_actions(uri, ide_range, &diagnostics, &format, &assists)?
         .into_iter()
@@ -758,12 +742,12 @@ pub(crate) fn handle_code_action(
             }
             let mut edit = if snap.client_caps.snippet_text_edit_support() && !creates_files {
                 crate::lsp::ext::SnippetWorkspaceEdit {
-                    document_changes: None,
                     changes: Some(crate::to_proto::snippet_workspace_edit(
                         &action.source_change,
                         &url,
                         &line_index,
                     )),
+                    ..Default::default()
                 }
             } else {
                 let plain = crate::to_proto::workspace_edit(
@@ -807,6 +791,18 @@ pub(crate) fn handle_code_action(
             })
         })
         .collect();
+    // A file no project loads is fixed in the manifest, not in the file.
+    let quickfix = lsp_types::CodeActionKind::QUICKFIX;
+    if crate::code_action_helpers::code_action_kind_allowed(&params.context.only, &quickfix) {
+        let unlinked: Vec<_> = params
+            .context
+            .diagnostics
+            .iter()
+            .filter(|d| matches!(&d.code, Some(NumberOrString::String(c)) if c == "unlinked-file"))
+            .cloned()
+            .collect();
+        actions.extend(crate::manifest_editing::add_to_project(&snap, uri, &unlinked));
+    }
 
     if actions.is_empty() {
         Ok(None)
@@ -843,7 +839,7 @@ pub(crate) fn handle_code_action_resolve(
         if !valid {
             return Err(super::dispatch::RequestError {
                 code: lsp_server::ErrorCode::ContentModified,
-                message: "The source changed since the code action was requested",
+                message: "The source changed since the code action was requested".into(),
             }
             .into());
         }
@@ -859,7 +855,7 @@ pub(crate) fn handle_code_action_resolve(
         if !valid {
             return Err(super::dispatch::RequestError {
                 code: lsp_server::ErrorCode::ContentModified,
-                message: "The source changed since the extraction was requested",
+                message: "The source changed since the extraction was requested".into(),
             }
             .into());
         }
@@ -873,7 +869,8 @@ pub(crate) fn handle_code_action_resolve(
         let Some(change) = snap.analysis.resolve_auto_include(&request)? else {
             return Err(super::dispatch::RequestError {
                 code: lsp_server::ErrorCode::ContentModified,
-                message: "The include candidate is no longer applicable in this source context",
+                message: "The include candidate is no longer applicable in this source context"
+                    .into(),
             }
             .into());
         };
@@ -901,7 +898,7 @@ pub(crate) fn handle_code_action_resolve(
                 {
                     return Err(super::dispatch::RequestError {
                         code: lsp_server::ErrorCode::ContentModified,
-                        message: "The extraction destination already exists",
+                        message: "The extraction destination already exists".into(),
                     }
                     .into());
                 }
@@ -917,13 +914,17 @@ pub(crate) fn handle_completion(
 ) -> anyhow::Result<Option<CompletionResponse>> {
     let uri = &params.text_document_position.text_document.uri;
     let position = params.text_document_position.position;
+    if !snap.config.completion.enable {
+        return Ok(None);
+    }
+    if crate::manifest_editing::is_manifest(uri) {
+        let items = crate::manifest_editing::completion(&snap, uri, position);
+        return Ok(items.map(CompletionResponse::Array));
+    }
     let Some(file_id) = snap.analysis.file_id(uri) else {
         return Ok(None);
     };
     let line_col = crate::from_proto::line_col(&line_index_for(&snap, uri), position);
-    if !snap.config.completion.enable {
-        return Ok(None);
-    }
     let config = snap.config.completion.to_ide_config();
     let ide_items = snap.analysis.completions(file_id, line_col, &config)?;
     let line_index = line_index_for(&snap, uri);
@@ -965,7 +966,7 @@ pub(crate) fn handle_resolve_completion_item(
     if ide_item.import.is_some() && ide_item.additional_text_edits.is_empty() {
         return Err(super::dispatch::RequestError {
             code: lsp_server::ErrorCode::ContentModified,
-            message: "The include candidate is no longer applicable in this source context",
+            message: "The include candidate is no longer applicable in this source context".into(),
         }
         .into());
     }
@@ -1063,6 +1064,10 @@ pub(crate) fn handle_goto_definition(
 ) -> anyhow::Result<Option<GotoDefinitionResponse>> {
     let uri = &params.text_document_position_params.text_document.uri;
     let position = params.text_document_position_params.position;
+    if crate::manifest_editing::is_manifest(uri) {
+        let found = crate::manifest_editing::goto_definition(&snap, uri, position);
+        return Ok(found.filter(|l| !l.is_empty()).map(GotoDefinitionResponse::Array));
+    }
     let lc = crate::from_proto::line_col(&line_index_for(&snap, uri), position);
 
     // The resolution chain lives in `ide` — this converts the answer.
@@ -1212,7 +1217,6 @@ pub(crate) fn handle_code_lens(
     let config = ide::annotations::AnnotationConfig {
         annotate_references: snap.config.code_lens.references,
         annotate_impls: snap.config.code_lens.implementations,
-        annotate_runnables: snap.config.code_lens.runnables,
         ..Default::default()
     };
     let Some(ide_lenses) = snap.analysis.code_lenses(file_id, &config).ok() else {
@@ -1489,16 +1493,6 @@ pub(crate) fn handle_type_hierarchy_subtypes(
     Ok(Some(lsp_items))
 }
 
-/// Handle `experimental/ssr` — structural search-replace.
-pub(crate) fn handle_ssr(
-    _snap: GlobalStateSnapshot,
-    params: crate::lsp_ext::SsrParams,
-) -> anyhow::Result<lsp_types::WorkspaceEdit> {
-    let _rule: ide_ssr::SsrRule = params.query.parse()?;
-    // SSR infrastructure is in place; return empty edits for now.
-    Ok(lsp_types::WorkspaceEdit::default())
-}
-
 /// View the concrete syntax tree for a file.
 /// Registered as `sail-lsp/viewSyntaxTree`.
 pub(crate) fn handle_view_syntax_tree(
@@ -1584,6 +1578,58 @@ pub(crate) fn handle_effect_annotations(
     Ok(items)
 }
 
+/// The manifest entry that lists the file, else the entry of the file that
+/// `$include`s it.
+pub(crate) fn handle_open_project_manifest(
+    snap: GlobalStateSnapshot,
+    params: crate::lsp_ext::ProjectNavigationParams,
+) -> anyhow::Result<Option<Location>> {
+    let listed = |uri: &Url| {
+        snap.projects.values().find_map(|p| {
+            let (_, range) =
+                p.declarations.iter().flat_map(|m| &m.files).find(|(f, _)| f == uri)?;
+            Some(Location::new(Url::from_file_path(&p.manifest).ok()?, *range))
+        })
+    };
+    let uri = params.text_document.uri;
+    if let Some(entry) = listed(&uri) {
+        return Ok(Some(entry));
+    }
+    // Not listed: the entry of the listed file whose `$include`s reach it.
+    let mut seen = std::collections::HashSet::from([uri.clone()]);
+    let mut pending = vec![uri];
+    while let Some(file) = pending.pop() {
+        for site in snap.analysis.include_sites(&file)? {
+            if let Some(entry) = listed(&site.url) {
+                return Ok(Some(entry));
+            }
+            if seen.insert(site.url.clone()) {
+                pending.push(site.url);
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Module declarations listing the file, then `$include`s naming it.
+pub(crate) fn handle_parent_module(
+    snap: GlobalStateSnapshot,
+    params: crate::lsp_ext::ProjectNavigationParams,
+) -> anyhow::Result<Vec<Location>> {
+    let uri = params.text_document.uri;
+    let mut out = Vec::new();
+    for project in snap.projects.values() {
+        let Ok(manifest) = Url::from_file_path(&project.manifest) else { continue };
+        for module in &project.declarations {
+            if module.files.iter().any(|(f, _)| *f == uri) {
+                out.push(Location::new(manifest.clone(), module.name_range));
+            }
+        }
+    }
+    out.extend(file_locations_to_lsp(&snap.analysis.include_sites(&uri)?, &snap.analysis));
+    Ok(out)
+}
+
 /// Server analyzer status — internal diagnostics.
 /// Registered as `sail-lsp/analyzerStatus`.
 pub(crate) fn handle_sail_lsp_status(
@@ -1594,6 +1640,52 @@ pub(crate) fn handle_sail_lsp_status(
 
     let mut status = String::new();
     stdx::format_to!(status, "sail-lsp status\n");
+    stdx::format_to!(status, "  version:          {}\n", crate::version::version());
+    stdx::format_to!(
+        status,
+        "  executable:       {}\n",
+        std::env::current_exe()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|e| format!("unavailable: {e}"))
+    );
+    let mut workspace = snap.workspace_status;
+    workspace.roots.sort();
+    workspace.manifests.sort();
+    stdx::format_to!(
+        status,
+        "  workspace loaded: {}\n  reload pending:   {}\n",
+        workspace.loaded,
+        workspace.loading
+    );
+    stdx::format_to!(status, "  workspace roots:\n");
+    for root in workspace.roots {
+        stdx::format_to!(status, "    {root}\n");
+    }
+    stdx::format_to!(status, "  loaded manifests:\n");
+    for manifest in workspace.manifests {
+        stdx::format_to!(status, "    {}\n", manifest.display());
+    }
+    stdx::format_to!(
+        status,
+        "  standard library: {} ({})\n",
+        workspace.sail_dir.map(|p| p.display().to_string()).unwrap_or_else(|| "unavailable".into()),
+        workspace.sail_dir_origin
+    );
+    if let Some(error) = snap.project_error {
+        stdx::format_to!(
+            status,
+            "  project load error (previous model may be retained): {error}\n"
+        );
+    }
+    for error in workspace.config_errors {
+        stdx::format_to!(status, "  configuration error: {error}\n");
+    }
+    stdx::format_to!(
+        status,
+        "  effective settings (project changes require a successful reload):\n{}\n",
+        serde_json::to_string_pretty(&snap.config)?
+    );
+
     stdx::format_to!(status, "  files loaded:     {}\n", counts.files);
     stdx::format_to!(status, "  index symbols:    {}\n", counts.symbols);
     stdx::format_to!(status, "  include graph:    {} nodes\n", counts.include_nodes);
@@ -1620,4 +1712,68 @@ pub(crate) fn handle_view_include_graph(
         .clone()
         .with_include_graph_arc(snap.include_graph.clone())
         .render_include_graph()?)
+}
+
+/// SSR returns versioned preview edits. The client decides whether to apply them.
+pub(crate) fn handle_ssr(
+    snap: GlobalStateSnapshot,
+    params: crate::lsp_ext::SsrParams,
+) -> anyhow::Result<lsp_types::WorkspaceEdit> {
+    let uri = &params.position.text_document.uri;
+    let id = snap
+        .analysis
+        .file_id(uri)
+        .ok_or_else(|| anyhow::anyhow!("SSR context file is unavailable"))?;
+    let index = line_index_for(&snap, uri);
+    let position = crate::from_proto::line_col(&index, params.position.position);
+    let selections: Vec<_> = params
+        .selections
+        .into_iter()
+        .map(|range| crate::from_proto::text_range(&index, range))
+        .collect();
+    let excluded = snap
+        .analysis
+        .all_salsa_files()
+        .into_iter()
+        .filter_map(|(uri, _)| {
+            let id = snap.analysis.file_id(&uri)?;
+            snap.is_library(id).then_some(id)
+        })
+        .collect();
+    let change = snap
+        .analysis
+        .structural_search_replace(
+            id,
+            position,
+            &params.query,
+            params.parse_only,
+            &selections,
+            &excluded,
+        )?
+        .map_err(|e| super::dispatch::RequestError {
+            code: lsp_server::ErrorCode::InvalidParams,
+            message: e,
+        })?;
+    let plain = crate::to_proto::workspace_edit(
+        &change,
+        &|id| snap.analysis.url_for_file_id(id).cloned(),
+        &|id| snap.analysis.url_for_file_id(id).map(|uri| line_index_for(&snap, uri)),
+        false,
+    );
+    let changes = plain
+        .changes
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(uri, edits)| lsp_types::TextDocumentEdit {
+            text_document: lsp_types::OptionalVersionedTextDocumentIdentifier {
+                version: snap.document_versions.get(&uri).copied(),
+                uri,
+            },
+            edits: edits.into_iter().map(lsp_types::OneOf::Left).collect(),
+        })
+        .collect();
+    Ok(lsp_types::WorkspaceEdit {
+        document_changes: Some(lsp_types::DocumentChanges::Edits(changes)),
+        ..Default::default()
+    })
 }

@@ -1,0 +1,2608 @@
+{
+  "status": "complete",
+  "scope": [
+    "burst latency profiling and improvements",
+    "trivia-only edits reuse inference with correct source mapping",
+    "two existential constructor mutation misses",
+    "diagnostic location and explanation audit",
+    "sustained session memory and cache budgets",
+    "three budget-exhausted proof obligations"
+  ],
+  "baseline": "2026-10-29-ra-followup.json",
+  "progress": {
+    "latency": {
+      "status": "implemented and measured in three isolated paired runs; final latest-version interactions verified in repeat probes",
+      "artifacts": [
+        "target/ra-improvements-2026-10-30/editor-burst-phases.json",
+        "target/ra-improvements-2026-10-30/latency-burst-phases.json"
+      ],
+      "interpretation": "In three paired 40-edit bursts, successful hover/completion P95 improves from about 899\u2013912ms to 737\u2013754ms. Update work drops; queue latency was not the bottleneck. No navigation speedup claim: subsequent edits cancel 31\u201335 old definition requests, consistent with RA NO_RETRY policy. Latest-version hover/completion/definition all return usable results after each repeat.",
+      "implementation": "file_fixities reads only top-level fixity declarations from semantic CST; input updates no longer force full ItemTree lowering and generated expansion.",
+      "isolated_comparison": {
+        "before": {
+          "artifact": "target/ra-improvements-2026-10-30/latency-before-fixity.json",
+          "phases_artifact": "target/ra-improvements-2026-10-30/latency-before-fixity-phases.json",
+          "server_sha256": "7172103f7b2683150d97c8ac95ca7c4c895890751dce4333d9b4f3eeb03fd15f",
+          "exit_code": 0,
+          "editing": {
+            "editing-burst:textDocument/hover": {
+              "count": 40,
+              "p50_ms": 531.052,
+              "p95_ms": 910.967,
+              "p99_ms": 976.188,
+              "max_ms": 976.188,
+              "errors": []
+            },
+            "editing-burst:textDocument/completion": {
+              "count": 40,
+              "p50_ms": 531.174,
+              "p95_ms": 911.914,
+              "p99_ms": 961.311,
+              "max_ms": 961.311,
+              "errors": []
+            },
+            "editing-burst:textDocument/definition": {
+              "count": 40,
+              "p50_ms": 526.643,
+              "p95_ms": 909.091,
+              "p99_ms": 932.953,
+              "max_ms": 932.953,
+              "errors": []
+            }
+          },
+          "apply_change": {
+            "apply_change:cancel_us": {
+              "count": 44,
+              "p50_ms": 2.759,
+              "p95_ms": 6.101,
+              "max_ms": 6.817
+            },
+            "apply_change:inputs_us": {
+              "count": 44,
+              "p50_ms": 0.853,
+              "p95_ms": 1.18,
+              "max_ms": 81.111
+            },
+            "apply_change:plan_us": {
+              "count": 44,
+              "p50_ms": 10.865,
+              "p95_ms": 11.537,
+              "max_ms": 526.69
+            },
+            "process_changes:apply_us": {
+              "count": 42,
+              "p50_ms": 15.154,
+              "p95_ms": 18.605,
+              "max_ms": 90.969
+            }
+          }
+        },
+        "after": {
+          "artifact": "target/ra-improvements-2026-10-30/latency-after-fixity.json",
+          "phases_artifact": "target/ra-improvements-2026-10-30/latency-after-fixity-phases.json",
+          "server_sha256": "8bf6f797a994a65cc888c968cdfcc71e1f82e2194210702e63efadfb6e75cfb5",
+          "exit_code": 0,
+          "editing": {
+            "editing-burst:textDocument/hover": {
+              "count": 40,
+              "p50_ms": 431.401,
+              "p95_ms": 740.05,
+              "p99_ms": 794.499,
+              "max_ms": 794.499,
+              "errors": []
+            },
+            "editing-burst:textDocument/completion": {
+              "count": 40,
+              "p50_ms": 432.527,
+              "p95_ms": 740.22,
+              "p99_ms": 779.295,
+              "max_ms": 779.295,
+              "errors": []
+            },
+            "editing-burst:textDocument/definition": {
+              "count": 40,
+              "p50_ms": 429.158,
+              "p95_ms": 738.388,
+              "p99_ms": 758.287,
+              "max_ms": 758.287,
+              "errors": [
+                {
+                  "code": -32802,
+                  "message": "server cancelled the request"
+                },
+                {
+                  "code": -32802,
+                  "message": "server cancelled the request"
+                },
+                {
+                  "code": -32802,
+                  "message": "server cancelled the request"
+                },
+                {
+                  "code": -32802,
+                  "message": "server cancelled the request"
+                },
+                {
+                  "code": -32802,
+                  "message": "server cancelled the request"
+                },
+                {
+                  "code": -32802,
+                  "message": "server cancelled the request"
+                },
+                {
+                  "code": -32802,
+                  "message": "server cancelled the request"
+                },
+                {
+                  "code": -32802,
+                  "message": "server cancelled the request"
+                },
+                {
+                  "code": -32802,
+                  "message": "server cancelled the request"
+                },
+                {
+                  "code": -32802,
+                  "message": "server cancelled the request"
+                },
+                {
+                  "code": -32802,
+                  "message": "server cancelled the request"
+                },
+                {
+                  "code": -32802,
+                  "message": "server cancelled the request"
+                },
+                {
+                  "code": -32802,
+                  "message": "server cancelled the request"
+                },
+                {
+                  "code": -32802,
+                  "message": "server cancelled the request"
+                },
+                {
+                  "code": -32802,
+                  "message": "server cancelled the request"
+                },
+                {
+                  "code": -32802,
+                  "message": "server cancelled the request"
+                },
+                {
+                  "code": -32802,
+                  "message": "server cancelled the request"
+                },
+                {
+                  "code": -32802,
+                  "message": "server cancelled the request"
+                },
+                {
+                  "code": -32802,
+                  "message": "server cancelled the request"
+                },
+                {
+                  "code": -32802,
+                  "message": "server cancelled the request"
+                },
+                {
+                  "code": -32802,
+                  "message": "server cancelled the request"
+                },
+                {
+                  "code": -32802,
+                  "message": "server cancelled the request"
+                },
+                {
+                  "code": -32802,
+                  "message": "server cancelled the request"
+                },
+                {
+                  "code": -32802,
+                  "message": "server cancelled the request"
+                },
+                {
+                  "code": -32802,
+                  "message": "server cancelled the request"
+                },
+                {
+                  "code": -32802,
+                  "message": "server cancelled the request"
+                },
+                {
+                  "code": -32802,
+                  "message": "server cancelled the request"
+                },
+                {
+                  "code": -32802,
+                  "message": "server cancelled the request"
+                },
+                {
+                  "code": -32802,
+                  "message": "server cancelled the request"
+                },
+                {
+                  "code": -32802,
+                  "message": "server cancelled the request"
+                },
+                {
+                  "code": -32802,
+                  "message": "server cancelled the request"
+                },
+                {
+                  "code": -32802,
+                  "message": "server cancelled the request"
+                },
+                {
+                  "code": -32802,
+                  "message": "server cancelled the request"
+                },
+                {
+                  "code": -32802,
+                  "message": "server cancelled the request"
+                },
+                {
+                  "code": -32802,
+                  "message": "server cancelled the request"
+                }
+              ]
+            }
+          },
+          "apply_change": {
+            "apply_change:cancel_us": {
+              "count": 44,
+              "p50_ms": 3.044,
+              "p95_ms": 6.893,
+              "max_ms": 8.49
+            },
+            "apply_change:inputs_us": {
+              "count": 44,
+              "p50_ms": 0.825,
+              "p95_ms": 1.047,
+              "max_ms": 67.325
+            },
+            "apply_change:plan_us": {
+              "count": 44,
+              "p50_ms": 7.208,
+              "p95_ms": 7.574,
+              "max_ms": 349.553
+            },
+            "process_changes:apply_us": {
+              "count": 42,
+              "p50_ms": 11.5,
+              "p95_ms": 14.876,
+              "max_ms": 77.252
+            }
+          }
+        }
+      },
+      "limitations": [
+        "Synthetic burst client timings include backlog; not a single-keystroke or Zed SSH latency claim.",
+        "Three repetitions on one host do not establish a universal performance guarantee.",
+        "Do not compare cancelled definition response durations as successful navigation latency."
+      ],
+      "repeat_runs": [
+        {
+          "before": {
+            "artifact": "target/ra-improvements-2026-10-30/latency-before-fixity-2.json",
+            "phases_artifact": "target/ra-improvements-2026-10-30/latency-before-fixity-2-phases.json",
+            "exit_code": 0,
+            "server_sha256": "7172103f7b2683150d97c8ac95ca7c4c895890751dce4333d9b4f3eeb03fd15f",
+            "editing": {
+              "editing-burst:textDocument/hover": {
+                "count": 40,
+                "p50_ms": 524.016,
+                "p95_ms": 907.378,
+                "p99_ms": 971.633,
+                "max_ms": 971.633,
+                "errors": []
+              },
+              "editing-burst:textDocument/completion": {
+                "count": 40,
+                "p50_ms": 524.156,
+                "p95_ms": 907.949,
+                "p99_ms": 956.059,
+                "max_ms": 956.059,
+                "errors": []
+              },
+              "editing-burst:textDocument/definition": {
+                "count": 40,
+                "p50_ms": 519.667,
+                "p95_ms": 905.768,
+                "p99_ms": 929.86,
+                "max_ms": 929.86,
+                "errors": [
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  }
+                ]
+              },
+              "editing-final:textDocument/hover": {
+                "count": 1,
+                "p50_ms": 17.58,
+                "p95_ms": 17.58,
+                "p99_ms": 17.58,
+                "max_ms": 17.58,
+                "errors": []
+              },
+              "editing-final:textDocument/completion": {
+                "count": 1,
+                "p50_ms": 16.432,
+                "p95_ms": 16.432,
+                "p99_ms": 16.432,
+                "max_ms": 16.432,
+                "errors": []
+              },
+              "editing-final:textDocument/definition": {
+                "count": 1,
+                "p50_ms": 2.079,
+                "p95_ms": 2.079,
+                "p99_ms": 2.079,
+                "max_ms": 2.079,
+                "errors": []
+              }
+            },
+            "apply_change": {
+              "apply_change:cancel_us": {
+                "count": 44,
+                "p50_ms": 2.726,
+                "p95_ms": 6.468,
+                "max_ms": 9.88
+              },
+              "apply_change:inputs_us": {
+                "count": 44,
+                "p50_ms": 0.88,
+                "p95_ms": 1.208,
+                "max_ms": 79.031
+              },
+              "apply_change:plan_us": {
+                "count": 44,
+                "p50_ms": 10.922,
+                "p95_ms": 11.523,
+                "max_ms": 540.381
+              },
+              "process_changes:apply_us": {
+                "count": 42,
+                "p50_ms": 15.062,
+                "p95_ms": 18.436,
+                "max_ms": 89.238
+              }
+            }
+          },
+          "after": {
+            "artifact": "target/ra-improvements-2026-10-30/latency-after-fixity-2.json",
+            "phases_artifact": "target/ra-improvements-2026-10-30/latency-after-fixity-2-phases.json",
+            "exit_code": 0,
+            "server_sha256": "8bf6f797a994a65cc888c968cdfcc71e1f82e2194210702e63efadfb6e75cfb5",
+            "editing": {
+              "editing-burst:textDocument/hover": {
+                "count": 40,
+                "p50_ms": 431.667,
+                "p95_ms": 737.112,
+                "p99_ms": 794.914,
+                "max_ms": 794.914,
+                "errors": []
+              },
+              "editing-burst:textDocument/completion": {
+                "count": 40,
+                "p50_ms": 432.77,
+                "p95_ms": 737.584,
+                "p99_ms": 777.4,
+                "max_ms": 777.4,
+                "errors": []
+              },
+              "editing-burst:textDocument/definition": {
+                "count": 40,
+                "p50_ms": 429.536,
+                "p95_ms": 734.629,
+                "p99_ms": 757.039,
+                "max_ms": 757.039,
+                "errors": [
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  }
+                ]
+              },
+              "editing-final:textDocument/hover": {
+                "count": 1,
+                "p50_ms": 16.862,
+                "p95_ms": 16.862,
+                "p99_ms": 16.862,
+                "max_ms": 16.862,
+                "errors": []
+              },
+              "editing-final:textDocument/completion": {
+                "count": 1,
+                "p50_ms": 15.826,
+                "p95_ms": 15.826,
+                "p99_ms": 15.826,
+                "max_ms": 15.826,
+                "errors": []
+              },
+              "editing-final:textDocument/definition": {
+                "count": 1,
+                "p50_ms": 2.011,
+                "p95_ms": 2.011,
+                "p99_ms": 2.011,
+                "max_ms": 2.011,
+                "errors": []
+              }
+            },
+            "apply_change": {
+              "apply_change:cancel_us": {
+                "count": 44,
+                "p50_ms": 3.076,
+                "p95_ms": 6.238,
+                "max_ms": 6.831
+              },
+              "apply_change:inputs_us": {
+                "count": 44,
+                "p50_ms": 0.773,
+                "p95_ms": 0.962,
+                "max_ms": 78.308
+              },
+              "apply_change:plan_us": {
+                "count": 44,
+                "p50_ms": 7.258,
+                "p95_ms": 8.111,
+                "max_ms": 349.135
+              },
+              "process_changes:apply_us": {
+                "count": 42,
+                "p50_ms": 11.23,
+                "p95_ms": 15.157,
+                "max_ms": 88.038
+              }
+            }
+          }
+        },
+        {
+          "before": {
+            "artifact": "target/ra-improvements-2026-10-30/latency-before-fixity-3.json",
+            "phases_artifact": "target/ra-improvements-2026-10-30/latency-before-fixity-3-phases.json",
+            "exit_code": 0,
+            "server_sha256": "7172103f7b2683150d97c8ac95ca7c4c895890751dce4333d9b4f3eeb03fd15f",
+            "editing": {
+              "editing-burst:textDocument/hover": {
+                "count": 40,
+                "p50_ms": 520.415,
+                "p95_ms": 899.425,
+                "p99_ms": 957.336,
+                "max_ms": 957.336,
+                "errors": []
+              },
+              "editing-burst:textDocument/completion": {
+                "count": 40,
+                "p50_ms": 520.603,
+                "p95_ms": 900.289,
+                "p99_ms": 941.156,
+                "max_ms": 941.156,
+                "errors": []
+              },
+              "editing-burst:textDocument/definition": {
+                "count": 40,
+                "p50_ms": 516.238,
+                "p95_ms": 897.766,
+                "p99_ms": 922.053,
+                "max_ms": 922.053,
+                "errors": []
+              },
+              "editing-final:textDocument/hover": {
+                "count": 1,
+                "p50_ms": 17.21,
+                "p95_ms": 17.21,
+                "p99_ms": 17.21,
+                "max_ms": 17.21,
+                "errors": []
+              },
+              "editing-final:textDocument/completion": {
+                "count": 1,
+                "p50_ms": 16.048,
+                "p95_ms": 16.048,
+                "p99_ms": 16.048,
+                "max_ms": 16.048,
+                "errors": []
+              },
+              "editing-final:textDocument/definition": {
+                "count": 1,
+                "p50_ms": 2.186,
+                "p95_ms": 2.186,
+                "p99_ms": 2.186,
+                "max_ms": 2.186,
+                "errors": []
+              }
+            },
+            "apply_change": {
+              "apply_change:cancel_us": {
+                "count": 44,
+                "p50_ms": 3.044,
+                "p95_ms": 6.614,
+                "max_ms": 7.114
+              },
+              "apply_change:inputs_us": {
+                "count": 44,
+                "p50_ms": 0.8,
+                "p95_ms": 1.184,
+                "max_ms": 83.74
+              },
+              "apply_change:plan_us": {
+                "count": 44,
+                "p50_ms": 10.733,
+                "p95_ms": 11.204,
+                "max_ms": 529.76
+              },
+              "process_changes:apply_us": {
+                "count": 42,
+                "p50_ms": 16.041,
+                "p95_ms": 18.746,
+                "max_ms": 93.871
+              }
+            }
+          },
+          "after": {
+            "artifact": "target/ra-improvements-2026-10-30/latency-after-fixity-3.json",
+            "phases_artifact": "target/ra-improvements-2026-10-30/latency-after-fixity-3-phases.json",
+            "exit_code": 0,
+            "server_sha256": "8bf6f797a994a65cc888c968cdfcc71e1f82e2194210702e63efadfb6e75cfb5",
+            "editing": {
+              "editing-burst:textDocument/hover": {
+                "count": 40,
+                "p50_ms": 446.163,
+                "p95_ms": 752.567,
+                "p99_ms": 812.178,
+                "max_ms": 812.178,
+                "errors": []
+              },
+              "editing-burst:textDocument/completion": {
+                "count": 40,
+                "p50_ms": 447.069,
+                "p95_ms": 754.395,
+                "p99_ms": 792.979,
+                "max_ms": 792.979,
+                "errors": []
+              },
+              "editing-burst:textDocument/definition": {
+                "count": 40,
+                "p50_ms": 444.767,
+                "p95_ms": 751.255,
+                "p99_ms": 773.152,
+                "max_ms": 773.152,
+                "errors": [
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  },
+                  {
+                    "code": -32802,
+                    "message": "server cancelled the request"
+                  }
+                ]
+              },
+              "editing-final:textDocument/hover": {
+                "count": 1,
+                "p50_ms": 16.952,
+                "p95_ms": 16.952,
+                "p99_ms": 16.952,
+                "max_ms": 16.952,
+                "errors": []
+              },
+              "editing-final:textDocument/completion": {
+                "count": 1,
+                "p50_ms": 15.215,
+                "p95_ms": 15.215,
+                "p99_ms": 15.215,
+                "max_ms": 15.215,
+                "errors": []
+              },
+              "editing-final:textDocument/definition": {
+                "count": 1,
+                "p50_ms": 2.366,
+                "p95_ms": 2.366,
+                "p99_ms": 2.366,
+                "max_ms": 2.366,
+                "errors": []
+              }
+            },
+            "apply_change": {
+              "apply_change:cancel_us": {
+                "count": 44,
+                "p50_ms": 3.157,
+                "p95_ms": 6.324,
+                "max_ms": 6.583
+              },
+              "apply_change:inputs_us": {
+                "count": 44,
+                "p50_ms": 0.781,
+                "p95_ms": 0.986,
+                "max_ms": 98.585
+              },
+              "apply_change:plan_us": {
+                "count": 44,
+                "p50_ms": 7.221,
+                "p95_ms": 7.903,
+                "max_ms": 343.628
+              },
+              "process_changes:apply_us": {
+                "count": 42,
+                "p50_ms": 11.461,
+                "p95_ms": 14.247,
+                "max_ms": 106.865
+              }
+            }
+          }
+        }
+      ],
+      "accepted_binary_probe": {
+        "artifact": "target/ra-improvements-2026-10-30/accepted-burst.json",
+        "server_sha256": "0eb22405a9afacd07fd4aca8b6f0d250ea3e23d6e914f733a8de42abd10bc9d2",
+        "exit_code": 0,
+        "editing": {
+          "editing-burst:textDocument/hover": {
+            "count": 40,
+            "p50_ms": 443.434,
+            "p95_ms": 757.527,
+            "p99_ms": 813.532,
+            "max_ms": 813.532,
+            "errors": []
+          },
+          "editing-burst:textDocument/completion": {
+            "count": 40,
+            "p50_ms": 443.353,
+            "p95_ms": 757.879,
+            "p99_ms": 798.495,
+            "max_ms": 798.495,
+            "errors": []
+          },
+          "editing-burst:textDocument/definition": {
+            "count": 40,
+            "p50_ms": 440.125,
+            "p95_ms": 755.19,
+            "p99_ms": 777.014,
+            "max_ms": 777.014,
+            "errors": [
+              {
+                "code": -32802,
+                "message": "server cancelled the request"
+              },
+              {
+                "code": -32802,
+                "message": "server cancelled the request"
+              },
+              {
+                "code": -32802,
+                "message": "server cancelled the request"
+              },
+              {
+                "code": -32802,
+                "message": "server cancelled the request"
+              },
+              {
+                "code": -32802,
+                "message": "server cancelled the request"
+              },
+              {
+                "code": -32802,
+                "message": "server cancelled the request"
+              },
+              {
+                "code": -32802,
+                "message": "server cancelled the request"
+              },
+              {
+                "code": -32802,
+                "message": "server cancelled the request"
+              },
+              {
+                "code": -32802,
+                "message": "server cancelled the request"
+              },
+              {
+                "code": -32802,
+                "message": "server cancelled the request"
+              },
+              {
+                "code": -32802,
+                "message": "server cancelled the request"
+              },
+              {
+                "code": -32802,
+                "message": "server cancelled the request"
+              },
+              {
+                "code": -32802,
+                "message": "server cancelled the request"
+              },
+              {
+                "code": -32802,
+                "message": "server cancelled the request"
+              },
+              {
+                "code": -32802,
+                "message": "server cancelled the request"
+              },
+              {
+                "code": -32802,
+                "message": "server cancelled the request"
+              },
+              {
+                "code": -32802,
+                "message": "server cancelled the request"
+              },
+              {
+                "code": -32802,
+                "message": "server cancelled the request"
+              },
+              {
+                "code": -32802,
+                "message": "server cancelled the request"
+              },
+              {
+                "code": -32802,
+                "message": "server cancelled the request"
+              },
+              {
+                "code": -32802,
+                "message": "server cancelled the request"
+              },
+              {
+                "code": -32802,
+                "message": "server cancelled the request"
+              },
+              {
+                "code": -32802,
+                "message": "server cancelled the request"
+              },
+              {
+                "code": -32802,
+                "message": "server cancelled the request"
+              },
+              {
+                "code": -32802,
+                "message": "server cancelled the request"
+              }
+            ]
+          },
+          "editing-final:textDocument/hover": {
+            "count": 1,
+            "p50_ms": 16.575,
+            "p95_ms": 16.575,
+            "p99_ms": 16.575,
+            "max_ms": 16.575,
+            "errors": []
+          },
+          "editing-final:textDocument/completion": {
+            "count": 1,
+            "p50_ms": 14.911,
+            "p95_ms": 14.911,
+            "p99_ms": 14.911,
+            "max_ms": 14.911,
+            "errors": []
+          },
+          "editing-final:textDocument/definition": {
+            "count": 1,
+            "p50_ms": 1.979,
+            "p95_ms": 1.979,
+            "p99_ms": 1.979,
+            "max_ms": 1.979,
+            "errors": []
+          }
+        }
+      }
+    },
+    "constructor": {
+      "status": "implemented; targeted and upstream corpus gates passed",
+      "fixes": [
+        "existential binders are not inferred as callable forall parameters; separate free occurrences retain scope",
+        "refute nested numeric goals using exact difference-constraint contradictions"
+      ],
+      "validation": {
+        "mutation": {
+          "caught": 274,
+          "rejected": 274,
+          "missed": 0,
+          "artifact": "target/ra-improvements-2026-10-30/mutation-final.log"
+        },
+        "conformance": {
+          "pass": 276,
+          "pass_total": 276,
+          "fail": 217,
+          "fail_total": 217,
+          "extended_agree": 355,
+          "scope_only": 17,
+          "extended_false_positive": 0,
+          "extended_false_negative": 0,
+          "artifact": "target/ra-improvements-2026-10-30/conformance-final.log"
+        },
+        "project_regressions": 8,
+        "hir_ty_serial": 440
+      },
+      "limitations": [
+        "Earlier parallel SMT semantic tests had six resource-related Unknown outcomes. Logical proof tests now use explicit outer test budgets; production and dedicated budget/cancellation tests retain their own limits. hir-ty parallel passed 442 tests at that checkpoint; final gates must cover subsequent diagnostic changes."
+      ]
+    },
+    "proof_obligations": {
+      "status": "original three divisibility sites implemented and verified; additional resource-sensitive obligations inventoried",
+      "implementation": "Prove divisibility by positive powers of two under nonnegative exponent and sufficient-width/exponent assumptions. Shared finite-domain enumeration handles sew. No production timeout increase.",
+      "actual_manifest": {
+        "callables": 3318,
+        "expressions": 81543,
+        "unknown_types": 0,
+        "partially_unknown_types": 0,
+        "type_mismatches": 0,
+        "proved": 2914,
+        "refuted": 0,
+        "unknown": 0,
+        "checkpoint": "Initial proof verification; see accepted_final for latest counts and additional budget-sensitive goals."
+      },
+      "artifacts": [
+        "target/ra-improvements-2026-10-30/inference-proof.log",
+        "target/ra-improvements-2026-10-30/constraints-proof.json"
+      ],
+      "obligation_count_note": "Goals discharged during compatibility checking do not enter the deferred count; do not compare totals as though they were fixed corpus sizes.",
+      "tests": {
+        "hir_ty_parallel": 443,
+        "hir_ty_no_smt": 429,
+        "artifacts": [
+          "target/ra-improvements-2026-10-30/hir-ty-proof-parallel-final.log",
+          "target/ra-improvements-2026-10-30/hir-ty-proof-no-smt.log"
+        ]
+      },
+      "final_recheck": {
+        "artifact": "target/ra-improvements-2026-10-30/riscv-final.log",
+        "constraints": "target/ra-improvements-2026-10-30/constraints-final.json",
+        "totals": {
+          "proved": 2914,
+          "refuted": 0,
+          "total": 2915,
+          "unknown": 1
+        },
+        "unknown_sites": [
+          {
+            "assumptions": [
+              "3 <= vlen_exp & vlen_exp <= 16",
+              "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+              "xlen in {32, 64}",
+              "'n >= 0 & 'sew in {8, 16, 32, 64}",
+              "-3 <= '_sk1_LMUL_pow & '_sk1_LMUL_pow <= 3",
+              "'_sk1_LMUL_pow >= 0 & '_sk3_z == '_sk1_LMUL_pow | '_sk1_LMUL_pow < 0 & '_sk3_z == 0",
+              "('_sk1_LMUL_pow >= 0 & '_sk4__sk3_z == '_sk1_LMUL_pow | '_sk1_LMUL_pow < 0 & '_sk4__sk3_z == 0)",
+              "'sew <= vlen",
+              "SEW <= vlen",
+              "'n == 2 ^ '_sk4__sk3_z * (vlen / 'sew) | 'n == 2 * 2 ^ '_sk4__sk3_z * (vlen / 'sew)",
+              "num_elem == group_size * elem_per_reg | num_elem == 2 * group_size * elem_per_reg",
+              "true",
+              "0 <= '_sk7__loop_index & '_sk7__loop_index <= 2 ^ '_sk4__sk3_z - 1",
+              "true",
+              "'sew <= 2 ^ vlen_exp",
+              "SEW <= 2 ^ vlen_exp",
+              "'n == 2 ^ '_sk4__sk3_z * (2 ^ vlen_exp / 'sew) | 'n == 2 * 2 ^ '_sk4__sk3_z * (2 ^ vlen_exp / 'sew)"
+            ],
+            "callable": "write_vreg",
+            "cause": "Compatibility",
+            "clause": 0,
+            "compatibility_types": null,
+            "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_control.sail",
+            "goal": "0 <= '_sk7__loop_index & '_sk7__loop_index <= 31",
+            "location": {
+              "column": 7,
+              "end": 7087,
+              "line": 144,
+              "source": "V(vrid + reg_in_group) = reg_value;",
+              "start": 7068
+            },
+            "origin_is_fallback": false,
+            "reason": "budget_exhausted",
+            "recovery_types": null,
+            "rigid_variables": [
+              "'_sk1_LMUL_pow",
+              "'_sk3_z",
+              "'_sk4__sk3_z",
+              "'_sk7__loop_index"
+            ],
+            "status": "unknown"
+          }
+        ],
+        "interpretation": "Original three divisibility obligations remain discharged. One new loop-index upper-bound obligation exhausted budget during final run; independent repeat and investigation pending. Do not claim stable zero unknown."
+      },
+      "isolated_repeat": {
+        "artifact": "target/ra-improvements-2026-10-30/riscv-isolated-repeat.log",
+        "constraints": "target/ra-improvements-2026-10-30/constraints-isolated-repeat.json",
+        "totals": {
+          "proved": 2914,
+          "refuted": 0,
+          "total": 2914,
+          "unknown": 0
+        },
+        "interpretation": "Same runtime binary reaches zero unknown in an isolated repeat. Resource sensitivity remains worth removing; reduced no-SMT finite-domain test under investigation."
+      },
+      "loop_bound_followup": {
+        "status": "experiment rejected and reverted: whole-model inference rose from 29.5s to 32.0\u201333.2s; a different goal still exhausted its budget",
+        "changes": [
+          "Prioritize finite domains connected to the goal, retaining all assumptions/candidates.",
+          "Extract a guarded numeric value only when every branch not known false yields the same value.",
+          "Fold a known side of a comparison before constructing difference-constraint edges, even if the other side is symbolic."
+        ],
+        "tests": [
+          "loop_index_upper_bound_ignores_disconnected_small_domains",
+          "manifest_loop_index_bound_is_proved_without_smt",
+          "guarded_numeric_values_require_every_possible_branch"
+        ],
+        "hir_ty_passed": 446,
+        "artifact": "target/ra-improvements-2026-10-30/loop-bound-hir-ty.log",
+        "production_budget_changed": false,
+        "artifacts": [
+          "target/ra-improvements-2026-10-30/loop-bound-experiment.patch",
+          "target/ra-improvements-2026-10-30/riscv-loop-bound.log",
+          "target/ra-improvements-2026-10-30/riscv-loop-ranked.log"
+        ]
+      },
+      "limitations": [
+        "Original three divisibility sites are solved without SMT. Model-wide zero unknown is not guaranteed: accepted-implementation runs observed 0\u20134 additional budget-exhausted goals; final inventory lists four (abs bit-width and loop-index lower bounds).",
+        "Rejected a broader guarded-value/domain-order experiment after measuring increased inference cost; repro and logs preserved. This is an additional finding, outside the three originally scoped divisibility sites."
+      ],
+      "accepted_final": {
+        "artifact": "target/ra-improvements-2026-10-30/riscv-accepted-final.log",
+        "constraints": "target/ra-improvements-2026-10-30/constraints-accepted-final.json",
+        "totals": {
+          "proved": 2913,
+          "refuted": 0,
+          "total": 2917,
+          "unknown": 4
+        },
+        "sites": [
+          {
+            "assumptions": [
+              "3 <= vlen_exp & vlen_exp <= 16",
+              "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+              "xlen in {32, 64}",
+              "'_sk1__set in {8, 16, 32, 64}",
+              "-3 <= '_sk2_LMUL_pow & '_sk2_LMUL_pow <= 3",
+              "1 <= '_sk3_num_elem & '_sk3_num_elem <= vlen",
+              "<unsupported>",
+              "true",
+              "0 <= '_sk5__loop_index & '_sk5__loop_index <= '_sk3_num_elem - 1",
+              "-(2 ^ ('_sk1__set - 1)) <= '_sk7__sk6__argument & '_sk7__sk6__argument <= 2 ^ ('_sk1__set - 1) - 1",
+              "1 <= '_sk3_num_elem & '_sk3_num_elem <= 2 ^ vlen_exp"
+            ],
+            "callable": "execute",
+            "cause": "Compatibility",
+            "clause": 0,
+            "compatibility_types": null,
+            "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/Zvabd/zvabd_insts.sail",
+            "goal": "'_sk1__set >= 0 & 0 <= abs('_sk7__sk6__argument) & abs('_sk7__sk6__argument) < 2 ^ '_sk1__set",
+            "location": {
+              "column": 19,
+              "end": 2058,
+              "line": 47,
+              "source": "result[i] = to_bits(SEW, abs_int(signed(vs2_val[i])))",
+              "start": 2017
+            },
+            "origin_is_fallback": false,
+            "reason": "budget_exhausted",
+            "recovery_types": null,
+            "rigid_variables": [
+              "'_sk1__set",
+              "'_sk2_LMUL_pow",
+              "'_sk3_num_elem",
+              "'_sk5__loop_index",
+              "'_sk7__sk6__argument"
+            ],
+            "status": "unknown"
+          },
+          {
+            "assumptions": [
+              "3 <= vlen_exp & vlen_exp <= 16",
+              "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+              "xlen in {32, 64}",
+              "'_sk1__set in {8, 16, 32, 64}",
+              "-3 <= '_sk2_LMUL_pow & '_sk2_LMUL_pow <= 3",
+              "1 <= '_sk3_num_elem & '_sk3_num_elem <= vlen",
+              "<unsupported>",
+              "true",
+              "0 <= '_sk5__loop_index & '_sk5__loop_index <= '_sk3_num_elem - 1",
+              "-(2 ^ ('_sk1__set - 1)) - (2 ^ ('_sk1__set - 1) - 1) <= '_sk7__sk6__argument & '_sk7__sk6__argument <= 2 ^ ('_sk1__set - 1) - 1 - -(2 ^ ('_sk1__set - 1))",
+              "1 <= '_sk3_num_elem & '_sk3_num_elem <= 2 ^ vlen_exp"
+            ],
+            "callable": "execute",
+            "cause": "Compatibility",
+            "clause": 1,
+            "compatibility_types": null,
+            "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/Zvabd/zvabd_insts.sail",
+            "goal": "'_sk1__set >= 0 & 0 <= abs('_sk7__sk6__argument) & abs('_sk7__sk6__argument) < 2 ^ '_sk1__set",
+            "location": {
+              "column": 21,
+              "end": 3790,
+              "line": 94,
+              "source": "VV_VABD  => to_bits(SEW, abs_int(signed(vs2_val[i]) - signed(vs1_val[i]))),",
+              "start": 3728
+            },
+            "origin_is_fallback": false,
+            "reason": "budget_exhausted",
+            "recovery_types": null,
+            "rigid_variables": [
+              "'_sk1__set",
+              "'_sk2_LMUL_pow",
+              "'_sk3_num_elem",
+              "'_sk5__loop_index",
+              "'_sk7__sk6__argument"
+            ],
+            "status": "unknown"
+          },
+          {
+            "assumptions": [
+              "xlen in {32, 64}",
+              "3 <= vlen_exp & vlen_exp <= 16",
+              "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+              "'_sk1__set in {8, 16, 32, 64}",
+              "-3 <= '_sk2_LMUL_pow & '_sk2_LMUL_pow <= 3",
+              "1 <= '_sk3_num_elem & '_sk3_num_elem <= vlen",
+              "true",
+              "<unsupported>",
+              "true",
+              "'_sk1__set == 32 | '_sk1__set == 64",
+              "SEW == 32 | SEW == 64",
+              "0 <= '_sk14__argument & '_sk14__argument <= 2 ^ xlen - 1",
+              "0 <= '_sk15__sk14__argument & '_sk15__sk14__argument <= 2 ^ xlen - 1",
+              "0 <= '_sk16__argument & '_sk16__argument <= 2 ^ xlen - 1",
+              "0 <= '_sk17__sk16__argument & '_sk17__sk16__argument <= 2 ^ xlen - 1",
+              "div('_sk17__sk16__argument, 4) <= '_sk18__loop_index & '_sk18__loop_index <= div('_sk15__sk14__argument, 4) - 1",
+              "'_sk18__loop_index * 4 + 3 < '_sk3_num_elem",
+              "i * 4 + 3 < num_elem",
+              "1 <= '_sk3_num_elem & '_sk3_num_elem <= 2 ^ vlen_exp"
+            ],
+            "callable": "execute",
+            "cause": "Compatibility",
+            "clause": 0,
+            "compatibility_types": null,
+            "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/vector_crypto/zvknhab_insts.sail",
+            "goal": "0 <= '_sk18__loop_index",
+            "location": {
+              "column": 5,
+              "end": 2601,
+              "line": 68,
+              "source": "write_velem_quad(vd, SEW, w[19] @ w[18] @ w[17] @ w[16], i);",
+              "start": 2542
+            },
+            "origin_is_fallback": false,
+            "reason": "budget_exhausted",
+            "recovery_types": null,
+            "rigid_variables": [
+              "'_sk14__argument",
+              "'_sk15__sk14__argument",
+              "'_sk16__argument",
+              "'_sk17__sk16__argument",
+              "'_sk18__loop_index",
+              "'_sk1__set",
+              "'_sk2_LMUL_pow",
+              "'_sk3_num_elem"
+            ],
+            "status": "unknown"
+          },
+          {
+            "assumptions": [
+              "xlen in {32, 64}",
+              "3 <= vlen_exp & vlen_exp <= 16",
+              "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+              "'_sk1__set in {8, 16, 32, 64}",
+              "-3 <= '_sk2_LMUL_pow & '_sk2_LMUL_pow <= 3",
+              "1 <= '_sk3_num_elem & '_sk3_num_elem <= vlen",
+              "true",
+              "<unsupported>",
+              "true",
+              "'_sk1__set == 32 | '_sk1__set == 64",
+              "SEW == 32 | SEW == 64",
+              "0 <= '_sk14__argument & '_sk14__argument <= 2 ^ xlen - 1",
+              "0 <= '_sk15__sk14__argument & '_sk15__sk14__argument <= 2 ^ xlen - 1",
+              "0 <= '_sk16__argument & '_sk16__argument <= 2 ^ xlen - 1",
+              "0 <= '_sk17__sk16__argument & '_sk17__sk16__argument <= 2 ^ xlen - 1",
+              "div('_sk17__sk16__argument, 4) <= '_sk18__loop_index & '_sk18__loop_index <= div('_sk15__sk14__argument, 4) - 1",
+              "'_sk18__loop_index * 4 + 3 < '_sk3_num_elem",
+              "i * 4 + 3 < num_elem",
+              "1 <= '_sk3_num_elem & '_sk3_num_elem <= 2 ^ vlen_exp"
+            ],
+            "callable": "execute",
+            "cause": "Compatibility",
+            "clause": 0,
+            "compatibility_types": null,
+            "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/vector_crypto/zvknhab_insts.sail",
+            "goal": "0 <= '_sk18__loop_index",
+            "location": {
+              "column": 5,
+              "end": 2601,
+              "line": 68,
+              "source": "write_velem_quad(vd, SEW, w[19] @ w[18] @ w[17] @ w[16], i);",
+              "start": 2542
+            },
+            "origin_is_fallback": false,
+            "reason": "budget_exhausted",
+            "recovery_types": null,
+            "rigid_variables": [
+              "'_sk14__argument",
+              "'_sk15__sk14__argument",
+              "'_sk16__argument",
+              "'_sk17__sk16__argument",
+              "'_sk18__loop_index",
+              "'_sk1__set",
+              "'_sk2_LMUL_pow",
+              "'_sk3_num_elem"
+            ],
+            "status": "unknown"
+          }
+        ],
+        "original_divisibility_sites_remaining": 0,
+        "interpretation": "All three originally scoped divisibility sites remain proved by the exact non-SMT rule. Other model obligations are resource-sensitive: accepted-implementation runs observed 0, 1 and 4 budget-exhausted goals. Do not present the earlier zero-unknown result as a universal or final total."
+      }
+    },
+    "diagnostics": {
+      "status": "six location refinements implemented; full upstream conformance and hir-ty/diagnostics suites passed",
+      "audit": "2026-10-30-diagnostic-audit.json",
+      "validation": {
+        "hir_ty_tests": 443,
+        "ide_diagnostics_tests": 113,
+        "artifact": "target/ra-improvements-2026-10-30/type-pattern-suites-final.log"
+      },
+      "pending": "Final workspace gates after cache/latency work.",
+      "rechecked_corpus": {
+        "pass": 276,
+        "fail": 217,
+        "located": 205,
+        "with_expectation": 216,
+        "worded": 127,
+        "extended_false_positive": 0,
+        "extended_false_negative": 0,
+        "artifact": "target/ra-improvements-2026-10-30/conformance-final.log"
+      }
+    },
+    "memory": {
+      "status": "verified: restored accepted binary completes full-model sweeps and reloads; late/reload heap plateau at 738 MiB",
+      "workload": {
+        "files": 48,
+        "sweeps": 3,
+        "reloads": 3,
+        "unsaved_edit_cycles": 2
+      },
+      "exit_code": 0,
+      "memory": [
+        {
+          "phase": "ready",
+          "rss": "108432 kB",
+          "heap_estimate_mib": null
+        },
+        {
+          "phase": "initial-prime-complete",
+          "rss": "431052 kB",
+          "heap_estimate_mib": 295
+        },
+        {
+          "phase": "edit-0",
+          "rss": "461620 kB",
+          "heap_estimate_mib": null
+        },
+        {
+          "phase": "edit-1",
+          "rss": "464440 kB",
+          "heap_estimate_mib": null
+        },
+        {
+          "phase": "closed",
+          "rss": "464452 kB",
+          "heap_estimate_mib": null
+        },
+        {
+          "phase": "sweep-close-0",
+          "rss": "817964 kB",
+          "heap_estimate_mib": 503
+        },
+        {
+          "phase": "sweep-close-1",
+          "rss": "900216 kB",
+          "heap_estimate_mib": 571
+        },
+        {
+          "phase": "sweep-close-2",
+          "rss": "943504 kB",
+          "heap_estimate_mib": 607
+        },
+        {
+          "phase": "reload-close-0",
+          "rss": "805248 kB",
+          "heap_estimate_mib": 611
+        },
+        {
+          "phase": "reload-close-1",
+          "rss": "833432 kB",
+          "heap_estimate_mib": 607
+        },
+        {
+          "phase": "reload-close-2",
+          "rss": "847560 kB",
+          "heap_estimate_mib": 608
+        },
+        {
+          "phase": "idle-after-lifecycle",
+          "rss": "847624 kB",
+          "heap_estimate_mib": 608
+        }
+      ],
+      "artifact": "target/ra-improvements-2026-10-30/memory-sweeps.json",
+      "limitation": "RSS includes allocator-reserved pages. Three rounds and 48 files do not establish a project-wide cache budget or rule out sustained growth.",
+      "expanded_run": {
+        "status": "complete",
+        "artifact": "target/ra-improvements-2026-10-30/memory-full-sweeps-retry.json",
+        "files": 158,
+        "sweeps": 6,
+        "reloads": 3,
+        "exit_code": 0,
+        "unique_responses": 1966,
+        "server_sha256": "8c1d925e6bc2dfe1b26c666ba7429a14dfd5a15fdf3e991606dc24aebadde792",
+        "successful_retries": 9,
+        "memory": [
+          {
+            "phase": "ready",
+            "rss": "108476 kB",
+            "heap_estimate_mib": null,
+            "elapsed_ms": 1150.56
+          },
+          {
+            "phase": "initial-prime-complete",
+            "rss": "420384 kB",
+            "heap_estimate_mib": 300,
+            "elapsed_ms": 15030.126
+          },
+          {
+            "phase": "edit-0",
+            "rss": "451116 kB",
+            "heap_estimate_mib": null,
+            "elapsed_ms": 15905.738
+          },
+          {
+            "phase": "edit-1",
+            "rss": "453660 kB",
+            "heap_estimate_mib": null,
+            "elapsed_ms": 15987.277
+          },
+          {
+            "phase": "closed",
+            "rss": "453668 kB",
+            "heap_estimate_mib": null,
+            "elapsed_ms": 18987.97
+          },
+          {
+            "phase": "sweep-close-0",
+            "rss": "1091092 kB",
+            "heap_estimate_mib": 833,
+            "elapsed_ms": 46247.583
+          },
+          {
+            "phase": "sweep-close-1",
+            "rss": "932556 kB",
+            "heap_estimate_mib": 644,
+            "elapsed_ms": 70541.256
+          },
+          {
+            "phase": "sweep-close-2",
+            "rss": "971816 kB",
+            "heap_estimate_mib": 700,
+            "elapsed_ms": 92345.397
+          },
+          {
+            "phase": "sweep-close-3",
+            "rss": "998320 kB",
+            "heap_estimate_mib": 733,
+            "elapsed_ms": 113772.952
+          },
+          {
+            "phase": "sweep-close-4",
+            "rss": "967684 kB",
+            "heap_estimate_mib": 731,
+            "elapsed_ms": 133285.777
+          },
+          {
+            "phase": "sweep-close-5",
+            "rss": "1028144 kB",
+            "heap_estimate_mib": 734,
+            "elapsed_ms": 152404.822
+          },
+          {
+            "phase": "reload-close-0",
+            "rss": "1039088 kB",
+            "heap_estimate_mib": 734,
+            "elapsed_ms": 159140.792
+          },
+          {
+            "phase": "reload-close-1",
+            "rss": "1056740 kB",
+            "heap_estimate_mib": 734,
+            "elapsed_ms": 165659.754
+          },
+          {
+            "phase": "reload-close-2",
+            "rss": "1070400 kB",
+            "heap_estimate_mib": 734,
+            "elapsed_ms": 171897.762
+          },
+          {
+            "phase": "idle-after-lifecycle",
+            "rss": "1070464 kB",
+            "heap_estimate_mib": 734,
+            "elapsed_ms": 181916.277
+          }
+        ],
+        "interpretation": "Late sweeps and reloads plateau at 731\u2013734 MiB estimated heap; RSS includes reserved pages. This finite workload does not establish a universal budget.",
+        "prior_attempt": "memory-full-sweeps.json failed on ServerCancelled; probe now records and boundedly retries protocol cancellation responses."
+      },
+      "cache_experiment": {
+        "artifact": "target/ra-improvements-2026-10-30/memory-parse-budget.json",
+        "exit_code": 0,
+        "server_sha256": "7e544e3c3fcb64df7221546f04e3522258ecb4b52fda988320f4102ced24e674",
+        "variant": "parse_file and semantic_parse_file LRU=128",
+        "memory": [
+          {
+            "phase": "ready",
+            "rss": "99840 kB",
+            "heap_estimate_mib": null,
+            "elapsed_ms": 1232.357
+          },
+          {
+            "phase": "initial-prime-complete",
+            "rss": "407488 kB",
+            "heap_estimate_mib": 295,
+            "elapsed_ms": 16782.039
+          },
+          {
+            "phase": "edit-0",
+            "rss": "442728 kB",
+            "heap_estimate_mib": null,
+            "elapsed_ms": 17711.49
+          },
+          {
+            "phase": "edit-1",
+            "rss": "445356 kB",
+            "heap_estimate_mib": null,
+            "elapsed_ms": 17796.974
+          },
+          {
+            "phase": "closed",
+            "rss": "445368 kB",
+            "heap_estimate_mib": null,
+            "elapsed_ms": 20797.634
+          },
+          {
+            "phase": "sweep-close-0",
+            "rss": "1177236 kB",
+            "heap_estimate_mib": 892,
+            "elapsed_ms": 56586.844
+          },
+          {
+            "phase": "sweep-close-1",
+            "rss": "1003092 kB",
+            "heap_estimate_mib": 722,
+            "elapsed_ms": 86598.899
+          },
+          {
+            "phase": "sweep-close-2",
+            "rss": "1293548 kB",
+            "heap_estimate_mib": 940,
+            "elapsed_ms": 114533.456
+          },
+          {
+            "phase": "sweep-close-3",
+            "rss": "1298028 kB",
+            "heap_estimate_mib": 943,
+            "elapsed_ms": 143700.602
+          },
+          {
+            "phase": "sweep-close-4",
+            "rss": "1311708 kB",
+            "heap_estimate_mib": 964,
+            "elapsed_ms": 172255.777
+          },
+          {
+            "phase": "sweep-close-5",
+            "rss": "1322424 kB",
+            "heap_estimate_mib": 969,
+            "elapsed_ms": 203815.342
+          },
+          {
+            "phase": "reload-close-0",
+            "rss": "1090144 kB",
+            "heap_estimate_mib": 734,
+            "elapsed_ms": 216215.287
+          },
+          {
+            "phase": "reload-close-1",
+            "rss": "1081344 kB",
+            "heap_estimate_mib": 742,
+            "elapsed_ms": 228577.261
+          },
+          {
+            "phase": "reload-close-2",
+            "rss": "1083520 kB",
+            "heap_estimate_mib": 742,
+            "elapsed_ms": 240988.203
+          },
+          {
+            "phase": "idle-after-lifecycle",
+            "rss": "1083588 kB",
+            "heap_estimate_mib": 742,
+            "elapsed_ms": 251015.132
+          }
+        ],
+        "decision": "Rejected and reverted: final sweep 969 MiB vs 734 MiB; final sweep reached at 203815 ms vs 152405 ms. Reloads returned heap to 742 MiB but did not justify throughput regression.",
+        "policy": "Retain 512-entry per-callable body/source-map caches and weak parse seeds. Preserve expensive inference results. Do not cap raw/semantic parses at 128; investigate query ownership/recomputation before another cap. Finite project sweep reaches plateau, not a proof of global boundedness."
+      },
+      "pre_experiment_final_run": {
+        "artifact": "target/ra-improvements-2026-10-30/memory-final.json",
+        "exit_code": 0,
+        "files": 158,
+        "sweeps": 6,
+        "reloads": 3,
+        "server_sha256": "8bf6f797a994a65cc888c968cdfcc71e1f82e2194210702e63efadfb6e75cfb5",
+        "memory": [
+          {
+            "phase": "ready",
+            "elapsed_ms": 921.475,
+            "rss": "102036 kB",
+            "heap_estimate_mib": null
+          },
+          {
+            "phase": "initial-prime-complete",
+            "elapsed_ms": 15544.811,
+            "rss": "444680 kB",
+            "heap_estimate_mib": 294
+          },
+          {
+            "phase": "edit-0",
+            "elapsed_ms": 16373.847,
+            "rss": "475460 kB",
+            "heap_estimate_mib": null
+          },
+          {
+            "phase": "edit-1",
+            "elapsed_ms": 16449.923,
+            "rss": "478240 kB",
+            "heap_estimate_mib": null
+          },
+          {
+            "phase": "closed",
+            "elapsed_ms": 19483.77,
+            "rss": "479080 kB",
+            "heap_estimate_mib": null
+          },
+          {
+            "phase": "sweep-close-0",
+            "elapsed_ms": 45964.803,
+            "rss": "1035316 kB",
+            "heap_estimate_mib": 798
+          },
+          {
+            "phase": "sweep-close-1",
+            "elapsed_ms": 69769.762,
+            "rss": "1195056 kB",
+            "heap_estimate_mib": 914
+          },
+          {
+            "phase": "sweep-close-2",
+            "elapsed_ms": 90906.106,
+            "rss": "1230536 kB",
+            "heap_estimate_mib": 916
+          },
+          {
+            "phase": "sweep-close-3",
+            "elapsed_ms": 112320.456,
+            "rss": "1300280 kB",
+            "heap_estimate_mib": 941
+          },
+          {
+            "phase": "sweep-close-4",
+            "elapsed_ms": 132781.493,
+            "rss": "1082468 kB",
+            "heap_estimate_mib": 715
+          },
+          {
+            "phase": "sweep-close-5",
+            "elapsed_ms": 152281.069,
+            "rss": "1087868 kB",
+            "heap_estimate_mib": 718
+          },
+          {
+            "phase": "reload-close-0",
+            "elapsed_ms": 159633.301,
+            "rss": "1113124 kB",
+            "heap_estimate_mib": 718
+          },
+          {
+            "phase": "reload-close-1",
+            "elapsed_ms": 166355.042,
+            "rss": "1113108 kB",
+            "heap_estimate_mib": 717
+          },
+          {
+            "phase": "reload-close-2",
+            "elapsed_ms": 173068.241,
+            "rss": "1114688 kB",
+            "heap_estimate_mib": 718
+          },
+          {
+            "phase": "idle-after-lifecycle",
+            "elapsed_ms": 183089.523,
+            "rss": "1114760 kB",
+            "heap_estimate_mib": 718
+          }
+        ],
+        "retries": 6,
+        "summary": {
+          "startup:initialize": {
+            "count": 1,
+            "p50_ms": 14.173,
+            "p95_ms": 14.173,
+            "p99_ms": 14.173,
+            "max_ms": 14.173,
+            "errors": []
+          },
+          "cold:textDocument/hover": {
+            "count": 1,
+            "p50_ms": 57.724,
+            "p95_ms": 57.724,
+            "p99_ms": 57.724,
+            "max_ms": 57.724,
+            "errors": []
+          },
+          "cold:textDocument/completion": {
+            "count": 1,
+            "p50_ms": 6.105,
+            "p95_ms": 6.105,
+            "p99_ms": 6.105,
+            "max_ms": 6.105,
+            "errors": []
+          },
+          "cold:textDocument/definition": {
+            "count": 1,
+            "p50_ms": 2.281,
+            "p95_ms": 2.281,
+            "p99_ms": 2.281,
+            "max_ms": 2.281,
+            "errors": []
+          },
+          "resource-status:sail-lsp/analyzerStatus": {
+            "count": 11,
+            "p50_ms": 17.338,
+            "p95_ms": 94.518,
+            "p99_ms": 94.518,
+            "max_ms": 94.518,
+            "errors": []
+          },
+          "warm:textDocument/hover": {
+            "count": 10,
+            "p50_ms": 16.825,
+            "p95_ms": 22.187,
+            "p99_ms": 22.187,
+            "max_ms": 22.187,
+            "errors": []
+          },
+          "warm:textDocument/completion": {
+            "count": 10,
+            "p50_ms": 14.421,
+            "p95_ms": 249.138,
+            "p99_ms": 249.138,
+            "max_ms": 249.138,
+            "errors": []
+          },
+          "warm:textDocument/definition": {
+            "count": 10,
+            "p50_ms": 2.109,
+            "p95_ms": 2.371,
+            "p99_ms": 2.371,
+            "max_ms": 2.371,
+            "errors": []
+          },
+          "editing:textDocument/hover": {
+            "count": 2,
+            "p50_ms": 54.459,
+            "p95_ms": 125.293,
+            "p99_ms": 125.293,
+            "max_ms": 125.293,
+            "errors": []
+          },
+          "editing:textDocument/completion": {
+            "count": 2,
+            "p50_ms": 18.473,
+            "p95_ms": 18.799,
+            "p99_ms": 18.799,
+            "max_ms": 18.799,
+            "errors": []
+          },
+          "editing:textDocument/definition": {
+            "count": 2,
+            "p50_ms": 1.961,
+            "p95_ms": 1.977,
+            "p99_ms": 1.977,
+            "max_ms": 1.977,
+            "errors": []
+          },
+          "editing-final:textDocument/hover": {
+            "count": 1,
+            "p50_ms": 16.762,
+            "p95_ms": 16.762,
+            "p99_ms": 16.762,
+            "max_ms": 16.762,
+            "errors": []
+          },
+          "editing-final:textDocument/completion": {
+            "count": 1,
+            "p50_ms": 13.595,
+            "p95_ms": 13.595,
+            "p99_ms": 13.595,
+            "max_ms": 13.595,
+            "errors": []
+          },
+          "editing-final:textDocument/definition": {
+            "count": 1,
+            "p50_ms": 2.116,
+            "p95_ms": 2.116,
+            "p99_ms": 2.116,
+            "max_ms": 2.116,
+            "errors": []
+          },
+          "memory-sweep:textDocument/documentSymbol": {
+            "count": 948,
+            "p50_ms": 2.399,
+            "p95_ms": 8.944,
+            "p99_ms": 19.656,
+            "max_ms": 28.769,
+            "errors": []
+          },
+          "memory-sweep:textDocument/diagnostic": {
+            "count": 948,
+            "p50_ms": 23.013,
+            "p95_ms": 494.735,
+            "p99_ms": 2350.718,
+            "max_ms": 8207.91,
+            "errors": [
+              {
+                "code": -32802,
+                "message": "server cancelled the request"
+              },
+              {
+                "code": -32802,
+                "message": "server cancelled the request"
+              },
+              {
+                "code": -32802,
+                "message": "server cancelled the request"
+              },
+              {
+                "code": -32802,
+                "message": "server cancelled the request"
+              },
+              {
+                "code": -32802,
+                "message": "server cancelled the request"
+              },
+              {
+                "code": -32802,
+                "message": "server cancelled the request"
+              }
+            ]
+          },
+          "memory-sweep-retry:textDocument/diagnostic": {
+            "count": 6,
+            "p50_ms": 20.6,
+            "p95_ms": 1872.181,
+            "p99_ms": 1872.181,
+            "max_ms": 1872.181,
+            "errors": []
+          },
+          "reopened:textDocument/hover": {
+            "count": 3,
+            "p50_ms": 19.543,
+            "p95_ms": 26.124,
+            "p99_ms": 26.124,
+            "max_ms": 26.124,
+            "errors": []
+          },
+          "reopened:textDocument/completion": {
+            "count": 3,
+            "p50_ms": 17.516,
+            "p95_ms": 19.116,
+            "p99_ms": 19.116,
+            "max_ms": 19.116,
+            "errors": []
+          },
+          "reopened:textDocument/definition": {
+            "count": 3,
+            "p50_ms": 2.189,
+            "p95_ms": 2.83,
+            "p99_ms": 2.83,
+            "max_ms": 2.83,
+            "errors": []
+          },
+          "shutdown:shutdown": {
+            "count": 1,
+            "p50_ms": 0.46,
+            "p95_ms": 0.46,
+            "p99_ms": 0.46,
+            "max_ms": 0.46,
+            "errors": []
+          }
+        }
+      },
+      "accepted_final": {
+        "artifact": "target/ra-improvements-2026-10-30/accepted-memory.json",
+        "exit_code": 0,
+        "files": 158,
+        "sweeps": 6,
+        "reloads": 3,
+        "server_sha256": "0eb22405a9afacd07fd4aca8b6f0d250ea3e23d6e914f733a8de42abd10bc9d2",
+        "memory": [
+          {
+            "phase": "ready",
+            "rss": "102212 kB",
+            "heap_estimate_mib": null,
+            "elapsed_ms": 922.712
+          },
+          {
+            "phase": "initial-prime-complete",
+            "rss": "448064 kB",
+            "heap_estimate_mib": 294,
+            "elapsed_ms": 15418.204
+          },
+          {
+            "phase": "edit-0",
+            "rss": "478844 kB",
+            "heap_estimate_mib": null,
+            "elapsed_ms": 16275.468
+          },
+          {
+            "phase": "edit-1",
+            "rss": "481512 kB",
+            "heap_estimate_mib": null,
+            "elapsed_ms": 16348.906
+          },
+          {
+            "phase": "closed",
+            "rss": "482360 kB",
+            "heap_estimate_mib": null,
+            "elapsed_ms": 19383.166
+          },
+          {
+            "phase": "sweep-close-0",
+            "rss": "1109888 kB",
+            "heap_estimate_mib": 861,
+            "elapsed_ms": 47320.622
+          },
+          {
+            "phase": "sweep-close-1",
+            "rss": "1192632 kB",
+            "heap_estimate_mib": 904,
+            "elapsed_ms": 72415.81
+          },
+          {
+            "phase": "sweep-close-2",
+            "rss": "971468 kB",
+            "heap_estimate_mib": 689,
+            "elapsed_ms": 95944.276
+          },
+          {
+            "phase": "sweep-close-3",
+            "rss": "1245220 kB",
+            "heap_estimate_mib": 957,
+            "elapsed_ms": 116062.374
+          },
+          {
+            "phase": "sweep-close-4",
+            "rss": "1046596 kB",
+            "heap_estimate_mib": 733,
+            "elapsed_ms": 137816.243
+          },
+          {
+            "phase": "sweep-close-5",
+            "rss": "1067796 kB",
+            "heap_estimate_mib": 738,
+            "elapsed_ms": 157966.03
+          },
+          {
+            "phase": "reload-close-0",
+            "rss": "1035732 kB",
+            "heap_estimate_mib": 738,
+            "elapsed_ms": 165534.579
+          },
+          {
+            "phase": "reload-close-1",
+            "rss": "1074580 kB",
+            "heap_estimate_mib": 738,
+            "elapsed_ms": 172868.825
+          },
+          {
+            "phase": "reload-close-2",
+            "rss": "1075380 kB",
+            "heap_estimate_mib": 738,
+            "elapsed_ms": 179358.459
+          },
+          {
+            "phase": "idle-after-lifecycle",
+            "rss": "1075448 kB",
+            "heap_estimate_mib": 738,
+            "elapsed_ms": 189383.897
+          }
+        ],
+        "successful_retries": 9
+      }
+    },
+    "trivia_invalidation": {
+      "status": "implemented and verified",
+      "design": [
+        "Semantic key uses CST node boundaries and non-trivia tokens; recovery syntax remains conservative.",
+        "Current source map is independent of the semantic body key and has position-sensitive equality.",
+        "InferenceResult stores origin token spans for relocating legacy related locations. ExprId/PatId diagnostics resolve through fresh mappings."
+      ],
+      "validation": {
+        "invalidation": {
+          "body": {
+            "reinferred": [
+              "f"
+            ],
+            "infer_executions": 1,
+            "warm_executions": 0
+          },
+          "comment": {
+            "reinferred": [],
+            "infer_executions": 0,
+            "warm_executions": 0
+          },
+          "include": {
+            "reinferred": [
+              "caller",
+              "f"
+            ],
+            "infer_executions": 2,
+            "warm_executions": 0
+          },
+          "include_content": {
+            "reinferred": [
+              "caller",
+              "f"
+            ],
+            "infer_executions": 2,
+            "warm_executions": 0
+          },
+          "leading_comment": {
+            "reinferred": [],
+            "infer_executions": 0,
+            "warm_executions": 0
+          },
+          "manifest": {
+            "reinferred": [
+              "caller"
+            ],
+            "infer_executions": 1,
+            "warm_executions": 0
+          },
+          "signature": {
+            "reinferred": [
+              "caller",
+              "f"
+            ],
+            "infer_executions": 2,
+            "warm_executions": 0
+          }
+        },
+        "tests": [
+          "internal_trivia_reuses_inference_and_refreshes_source_locations",
+          "reused_inference_keeps_constraint_related_locations_current",
+          "callable_semantic_fingerprint_tracks_operator_grouping"
+        ],
+        "server_tests": {
+          "passed": 343,
+          "ignored": 1
+        }
+      },
+      "artifacts": [
+        "target/ra-improvements-2026-10-30/invalidation-trivia-final.json",
+        "target/ra-improvements-2026-10-30/trivia-server-tests-verified.log"
+      ],
+      "limitations": [
+        "Malformed/recovery syntax conservatively uses the full-text key; no zero-inference claim for malformed callables."
+      ],
+      "latest_invalidation": "target/ra-improvements-2026-10-30/invalidation-fixity.json"
+    }
+  },
+  "next_actions": [],
+  "final_gates": {
+    "default": {
+      "command": "cargo +1.97.1 test --workspace",
+      "exit_code": 0,
+      "passed": 2463,
+      "ignored": 18,
+      "artifact": "target/ra-improvements-2026-10-30/workspace-final-default.log"
+    },
+    "no_smt": {
+      "command": "cargo +1.97.1 test --workspace --no-default-features",
+      "exit_code": 0,
+      "passed": 2447,
+      "ignored": 18,
+      "artifact": "target/ra-improvements-2026-10-30/workspace-final-no-smt.log"
+    },
+    "clippy": {
+      "command": "cargo +1.97.1 clippy --workspace --all-targets --message-format=json",
+      "exit_code": 0,
+      "distinct_warnings": 40,
+      "artifact": "target/ra-improvements-2026-10-30/clippy-verified.jsonl",
+      "note": "Existing warnings remain. Removed two new test-only warnings (single-element loop and manual is_multiple_of); both affected tests rerun successfully. This is not a warning-free clippy claim."
+    },
+    "post_gate_test_cleanup": {
+      "runtime_code_changed": false,
+      "artifacts": [
+        "target/ra-improvements-2026-10-30/proof-test-lint-cleanup.log",
+        "target/ra-improvements-2026-10-30/trivia-test-lint-cleanup.log"
+      ],
+      "exit_codes": [
+        0,
+        0
+      ]
+    },
+    "conformance": {
+      "artifact": "target/ra-improvements-2026-10-30/conformance-final.log",
+      "exit_code": 0,
+      "pass_clean": 276,
+      "fail_rejected": 217,
+      "located": 205,
+      "expectations": 216,
+      "worded": 127,
+      "extended_agree": 355,
+      "scope_only": 17,
+      "extended_false_positive": 0,
+      "extended_false_negative": 0
+    },
+    "restoration_checks": [
+      {
+        "name": "restored-hir-ty-default",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "test",
+          "-p",
+          "hir-ty"
+        ],
+        "exit_code": 0
+      },
+      {
+        "name": "restored-hir-ty-no-smt",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "test",
+          "-p",
+          "hir-ty",
+          "--no-default-features"
+        ],
+        "exit_code": 0
+      },
+      {
+        "name": "restored-tools-build",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "build",
+          "--release",
+          "-p",
+          "sail-lsp",
+          "--example",
+          "conformance_check",
+          "--example",
+          "mutation_check",
+          "--example",
+          "invalidation_matrix"
+        ],
+        "exit_code": 0
+      },
+      {
+        "name": "restored-fmt",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "exit_code": 0
+      },
+      {
+        "name": "restored-diff-check",
+        "command": [
+          "git",
+          "diff",
+          "--check"
+        ],
+        "exit_code": 0
+      }
+    ]
+  },
+  "provenance": {
+    "base_commit": "0c9ce4cd705cbc48bef8cd9db93e250a517a18f3",
+    "worktree_runtime_sources_sha256": "66c5dd9ae7096b8051882db8bcc01854dee19465160d5c29b5ee98db96245455",
+    "source_hash_scope": "Sorted crates/**/*.rs and crates/**/*.toml, then Cargo.toml and Cargo.lock; path NUL contents NUL per entry. Includes untracked source files.",
+    "sail_commit": "ac09f8870b9d85e528e2a3436150b03b9d805d40",
+    "riscv_commit": "20690c8a8d6ccbb0e6adea8e2977efd3adaf8391",
+    "toolchain": "cargo +1.97.1",
+    "working_tree": "dirty; includes pre-existing edits; no commit requested",
+    "accepted_server_sha256": "0eb22405a9afacd07fd4aca8b6f0d250ea3e23d6e914f733a8de42abd10bc9d2"
+  },
+  "requirements": [
+    {
+      "item": "Burst latency profiling and measured improvement",
+      "status": "verified",
+      "implementation": [
+        "crates/hir-def/src/def_query.rs:file_fixities",
+        "crates/hir-def/src/item_tree/lower.rs:fixity_context_from_cst",
+        "scripts/latency_summary.py"
+      ],
+      "evidence": [
+        "latency-before-fixity.json",
+        "latency-after-fixity.json",
+        "latency-before-fixity-2.json",
+        "latency-after-fixity-2.json",
+        "latency-before-fixity-3.json",
+        "latency-after-fixity-3.json",
+        "accepted-burst.json"
+      ],
+      "limitation": "Client burst timing includes backlog. Cancelled definition requests are not counted as successful navigation; final-version interactions succeed."
+    },
+    {
+      "item": "Internal trivia reuses inference while locations refresh",
+      "status": "verified",
+      "implementation": [
+        "crates/hir-def/src/def_query.rs",
+        "crates/hir-def/src/expr_store/body.rs",
+        "crates/hir-ty/src/query.rs",
+        "crates/hir/src/diagnostics.rs"
+      ],
+      "evidence": [
+        "invalidation-fixity.json",
+        "workspace-final-default.log",
+        "trivia-test-lint-cleanup.log"
+      ],
+      "limitation": "Malformed/recovery syntax retains conservative text invalidation."
+    },
+    {
+      "item": "Two existential-constructor argument-order mutation misses",
+      "status": "verified",
+      "implementation": [
+        "crates/hir-ty/src/infer/expr.rs:scheme_free_params",
+        "crates/hir-ty/src/infer/solver.rs:solve_finite"
+      ],
+      "evidence": [
+        "mutation-final.log",
+        "conformance-final.log"
+      ],
+      "result": "274/274 mutation detections; upstream 276/276 pass and 217/217 fail."
+    },
+    {
+      "item": "Diagnostic location and explanation audit",
+      "status": "verified",
+      "implementation": [
+        "crates/parser/src/shortcuts.rs",
+        "crates/syntax/src/parsing.rs",
+        "crates/hir-ty/src/infer/pat.rs",
+        "crates/ide-diagnostics/src/lib.rs"
+      ],
+      "evidence": [
+        "conformance-final.log",
+        "type-pattern-locations.log",
+        "type-pattern-suites-final.log"
+      ],
+      "audit": "docs/baselines/2026-10-30-diagnostic-audit.json",
+      "result": "17 location differences audited: six refinements verified; 11 intentional precise/related locations. Match 205/216 carets; wording policy documented."
+    },
+    {
+      "item": "Sustained multi-file memory and cache-budget policy",
+      "status": "verified",
+      "implementation": [
+        "scripts/editor_probe.py",
+        "docs/architecture.md"
+      ],
+      "evidence": [
+        "memory-full-sweeps-retry.json",
+        "memory-parse-budget.json",
+        "memory-final.json",
+        "accepted-memory.json"
+      ],
+      "result": "158 physical files, six sweeps, three reloads. Rejected parse LRU=128 after worsened memory/throughput; retain per-callable LRU=512 and weak parse seeds. Finite plateau is not a universal bound."
+    },
+    {
+      "item": "Resolve the three originally identified divisibility obligations",
+      "status": "verified",
+      "implementation": [
+        "crates/hir-ty/src/infer/solver.rs:power_remainder_is_zero"
+      ],
+      "evidence": [
+        "riscv-accepted-final.log",
+        "constraints-accepted-final.json",
+        "hir-ty-proof-no-smt.log",
+        "proof-test-lint-cleanup.log"
+      ],
+      "result": "Exact power-of-two divisibility rule, no production budget increase; all three original sites resolved. Additional budget-sensitive goals separately inventoried (four in final accepted run)."
+    }
+  ],
+  "artifact_directory": "target/ra-improvements-2026-10-30",
+  "quality": {
+    "typecheck": {
+      "pass_clean": 276,
+      "pass_total": 276,
+      "fail_rejected": 217,
+      "fail_total": 217
+    },
+    "extended": {
+      "agree": 355,
+      "scope_only": 17,
+      "false_positive": 0,
+      "false_negative": 0
+    },
+    "mutation": {
+      "caught": 274,
+      "rejected": 274,
+      "missed": 0
+    },
+    "riscv": {
+      "callables": 3318,
+      "expressions": 81543,
+      "unknown_types": 0,
+      "partially_unknown_types": 0,
+      "type_mismatches": 0,
+      "error_diagnostics": 0,
+      "warnings": 62,
+      "hints": 6,
+      "deferred_constraints": {
+        "proved": 2913,
+        "refuted": 0,
+        "total": 2917,
+        "unknown": 4
+      }
+    },
+    "diagnostic_carets": {
+      "matched": 205,
+      "total": 216
+    }
+  },
+  "known_remaining": {
+    "additional_budget_sensitive_obligations": [
+      {
+        "assumptions": [
+          "3 <= vlen_exp & vlen_exp <= 16",
+          "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+          "xlen in {32, 64}",
+          "'_sk1__set in {8, 16, 32, 64}",
+          "-3 <= '_sk2_LMUL_pow & '_sk2_LMUL_pow <= 3",
+          "1 <= '_sk3_num_elem & '_sk3_num_elem <= vlen",
+          "<unsupported>",
+          "true",
+          "0 <= '_sk5__loop_index & '_sk5__loop_index <= '_sk3_num_elem - 1",
+          "-(2 ^ ('_sk1__set - 1)) <= '_sk7__sk6__argument & '_sk7__sk6__argument <= 2 ^ ('_sk1__set - 1) - 1",
+          "1 <= '_sk3_num_elem & '_sk3_num_elem <= 2 ^ vlen_exp"
+        ],
+        "callable": "execute",
+        "cause": "Compatibility",
+        "clause": 0,
+        "compatibility_types": null,
+        "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/Zvabd/zvabd_insts.sail",
+        "goal": "'_sk1__set >= 0 & 0 <= abs('_sk7__sk6__argument) & abs('_sk7__sk6__argument) < 2 ^ '_sk1__set",
+        "location": {
+          "column": 19,
+          "end": 2058,
+          "line": 47,
+          "source": "result[i] = to_bits(SEW, abs_int(signed(vs2_val[i])))",
+          "start": 2017
+        },
+        "origin_is_fallback": false,
+        "reason": "budget_exhausted",
+        "recovery_types": null,
+        "rigid_variables": [
+          "'_sk1__set",
+          "'_sk2_LMUL_pow",
+          "'_sk3_num_elem",
+          "'_sk5__loop_index",
+          "'_sk7__sk6__argument"
+        ],
+        "status": "unknown"
+      },
+      {
+        "assumptions": [
+          "3 <= vlen_exp & vlen_exp <= 16",
+          "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+          "xlen in {32, 64}",
+          "'_sk1__set in {8, 16, 32, 64}",
+          "-3 <= '_sk2_LMUL_pow & '_sk2_LMUL_pow <= 3",
+          "1 <= '_sk3_num_elem & '_sk3_num_elem <= vlen",
+          "<unsupported>",
+          "true",
+          "0 <= '_sk5__loop_index & '_sk5__loop_index <= '_sk3_num_elem - 1",
+          "-(2 ^ ('_sk1__set - 1)) - (2 ^ ('_sk1__set - 1) - 1) <= '_sk7__sk6__argument & '_sk7__sk6__argument <= 2 ^ ('_sk1__set - 1) - 1 - -(2 ^ ('_sk1__set - 1))",
+          "1 <= '_sk3_num_elem & '_sk3_num_elem <= 2 ^ vlen_exp"
+        ],
+        "callable": "execute",
+        "cause": "Compatibility",
+        "clause": 1,
+        "compatibility_types": null,
+        "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/Zvabd/zvabd_insts.sail",
+        "goal": "'_sk1__set >= 0 & 0 <= abs('_sk7__sk6__argument) & abs('_sk7__sk6__argument) < 2 ^ '_sk1__set",
+        "location": {
+          "column": 21,
+          "end": 3790,
+          "line": 94,
+          "source": "VV_VABD  => to_bits(SEW, abs_int(signed(vs2_val[i]) - signed(vs1_val[i]))),",
+          "start": 3728
+        },
+        "origin_is_fallback": false,
+        "reason": "budget_exhausted",
+        "recovery_types": null,
+        "rigid_variables": [
+          "'_sk1__set",
+          "'_sk2_LMUL_pow",
+          "'_sk3_num_elem",
+          "'_sk5__loop_index",
+          "'_sk7__sk6__argument"
+        ],
+        "status": "unknown"
+      },
+      {
+        "assumptions": [
+          "xlen in {32, 64}",
+          "3 <= vlen_exp & vlen_exp <= 16",
+          "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+          "'_sk1__set in {8, 16, 32, 64}",
+          "-3 <= '_sk2_LMUL_pow & '_sk2_LMUL_pow <= 3",
+          "1 <= '_sk3_num_elem & '_sk3_num_elem <= vlen",
+          "true",
+          "<unsupported>",
+          "true",
+          "'_sk1__set == 32 | '_sk1__set == 64",
+          "SEW == 32 | SEW == 64",
+          "0 <= '_sk14__argument & '_sk14__argument <= 2 ^ xlen - 1",
+          "0 <= '_sk15__sk14__argument & '_sk15__sk14__argument <= 2 ^ xlen - 1",
+          "0 <= '_sk16__argument & '_sk16__argument <= 2 ^ xlen - 1",
+          "0 <= '_sk17__sk16__argument & '_sk17__sk16__argument <= 2 ^ xlen - 1",
+          "div('_sk17__sk16__argument, 4) <= '_sk18__loop_index & '_sk18__loop_index <= div('_sk15__sk14__argument, 4) - 1",
+          "'_sk18__loop_index * 4 + 3 < '_sk3_num_elem",
+          "i * 4 + 3 < num_elem",
+          "1 <= '_sk3_num_elem & '_sk3_num_elem <= 2 ^ vlen_exp"
+        ],
+        "callable": "execute",
+        "cause": "Compatibility",
+        "clause": 0,
+        "compatibility_types": null,
+        "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/vector_crypto/zvknhab_insts.sail",
+        "goal": "0 <= '_sk18__loop_index",
+        "location": {
+          "column": 5,
+          "end": 2601,
+          "line": 68,
+          "source": "write_velem_quad(vd, SEW, w[19] @ w[18] @ w[17] @ w[16], i);",
+          "start": 2542
+        },
+        "origin_is_fallback": false,
+        "reason": "budget_exhausted",
+        "recovery_types": null,
+        "rigid_variables": [
+          "'_sk14__argument",
+          "'_sk15__sk14__argument",
+          "'_sk16__argument",
+          "'_sk17__sk16__argument",
+          "'_sk18__loop_index",
+          "'_sk1__set",
+          "'_sk2_LMUL_pow",
+          "'_sk3_num_elem"
+        ],
+        "status": "unknown"
+      },
+      {
+        "assumptions": [
+          "xlen in {32, 64}",
+          "3 <= vlen_exp & vlen_exp <= 16",
+          "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+          "'_sk1__set in {8, 16, 32, 64}",
+          "-3 <= '_sk2_LMUL_pow & '_sk2_LMUL_pow <= 3",
+          "1 <= '_sk3_num_elem & '_sk3_num_elem <= vlen",
+          "true",
+          "<unsupported>",
+          "true",
+          "'_sk1__set == 32 | '_sk1__set == 64",
+          "SEW == 32 | SEW == 64",
+          "0 <= '_sk14__argument & '_sk14__argument <= 2 ^ xlen - 1",
+          "0 <= '_sk15__sk14__argument & '_sk15__sk14__argument <= 2 ^ xlen - 1",
+          "0 <= '_sk16__argument & '_sk16__argument <= 2 ^ xlen - 1",
+          "0 <= '_sk17__sk16__argument & '_sk17__sk16__argument <= 2 ^ xlen - 1",
+          "div('_sk17__sk16__argument, 4) <= '_sk18__loop_index & '_sk18__loop_index <= div('_sk15__sk14__argument, 4) - 1",
+          "'_sk18__loop_index * 4 + 3 < '_sk3_num_elem",
+          "i * 4 + 3 < num_elem",
+          "1 <= '_sk3_num_elem & '_sk3_num_elem <= 2 ^ vlen_exp"
+        ],
+        "callable": "execute",
+        "cause": "Compatibility",
+        "clause": 0,
+        "compatibility_types": null,
+        "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/vector_crypto/zvknhab_insts.sail",
+        "goal": "0 <= '_sk18__loop_index",
+        "location": {
+          "column": 5,
+          "end": 2601,
+          "line": 68,
+          "source": "write_velem_quad(vd, SEW, w[19] @ w[18] @ w[17] @ w[16], i);",
+          "start": 2542
+        },
+        "origin_is_fallback": false,
+        "reason": "budget_exhausted",
+        "recovery_types": null,
+        "rigid_variables": [
+          "'_sk14__argument",
+          "'_sk15__sk14__argument",
+          "'_sk16__argument",
+          "'_sk17__sk16__argument",
+          "'_sk18__loop_index",
+          "'_sk1__set",
+          "'_sk2_LMUL_pow",
+          "'_sk3_num_elem"
+        ],
+        "status": "unknown"
+      }
+    ],
+    "clippy_existing_warnings": 40,
+    "limitations": [
+      "No Zed SSH real-client acceptance requested or performed.",
+      "Synthetic stdio burst measurements are not single-keystroke latency guarantees.",
+      "Finite memory sweeps do not prove a universal bound or absence of all leaks.",
+      "Default solver budgets are unchanged; Unknown is not a refutation."
+    ]
+  },
+  "completion_audit": {
+    "status": "verified",
+    "scope": "Original six items in scope list; additional budget-sensitive model obligations and existing lint warnings are explicitly retained as limitations.",
+    "source_sha256": "66c5dd9ae7096b8051882db8bcc01854dee19465160d5c29b5ee98db96245455",
+    "accepted_server_sha256": "0eb22405a9afacd07fd4aca8b6f0d250ea3e23d6e914f733a8de42abd10bc9d2",
+    "restoration_note": "Rejected solver experiments were removed; original finite_domain and integer evaluator restored. Rebuilt acceptance tools and reran default/no-SMT hir-ty suites; prior full-workspace gates cover accepted implementation plus separately verified test-only lint cleanups.",
+    "requirements_verified": 6
+  }
+}

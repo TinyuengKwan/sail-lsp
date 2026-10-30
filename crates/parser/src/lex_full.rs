@@ -55,6 +55,7 @@ pub struct LexError {
 
 /// Lex input preserving all whitespace and comments.
 /// Every byte of input is covered by exactly one token span.
+#[cfg(test)]
 pub fn lex_full_fidelity(input: &str) -> Vec<(FullToken, Span)> {
     lex_full_fidelity_with_errors(input).0
 }
@@ -446,10 +447,10 @@ pub fn single_token(text: &str) -> Option<(crate::syntax_kind::SyntaxKind, Optio
     if text.is_empty() {
         return None;
     }
-    let tokens = lex_full_fidelity(text);
+    let (tokens, errors) = lex_full_fidelity_with_errors(text);
     if tokens.len() == 1 {
         let kind = tokens[0].0.syntax_kind();
-        Some((kind, None))
+        Some((kind, errors.first().map(|error| error.message.clone())))
     } else {
         None
     }

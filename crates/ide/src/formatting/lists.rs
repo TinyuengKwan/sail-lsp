@@ -25,8 +25,6 @@ pub(crate) enum DefinitiveListTactic {
 pub(crate) enum SeparatorTactic {
     /// Always include trailing separator.
     Always,
-    /// Never include trailing separator.
-    Never,
     /// Only on vertical layouts.
     Vertical,
 }
@@ -110,7 +108,6 @@ impl<'a> ListFormatting<'a> {
     pub(crate) fn needs_trailing_separator(&self) -> bool {
         match self.trailing_separator {
             SeparatorTactic::Always => true,
-            SeparatorTactic::Never => false,
             SeparatorTactic::Vertical => self.tactic == DefinitiveListTactic::Vertical,
         }
     }

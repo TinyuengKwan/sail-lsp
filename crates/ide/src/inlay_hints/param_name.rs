@@ -3,9 +3,7 @@
 use super::*;
 
 /// Replaces `collect_core_inlay_hints` by walking Expr::Call in each body.
-pub(super) fn collect_hir_parameter_hints<'a>(
-    files: &[(&'a Url, &'a dyn FileDb)],
-    _current_uri: &Url,
+pub(super) fn collect_hir_parameter_hints(
     current_file: &dyn FileDb,
     begin: usize,
     end: usize,
@@ -16,10 +14,6 @@ pub(super) fn collect_hir_parameter_hints<'a>(
     let Some(bodies) = current_file.bodies() else {
         return;
     };
-    // Only ad-hoc buffers need the legacy workspace fallback. Configured
-    // calls select their signature at the call's actual declaration position.
-    let fallback = std::cell::OnceCell::new();
-
     for entry in bodies.entries() {
         for (id, hir) in entry.body.iter_exprs() {
             let span = entry.source_map.expr_syntax(id).unwrap_or(parser::Span::new(0, 0));
@@ -82,26 +76,7 @@ pub(super) fn collect_hir_parameter_hints<'a>(
                             head.params.iter().filter_map(|param| param.name.clone()).collect();
                         &selected_names
                     } else {
-                        let lookup = fallback.get_or_init(|| {
-                            let mut map = std::collections::HashMap::new();
-                            for (_, file) in files {
-                                if let Some(parsed) = file.parsed() {
-                                    for head in &parsed.callable_heads {
-                                        let params = head
-                                            .params
-                                            .iter()
-                                            .filter_map(|p| p.name.clone())
-                                            .collect::<Vec<_>>();
-                                        if !params.is_empty() {
-                                            map.entry(head.name.clone()).or_insert(params);
-                                        }
-                                    }
-                                }
-                            }
-                            map
-                        });
-                        let Some(names) = lookup.get(callee_name) else { continue };
-                        names
+                        continue;
                     }
                 };
                 // Generate parameter hints

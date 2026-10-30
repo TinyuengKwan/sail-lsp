@@ -51,7 +51,6 @@ pub use item_tree::{Associativity, DefKind, FixityDecl, ItemTree};
 pub use name::Name;
 pub use nameres::{DefData, DefDiagnostic, DefIdx, DefMap};
 pub use per_ns::{Namespace, PerNs};
-pub use project::{parse_project, ProjectFile, ProjectParseError};
 pub use resolver::{Resolution, ResolveValueResult, Resolver, TypeNs, ValueNs};
 pub use scattered::{
     workspace_scattered_status, InFileSpan, ScatteredHeadLocation, ScatteredKind, ScatteredStatus,

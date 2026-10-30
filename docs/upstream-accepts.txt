@@ -1,4 +1,4 @@
-# Regenerated 2026-10-24 against Sail ac09f8870b9d85e528e2a3436150b03b9d805d40 using its local _build/default/src/bin/sail.exe.
+# Upstream: Sail 0.20.3 (sail2 @ ac09f8870b9d85e528e2a3436150b03b9d805d40); SAIL_DIR=/home/clair/tinyueng_workplace/sail
 # Which files upstream Sail itself accepts
 #
 # Built by `scripts/regen_upstream_accepts.py` with `sail --no-memo-z3

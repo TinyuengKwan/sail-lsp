@@ -162,24 +162,40 @@ impl std::ops::Index<PatId> for Body {
 pub struct BodySourceMap {
     pub file_id: Option<base_db::FileId>,
     pub store: ExpressionStoreSourceMap,
-    /// Where the callable starts in the file as it is *now*.
-    ///
-    /// `body_with_source_map` reads this fresh on every revision, which is
-    /// what makes the query re-execute at all: its only other input is
-    /// `callable_body`, which is deliberately backdated across an edit
-    /// above the callable, and a query whose inputs all verify unchanged
-    /// returns its memo — positions and all, from before the edit.
-    ///
-    /// It is also the datum a raw inference span needs: an
-    /// `InferenceResult` that was reused records the base it was inferred
-    /// with, and the difference is how far its spans have to move.
+    /// Where the callable starts in the current revision. The source-map
+    /// query reads current lowering independently of the semantic cache.
     pub def_base: usize,
+    /// Current significant token positions. Legacy raw inference spans are
+    /// relocated against the origin token positions stored in the result.
+    pub source_tokens: Vec<Span>,
 }
 
 impl BodySourceMap {
-    /// Move a span recorded when the callable started at `was` to where it
-    /// starts now.
-    pub fn rebase(&self, span: Span, was: usize) -> Span {
+    /// Relocate a legacy inference span using token identity across trivia
+    /// edits. Semantic ExprId/PatId locations already use the current store.
+    /// Callers without origin tokens retain the previous base-offset fallback.
+    pub fn rebase(&self, span: Span, was: usize, original_tokens: &[Span]) -> Span {
+        if original_tokens.len() == self.source_tokens.len()
+            && original_tokens.first().is_some_and(|old| span.start >= old.start)
+            && original_tokens.last().is_some_and(|old| span.end <= old.end)
+        {
+            let relocate = |offset: usize, end: bool| {
+                let index = original_tokens.partition_point(|old| {
+                    if end {
+                        old.end < offset
+                    } else {
+                        old.end <= offset
+                    }
+                });
+                if let Some(old) = original_tokens.get(index) {
+                    let new = self.source_tokens[index];
+                    new.start + offset.saturating_sub(old.start).min(new.end - new.start)
+                } else {
+                    self.source_tokens.last().unwrap().end
+                }
+            };
+            return Span::new(relocate(span.start, false), relocate(span.end, true));
+        }
         let delta = self.def_base as i64 - was as i64;
         if delta == 0 {
             return span;

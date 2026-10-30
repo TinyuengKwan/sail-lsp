@@ -91,7 +91,7 @@ fn rewrite_aligned_group<T: AlignedItem>(
         let mut result = Vec::new();
         for item in items {
             if item.skip() {
-                result.push(context.snippet(item.get_range()).to_string());
+                result.push(context.snippet(item.get_range()).trim().to_string());
                 continue;
             }
             match item.rewrite_aligned_item(context, shape, 0) {
@@ -109,7 +109,7 @@ fn rewrite_aligned_group<T: AlignedItem>(
     for item in items {
         if item.skip() {
             // Preserve comments/blank lines verbatim.
-            result.push(context.snippet(item.get_range()).to_string());
+            result.push(format!("{indent}{}", context.snippet(item.get_range()).trim()));
             continue;
         }
         match item.rewrite_aligned_item(context, shape, max_prefix_width) {

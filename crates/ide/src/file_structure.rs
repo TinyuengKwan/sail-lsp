@@ -37,6 +37,9 @@ pub fn file_structure(file: &dyn FileDb) -> Vec<NavigationTarget> {
     };
 
     let mut roots: Vec<NavigationTarget> = Vec::new();
+    // Where each declaration's entry is, so what it generates can join it.
+    let mut root_of: HashMap<hir::DefItem, usize> = HashMap::new();
+    let mut generated: Vec<(hir::DefItem, NavigationTarget)> = Vec::new();
     for &id in tree.top_level_items() {
         let kind = match id.def_kind(tree) {
             hir::DefKind::Function
@@ -82,44 +85,24 @@ pub fn file_structure(file: &dyn FileDb) -> Vec<NavigationTarget> {
                 ));
             }
         }
-        roots.push(root);
+        match tree.generated.get(&id) {
+            Some(origin) => generated.push((origin.owner, root)),
+            None => {
+                root_of.insert(id, roots.len());
+                roots.push(root);
+            }
+        }
     }
 
-    // Nest bitfield synthetic accessors under their parent bitfield.
-    // ItemTree generates _get_/update_/set_ entries for each bitfield field.
-    // Group them as children of the bitfield entry in the outline.
-    let mut bitfield_indices: HashMap<String, usize> = HashMap::new();
-    for (idx, target) in roots.iter().enumerate() {
-        if target.kind == IdeSymbolKind::Struct
-            && target.detail.as_deref().is_some_and(|d| d.starts_with("bitfield"))
-        {
-            bitfield_indices.insert(target.name.clone(), idx);
-        }
-    }
-    // Move synthetic bitfield accessors into their parent's children
-    let mut to_remove = Vec::new();
-    for (idx, target) in roots.iter().enumerate() {
-        for (bf_name, &parent_idx) in &bitfield_indices {
-            if target.name.contains(&format!("_{bf_name}_"))
-                && (target.name.starts_with("_get_")
-                    || target.name.starts_with("_update_")
-                    || target.name.starts_with("_set_")
-                    || target.name.starts_with("Mk_"))
-            {
-                to_remove.push((idx, parent_idx));
-                break;
-            }
-        }
-    }
-    // Apply nesting (reverse order to preserve indices)
-    for &(child_idx, parent_idx) in to_remove.iter().rev() {
-        if child_idx < roots.len() {
-            let child = roots.remove(child_idx);
-            // Adjust parent_idx if it was after the removed child
-            let adjusted_parent = if parent_idx > child_idx { parent_idx - 1 } else { parent_idx };
-            if let Some(parent) = roots.get_mut(adjusted_parent) {
-                parent.children.push(child);
-            }
+    // What a declaration generates — a bitfield's accessors, an enum's
+    // conversions, a mapping's directions — is listed under it, in source
+    // order. The item tree records the owner; matching on `_get_`/`_set_`
+    // name prefixes left `Mk_B` and every `_mod_F`/`update_F` overload at the
+    // top level, seven per bitfield, and listed the rest in reverse.
+    for (owner, entry) in generated {
+        match root_of.get(&owner) {
+            Some(&at) => roots[at].children.push(entry),
+            None => roots.push(entry),
         }
     }
 
@@ -155,6 +138,25 @@ enum E = {A, B}
         // Enum members are children of their enum, not roots.
         let e = symbols.iter().find(|s| s.name == "E").expect("E");
         let members: Vec<&str> = e.children.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(members, vec!["A", "B"], "enum members are not its children");
+        assert_eq!(&members[..2], ["A", "B"], "enum members are not its children");
+    }
+    /// What a declaration generates sits under it, in order, and nothing
+    /// generated is a root of its own.
+    #[test]
+    fn generated_names_are_children_of_what_generates_them() {
+        let source = "//- /main.sail\nbitfield B : bits(8) = { HI : 7 .. 4, LO : 3 .. 0 }\n\
+                      enum E = {A, Z}\nfunction f() -> unit = ()\n";
+        let (analysis, files) = fixture::analysis(source);
+        let symbols = analysis.document_symbols(files[0].0).expect("no cancellation");
+        let roots: Vec<&str> = symbols.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(roots, ["B", "E", "f"]);
+        let b: Vec<&str> = symbols[0].children.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(b[0], "Mk_B");
+        let at = |n: &str| b.iter().position(|c| *c == n).unwrap_or_else(|| panic!("{n}: {b:?}"));
+        assert!(at("_get_B_HI") < at("_set_B_HI") && at("_set_B_HI") < at("_get_B_LO"), "{b:?}");
+        assert!(at("update_HI") > at("_get_B_HI"), "{b:?}");
+        let e: Vec<&str> = symbols[1].children.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(&e[..2], ["A", "Z"], "members first: {e:?}");
+        assert!(e.len() > 2, "the enum's conversions are under it too: {e:?}");
     }
 }

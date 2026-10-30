@@ -39,11 +39,15 @@ pub(crate) struct DiagnosticCollection {
     /// Per-file native semantic diagnostics (type errors).
     pub(crate) native_semantic:
         HashMap<FileId, (DiagnosticsGeneration, Vec<lsp_types::Diagnostic>)>,
-    /// Per-file diagnostics from `sail --just-check`. Not generation-keyed:
-    /// a run replaces the previous run wholesale, because upstream stops at
-    /// the first error in a file and a partial merge would keep a finding it
-    /// no longer makes.
-    pub(crate) check: HashMap<FileId, Vec<lsp_types::Diagnostic>>,
+    /// Per-file diagnostics from `sail --just-check`, by the run that found
+    /// them. Not generation-keyed: a run replaces everything the previous run
+    /// of the same target said, because upstream stops at the first error in
+    /// a file and a partial merge would keep a finding it no longer makes.
+    /// Another project's run leaves them alone.
+    pub(crate) check: HashMap<
+        FileId,
+        std::collections::BTreeMap<crate::flycheck::CheckTarget, Vec<lsp_types::Diagnostic>>,
+    >,
     /// Files whose diagnostics changed since last `take_changes()`.
     changes: HashSet<FileId>,
     /// Counter for supplying new generation numbers.
@@ -110,19 +114,32 @@ impl DiagnosticCollection {
         }
     }
 
-    /// Replace everything the last `sail --just-check` run said.
+    /// Replace everything the last `sail --just-check` run of `target` said.
     pub(crate) fn set_check_diagnostics(
         &mut self,
+        target: &crate::flycheck::CheckTarget,
         diagnostics: Vec<(FileId, Vec<lsp_types::Diagnostic>)>,
     ) {
-        // Every file that had findings before is a change, whether or not it
-        // has any now — clearing is a change too.
-        self.changes.extend(self.check.keys().copied());
-        self.check.clear();
+        self.retain_check_targets(|t| t != target);
         for (file_id, diags) in diagnostics {
             self.changes.insert(file_id);
-            self.check.entry(file_id).or_default().extend(diags);
+            self.check.entry(file_id).or_default().entry(target.clone()).or_default().extend(diags);
         }
+    }
+
+    /// Forget the runs of targets that no longer exist. Clearing is a change.
+    pub(crate) fn retain_check_targets(
+        &mut self,
+        mut keep: impl FnMut(&crate::flycheck::CheckTarget) -> bool,
+    ) {
+        for (file_id, by_target) in &mut self.check {
+            let before = by_target.len();
+            by_target.retain(|t, _| keep(t));
+            if by_target.len() != before {
+                self.changes.insert(*file_id);
+            }
+        }
+        self.check.retain(|_, by_target| !by_target.is_empty());
     }
 
     /// Get all diagnostics for a file (syntax + semantic + check).
@@ -139,12 +156,12 @@ impl DiagnosticCollection {
             (_, Some(full)) => Some(full),
             (syntax, None) => syntax,
         };
-        let check = self.check.get(&file_id).into_iter().flatten();
+        let check = self.check.get(&file_id).into_iter().flat_map(|m| m.values().flatten());
         native.into_iter().flat_map(|(_, d)| d).chain(check)
     }
 
     pub(crate) fn native_diagnostics_are_current(&self, file_id: FileId) -> bool {
-        !self.check.get(&file_id).is_some_and(|diags| !diags.is_empty())
+        !self.check.get(&file_id).is_some_and(|m| m.values().any(|diags| !diags.is_empty()))
             && [self.native_syntax.get(&file_id), self.native_semantic.get(&file_id)]
                 .into_iter()
                 .flatten()

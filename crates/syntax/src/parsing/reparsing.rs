@@ -25,15 +25,33 @@ pub(crate) fn incremental_reparse(
     insert: &str,
     errors: impl IntoIterator<Item = SyntaxError>,
 ) -> Option<(GreenNode, Vec<SyntaxError>, TextRange)> {
+    incremental_reparse_with_fixities(node, delete, insert, errors, &parser::FixityContext::new())
+}
+
+pub(crate) fn incremental_reparse_with_fixities(
+    node: &SyntaxNode,
+    delete: TextRange,
+    insert: &str,
+    errors: impl IntoIterator<Item = SyntaxError>,
+    fixities: &parser::FixityContext,
+) -> Option<(GreenNode, Vec<SyntaxError>, TextRange)> {
+    let errors: Vec<_> = errors.into_iter().collect();
     if let Some((green, new_errors, old_range)) = reparse_token(node, delete, insert) {
-        return Some((
-            green,
-            merge_errors(errors, new_errors, old_range, delete, insert),
-            old_range,
-        ));
+        // An error at the token may be a recovery decision of its parent,
+        // not a lexical error. Replacing the token cannot re-evaluate it.
+        let has_error = errors.iter().any(|error| {
+            error.range().start() <= old_range.end() && error.range().end() >= old_range.start()
+        });
+        if !has_error {
+            return Some((
+                green,
+                merge_errors(errors, new_errors, old_range, delete, insert),
+                old_range,
+            ));
+        }
     }
 
-    if let Some((green, new_errors, old_range)) = reparse_block(node, delete, insert) {
+    if let Some((green, new_errors, old_range)) = reparse_block(node, delete, insert, fixities) {
         return Some((
             green,
             merge_errors(errors, new_errors, old_range, delete, insert),
@@ -64,9 +82,9 @@ fn reparse_token(
             }
 
             let mut new_text = get_text_after_edit(prev_token.clone().into(), delete, insert);
-            let (new_token_kind, _new_err) = parser::single_token(&new_text)?;
+            let (new_token_kind, new_err) = parser::single_token(&new_text)?;
 
-            if new_token_kind != prev_token_kind {
+            if new_token_kind != prev_token_kind || new_err.is_some() {
                 return None;
             }
 
@@ -87,9 +105,9 @@ fn reparse_token(
         // IDENT tokens (Sail identifiers, keywords are separate tokens)
         k if is_ident_like(k) => {
             let mut new_text = get_text_after_edit(prev_token.clone().into(), delete, insert);
-            let (new_token_kind, _new_err) = parser::single_token(&new_text)?;
+            let (new_token_kind, new_err) = parser::single_token(&new_text)?;
 
-            if new_token_kind != prev_token_kind {
+            if new_token_kind != prev_token_kind || new_err.is_some() {
                 return None;
             }
 
@@ -109,9 +127,9 @@ fn reparse_token(
         // STRING tokens
         SyntaxKind::STRING_LIT => {
             let new_text = get_text_after_edit(prev_token.clone().into(), delete, insert);
-            let (new_token_kind, _new_err) = parser::single_token(&new_text)?;
+            let (new_token_kind, new_err) = parser::single_token(&new_text)?;
 
-            if new_token_kind != prev_token_kind {
+            if new_token_kind != prev_token_kind || new_err.is_some() {
                 return None;
             }
 
@@ -137,18 +155,27 @@ fn reparse_block(
     root: &SyntaxNode,
     delete: TextRange,
     insert: &str,
+    fixities: &parser::FixityContext,
 ) -> Option<(GreenNode, Vec<SyntaxError>, TextRange)> {
     let (node, reparser) = find_reparsable_node(root, delete)?;
+    // A recovered, unclosed block has no independent syntax boundary. Its
+    // errors can live at the outer EOF and cannot safely be merged locally.
+    if !is_balanced(&parser::LexedStr::new(&node.text().to_string())) {
+        return None;
+    }
     let text = get_text_after_edit(node.clone().into(), delete, insert);
 
     let lexed = parser::LexedStr::new(&text);
-    let parser_input = lexed.to_input();
+    let parser_input = lexed.to_input_with_text(&text);
     if !is_balanced(&lexed) {
         return None;
     }
 
-    let tree_traversal = reparser.parse(&parser_input);
-    let (green, new_parser_errors, _eof) = crate::parsing::build_tree(lexed, tree_traversal);
+    let tree_traversal = reparser.parse_with_fixities(&parser_input, fixities.clone());
+    let (green, new_parser_errors, eof) = crate::parsing::build_tree(lexed, tree_traversal);
+    if !eof {
+        return None;
+    }
 
     Some((node.replace_with(green), new_parser_errors, node.text_range()))
 }
@@ -170,6 +197,23 @@ fn find_reparsable_node(node: &SyntaxNode, range: TextRange) -> Option<(SyntaxNo
     let node = node.covering_element(range);
 
     node.ancestors().find_map(|node| {
+        // This path relies on an enclosing, balanced pair of braces. A nearer
+        // BLOCK_ITEM/BODY has a parser entry point but is not a safe boundary;
+        // keep looking for its block instead of giving up on the first item.
+        if node.kind() != SyntaxKind::BLOCK_EXPR {
+            return None;
+        }
+        // A mapping body shares BLOCK_EXPR with ordinary blocks, but its
+        // entries use pattern/arrow grammar. An empty body has no clauses,
+        // so also inspect the defining keyword. Nested expression blocks
+        // inside mapping clauses remain eligible.
+        if node.children().any(|child| child.kind() == SyntaxKind::MAPPING_CLAUSE)
+            || node.parent().is_some_and(|parent| {
+                parent.children_with_tokens().any(|child| child.kind() == SyntaxKind::KW_MAPPING)
+            })
+        {
+            return None;
+        }
         let first_child = node.first_child_or_token().map(|it| it.kind());
         let parent = node.parent().map(|it| it.kind());
         Reparser::for_node(node.kind(), first_child, parent).map(|r| (node, r))
@@ -212,7 +256,9 @@ fn merge_errors(
 
     for old_err in old_errors {
         let old_err_range = old_err.range();
-        if old_err_range.end() <= range_before_reparse.start() {
+        if old_err_range.end() <= range_before_reparse.start()
+            && old_err_range.start() < range_before_reparse.start()
+        {
             // Error is before the reparsed region — keep as-is.
             res.push(old_err);
         } else if old_err_range.start() >= range_before_reparse.end() {

@@ -168,50 +168,32 @@ impl Parse<ast::SourceFile> {
 /// the first identifier-like token otherwise. `operator <sym>` needs no
 /// special case: the lexer emits the symbol as an ordinary `IDENT`.
 pub fn definition_name(node: &SyntaxNode) -> Option<String> {
-    fn from_tokens(node: &SyntaxNode) -> Option<String> {
-        node.children_with_tokens()
-            .filter_map(|el| el.into_token())
-            .find(|t| matches!(t.kind(), SyntaxKind::IDENT | SyntaxKind::STRING_LIT))
-            .map(|t| t.text().trim_matches('"').to_string())
-    }
-    for child in node.children() {
-        if child.kind() == SyntaxKind::NAME {
-            return from_tokens(&child);
-        }
-    }
-    node.descendants_with_tokens()
-        .filter_map(|el| el.into_token())
-        .find(|t| matches!(t.kind(), SyntaxKind::IDENT | SyntaxKind::STRING_LIT))
-        .map(|t| t.text().trim_matches('"').to_string())
+    definition_name_token(node).map(|t| t.text().trim_matches('"').to_string())
 }
 
 /// Byte span of the name [`definition_name`] returns.
-///
-/// Where a cursor should land when navigating to this definition. `None` when
-/// the definition declares no ordinary name — an anonymous pragma, or a
-/// recovered node.
 pub fn definition_name_span(node: &SyntaxNode) -> Option<parser::Span> {
-    fn token_span(node: &SyntaxNode) -> Option<parser::Span> {
-        node.children_with_tokens()
+    let range = definition_name_token(node)?.text_range();
+    Some(parser::Span::new(usize::from(range.start()), usize::from(range.end())))
+}
+
+fn definition_name_token(node: &SyntaxNode) -> Option<SyntaxToken> {
+    if let Some(child) = node.children().find(|child| child.kind() == SyntaxKind::NAME) {
+        return child
+            .children_with_tokens()
             .filter_map(|el| el.into_token())
-            .find(|t| matches!(t.kind(), SyntaxKind::IDENT | SyntaxKind::STRING_LIT))
-            .map(|t| {
-                let r = t.text_range();
-                parser::Span::new(usize::from(r.start()), usize::from(r.end()))
-            })
-    }
-    for child in node.children() {
-        if child.kind() == SyntaxKind::NAME {
-            return token_span(&child);
-        }
+            .find(|t| matches!(t.kind(), SyntaxKind::IDENT | SyntaxKind::STRING_LIT));
     }
     node.descendants_with_tokens()
         .filter_map(|el| el.into_token())
-        .find(|t| matches!(t.kind(), SyntaxKind::IDENT | SyntaxKind::STRING_LIT))
-        .map(|t| {
-            let r = t.text_range();
-            parser::Span::new(usize::from(r.start()), usize::from(r.end()))
+        .filter(|t| {
+            !t.parent().is_some_and(|p| {
+                p.ancestors().take_while(|p| p != node).any(|p| {
+                    matches!(p.kind(), SyntaxKind::ATTRIBUTE | SyntaxKind::TERMINATION_MEASURE_DEF)
+                })
+            })
         })
+        .find(|t| matches!(t.kind(), SyntaxKind::IDENT | SyntaxKind::STRING_LIT))
 }
 
 impl ast::SourceFile {

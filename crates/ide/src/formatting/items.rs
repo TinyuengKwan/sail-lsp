@@ -197,12 +197,49 @@ pub(crate) fn extract_struct_fields(
         None => return Vec::new(),
     };
 
-    let (body, body_start) = match extract_body_from_braced_node(&body_node, snippet) {
-        Some(v) => v,
-        None => return Vec::new(),
+    let Some((body, body_start)) = extract_body_from_braced_node(&body_node, snippet) else {
+        return Vec::new();
     };
-
-    parse_colon_fields(&body, body_start)
+    let nodes: Vec<_> = body_node.children().filter(|c| c.kind() == SK::FIELD_INIT).collect();
+    let mut fields = Vec::new();
+    if let Some(first) = nodes.first() {
+        let prefix_end = usize::from(first.text_range().start());
+        let prefix = snippet.span_to_snippet(base_db::text_range(body_start, prefix_end));
+        if !prefix.trim().is_empty() {
+            fields.push(StructField {
+                name: String::new(),
+                separator: String::new(),
+                suffix: String::new(),
+                range: base_db::text_range(body_start, prefix_end),
+                is_comment: true,
+            });
+        }
+    }
+    for (index, field) in nodes.iter().enumerate() {
+        let Some(colon) = field.children_with_tokens().find(|e| e.kind() == SK::COLON) else {
+            return Vec::new();
+        };
+        let start = usize::from(field.text_range().start());
+        let end = nodes
+            .get(index + 1)
+            .map_or(body_start + body.len(), |next| usize::from(next.text_range().start()));
+        let name = snippet
+            .span_to_snippet(base_db::text_range(start, usize::from(colon.text_range().start())))
+            .trim()
+            .to_owned();
+        let suffix = snippet
+            .span_to_snippet(base_db::text_range(usize::from(colon.text_range().end()), end))
+            .trim()
+            .to_owned();
+        fields.push(StructField {
+            name,
+            separator: " : ".into(),
+            suffix,
+            range: base_db::text_range(start, end),
+            is_comment: false,
+        });
+    }
+    fields
 }
 
 /// Extract bitfield fields from a NAMED_DEF(bitfield) node's body.
@@ -319,13 +356,19 @@ pub(crate) fn extract_mapping_arms(
 
         // Parse `LHS <-> RHS` with optional trailing comma
         let trimmed_no_comma = trimmed.trim_end_matches(',').trim();
-        if let Some(arrow_pos) = trimmed_no_comma.find("<->") {
-            let lhs = trimmed_no_comma[..arrow_pos].trim().to_string();
-            let rhs = trimmed_no_comma[arrow_pos + 3..].trim().to_string();
-            let has_comma = trimmed.trim_end().ends_with(',');
-            let rhs = if has_comma { format!("{rhs},") } else { rhs };
-            arms.push(MappingArm { lhs, rhs, range: line_range, is_comment: false });
-        }
+        let Some(arrow_pos) = trimmed_no_comma.find("<->") else {
+            // A line that is not a `<->` arm — a `forwards`/`backwards`
+            // clause, or an arm continued from the line above — is not one
+            // this aligns. It used to be skipped, and the body was rebuilt
+            // from the arms alone, so `backwards 0b00 => ..` vanished from
+            // the mapping. No arms means the mapping is left as written.
+            return Vec::new();
+        };
+        let lhs = trimmed_no_comma[..arrow_pos].trim().to_string();
+        let rhs = trimmed_no_comma[arrow_pos + 3..].trim().to_string();
+        let has_comma = trimmed.trim_end().ends_with(',');
+        let rhs = if has_comma { format!("{rhs},") } else { rhs };
+        arms.push(MappingArm { lhs, rhs, range: line_range, is_comment: false });
 
         offset += line_len + 1;
     }
@@ -355,55 +398,6 @@ pub(crate) fn extract_register_decls(
     }
 
     decls
-}
-
-/// Parse `name : type` lines from body text between braces.
-fn parse_colon_fields(body: &str, body_start: usize) -> Vec<StructField> {
-    let mut fields = Vec::new();
-    let mut offset = body_start;
-
-    for line in body.split('\n') {
-        let trimmed = line.trim();
-        let line_len = line.len();
-        let line_range = base_db::text_range(offset, offset + line_len);
-
-        if trimmed.is_empty() {
-            offset += line_len + 1;
-            continue;
-        }
-
-        if trimmed.starts_with("//") {
-            fields.push(StructField {
-                name: String::new(),
-                separator: String::new(),
-                suffix: trimmed.to_string(),
-                range: line_range,
-                is_comment: true,
-            });
-            offset += line_len + 1;
-            continue;
-        }
-
-        // Try to parse `name : type` with optional trailing comma
-        let trimmed_no_comma = trimmed.trim_end_matches(',').trim();
-        if let Some(colon_pos) = trimmed_no_comma.find(':') {
-            let name = trimmed_no_comma[..colon_pos].trim().to_string();
-            let suffix = trimmed_no_comma[colon_pos + 1..].trim().to_string();
-            let has_comma = trimmed.trim_end().ends_with(',');
-            let full_suffix = if has_comma { format!("{suffix},") } else { suffix };
-            fields.push(StructField {
-                name,
-                separator: " : ".to_string(),
-                suffix: full_suffix,
-                range: line_range,
-                is_comment: false,
-            });
-        }
-
-        offset += line_len + 1;
-    }
-
-    fields
 }
 
 /// A function parameter: `name : type` (for function defs) or just `type` (for val specs).
@@ -591,203 +585,87 @@ fn parse_function_params(params_str: &str, base_offset: usize) -> (Vec<FunctionP
     (params, has_named)
 }
 
-/// Format a CALLABLE_DEF node that is a function definition (S31).
-///
-///   1. Reconstruct single-line signature (undo legacy wrap)
-///   2. compute_budgets_for_params → one_line_budget / multi_line_budget
-///   3. definitive_tactic → Horizontal if fits, else Vertical
-///   4. write_list → single-line join or one-param-per-line with alignment
+/// Rewrite only the CST parameter list. The body, return type and trailing
+/// documentation are outside this edit, even when the body is an expression.
 pub(crate) fn rewrite_function_def(
     node: &SyntaxNode,
     context: &RewriteContext<'_>,
     shape: Shape,
 ) -> Option<String> {
+    if !node.children_with_tokens().any(|e| e.kind() == SK::KW_FUNCTION) {
+        return None;
+    }
+    let params = find_child_node(node, SK::PARAM_LIST)?;
+    let open = params.children_with_tokens().find(|e| e.kind() == SK::L_PAREN)?;
+    let close = params.children_with_tokens().find(|e| e.kind() == SK::R_PAREN)?;
     let source = context.snippet(node.text_range());
-
-    // Verify this is a function definition (not mapping).
-    let is_function = node
-        .children_with_tokens()
-        .any(|elem| matches!(elem, NodeOrToken::Token(ref t) if t.kind() == SK::KW_FUNCTION));
-    if !is_function {
-        return None;
+    let start = usize::from(node.text_range().start());
+    let open_pos = usize::from(open.text_range().start()) - start;
+    let close_pos = usize::from(close.text_range().start()) - start;
+    let raw = &source[open_pos + 1..close_pos];
+    let prefix = source[..open_pos].trim_end();
+    let suffix = &source[close_pos + 1..];
+    // Newlines terminate line comments. Never collapse them into the next
+    // parameter or move a comma across a comment.
+    let has_comments = params
+        .descendants_with_tokens()
+        .any(|e| matches!(e.kind(), SK::LINE_COMMENT | SK::BLOCK_COMMENT));
+    if has_comments {
+        let result = format!("{prefix}({raw}){suffix}");
+        return (result != source).then_some(result);
     }
-
-    // ── Step 1: Extract signature components from CST source ──────────
-    //
-    // Find `(`, matching `)`, and the body-start marker (`= {` or `=`).
-    // Reconstruct a single-line version so legacy line-breaks don't
-    // distort width measurements.
-
-    let open_paren = source.find('(')?;
-    let after_paren = &source[open_paren + 1..];
-    let close_offset = find_matching_paren(after_paren)?;
-    let close_paren = open_paren + 1 + close_offset; // absolute index of `)`
-
-    // prefix: everything before `(` — e.g. "function foo" / "private function foo"
-    let prefix_raw = &source[..open_paren];
-    // params_str: raw text between the parens
-    let params_str_raw = &after_paren[..close_offset];
-    // suffix: everything after `)` up to (and including) body-start marker
-    let after_close_raw = &source[close_paren + 1..];
-    let body_start_offset = after_close_raw
-        .find("= {")
-        .or_else(|| after_close_raw.find("=\n"))
-        .unwrap_or(after_close_raw.len());
-    let suffix_raw = &after_close_raw[..body_start_offset];
-
-    // Normalise each component to single-line (collapse legacy wraps).
-    let prefix: String = prefix_raw.lines().map(|l| l.trim()).collect::<Vec<_>>().join(" ");
-    let params_str: String = params_str_raw.lines().map(|l| l.trim()).collect::<Vec<_>>().join(" ");
-    let suffix: String = {
-        let joined: String = suffix_raw
-            .lines()
-            .map(|l| l.trim())
-            .filter(|l| !l.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ");
-        let body_marker = &after_close_raw[body_start_offset..];
-        let marker_part: String =
-            body_marker.lines().next().map(|l| l.trim().to_string()).unwrap_or_default();
-        let mut s = joined;
-        if !marker_part.is_empty() {
-            if !s.is_empty() {
-                s.push(' ');
-            }
-            s.push_str(&marker_part);
-        }
-        s
-    };
-
-    // ── Step 2: compute_budgets (aligned with rustfmt) ────────────────
-    // Uses context.budget() to compute remaining width after overhead.
-    let prefix_width = shape.indent.width() + prefix.len() + 1; // +1 for `(`
-    let suffix_width = suffix.trim().len();
-    let overhead = prefix_width + suffix_width + 1; // +1 for `)`
-    let one_line_budget = context.budget(overhead);
-
-    let param_indent = shape.indent.block_indent(context.config);
-    let _multi_line_budget = context.budget(param_indent.width() + 1); // +1 for comma; used by AlignedItem rewrite
-
-    // ── Step 3: Parse params & definitive_tactic ──────────────────────
-    let params_vec = split_params_at_commas(&params_str);
-    if params_vec.is_empty() {
-        return None;
-    }
-
-    // Convert params to ListItems, then call definitive_tactic.
-    use super::lists::{self, DefinitiveListTactic, ListItem, SeparatorTactic};
-    let list_items: Vec<ListItem> =
-        params_vec.iter().map(|p| ListItem::from_str(p.trim())).collect();
-    let list_tactic = lists::definitive_tactic(&list_items, one_line_budget, 2); // 2 = ", ".len()
-
-    #[derive(Debug, PartialEq)]
-    enum Tactic {
-        Horizontal,
-        Vertical,
-    }
-
-    // Mixed falls back to Vertical if the packed layout still overflows.
-    let tactic = match list_tactic {
-        DefinitiveListTactic::Horizontal | DefinitiveListTactic::Mixed => Tactic::Horizontal,
-        DefinitiveListTactic::Vertical => Tactic::Vertical,
-    };
-    // (no trailing comma); Vertical uses Vertical (trailing comma only
-    // on vertical layout).
-    let _sep_tactic = match tactic {
-        Tactic::Horizontal => SeparatorTactic::Never,
-        Tactic::Vertical => SeparatorTactic::Vertical,
-    };
-
-    // ── Step 4: Horizontal — try single line ──────────────────────────
-    let indent_str = shape.indent.to_string_inner(context.config);
-    let suffix_sep = if suffix.trim().is_empty() { "" } else { " " };
-    let suffix_trimmed = suffix.trim();
-
-    // Body text: everything after the signature (after the body-start marker line).
-    // We must preserve the body verbatim.
-    let body_rest = {
-        let marker_end = close_paren + 1 + body_start_offset;
-        let after_marker = &source[marker_end..];
-        // The body-start marker line (e.g. "= {") is in suffix_trimmed.
-        // Everything after that first line is the body.
-        let first_nl = after_marker.find('\n');
-        match first_nl {
-            Some(pos) => &after_marker[pos..], // includes leading \n
-            None => "",
-        }
-    };
-
-    if tactic == Tactic::Horizontal {
-        let joined_params: String =
-            params_vec.iter().map(|p| p.trim()).collect::<Vec<_>>().join(", ");
-        let sig_line = format!("{prefix}({joined_params}){suffix_sep}{suffix_trimmed}");
-        // offset_left accounts for text already placed on this line;
-        // used_width gives the total consumed columns.
-        let sig_shape = shape
-            .offset_left(prefix.len() + 1) // +1 for `(`
-            .and_then(|s| s.sub_width(suffix_width + 1)); // +1 for `)`
-        let full_width = shape.used_width() + sig_line.len();
-        let fits = sig_shape.is_some() && full_width <= context.config.max_width();
-        if fits {
-            // Check if source signature is already identical single-line.
-            let source_sig_normalized: String =
-                source[..close_paren + 1].lines().map(|l| l.trim()).collect::<Vec<_>>().join(" ");
-            let new_sig_normalized = format!("{prefix}({joined_params})");
-            if source_sig_normalized == new_sig_normalized
-                && !source[..close_paren + 1].contains('\n')
+    // Collapse whitespace tokens only: whitespace inside string patterns is data.
+    let normalize = |from: usize, to: usize| {
+        let mut text = String::new();
+        for token in params.descendants_with_tokens().filter_map(|e| e.into_token()) {
+            if usize::from(token.text_range().start()) < start + from
+                || usize::from(token.text_range().end()) > start + to
             {
-                return None; // Already correct, no rewrite needed.
+                continue;
             }
-            // Rewrite signature + preserve body.
-            return Some(format!("{sig_line}{body_rest}"));
+            if token.kind() == SK::WHITESPACE {
+                text.push(' ');
+            } else {
+                text.push_str(token.text());
+            }
         }
-        // Doesn't fit → fall through to Vertical.
+        text.trim().to_owned()
+    };
+    let mut parts = Vec::new();
+    let mut from = open_pos + 1;
+    for comma in params.children_with_tokens().filter(|e| e.kind() == SK::COMMA) {
+        let to = usize::from(comma.text_range().start()) - start;
+        parts.push(normalize(from, to));
+        from = to + 1;
     }
-
-    // ── Step 5: Vertical — one-param-per-line with colon alignment ────
-    let node_start: usize = node.text_range().start().into();
-    let params_abs_start = node_start + open_paren + 1;
-    let (parsed_params, has_named) = parse_function_params(&params_str, params_abs_start);
-
-    if parsed_params.is_empty() {
-        return None;
+    let last = normalize(from, close_pos);
+    if !last.is_empty() {
+        parts.push(last);
     }
-
-    let body_shape = shape.block_indent(context.config);
-
-    // paren line, matching rustfmt's pattern for multi-line parameter lists.
-    let close_indent = shape.indent.to_string_with_newline(context.config);
-
-    if has_named {
-        // Use AlignedItem for colon alignment.
-        let aligned_body = rewrite_with_alignment(&parsed_params, context, body_shape)?;
-        // Add trailing comma to each parameter line.
-        let param_lines: Vec<String> = aligned_body
-            .lines()
-            .map(|line| {
-                let trimmed = line.trim_end();
-                if !trimmed.is_empty() && !trimmed.ends_with(',') {
-                    format!("{trimmed},")
-                } else {
-                    trimmed.to_string()
-                }
-            })
-            .collect();
-        let params_block = param_lines.join("\n");
-
-        Some(format!(
-            "{indent_str}{prefix}(\n{params_block}{close_indent}){suffix_sep}{suffix_trimmed}{body_rest}"
-        ))
+    let joined = parts.join(", ");
+    let suffix_width = suffix.lines().next().unwrap_or_default().len();
+    use super::lists::{self, DefinitiveListTactic, ListItem};
+    let budget = shape
+        .offset_left(prefix.len() + 2 + suffix_width)
+        .map_or(0, |remaining| context.budget(remaining.used_width()));
+    let list_items: Vec<_> = parts.iter().map(ListItem::from_str).collect();
+    let tactic = lists::definitive_tactic(&list_items, budget, 2);
+    let result = if (tactic != DefinitiveListTactic::Vertical && joined.len() <= budget)
+        || parts.is_empty()
+    {
+        format!("{prefix}({joined}){suffix}")
     } else {
-        // Type-only params — just indent each one.
-        let body_indent = body_shape.indent.to_string_inner(context.config);
-        let param_lines: Vec<String> =
-            parsed_params.iter().map(|p| format!("{body_indent}{},", p.type_text)).collect();
-        let params_block = param_lines.join("\n");
-        Some(format!(
-            "{indent_str}{prefix}(\n{params_block}{close_indent}){suffix_sep}{suffix_trimmed}{body_rest}"
-        ))
-    }
+        let (parsed, _) = parse_function_params(&joined, start + open_pos + 1);
+        let body = rewrite_with_alignment(&parsed, context, shape.block_indent(context.config))?;
+        let body = body
+            .lines()
+            .map(|line| format!("{},", line.trim_end_matches(',')))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let close_indent = shape.indent.to_string_with_newline(context.config);
+        format!("{prefix}(\n{body}{close_indent}){suffix}")
+    };
+    (result != source).then_some(result)
 }
 
 /// Format a CALLABLE_SPEC node that is a val declaration (S31).
@@ -944,12 +822,7 @@ pub(crate) fn rewrite_mapping_def(
     let body_shape = shape.block_indent(context.config);
     let aligned_body = rewrite_with_alignment(&arms, context, body_shape)?;
 
-    let source = context.snippet(node.text_range());
-    let l_curly_pos = source.find('{')?;
-    let header = source[..=l_curly_pos].trim_end();
-
-    let indent = shape.indent.to_string_inner(context.config);
-    Some(format!("{header}\n{aligned_body}\n{indent}}}"))
+    rewrite_braced_body(node, context, shape, &aligned_body)
 }
 
 fn rewrite_struct_like(
@@ -1016,6 +889,24 @@ fn rewrite_register(
     // pass handles cross-definition alignment).
     let decl = &decls[0];
     Some(format!("register {} : {}", decl.name, decl.type_text))
+}
+
+fn rewrite_braced_body(
+    node: &SyntaxNode,
+    context: &RewriteContext<'_>,
+    shape: Shape,
+    body: &str,
+) -> Option<String> {
+    let block =
+        node.children().find(|child| matches!(child.kind(), SK::BLOCK_EXPR | SK::STRUCT_EXPR))?;
+    let open = block.children_with_tokens().find(|e| e.kind() == SK::L_CURLY)?;
+    let close = block.children_with_tokens().find(|e| e.kind() == SK::R_CURLY)?;
+    let source = context.snippet(node.text_range());
+    let start = usize::from(node.text_range().start());
+    let from = usize::from(open.text_range().end()) - start;
+    let to = usize::from(close.text_range().start()) - start;
+    let indent = shape.indent.to_string_inner(context.config);
+    Some(format!("{}\n{body}\n{indent}{}", &source[..from], &source[to..]))
 }
 
 #[cfg(test)]

@@ -101,7 +101,18 @@ pub(crate) struct GlobalState {
     pub(crate) project_error: Option<String>,
     /// Settings the client sent that could not be read, last reported.
     pub(crate) config_errors: Vec<String>,
-    pub(crate) project_manifests: Vec<std::path::PathBuf>,
+    /// The project each workspace folder loaded, or kept after its manifest
+    /// broke. Flycheck checks these, and a failed reload falls back to them.
+    pub(crate) projects: Arc<std::collections::BTreeMap<Url, crate::reload::FolderProject>>,
+    /// Open manifests' text. A manifest is not Sail and never enters the
+    /// analysis; its editor features read this.
+    pub(crate) manifest_texts: Arc<std::collections::HashMap<Url, String>>,
+    /// What was last published on each manifest, so a fixed one is cleared.
+    pub(crate) manifest_diagnostics:
+        std::collections::BTreeMap<std::path::PathBuf, Vec<lsp_types::Diagnostic>>,
+    /// The latest run started for each check target; older answers are dropped.
+    pub(crate) flycheck_latest: std::collections::HashMap<crate::flycheck::CheckTarget, u64>,
+    pub(crate) flycheck_generation: u64,
     pub(crate) loading_module_graph: Option<base_db::module_graph::ModuleGraph>,
     pub(crate) loading_source_project: Option<base_db::preprocess::SourceProject>,
 
@@ -160,6 +171,7 @@ pub(crate) struct GlobalState {
     /// When the env var is not set, the embedded stdlib is written to disk
     /// at server start and this field points to that directory.
     pub(crate) effective_sail_dir: Option<std::path::PathBuf>,
+    pub(crate) sail_dir_origin: &'static str,
 
     /// Cached formatting options from the last `textDocument/formatting`
     /// request. Used by code actions ("Format document") so they apply
@@ -175,6 +187,7 @@ impl GlobalState {
         sender: Sender<Message>,
         task_sender: crossbeam_channel::Sender<crate::main_loop::Task>,
     ) -> Self {
+        let (effective_sail_dir, sail_dir_origin) = Self::resolve_sail_dir();
         Self {
             pending_change: ide_db::apply_change::Change::new(),
             mem_docs: crate::mem_docs::MemDocs::default(),
@@ -198,7 +211,11 @@ impl GlobalState {
             loading_project_inputs: Default::default(),
             project_error: None,
             config_errors: Vec::new(),
-            project_manifests: Vec::new(),
+            projects: Default::default(),
+            manifest_diagnostics: Default::default(),
+            manifest_texts: Default::default(),
+            flycheck_latest: Default::default(),
+            flycheck_generation: 0,
             loading_module_graph: None,
             loading_source_project: None,
             task_pool: crate::task_pool::TaskPool::new_with_threads(
@@ -217,7 +234,8 @@ impl GlobalState {
             prime_caches_cancel: hir::CancellationToken::new(),
             workspace_loaded: false,
             shutdown_requested: false,
-            effective_sail_dir: Self::resolve_sail_dir(),
+            effective_sail_dir,
+            sail_dir_origin,
             last_format_options: std::sync::Arc::new(std::sync::Mutex::new(
                 ide_db::ide_types::FormatOptions::default(),
             )),
@@ -226,12 +244,12 @@ impl GlobalState {
 
     /// Determine the effective SAIL_DIR: prefer `$SAIL_DIR` env var, fall
     /// back to materialising the embedded stdlib into a temp directory.
-    fn resolve_sail_dir() -> Option<std::path::PathBuf> {
+    fn resolve_sail_dir() -> (Option<std::path::PathBuf>, &'static str) {
         if let Ok(dir) = std::env::var("SAIL_DIR") {
             let p = std::path::PathBuf::from(&dir);
             if p.join("lib").is_dir() {
                 log::info!("using $SAIL_DIR from environment: {dir}");
-                return Some(p);
+                return (Some(p), "SAIL_DIR environment");
             }
             log::warn!("$SAIL_DIR={dir} has no lib/ subdirectory, falling back to embedded stdlib");
         }
@@ -242,11 +260,11 @@ impl GlobalState {
         match crate::sail_stdlib::materialise_stdlib(&tmp) {
             Ok(sail_dir) => {
                 log::info!("materialised embedded Sail stdlib to {}", sail_dir.display());
-                Some(sail_dir)
+                (Some(sail_dir), "embedded standard library")
             }
             Err(e) => {
                 log::error!("failed to materialise embedded stdlib: {e}");
-                None
+                (None, "unavailable")
             }
         }
     }
@@ -255,6 +273,9 @@ impl GlobalState {
     pub(crate) fn respond(&mut self, response: Response) {
         if let Some((method, started)) = self.req_queue.incoming.complete(&response.id) {
             let took = started.elapsed();
+            tracing::debug!(target: "sail_lsp::latency",
+                "request_complete id={} method={method} total_us={} error={:?}",
+                response.id, took.as_micros(), response.error.as_ref().map(|error| error.code));
             if took > std::time::Duration::from_millis(200) {
                 log::info!("{method} took {took:?}");
             }
@@ -467,8 +488,16 @@ impl GlobalState {
             // Prime is only needed after workspace scan (initial load).
         }
         let change = std::mem::take(&mut self.pending_change);
+        let apply_started = std::time::Instant::now();
         let changed = self.analysis_host.raw_database_mut().apply_change(change);
+        let apply_us = apply_started.elapsed().as_micros();
+        let graph_started = std::time::Instant::now();
         self.refresh_preprocessed_include_graph();
+        if changed {
+            tracing::debug!(target: "sail_lsp::latency",
+                "process_changes apply_us={apply_us} include_graph_us={}",
+                graph_started.elapsed().as_micros());
+        }
         changed
     }
 
@@ -520,6 +549,15 @@ impl GlobalState {
     /// Immutable snapshot passed to handler (sync or async).
     pub(crate) fn snapshot(&mut self) -> GlobalStateSnapshot {
         GlobalStateSnapshot {
+            workspace_status: WorkspaceStatus {
+                roots: self.workspace_folders.iter().cloned().collect(),
+                manifests: self.projects.values().map(|p| p.manifest.clone()).collect(),
+                loaded: self.workspace_loaded,
+                loading: self.loading_project_config.is_some(),
+                config_errors: self.config_errors.clone(),
+                sail_dir: self.effective_sail_dir.clone(),
+                sail_dir_origin: self.sail_dir_origin,
+            },
             analysis: self.analysis_snapshot(),
             config: self.config.clone(),
             semantic_tokens_cache: self.semantic_tokens_cache.clone(),
@@ -528,6 +566,8 @@ impl GlobalState {
             last_format_options: self.last_format_options.clone(),
             library_files: Arc::new(self.library_root.clone()),
             project_error: self.project_error.as_deref().map(Arc::from),
+            projects: self.projects.clone(),
+            manifest_texts: self.manifest_texts.clone(),
             document_versions: self
                 .mem_docs
                 .iter()
@@ -568,8 +608,13 @@ impl GlobalState {
 /// mutating shared state. Clone is cheap (salsa Arc + index Arc).
 #[derive(Clone)]
 pub(crate) struct GlobalStateSnapshot {
+    pub(crate) workspace_status: WorkspaceStatus,
     pub(crate) document_versions: std::collections::HashMap<Url, i32>,
     pub(crate) project_error: Option<Arc<str>>,
+    /// Open manifests' text.
+    pub(crate) manifest_texts: Arc<std::collections::HashMap<Url, String>>,
+    /// The loaded projects, for project navigation.
+    pub(crate) projects: Arc<std::collections::BTreeMap<Url, crate::reload::FolderProject>>,
     /// Immutable Analysis snapshot (salsa db + Files).
     pub analysis: Analysis,
     /// Server configuration.
@@ -602,4 +647,16 @@ impl GlobalStateSnapshot {
     pub(crate) fn is_library(&self, file_id: base_db::FileId) -> bool {
         self.library_files.contains(file_id)
     }
+}
+
+/// Small immutable load-state snapshot; serialized only on a status request.
+#[derive(Clone)]
+pub(crate) struct WorkspaceStatus {
+    pub roots: Vec<Url>,
+    pub manifests: Vec<std::path::PathBuf>,
+    pub loaded: bool,
+    pub loading: bool,
+    pub config_errors: Vec<String>,
+    pub sail_dir: Option<std::path::PathBuf>,
+    pub sail_dir_origin: &'static str,
 }

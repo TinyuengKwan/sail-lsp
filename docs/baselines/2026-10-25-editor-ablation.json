@@ -1,0 +1,4610 @@
+{
+  "scope": "Uncommitted editor-experience changes captured before ablation",
+  "baseline_commit": "aaa578e",
+  "baseline_parent": "a66b7c3",
+  "baseline_release_sha256": "a30efb812712c96a7fa0262d922fd28c4cd95dcc4c8c92d87c34556b619426bd",
+  "status": "complete",
+  "method": "One design change at a time; preserve controls and failed experiments; retain only simplifications with behavior and performance evidence. No budget increases or test weakening.",
+  "experiments": [
+    {
+      "id": "I1",
+      "change": "Remove all parameter-hint compatibility fallback",
+      "control": "13/13 inlay tests pass",
+      "result": "11 pass, 2 fail: same-file and replaced-signature parameter hints disappear",
+      "decision": "reject; restore necessary local fallback",
+      "log": "target/ablation-2026-10-25/I1/inlay-tests.log"
+    },
+    {
+      "id": "I2",
+      "change": "Remove workspace-wide spelling-based parameter-name cache and unused provider arguments, retain local source-order fallback",
+      "result": "13/13 IDE inlay tests and 5/5 config/protocol tests passed",
+      "decision": "retain; identity counterexample fixed, default/no-SMT/full protocol gates pass, matched stdio probe passes",
+      "log": "target/ablation-2026-10-25/I2/inlay-tests.log",
+      "protocol_log": "target/ablation-2026-10-25/I2/protocol-tests.log",
+      "identity_regression": "New test passes with removal and fails on baseline: baseline borrows unrelated_name from an unresolved foreign helper.",
+      "identity_logs": [
+        "target/ablation-2026-10-25/I2-identity-candidate.log",
+        "target/ablation-2026-10-25/I2-identity-control.log"
+      ]
+    },
+    {
+      "id": "Q1",
+      "change": "Use source-map exact span before inference in missing-field/match queries; avoid inferring every callable",
+      "decision": "retain; existing source-map prefilter reduces cold-query inference from 201 to 1 callable, field/match protocol and full gates pass",
+      "result": "Exact source-map span/file prefilter added before inference; two field-fill protocol tests and match constructor-payload protocol test pass.",
+      "logs": [
+        "target/ablation-2026-10-25/Q1-fields.log",
+        "target/ablation-2026-10-25/Q1-match.log"
+      ],
+      "measurement": {
+        "control": {
+          "cold_query_ms": [
+            174.787,
+            145.652,
+            146.001,
+            145.768,
+            151.998
+          ],
+          "infer_executions": 1005
+        },
+        "candidate": {
+          "cold_query_ms": [
+            45.454,
+            31.039,
+            26.215,
+            26.045,
+            26.086
+          ],
+          "infer_executions": 5
+        }
+      },
+      "measurement_scope": "Five cold databases, 200 unrelated functions before one missing-field target; debug build with identical tracing, not editor latency.",
+      "probe_source": "target/ablation-2026-10-25/Q1-probe.rs"
+    },
+    {
+      "id": "S1",
+      "change": "Ablate sufficient arithmetic-premise SMT rewrite versus general bounded-domain proof",
+      "decision": "reject; restored dispatch; baseline 79/79 semantic audits pass",
+      "result": "78 semantic audit tests passed, one failed: vector_element_count_uses_product_quotient_premises becomes Unknown without sufficient-premise dispatch.",
+      "log": "target/ablation-2026-10-25/S1-tests.log",
+      "control_log": "target/ablation-2026-10-25/solver-control.log"
+    },
+    {
+      "id": "S2",
+      "change": "Ablate specialized positive-factor/power ordering rules independently",
+      "decision": "reject both independent removals; restored baseline",
+      "result": "Control 79/79 passes; removing natural-power ordering fails power_ordering_requires_natural_ordered_exponents; removing positive-factor rule fails positive_integer_factor_is_bounded_by_its_product (78/79 pass each).",
+      "logs": [
+        "target/ablation-2026-10-25/solver-control.log",
+        "target/ablation-2026-10-25/S2-power.log",
+        "target/ablation-2026-10-25/S2-factor.log"
+      ]
+    },
+    {
+      "id": "D1",
+      "change": "Ablate stale-diagnostic request validation independently of resolve fingerprint",
+      "decision": "reject; restored request-time validation",
+      "result": "Control passed; without request-time revalidation, stale unused-variable diagnostic offers rename for a binding that is now used. Resolve fingerprint remains present.",
+      "control_log": "target/ablation-2026-10-25/D1-control.log",
+      "log": "target/ablation-2026-10-25/D1-ablated.log"
+    },
+    {
+      "id": "R1",
+      "change": "Ablate priming panic recovery and free-page reclamation independently",
+      "decision": "reject both removals; retain panic recovery and free-page reclamation",
+      "panic": {
+        "decision": "reject removal; restored catch_unwind",
+        "method": "Inject exactly one panic inside real priming worker; initialize server over stdio, observe progress, reload, observe recovery. Same injected fault with and without catch_unwind.",
+        "control": {
+          "initial": {
+            "failures": 1,
+            "active_progress": []
+          },
+          "after_reload": {
+            "failures": 1,
+            "completions": 1,
+            "active_progress": []
+          }
+        },
+        "ablated": {
+          "initial": {
+            "failures": 0,
+            "active_progress": [
+              "sail-lsp/Priming-caches"
+            ]
+          },
+          "after_reload": {
+            "failures": 0,
+            "completions": 0,
+            "active_progress": [
+              "sail-lsp/Priming-caches"
+            ]
+          }
+        },
+        "runner": "target/ablation-2026-10-25/run_panic.py"
+      },
+      "memory": {
+        "decision": "retain free-page reclamation",
+        "retained_idle_rss_kib": 523632,
+        "untrimmed_idle_rss_kib": 826552,
+        "difference_kib": 302920,
+        "method": "Same final source and release build configuration; ablated binary removes only the release_unused_memory call. All sources restored before sampling. Same stdio workload, separate sequential processes."
+      }
+    }
+  ],
+  "review_inventory": {
+    "behavioral_interfaces": [
+      "completion source_range/config plumbing",
+      "diagnostic revision and metadata identity",
+      "hover limits and scoped member queries",
+      "record/match inference metadata",
+      "__virtual registration and generated file providers",
+      "semantic tokens/lens/hint configuration"
+    ],
+    "non_design_changes": [
+      "regression tests",
+      "baseline artifacts and probe harness",
+      "12 formatting-only files"
+    ],
+    "retained_contracts": [
+      {
+        "design": "Completion replacement ranges and configuration plumbing",
+        "reason": "Primary edit must replace the full token or postfix receiver, preserve existing calls, and honor client snippet support; these are protocol data, not an extra cache or abstraction layer.",
+        "evidence": [
+          "completion_settings_reach_candidates_and_preserve_existing_calls",
+          "completion_replaces_identifier_suffix_in_expression_type_field_and_pattern",
+          "completion_ranks_a_local_binding_before_a_global_with_the_same_prefix"
+        ]
+      },
+      {
+        "design": "Diagnostic generation and metadata identity",
+        "reason": "A newer syntax wave cannot merge with older semantic results; identical diagnostics still advance the applied generation. Related information/code changes are user-visible.",
+        "evidence": [
+          "rapid_signature_edits_and_undo_recover_dependent_diagnostics",
+          "syntax_errors_are_not_duplicated_by_the_full_diagnostic_wave"
+        ]
+      },
+      {
+        "design": "Canonical callable selection for hints and hover",
+        "reason": "Source-order replacement and scoped overloads require definition identity. Only the unscoped spelling-based hint cache was removed.",
+        "evidence": [
+          "I1",
+          "I2",
+          "cross-file parameter and hover protocol regressions"
+        ]
+      },
+      {
+        "design": "Missing-field and match inference metadata",
+        "reason": "Instantiated field types and exhaustiveness witnesses avoid inventing defaults or constructors from global names. Existing BodySourceMap suffices to restrict query work; no new analyzer/cache introduced.",
+        "evidence": [
+          "Q1",
+          "every_record_fill_action_uses_instantiated_cross_file_types",
+          "record_pattern_fill_preserves_cross_file_generic_match_coverage",
+          "match_fixes_apply_and_recheck_cross_file_constructor_payloads"
+        ]
+      },
+      {
+        "design": "Generated-file registration and typed __virtual manifest values",
+        "reason": "Represents upstream manifest semantics and maps real provider files; removal would undo explicitly requested generated-source integration.",
+        "evidence": [
+          "virtual_files_use_registered_sources_and_preserve_value_kind",
+          "virtual_sources_support_navigation_unsaved_edits_and_provider_changes"
+        ]
+      },
+      {
+        "design": "Display switches and limits for hints, lenses, tokens and hover",
+        "reason": "Connects existing configuration to visible editor behavior and bounds output. No replacement configuration layer or speculative cache added.",
+        "evidence": [
+          "display_configuration_controls_lens_categories_hints_and_tokens",
+          "a_semantic_token_delta_describes_the_buffer_now"
+        ]
+      },
+      {
+        "design": "Bounded finite-domain proofs and negated comparison edges",
+        "reason": "Restore no-SMT conformance without increasing production solver budgets; exhaustive branches share a 64-state cap. Specialized rules remain independently necessary as S1/S2 demonstrate.",
+        "evidence": [
+          "S1",
+          "S2",
+          "default/no-SMT workspace gates",
+          "strict upstream conformance"
+        ]
+      }
+    ]
+  },
+  "remaining": [],
+  "measurement_sources": {
+    "q1_probe_rust": "use ide_db::{root_database::RootDatabase, apply_change::Change};\nfn main() {\n    tracing_subscriber::fmt().with_ansi(false).with_max_level(tracing::Level::INFO).with_span_events(tracing_subscriber::fmt::format::FmtSpan::NEW).init();\n    for _ in 0..5 {\n        let mut source = String::from(\"struct S = { x : int, enabled : bool }\\n\");\n        for i in 0..200 {\n            source.push_str(&format!(\"function unused_{i}() -> int = 1\\n\"));\n        }\n        let start = source.len() + \"function target() -> S = \".len();\n        source.push_str(\"function target() -> S = struct S { x = 1 }\\n\");\n        let end = source.len() - 1;\n        let id = base_db::FileId::from_raw(0);\n        let mut db = RootDatabase::default();\n        let mut change = Change::new();\n        change.change_file(id, source);\n        db.apply_change(change);\n        let ft = db.files().file_text(id).unwrap();\n        let sema = hir::Semantics::new(&db);\n        let now = std::time::Instant::now();\n        let fields = sema.missing_record_fields(ft, base_db::text_range(start,end));\n        assert_eq!(fields, Some(vec![(\"enabled\".into(), \"bool\".into())]));\n        println!(\"cold_query_ms={:.3}\",now.elapsed().as_secs_f64()*1000.0);\n    }\n}\n",
+    "panic_probe_python": "from pathlib import Path\nimport sys, os, time, json\nsys.path.insert(0, str(Path('scripts').resolve()))\nfrom editor_probe import Client\nroot=Path('target/ablation-2026-10-25/panic-project').resolve()\nroot.mkdir(exist_ok=True)\n(root/'main.sail').write_text('function main() -> int = 1\\n')\n(root/'test.sail_project').write_text('Main { files main.sail }\\n')\nname=sys.argv[1]\nwith Path(f'target/ablation-2026-10-25/{name}-stderr.log').open('w') as stderr:\n c=Client(Path('target/debug/sail-lsp').resolve(),stderr)\n try:\n  c.ask('initialize',{'processId':os.getpid(),'rootUri':root.as_uri(),'workspaceFolders':[{'uri':root.as_uri(),'name':'panic-project'}],'capabilities':{'window':{'workDoneProgress':True}}},'init',timeout=20)\n  c.send('initialized',{})\n  deadline=time.monotonic()+10\n  while time.monotonic()<deadline and c.prime_failures==0:c.pump(.1)\n  initial={'failures':c.prime_failures,'active_progress':list(c.priming)}\n  c.send('sail-lsp/reloadWorkspace',None)\n  deadline=time.monotonic()+10\n  while time.monotonic()<deadline and c.prime_completions==0:c.pump(.1)\n  after={'failures':c.prime_failures,'completions':c.prime_completions,'active_progress':list(c.priming)}\n  status=c.ask('sail-lsp/analyzerStatus',None,'responsive',timeout=5)\n  Path(f'target/ablation-2026-10-25/{name}.json').write_text(json.dumps({'initial':initial,'after_reload':after,'status':status,'events':c.events},indent=2))\n  print(name,initial,after,flush=True)\n  c.ask('shutdown',None,'shutdown',timeout=5);c.send('exit',None);c.process.wait(timeout=10)\n finally:\n  if c.process.poll() is None:c.process.kill();c.process.wait()\n",
+    "panic_variants_python": "from pathlib import Path\nimport subprocess\np=Path('crates/sail-lsp/src/main_loop.rs')\nbase=p.read_text()\nroot=Path('target/ablation-2026-10-25')\n(root/'R1-main_loop.rs').write_text(base)\nneedle='''                    analysis.parallel_prime_caches(num_worker_threads, &cancel, move |p| {'''\ninjected=base.replace(needle,'''                    static PANICKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);\n                    if !PANICKED.swap(true, std::sync::atomic::Ordering::SeqCst) {\n                        panic!(\"ablation: injected priming worker panic\");\n                    }\n'''+needle)\nassert injected!=base\nstart=injected.index('                let outcome = std::panic::catch_unwind',injected.index('if let Some((_cause'))\nend=injected.index('                // Priming\\'s temporary workers',start)\nblock=injected[start:end]\nablated=injected[:start]+block.replace('std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {','Ok::<_, ()>({').replace('                }));','                });')+injected[end:]\ntry:\n for name,source in [('R1-panic-control',injected),('R1-panic-ablated',ablated)]:\n  p.write_text(source)\n  with (root/(name+'-build.log')).open('w') as log:\n   subprocess.run(['cargo','+1.97.1','build','-p','sail-lsp','--bin','sail-lsp'],stdout=log,stderr=subprocess.STDOUT,check=True)\n  subprocess.run(['python3',str(root/'probe_panic.py'),name],check=True)\nfinally:\n p.write_text(base)\n"
+  },
+  "validation": {
+    "runner": "target/ablation-2026-10-25/run_acceptance.py",
+    "stages": [
+      {
+        "name": "default-workspace",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "test",
+          "--workspace",
+          "--",
+          "--test-threads=1"
+        ],
+        "started": 1792904290.045189,
+        "status": "passed",
+        "exit_code": 0,
+        "elapsed_seconds": 189.57890343666077
+      },
+      {
+        "name": "no-smt-workspace",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "test",
+          "--workspace",
+          "--no-default-features",
+          "--",
+          "--test-threads=1"
+        ],
+        "started": 1792904479.6253133,
+        "status": "passed",
+        "exit_code": 0,
+        "elapsed_seconds": 177.15733122825623
+      },
+      {
+        "name": "all-targets",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "check",
+          "--workspace",
+          "--all-targets"
+        ],
+        "started": 1792904656.783699,
+        "status": "passed",
+        "exit_code": 0,
+        "elapsed_seconds": 5.461589813232422
+      },
+      {
+        "name": "format",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "fmt",
+          "--all",
+          "--",
+          "--check"
+        ],
+        "started": 1792904662.2459824,
+        "status": "passed",
+        "exit_code": 0,
+        "elapsed_seconds": 3.3342742919921875
+      },
+      {
+        "name": "release",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "build",
+          "--release",
+          "-p",
+          "sail-lsp",
+          "--bin",
+          "sail-lsp",
+          "--example",
+          "conformance_check",
+          "--example",
+          "analysis_stats"
+        ],
+        "started": 1792904665.581107,
+        "status": "passed",
+        "exit_code": 0,
+        "elapsed_seconds": 11.072905778884888
+      },
+      {
+        "name": "strict",
+        "command": [
+          "target/release/examples/conformance_check",
+          "--typecheck-only",
+          "../sail/test/typecheck"
+        ],
+        "started": 1792904676.699443,
+        "status": "passed",
+        "exit_code": 0,
+        "elapsed_seconds": 54.083759784698486
+      },
+      {
+        "name": "constraints",
+        "command": [
+          "target/release/examples/analysis_stats",
+          "--diagnostics-only",
+          "--constraint-report",
+          "target/ablation-2026-10-25/constraints.json",
+          "../sail-riscv"
+        ],
+        "started": 1792904730.7845955,
+        "status": "passed",
+        "exit_code": 0,
+        "elapsed_seconds": 26.699979543685913
+      },
+      {
+        "name": "R1-untrimmed-build",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "build",
+          "--release",
+          "-p",
+          "sail-lsp",
+          "--bin",
+          "sail-lsp"
+        ],
+        "started": 1792904757.4913452,
+        "status": "passed",
+        "exit_code": 0,
+        "elapsed_seconds": 17.457914352416992
+      },
+      {
+        "name": "release-restored",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "build",
+          "--release",
+          "-p",
+          "sail-lsp",
+          "--bin",
+          "sail-lsp"
+        ],
+        "started": 1792904774.9948704,
+        "status": "passed",
+        "exit_code": 0,
+        "elapsed_seconds": 7.725527763366699
+      },
+      {
+        "name": "probe-baseline",
+        "command": [
+          "python3",
+          "scripts/editor_probe.py",
+          "--server",
+          "target/ablation-2026-10-25/baseline/sail-lsp",
+          "--workspace",
+          "../sail-riscv",
+          "--cycles",
+          "100",
+          "--cancel-every",
+          "5",
+          "--lifecycle-cycles",
+          "20",
+          "--settle",
+          "--heap-status",
+          "--idle-seconds",
+          "30",
+          "--output",
+          "target/ablation-2026-10-25/probe-baseline.json"
+        ],
+        "started": 1792904783.0707247,
+        "status": "passed",
+        "exit_code": 0,
+        "elapsed_seconds": 308.49418091773987
+      },
+      {
+        "name": "probe-retained",
+        "command": [
+          "python3",
+          "scripts/editor_probe.py",
+          "--server",
+          "target/ablation-2026-10-25/retained/sail-lsp",
+          "--workspace",
+          "../sail-riscv",
+          "--cycles",
+          "100",
+          "--cancel-every",
+          "5",
+          "--lifecycle-cycles",
+          "20",
+          "--settle",
+          "--heap-status",
+          "--idle-seconds",
+          "30",
+          "--output",
+          "target/ablation-2026-10-25/probe-retained.json"
+        ],
+        "started": 1792905091.566637,
+        "status": "passed",
+        "exit_code": 0,
+        "elapsed_seconds": 253.87457513809204
+      },
+      {
+        "name": "probe-untrimmed",
+        "command": [
+          "python3",
+          "scripts/editor_probe.py",
+          "--server",
+          "target/ablation-2026-10-25/untrimmed/sail-lsp",
+          "--workspace",
+          "../sail-riscv",
+          "--cycles",
+          "100",
+          "--cancel-every",
+          "5",
+          "--lifecycle-cycles",
+          "20",
+          "--settle",
+          "--heap-status",
+          "--idle-seconds",
+          "30",
+          "--output",
+          "target/ablation-2026-10-25/probe-untrimmed.json"
+        ],
+        "started": 1792905345.4426925,
+        "status": "passed",
+        "exit_code": 0,
+        "elapsed_seconds": 287.1287326812744
+      },
+      {
+        "name": "probe-retained-matched",
+        "command": [
+          "python3",
+          "scripts/editor_probe.py",
+          "--server",
+          "target/ablation-2026-10-25/retained/sail-lsp",
+          "--workspace",
+          "../sail-riscv",
+          "--cycles",
+          "100",
+          "--cancel-every",
+          "5",
+          "--lifecycle-cycles",
+          "20",
+          "--settle",
+          "--heap-status",
+          "--idle-seconds",
+          "30",
+          "--output",
+          "target/ablation-2026-10-25/probe-retained.json"
+        ],
+        "started": 1792905708.9608135,
+        "status": "passed",
+        "exit_code": 0,
+        "elapsed_seconds": 228.40541696548462
+      }
+    ],
+    "source_hashes": {
+      "crates/hir/src/semantics.rs": "d35923acfbce3ed9cd1651a891343657fc60214ae13001f2847834d3a5ff10c8",
+      "crates/ide/src/inlay_hints/mod.rs": "6c3d007f70ab6dca2ab0d3a9f3b3dec19e5c2ec7334a3356ab2739267386bda6",
+      "crates/ide/src/inlay_hints/param_name.rs": "b732ba4eff5e554c22192b6da11d83e3cc93ca7c50e95b4d382cbc1df23f2b27"
+    },
+    "workspace_tests": {
+      "default-workspace": {
+        "suites": 55,
+        "passed": 2389,
+        "failed": 0,
+        "ignored": 17
+      },
+      "no-smt-workspace": {
+        "suites": 55,
+        "passed": 2374,
+        "failed": 0,
+        "ignored": 17
+      }
+    },
+    "source_hashes_verified": true,
+    "strict": {
+      "pass_clean": 276,
+      "pass_total": 276,
+      "fail_rejected": 217,
+      "fail_total": 217,
+      "log": "target/ablation-2026-10-25/strict.log"
+    },
+    "constraints": {
+      "totals": {
+        "proved": 3765,
+        "refuted": 0,
+        "total": 3802,
+        "unknown": 37
+      },
+      "unknown_by_reason": {
+        "erased_numeric": 12,
+        "flexible_witness": 21,
+        "not_established": 4
+      },
+      "report_sha256": "081d0d1d94dda1df19bd2edff232fd862f81db60b3ec0ac94b080a249d71c5d8"
+    },
+    "probes": {
+      "baseline": {
+        "report": "target/ablation-2026-10-25/probe-baseline.json",
+        "report_sha256": "27d1b945ba8375e0f207254aadaf5c2495d23aa3f4ef705d20f2cfce262fa1b6",
+        "server_sha256": "a30efb812712c96a7fa0262d922fd28c4cd95dcc4c8c92d87c34556b619426bd",
+        "ready_ms": 1137.369,
+        "editing": {
+          "editing:textDocument/hover": {
+            "count": 100,
+            "p50_ms": 53.382,
+            "p95_ms": 56.71,
+            "p99_ms": 69.699,
+            "max_ms": 164.863,
+            "errors": []
+          },
+          "editing:textDocument/completion": {
+            "count": 100,
+            "p50_ms": 15.688,
+            "p95_ms": 17.168,
+            "p99_ms": 18.322,
+            "max_ms": 22.186,
+            "errors": []
+          },
+          "editing:textDocument/definition": {
+            "count": 100,
+            "p50_ms": 2.264,
+            "p95_ms": 2.691,
+            "p99_ms": 3.38,
+            "max_ms": 6.03,
+            "errors": []
+          }
+        },
+        "memory": [
+          {
+            "phase": "ready",
+            "elapsed_ms": 1137.398,
+            "VmHWM": "103296 kB",
+            "VmRSS": "103296 kB",
+            "Threads": "54"
+          },
+          {
+            "phase": "initial-prime-complete",
+            "elapsed_ms": 15639.334,
+            "VmHWM": "614568 kB",
+            "VmRSS": "403316 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 5,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   293 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "edit-0",
+            "elapsed_ms": 16508.78,
+            "VmHWM": "614568 kB",
+            "VmRSS": "433132 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-1",
+            "elapsed_ms": 16583.127,
+            "VmHWM": "614568 kB",
+            "VmRSS": "436488 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-2",
+            "elapsed_ms": 16659.253,
+            "VmHWM": "614568 kB",
+            "VmRSS": "438636 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-3",
+            "elapsed_ms": 16731.117,
+            "VmHWM": "614568 kB",
+            "VmRSS": "441452 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-4",
+            "elapsed_ms": 16802.391,
+            "VmHWM": "614568 kB",
+            "VmRSS": "443204 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-5",
+            "elapsed_ms": 16876.686,
+            "VmHWM": "614568 kB",
+            "VmRSS": "445244 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-6",
+            "elapsed_ms": 16948.873,
+            "VmHWM": "614568 kB",
+            "VmRSS": "446256 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-7",
+            "elapsed_ms": 17020.511,
+            "VmHWM": "614568 kB",
+            "VmRSS": "447608 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-8",
+            "elapsed_ms": 17092.033,
+            "VmHWM": "614568 kB",
+            "VmRSS": "447976 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-9",
+            "elapsed_ms": 17164.332,
+            "VmHWM": "614568 kB",
+            "VmRSS": "448232 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-10",
+            "elapsed_ms": 17237.085,
+            "VmHWM": "614568 kB",
+            "VmRSS": "449528 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-11",
+            "elapsed_ms": 17310.171,
+            "VmHWM": "614568 kB",
+            "VmRSS": "451288 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-12",
+            "elapsed_ms": 17381.332,
+            "VmHWM": "614568 kB",
+            "VmRSS": "452216 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-13",
+            "elapsed_ms": 17454.184,
+            "VmHWM": "614568 kB",
+            "VmRSS": "453184 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-14",
+            "elapsed_ms": 17526.772,
+            "VmHWM": "614568 kB",
+            "VmRSS": "453800 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-15",
+            "elapsed_ms": 17598.46,
+            "VmHWM": "614568 kB",
+            "VmRSS": "454688 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-16",
+            "elapsed_ms": 17672.675,
+            "VmHWM": "614568 kB",
+            "VmRSS": "456196 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-17",
+            "elapsed_ms": 17744.511,
+            "VmHWM": "614568 kB",
+            "VmRSS": "457244 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-18",
+            "elapsed_ms": 17816.407,
+            "VmHWM": "614568 kB",
+            "VmRSS": "457608 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-19",
+            "elapsed_ms": 17889.32,
+            "VmHWM": "614568 kB",
+            "VmRSS": "458004 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-20",
+            "elapsed_ms": 17960.972,
+            "VmHWM": "614568 kB",
+            "VmRSS": "458116 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-21",
+            "elapsed_ms": 18035.215,
+            "VmHWM": "614568 kB",
+            "VmRSS": "458644 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-22",
+            "elapsed_ms": 18104.651,
+            "VmHWM": "614568 kB",
+            "VmRSS": "458760 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-23",
+            "elapsed_ms": 18173.99,
+            "VmHWM": "614568 kB",
+            "VmRSS": "459024 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-24",
+            "elapsed_ms": 18245.082,
+            "VmHWM": "614568 kB",
+            "VmRSS": "459412 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-25",
+            "elapsed_ms": 18318.527,
+            "VmHWM": "614568 kB",
+            "VmRSS": "459480 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-26",
+            "elapsed_ms": 18392.071,
+            "VmHWM": "614568 kB",
+            "VmRSS": "459996 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-27",
+            "elapsed_ms": 18463.981,
+            "VmHWM": "614568 kB",
+            "VmRSS": "460068 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-28",
+            "elapsed_ms": 18536.41,
+            "VmHWM": "614568 kB",
+            "VmRSS": "460148 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-29",
+            "elapsed_ms": 18616.206,
+            "VmHWM": "614568 kB",
+            "VmRSS": "460540 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-30",
+            "elapsed_ms": 18704.947,
+            "VmHWM": "614568 kB",
+            "VmRSS": "460912 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-31",
+            "elapsed_ms": 18800.948,
+            "VmHWM": "614568 kB",
+            "VmRSS": "461332 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-32",
+            "elapsed_ms": 18871.737,
+            "VmHWM": "614568 kB",
+            "VmRSS": "461388 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-33",
+            "elapsed_ms": 18943.324,
+            "VmHWM": "614568 kB",
+            "VmRSS": "461480 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-34",
+            "elapsed_ms": 19013.349,
+            "VmHWM": "614568 kB",
+            "VmRSS": "461668 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-35",
+            "elapsed_ms": 19083.494,
+            "VmHWM": "614568 kB",
+            "VmRSS": "461812 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-36",
+            "elapsed_ms": 19156.154,
+            "VmHWM": "614568 kB",
+            "VmRSS": "462064 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-37",
+            "elapsed_ms": 19225.785,
+            "VmHWM": "614568 kB",
+            "VmRSS": "462136 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-38",
+            "elapsed_ms": 19296.658,
+            "VmHWM": "614568 kB",
+            "VmRSS": "462184 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-39",
+            "elapsed_ms": 19367.17,
+            "VmHWM": "614568 kB",
+            "VmRSS": "462204 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-40",
+            "elapsed_ms": 19436.954,
+            "VmHWM": "614568 kB",
+            "VmRSS": "462276 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-41",
+            "elapsed_ms": 19508.655,
+            "VmHWM": "614568 kB",
+            "VmRSS": "462572 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-42",
+            "elapsed_ms": 19581.021,
+            "VmHWM": "614568 kB",
+            "VmRSS": "462596 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-43",
+            "elapsed_ms": 19651.681,
+            "VmHWM": "614568 kB",
+            "VmRSS": "462596 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-44",
+            "elapsed_ms": 19722.971,
+            "VmHWM": "614568 kB",
+            "VmRSS": "462616 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-45",
+            "elapsed_ms": 19794.534,
+            "VmHWM": "614568 kB",
+            "VmRSS": "462692 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-46",
+            "elapsed_ms": 19866.96,
+            "VmHWM": "614568 kB",
+            "VmRSS": "462944 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-47",
+            "elapsed_ms": 19939.158,
+            "VmHWM": "614568 kB",
+            "VmRSS": "462948 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-48",
+            "elapsed_ms": 20012.324,
+            "VmHWM": "614568 kB",
+            "VmRSS": "462948 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-49",
+            "elapsed_ms": 20083.282,
+            "VmHWM": "614568 kB",
+            "VmRSS": "462960 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-50",
+            "elapsed_ms": 20153.127,
+            "VmHWM": "614568 kB",
+            "VmRSS": "462960 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-51",
+            "elapsed_ms": 20221.393,
+            "VmHWM": "614568 kB",
+            "VmRSS": "463312 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-52",
+            "elapsed_ms": 20288.747,
+            "VmHWM": "614568 kB",
+            "VmRSS": "463372 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-53",
+            "elapsed_ms": 20359.95,
+            "VmHWM": "614568 kB",
+            "VmRSS": "463420 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-54",
+            "elapsed_ms": 20430.386,
+            "VmHWM": "614568 kB",
+            "VmRSS": "463692 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-55",
+            "elapsed_ms": 20517.979,
+            "VmHWM": "614568 kB",
+            "VmRSS": "463724 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-56",
+            "elapsed_ms": 20592.364,
+            "VmHWM": "614568 kB",
+            "VmRSS": "464016 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-57",
+            "elapsed_ms": 20661.967,
+            "VmHWM": "614568 kB",
+            "VmRSS": "464036 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-58",
+            "elapsed_ms": 20733.869,
+            "VmHWM": "614568 kB",
+            "VmRSS": "464040 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-59",
+            "elapsed_ms": 20807.721,
+            "VmHWM": "614568 kB",
+            "VmRSS": "464080 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-60",
+            "elapsed_ms": 20879.692,
+            "VmHWM": "614568 kB",
+            "VmRSS": "464080 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-61",
+            "elapsed_ms": 20953.633,
+            "VmHWM": "614568 kB",
+            "VmRSS": "464400 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-62",
+            "elapsed_ms": 21022.949,
+            "VmHWM": "614568 kB",
+            "VmRSS": "464408 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-63",
+            "elapsed_ms": 21093.734,
+            "VmHWM": "614568 kB",
+            "VmRSS": "464408 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-64",
+            "elapsed_ms": 21166.723,
+            "VmHWM": "614568 kB",
+            "VmRSS": "464580 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-65",
+            "elapsed_ms": 21239.56,
+            "VmHWM": "614568 kB",
+            "VmRSS": "464580 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-66",
+            "elapsed_ms": 21311.858,
+            "VmHWM": "614568 kB",
+            "VmRSS": "464852 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-67",
+            "elapsed_ms": 21383.991,
+            "VmHWM": "614568 kB",
+            "VmRSS": "464856 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-68",
+            "elapsed_ms": 21452.298,
+            "VmHWM": "614568 kB",
+            "VmRSS": "464864 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-69",
+            "elapsed_ms": 21521.755,
+            "VmHWM": "614568 kB",
+            "VmRSS": "465096 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-70",
+            "elapsed_ms": 21595.099,
+            "VmHWM": "614568 kB",
+            "VmRSS": "465096 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-71",
+            "elapsed_ms": 21670.153,
+            "VmHWM": "614568 kB",
+            "VmRSS": "465132 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-72",
+            "elapsed_ms": 21742.713,
+            "VmHWM": "614568 kB",
+            "VmRSS": "465136 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-73",
+            "elapsed_ms": 21813.494,
+            "VmHWM": "614568 kB",
+            "VmRSS": "465144 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-74",
+            "elapsed_ms": 21883.714,
+            "VmHWM": "614568 kB",
+            "VmRSS": "465388 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-75",
+            "elapsed_ms": 21954.099,
+            "VmHWM": "614568 kB",
+            "VmRSS": "465388 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-76",
+            "elapsed_ms": 22030.183,
+            "VmHWM": "614568 kB",
+            "VmRSS": "465652 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-77",
+            "elapsed_ms": 22103.651,
+            "VmHWM": "614568 kB",
+            "VmRSS": "465704 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-78",
+            "elapsed_ms": 22174.372,
+            "VmHWM": "614568 kB",
+            "VmRSS": "465704 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-79",
+            "elapsed_ms": 22243.781,
+            "VmHWM": "614568 kB",
+            "VmRSS": "465764 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-80",
+            "elapsed_ms": 22312.665,
+            "VmHWM": "614568 kB",
+            "VmRSS": "465764 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-81",
+            "elapsed_ms": 22386.397,
+            "VmHWM": "614568 kB",
+            "VmRSS": "465764 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-82",
+            "elapsed_ms": 22458.766,
+            "VmHWM": "614568 kB",
+            "VmRSS": "465768 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-83",
+            "elapsed_ms": 22528.671,
+            "VmHWM": "614568 kB",
+            "VmRSS": "465768 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-84",
+            "elapsed_ms": 22599.127,
+            "VmHWM": "614568 kB",
+            "VmRSS": "465768 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-85",
+            "elapsed_ms": 22666.643,
+            "VmHWM": "614568 kB",
+            "VmRSS": "465776 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-86",
+            "elapsed_ms": 22739.374,
+            "VmHWM": "614568 kB",
+            "VmRSS": "465788 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-87",
+            "elapsed_ms": 22812.187,
+            "VmHWM": "614568 kB",
+            "VmRSS": "465804 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-88",
+            "elapsed_ms": 22885.42,
+            "VmHWM": "614568 kB",
+            "VmRSS": "465812 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-89",
+            "elapsed_ms": 22956.512,
+            "VmHWM": "614568 kB",
+            "VmRSS": "465828 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-90",
+            "elapsed_ms": 23028.407,
+            "VmHWM": "614568 kB",
+            "VmRSS": "465836 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-91",
+            "elapsed_ms": 23098.277,
+            "VmHWM": "614568 kB",
+            "VmRSS": "465836 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-92",
+            "elapsed_ms": 23170.092,
+            "VmHWM": "614568 kB",
+            "VmRSS": "465844 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-93",
+            "elapsed_ms": 23243.155,
+            "VmHWM": "614568 kB",
+            "VmRSS": "465844 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-94",
+            "elapsed_ms": 23315.736,
+            "VmHWM": "614568 kB",
+            "VmRSS": "465848 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-95",
+            "elapsed_ms": 23385.677,
+            "VmHWM": "614568 kB",
+            "VmRSS": "465880 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-96",
+            "elapsed_ms": 23460.637,
+            "VmHWM": "614568 kB",
+            "VmRSS": "465988 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-97",
+            "elapsed_ms": 23533.618,
+            "VmHWM": "614568 kB",
+            "VmRSS": "465988 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-98",
+            "elapsed_ms": 23605.661,
+            "VmHWM": "614568 kB",
+            "VmRSS": "465988 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-99",
+            "elapsed_ms": 23676.064,
+            "VmHWM": "614568 kB",
+            "VmRSS": "465988 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "closed",
+            "elapsed_ms": 26676.697,
+            "VmHWM": "614568 kB",
+            "VmRSS": "466004 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "reload-close-0",
+            "elapsed_ms": 40847.278,
+            "VmHWM": "729204 kB",
+            "VmRSS": "454888 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 359,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-1",
+            "elapsed_ms": 54940.083,
+            "VmHWM": "729204 kB",
+            "VmRSS": "434852 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 363,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-2",
+            "elapsed_ms": 69328.445,
+            "VmHWM": "729204 kB",
+            "VmRSS": "464100 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 367,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-3",
+            "elapsed_ms": 83665.503,
+            "VmHWM": "729204 kB",
+            "VmRSS": "466912 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 371,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-4",
+            "elapsed_ms": 96833.352,
+            "VmHWM": "729204 kB",
+            "VmRSS": "476948 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 375,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-5",
+            "elapsed_ms": 109498.268,
+            "VmHWM": "729204 kB",
+            "VmRSS": "482320 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 379,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-6",
+            "elapsed_ms": 121932.358,
+            "VmHWM": "729204 kB",
+            "VmRSS": "482588 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 383,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-7",
+            "elapsed_ms": 134438.558,
+            "VmHWM": "729204 kB",
+            "VmRSS": "489292 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 387,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-8",
+            "elapsed_ms": 146773.439,
+            "VmHWM": "729204 kB",
+            "VmRSS": "478716 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 391,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-9",
+            "elapsed_ms": 158925.461,
+            "VmHWM": "729204 kB",
+            "VmRSS": "480588 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 395,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-10",
+            "elapsed_ms": 171006.546,
+            "VmHWM": "729204 kB",
+            "VmRSS": "472624 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 399,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-11",
+            "elapsed_ms": 182970.429,
+            "VmHWM": "729204 kB",
+            "VmRSS": "496736 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 403,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-12",
+            "elapsed_ms": 195014.658,
+            "VmHWM": "729204 kB",
+            "VmRSS": "506976 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 407,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-13",
+            "elapsed_ms": 207003.994,
+            "VmHWM": "729204 kB",
+            "VmRSS": "475344 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 411,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-14",
+            "elapsed_ms": 219288.934,
+            "VmHWM": "729204 kB",
+            "VmRSS": "492756 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 415,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-15",
+            "elapsed_ms": 231189.64,
+            "VmHWM": "729204 kB",
+            "VmRSS": "476724 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 419,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-16",
+            "elapsed_ms": 242993.003,
+            "VmHWM": "729204 kB",
+            "VmRSS": "492272 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 423,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-17",
+            "elapsed_ms": 254631.697,
+            "VmHWM": "729204 kB",
+            "VmRSS": "483652 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 427,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-18",
+            "elapsed_ms": 266153.746,
+            "VmHWM": "729204 kB",
+            "VmRSS": "501180 kB",
+            "Threads": "58",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 431,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-19",
+            "elapsed_ms": 277603.755,
+            "VmHWM": "729204 kB",
+            "VmRSS": "525584 kB",
+            "Threads": "58",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 435,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "idle-after-lifecycle",
+            "elapsed_ms": 307617.556,
+            "VmHWM": "729204 kB",
+            "VmRSS": "525648 kB",
+            "Threads": "58",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 436,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          }
+        ],
+        "cancellations": 20,
+        "unexpected_errors": 0,
+        "error_logs": 0,
+        "exit_code": 0
+      },
+      "retained": {
+        "report": "target/ablation-2026-10-25/probe-retained.json",
+        "report_sha256": "ecb5b64d1f862bc8e07c2e973cb8fe32bb18b5be74f580df90d6604cc1f526ae",
+        "server_sha256": "e022bcf5478200cc6647bb6c47b6498696581e458028d57771ddeae134fc0178",
+        "ready_ms": 1108.608,
+        "editing": {
+          "editing:textDocument/hover": {
+            "count": 100,
+            "p50_ms": 55.336,
+            "p95_ms": 58.387,
+            "p99_ms": 62.912,
+            "max_ms": 142.045,
+            "errors": []
+          },
+          "editing:textDocument/completion": {
+            "count": 100,
+            "p50_ms": 16.349,
+            "p95_ms": 17.864,
+            "p99_ms": 20.362,
+            "max_ms": 24.497,
+            "errors": []
+          },
+          "editing:textDocument/definition": {
+            "count": 100,
+            "p50_ms": 2.541,
+            "p95_ms": 2.852,
+            "p99_ms": 2.873,
+            "max_ms": 3.097,
+            "errors": []
+          }
+        },
+        "memory": [
+          {
+            "phase": "ready",
+            "elapsed_ms": 1108.64,
+            "VmHWM": "103144 kB",
+            "VmRSS": "103144 kB",
+            "Threads": "54"
+          },
+          {
+            "phase": "initial-prime-complete",
+            "elapsed_ms": 14567.164,
+            "VmHWM": "620716 kB",
+            "VmRSS": "383904 kB",
+            "Threads": "55",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 5,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   293 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "edit-0",
+            "elapsed_ms": 15408.472,
+            "VmHWM": "620716 kB",
+            "VmRSS": "413400 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-1",
+            "elapsed_ms": 15486.778,
+            "VmHWM": "620716 kB",
+            "VmRSS": "416656 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-2",
+            "elapsed_ms": 15563.884,
+            "VmHWM": "620716 kB",
+            "VmRSS": "418840 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-3",
+            "elapsed_ms": 15639.857,
+            "VmHWM": "620716 kB",
+            "VmRSS": "421652 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-4",
+            "elapsed_ms": 15712.874,
+            "VmHWM": "620716 kB",
+            "VmRSS": "423376 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-5",
+            "elapsed_ms": 15796.213,
+            "VmHWM": "620716 kB",
+            "VmRSS": "425280 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-6",
+            "elapsed_ms": 15875.048,
+            "VmHWM": "620716 kB",
+            "VmRSS": "427548 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-7",
+            "elapsed_ms": 15950.612,
+            "VmHWM": "620716 kB",
+            "VmRSS": "428792 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-8",
+            "elapsed_ms": 16027.312,
+            "VmHWM": "620716 kB",
+            "VmRSS": "429184 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-9",
+            "elapsed_ms": 16102.251,
+            "VmHWM": "620716 kB",
+            "VmRSS": "430056 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-10",
+            "elapsed_ms": 16175.911,
+            "VmHWM": "620716 kB",
+            "VmRSS": "431364 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-11",
+            "elapsed_ms": 16253.616,
+            "VmHWM": "620716 kB",
+            "VmRSS": "432880 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-12",
+            "elapsed_ms": 16325.942,
+            "VmHWM": "620716 kB",
+            "VmRSS": "433896 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-13",
+            "elapsed_ms": 16401.287,
+            "VmHWM": "620716 kB",
+            "VmRSS": "434872 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-14",
+            "elapsed_ms": 16476.733,
+            "VmHWM": "620716 kB",
+            "VmRSS": "435468 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-15",
+            "elapsed_ms": 16552.881,
+            "VmHWM": "620716 kB",
+            "VmRSS": "436376 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-16",
+            "elapsed_ms": 16629.144,
+            "VmHWM": "620716 kB",
+            "VmRSS": "438088 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-17",
+            "elapsed_ms": 16701.972,
+            "VmHWM": "620716 kB",
+            "VmRSS": "438192 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-18",
+            "elapsed_ms": 16781.362,
+            "VmHWM": "620716 kB",
+            "VmRSS": "438420 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-19",
+            "elapsed_ms": 16855.247,
+            "VmHWM": "620716 kB",
+            "VmRSS": "438624 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-20",
+            "elapsed_ms": 16929.088,
+            "VmHWM": "620716 kB",
+            "VmRSS": "438736 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-21",
+            "elapsed_ms": 17005.064,
+            "VmHWM": "620716 kB",
+            "VmRSS": "439324 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-22",
+            "elapsed_ms": 17080.809,
+            "VmHWM": "620716 kB",
+            "VmRSS": "439492 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-23",
+            "elapsed_ms": 17155.875,
+            "VmHWM": "620716 kB",
+            "VmRSS": "439744 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-24",
+            "elapsed_ms": 17229.288,
+            "VmHWM": "620716 kB",
+            "VmRSS": "440152 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-25",
+            "elapsed_ms": 17301.606,
+            "VmHWM": "620716 kB",
+            "VmRSS": "440204 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-26",
+            "elapsed_ms": 17381.462,
+            "VmHWM": "620716 kB",
+            "VmRSS": "440724 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-27",
+            "elapsed_ms": 17454.359,
+            "VmHWM": "620716 kB",
+            "VmRSS": "440852 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-28",
+            "elapsed_ms": 17528.09,
+            "VmHWM": "620716 kB",
+            "VmRSS": "441008 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-29",
+            "elapsed_ms": 17608.968,
+            "VmHWM": "620716 kB",
+            "VmRSS": "441268 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-30",
+            "elapsed_ms": 17683.664,
+            "VmHWM": "620716 kB",
+            "VmRSS": "441632 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-31",
+            "elapsed_ms": 17758.08,
+            "VmHWM": "620716 kB",
+            "VmRSS": "442044 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-32",
+            "elapsed_ms": 17831.419,
+            "VmHWM": "620716 kB",
+            "VmRSS": "442064 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-33",
+            "elapsed_ms": 17906.658,
+            "VmHWM": "620716 kB",
+            "VmRSS": "442064 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-34",
+            "elapsed_ms": 17983.042,
+            "VmHWM": "620716 kB",
+            "VmRSS": "442336 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-35",
+            "elapsed_ms": 18057.045,
+            "VmHWM": "620716 kB",
+            "VmRSS": "442468 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-36",
+            "elapsed_ms": 18132.554,
+            "VmHWM": "620716 kB",
+            "VmRSS": "442796 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-37",
+            "elapsed_ms": 18207.462,
+            "VmHWM": "620716 kB",
+            "VmRSS": "442820 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-38",
+            "elapsed_ms": 18283.776,
+            "VmHWM": "620716 kB",
+            "VmRSS": "442828 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-39",
+            "elapsed_ms": 18360.574,
+            "VmHWM": "620716 kB",
+            "VmRSS": "442888 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-40",
+            "elapsed_ms": 18434.61,
+            "VmHWM": "620716 kB",
+            "VmRSS": "442996 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-41",
+            "elapsed_ms": 18510.637,
+            "VmHWM": "620716 kB",
+            "VmRSS": "443336 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-42",
+            "elapsed_ms": 18584.874,
+            "VmHWM": "620716 kB",
+            "VmRSS": "443460 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-43",
+            "elapsed_ms": 18660.931,
+            "VmHWM": "620716 kB",
+            "VmRSS": "443584 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-44",
+            "elapsed_ms": 18737.042,
+            "VmHWM": "620716 kB",
+            "VmRSS": "443600 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-45",
+            "elapsed_ms": 18815.012,
+            "VmHWM": "620716 kB",
+            "VmRSS": "443608 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-46",
+            "elapsed_ms": 18889.839,
+            "VmHWM": "620716 kB",
+            "VmRSS": "443940 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-47",
+            "elapsed_ms": 18962.951,
+            "VmHWM": "620716 kB",
+            "VmRSS": "443964 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-48",
+            "elapsed_ms": 19036.862,
+            "VmHWM": "620716 kB",
+            "VmRSS": "443964 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-49",
+            "elapsed_ms": 19111.874,
+            "VmHWM": "620716 kB",
+            "VmRSS": "443968 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-50",
+            "elapsed_ms": 19186.904,
+            "VmHWM": "620716 kB",
+            "VmRSS": "444024 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-51",
+            "elapsed_ms": 19263.621,
+            "VmHWM": "620716 kB",
+            "VmRSS": "444024 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-52",
+            "elapsed_ms": 19340.169,
+            "VmHWM": "620716 kB",
+            "VmRSS": "444044 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-53",
+            "elapsed_ms": 19416.355,
+            "VmHWM": "620716 kB",
+            "VmRSS": "444044 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-54",
+            "elapsed_ms": 19493.044,
+            "VmHWM": "620716 kB",
+            "VmRSS": "444276 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-55",
+            "elapsed_ms": 19569.45,
+            "VmHWM": "620716 kB",
+            "VmRSS": "444276 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-56",
+            "elapsed_ms": 19648.654,
+            "VmHWM": "620716 kB",
+            "VmRSS": "444468 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-57",
+            "elapsed_ms": 19724.082,
+            "VmHWM": "620716 kB",
+            "VmRSS": "444488 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-58",
+            "elapsed_ms": 19799.261,
+            "VmHWM": "620716 kB",
+            "VmRSS": "444488 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-59",
+            "elapsed_ms": 19876.692,
+            "VmHWM": "620716 kB",
+            "VmRSS": "444604 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-60",
+            "elapsed_ms": 19954.683,
+            "VmHWM": "620716 kB",
+            "VmRSS": "444604 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-61",
+            "elapsed_ms": 20032.958,
+            "VmHWM": "620716 kB",
+            "VmRSS": "444828 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-62",
+            "elapsed_ms": 20108.622,
+            "VmHWM": "620716 kB",
+            "VmRSS": "444828 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-63",
+            "elapsed_ms": 20185.04,
+            "VmHWM": "620716 kB",
+            "VmRSS": "444828 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-64",
+            "elapsed_ms": 20259.26,
+            "VmHWM": "620716 kB",
+            "VmRSS": "445064 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-65",
+            "elapsed_ms": 20334.259,
+            "VmHWM": "620716 kB",
+            "VmRSS": "445068 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-66",
+            "elapsed_ms": 20411.902,
+            "VmHWM": "620716 kB",
+            "VmRSS": "445520 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-67",
+            "elapsed_ms": 20488.713,
+            "VmHWM": "620716 kB",
+            "VmRSS": "445584 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-68",
+            "elapsed_ms": 20565.426,
+            "VmHWM": "620716 kB",
+            "VmRSS": "445604 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-69",
+            "elapsed_ms": 20641.159,
+            "VmHWM": "620716 kB",
+            "VmRSS": "445604 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-70",
+            "elapsed_ms": 20713.037,
+            "VmHWM": "620716 kB",
+            "VmRSS": "445604 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-71",
+            "elapsed_ms": 20789.028,
+            "VmHWM": "620716 kB",
+            "VmRSS": "445632 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-72",
+            "elapsed_ms": 20863.934,
+            "VmHWM": "620716 kB",
+            "VmRSS": "445640 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-73",
+            "elapsed_ms": 20937.27,
+            "VmHWM": "620716 kB",
+            "VmRSS": "445640 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-74",
+            "elapsed_ms": 21011.173,
+            "VmHWM": "620716 kB",
+            "VmRSS": "445840 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-75",
+            "elapsed_ms": 21084.372,
+            "VmHWM": "620716 kB",
+            "VmRSS": "445848 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-76",
+            "elapsed_ms": 21160.179,
+            "VmHWM": "620716 kB",
+            "VmRSS": "445860 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-77",
+            "elapsed_ms": 21233.463,
+            "VmHWM": "620716 kB",
+            "VmRSS": "445860 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-78",
+            "elapsed_ms": 21307.823,
+            "VmHWM": "620716 kB",
+            "VmRSS": "445860 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-79",
+            "elapsed_ms": 21380.806,
+            "VmHWM": "620716 kB",
+            "VmRSS": "445880 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-80",
+            "elapsed_ms": 21455.496,
+            "VmHWM": "620716 kB",
+            "VmRSS": "445884 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-81",
+            "elapsed_ms": 21531.505,
+            "VmHWM": "620716 kB",
+            "VmRSS": "445884 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-82",
+            "elapsed_ms": 21605.412,
+            "VmHWM": "620716 kB",
+            "VmRSS": "445932 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-83",
+            "elapsed_ms": 21677.553,
+            "VmHWM": "620716 kB",
+            "VmRSS": "445932 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-84",
+            "elapsed_ms": 21750.476,
+            "VmHWM": "620716 kB",
+            "VmRSS": "445936 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-85",
+            "elapsed_ms": 21823.221,
+            "VmHWM": "620716 kB",
+            "VmRSS": "445968 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-86",
+            "elapsed_ms": 21899.703,
+            "VmHWM": "620716 kB",
+            "VmRSS": "446192 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-87",
+            "elapsed_ms": 21980.089,
+            "VmHWM": "620716 kB",
+            "VmRSS": "446196 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-88",
+            "elapsed_ms": 22055.616,
+            "VmHWM": "620716 kB",
+            "VmRSS": "446200 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-89",
+            "elapsed_ms": 22130.864,
+            "VmHWM": "620716 kB",
+            "VmRSS": "446260 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-90",
+            "elapsed_ms": 22213.273,
+            "VmHWM": "620716 kB",
+            "VmRSS": "446272 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-91",
+            "elapsed_ms": 22289.083,
+            "VmHWM": "620716 kB",
+            "VmRSS": "446288 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-92",
+            "elapsed_ms": 22362.069,
+            "VmHWM": "620716 kB",
+            "VmRSS": "446332 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-93",
+            "elapsed_ms": 22435.334,
+            "VmHWM": "620716 kB",
+            "VmRSS": "446332 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-94",
+            "elapsed_ms": 22506.647,
+            "VmHWM": "620716 kB",
+            "VmRSS": "446344 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-95",
+            "elapsed_ms": 22578.751,
+            "VmHWM": "620716 kB",
+            "VmRSS": "446344 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-96",
+            "elapsed_ms": 22652.081,
+            "VmHWM": "620716 kB",
+            "VmRSS": "446376 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-97",
+            "elapsed_ms": 22726.759,
+            "VmHWM": "620716 kB",
+            "VmRSS": "446376 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-98",
+            "elapsed_ms": 22799.388,
+            "VmHWM": "620716 kB",
+            "VmRSS": "446376 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "edit-99",
+            "elapsed_ms": 22870.484,
+            "VmHWM": "620716 kB",
+            "VmRSS": "446388 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "closed",
+            "elapsed_ms": 25871.106,
+            "VmHWM": "620716 kB",
+            "VmRSS": "446400 kB",
+            "Threads": "55"
+          },
+          {
+            "phase": "reload-close-0",
+            "elapsed_ms": 37258.522,
+            "VmHWM": "736080 kB",
+            "VmRSS": "481232 kB",
+            "Threads": "55",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 359,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-1",
+            "elapsed_ms": 48396.68,
+            "VmHWM": "736080 kB",
+            "VmRSS": "493324 kB",
+            "Threads": "55",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 363,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-2",
+            "elapsed_ms": 59035.866,
+            "VmHWM": "736080 kB",
+            "VmRSS": "498688 kB",
+            "Threads": "55",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 367,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-3",
+            "elapsed_ms": 69478.382,
+            "VmHWM": "736080 kB",
+            "VmRSS": "484000 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 371,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-4",
+            "elapsed_ms": 79125.955,
+            "VmHWM": "736080 kB",
+            "VmRSS": "499380 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 375,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-5",
+            "elapsed_ms": 88634.408,
+            "VmHWM": "736080 kB",
+            "VmRSS": "516896 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 379,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-6",
+            "elapsed_ms": 97444.508,
+            "VmHWM": "736080 kB",
+            "VmRSS": "514920 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 383,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   263 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-7",
+            "elapsed_ms": 106143.714,
+            "VmHWM": "736080 kB",
+            "VmRSS": "514096 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 387,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   263 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-8",
+            "elapsed_ms": 114579.699,
+            "VmHWM": "736080 kB",
+            "VmRSS": "521064 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 391,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   263 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-9",
+            "elapsed_ms": 122662.464,
+            "VmHWM": "736080 kB",
+            "VmRSS": "504764 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 395,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   263 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-10",
+            "elapsed_ms": 130307.547,
+            "VmHWM": "736080 kB",
+            "VmRSS": "505024 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 399,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   263 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-11",
+            "elapsed_ms": 138173.487,
+            "VmHWM": "736080 kB",
+            "VmRSS": "506656 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 403,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   263 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-12",
+            "elapsed_ms": 145750.906,
+            "VmHWM": "736080 kB",
+            "VmRSS": "506304 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 407,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   263 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-13",
+            "elapsed_ms": 153262.826,
+            "VmHWM": "736080 kB",
+            "VmRSS": "491444 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 411,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   263 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-14",
+            "elapsed_ms": 160880.911,
+            "VmHWM": "736080 kB",
+            "VmRSS": "540560 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 415,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   263 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-15",
+            "elapsed_ms": 168374.576,
+            "VmHWM": "736080 kB",
+            "VmRSS": "524736 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 419,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   263 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-16",
+            "elapsed_ms": 175782.134,
+            "VmHWM": "736080 kB",
+            "VmRSS": "540324 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 423,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   263 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-17",
+            "elapsed_ms": 183171.872,
+            "VmHWM": "736080 kB",
+            "VmRSS": "490480 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 427,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   263 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-18",
+            "elapsed_ms": 190541.032,
+            "VmHWM": "736080 kB",
+            "VmRSS": "541352 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 431,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   263 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-19",
+            "elapsed_ms": 197595.315,
+            "VmHWM": "736080 kB",
+            "VmRSS": "523568 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 435,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   263 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "idle-after-lifecycle",
+            "elapsed_ms": 227608.387,
+            "VmHWM": "736080 kB",
+            "VmRSS": "523632 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 436,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   263 MiB (estimate)\n"
+            }
+          }
+        ],
+        "cancellations": 20,
+        "unexpected_errors": 0,
+        "error_logs": 0,
+        "exit_code": 0
+      },
+      "untrimmed": {
+        "report": "target/ablation-2026-10-25/probe-untrimmed.json",
+        "report_sha256": "112562b7a2af80e39025cf43bd559f8fb6009bf3f32ce7e74a25be1742b8741c",
+        "server_sha256": "850cd2ee757d44039bc181499972f8bda5127b8c0e96608bb5239a48d6c1fee8",
+        "ready_ms": 1099.768,
+        "editing": {
+          "editing:textDocument/hover": {
+            "count": 100,
+            "p50_ms": 53.51,
+            "p95_ms": 56.436,
+            "p99_ms": 73.599,
+            "max_ms": 166.993,
+            "errors": []
+          },
+          "editing:textDocument/completion": {
+            "count": 100,
+            "p50_ms": 16.26,
+            "p95_ms": 17.074,
+            "p99_ms": 19.569,
+            "max_ms": 25.739,
+            "errors": []
+          },
+          "editing:textDocument/definition": {
+            "count": 100,
+            "p50_ms": 2.4,
+            "p95_ms": 2.77,
+            "p99_ms": 3.33,
+            "max_ms": 7.855,
+            "errors": []
+          }
+        },
+        "memory": [
+          {
+            "phase": "ready",
+            "elapsed_ms": 1099.8,
+            "VmHWM": "104124 kB",
+            "VmRSS": "104124 kB",
+            "Threads": "54"
+          },
+          {
+            "phase": "initial-prime-complete",
+            "elapsed_ms": 15381.515,
+            "VmHWM": "638532 kB",
+            "VmRSS": "486300 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 5,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   293 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "edit-0",
+            "elapsed_ms": 16258.381,
+            "VmHWM": "638532 kB",
+            "VmRSS": "515232 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-1",
+            "elapsed_ms": 16334.088,
+            "VmHWM": "638532 kB",
+            "VmRSS": "518560 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-2",
+            "elapsed_ms": 16407.75,
+            "VmHWM": "638532 kB",
+            "VmRSS": "520644 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-3",
+            "elapsed_ms": 16481.546,
+            "VmHWM": "638532 kB",
+            "VmRSS": "522168 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-4",
+            "elapsed_ms": 16552.967,
+            "VmHWM": "638532 kB",
+            "VmRSS": "523900 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-5",
+            "elapsed_ms": 16627.896,
+            "VmHWM": "638532 kB",
+            "VmRSS": "525816 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-6",
+            "elapsed_ms": 16705.422,
+            "VmHWM": "638532 kB",
+            "VmRSS": "526600 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-7",
+            "elapsed_ms": 16778.622,
+            "VmHWM": "638532 kB",
+            "VmRSS": "527904 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-8",
+            "elapsed_ms": 16849.83,
+            "VmHWM": "638532 kB",
+            "VmRSS": "528264 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-9",
+            "elapsed_ms": 16921.824,
+            "VmHWM": "638532 kB",
+            "VmRSS": "528572 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-10",
+            "elapsed_ms": 16995.419,
+            "VmHWM": "638532 kB",
+            "VmRSS": "529912 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-11",
+            "elapsed_ms": 17072.699,
+            "VmHWM": "638532 kB",
+            "VmRSS": "531740 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-12",
+            "elapsed_ms": 17145.207,
+            "VmHWM": "638532 kB",
+            "VmRSS": "532684 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-13",
+            "elapsed_ms": 17219.153,
+            "VmHWM": "638532 kB",
+            "VmRSS": "533652 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-14",
+            "elapsed_ms": 17291.007,
+            "VmHWM": "638532 kB",
+            "VmRSS": "534244 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-15",
+            "elapsed_ms": 17370.085,
+            "VmHWM": "638532 kB",
+            "VmRSS": "535188 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-16",
+            "elapsed_ms": 17444.543,
+            "VmHWM": "638532 kB",
+            "VmRSS": "536916 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-17",
+            "elapsed_ms": 17517.803,
+            "VmHWM": "638532 kB",
+            "VmRSS": "537988 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-18",
+            "elapsed_ms": 17589.318,
+            "VmHWM": "638532 kB",
+            "VmRSS": "538192 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-19",
+            "elapsed_ms": 17659.072,
+            "VmHWM": "638532 kB",
+            "VmRSS": "538364 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-20",
+            "elapsed_ms": 17731.588,
+            "VmHWM": "638532 kB",
+            "VmRSS": "538376 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-21",
+            "elapsed_ms": 17806.377,
+            "VmHWM": "638532 kB",
+            "VmRSS": "538896 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-22",
+            "elapsed_ms": 17880.39,
+            "VmHWM": "638532 kB",
+            "VmRSS": "539028 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-23",
+            "elapsed_ms": 17953.591,
+            "VmHWM": "638532 kB",
+            "VmRSS": "539260 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-24",
+            "elapsed_ms": 18026.616,
+            "VmHWM": "638532 kB",
+            "VmRSS": "539468 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-25",
+            "elapsed_ms": 18098.157,
+            "VmHWM": "638532 kB",
+            "VmRSS": "539512 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-26",
+            "elapsed_ms": 18172.073,
+            "VmHWM": "638532 kB",
+            "VmRSS": "540076 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-27",
+            "elapsed_ms": 18245.218,
+            "VmHWM": "638532 kB",
+            "VmRSS": "540168 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-28",
+            "elapsed_ms": 18317.535,
+            "VmHWM": "638532 kB",
+            "VmRSS": "540304 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-29",
+            "elapsed_ms": 18388.523,
+            "VmHWM": "638532 kB",
+            "VmRSS": "540672 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-30",
+            "elapsed_ms": 18462.216,
+            "VmHWM": "638532 kB",
+            "VmRSS": "540916 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-31",
+            "elapsed_ms": 18537.044,
+            "VmHWM": "638532 kB",
+            "VmRSS": "541328 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-32",
+            "elapsed_ms": 18609.193,
+            "VmHWM": "638532 kB",
+            "VmRSS": "541396 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-33",
+            "elapsed_ms": 18683.578,
+            "VmHWM": "638532 kB",
+            "VmRSS": "541412 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-34",
+            "elapsed_ms": 18757.309,
+            "VmHWM": "638532 kB",
+            "VmRSS": "541612 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-35",
+            "elapsed_ms": 18829.697,
+            "VmHWM": "638532 kB",
+            "VmRSS": "541736 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-36",
+            "elapsed_ms": 18902.769,
+            "VmHWM": "638532 kB",
+            "VmRSS": "542112 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-37",
+            "elapsed_ms": 18975.201,
+            "VmHWM": "638532 kB",
+            "VmRSS": "542220 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-38",
+            "elapsed_ms": 19047.145,
+            "VmHWM": "638532 kB",
+            "VmRSS": "542220 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-39",
+            "elapsed_ms": 19119.779,
+            "VmHWM": "638532 kB",
+            "VmRSS": "542268 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-40",
+            "elapsed_ms": 19193.703,
+            "VmHWM": "638532 kB",
+            "VmRSS": "542356 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-41",
+            "elapsed_ms": 19266.113,
+            "VmHWM": "638532 kB",
+            "VmRSS": "542724 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-42",
+            "elapsed_ms": 19337.6,
+            "VmHWM": "638532 kB",
+            "VmRSS": "542872 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-43",
+            "elapsed_ms": 19409.889,
+            "VmHWM": "638532 kB",
+            "VmRSS": "542896 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-44",
+            "elapsed_ms": 19483.774,
+            "VmHWM": "638532 kB",
+            "VmRSS": "542908 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-45",
+            "elapsed_ms": 19556.919,
+            "VmHWM": "638532 kB",
+            "VmRSS": "542908 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-46",
+            "elapsed_ms": 19629.55,
+            "VmHWM": "638532 kB",
+            "VmRSS": "543176 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-47",
+            "elapsed_ms": 19702.146,
+            "VmHWM": "638532 kB",
+            "VmRSS": "543252 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-48",
+            "elapsed_ms": 19774.545,
+            "VmHWM": "638532 kB",
+            "VmRSS": "543252 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-49",
+            "elapsed_ms": 19848.033,
+            "VmHWM": "638532 kB",
+            "VmRSS": "543276 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-50",
+            "elapsed_ms": 19921.434,
+            "VmHWM": "638532 kB",
+            "VmRSS": "543332 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-51",
+            "elapsed_ms": 19996.163,
+            "VmHWM": "638532 kB",
+            "VmRSS": "543668 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-52",
+            "elapsed_ms": 20066.684,
+            "VmHWM": "638532 kB",
+            "VmRSS": "543688 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-53",
+            "elapsed_ms": 20137.989,
+            "VmHWM": "638532 kB",
+            "VmRSS": "543752 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-54",
+            "elapsed_ms": 20210.22,
+            "VmHWM": "638532 kB",
+            "VmRSS": "543796 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-55",
+            "elapsed_ms": 20283.727,
+            "VmHWM": "638532 kB",
+            "VmRSS": "543816 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-56",
+            "elapsed_ms": 20378.131,
+            "VmHWM": "638532 kB",
+            "VmRSS": "543964 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-57",
+            "elapsed_ms": 20448.583,
+            "VmHWM": "638532 kB",
+            "VmRSS": "544008 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-58",
+            "elapsed_ms": 20520.064,
+            "VmHWM": "638532 kB",
+            "VmRSS": "544064 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-59",
+            "elapsed_ms": 20591.174,
+            "VmHWM": "638532 kB",
+            "VmRSS": "544228 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-60",
+            "elapsed_ms": 20664.81,
+            "VmHWM": "638532 kB",
+            "VmRSS": "544248 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-61",
+            "elapsed_ms": 20738.66,
+            "VmHWM": "638532 kB",
+            "VmRSS": "544364 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-62",
+            "elapsed_ms": 20810.994,
+            "VmHWM": "638532 kB",
+            "VmRSS": "544368 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-63",
+            "elapsed_ms": 20881.198,
+            "VmHWM": "638532 kB",
+            "VmRSS": "544368 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-64",
+            "elapsed_ms": 20955.074,
+            "VmHWM": "638532 kB",
+            "VmRSS": "544388 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-65",
+            "elapsed_ms": 21026.981,
+            "VmHWM": "638532 kB",
+            "VmRSS": "544428 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-66",
+            "elapsed_ms": 21101.963,
+            "VmHWM": "638532 kB",
+            "VmRSS": "544572 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-67",
+            "elapsed_ms": 21174.601,
+            "VmHWM": "638532 kB",
+            "VmRSS": "544572 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-68",
+            "elapsed_ms": 21248.18,
+            "VmHWM": "638532 kB",
+            "VmRSS": "544572 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-69",
+            "elapsed_ms": 21319.182,
+            "VmHWM": "638532 kB",
+            "VmRSS": "544604 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-70",
+            "elapsed_ms": 21390.693,
+            "VmHWM": "638532 kB",
+            "VmRSS": "544656 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-71",
+            "elapsed_ms": 21470.365,
+            "VmHWM": "638532 kB",
+            "VmRSS": "544680 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-72",
+            "elapsed_ms": 21565.932,
+            "VmHWM": "638532 kB",
+            "VmRSS": "544688 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-73",
+            "elapsed_ms": 21655.545,
+            "VmHWM": "638532 kB",
+            "VmRSS": "544688 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-74",
+            "elapsed_ms": 21726.516,
+            "VmHWM": "638532 kB",
+            "VmRSS": "544688 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-75",
+            "elapsed_ms": 21799.483,
+            "VmHWM": "638532 kB",
+            "VmRSS": "544760 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-76",
+            "elapsed_ms": 21874.257,
+            "VmHWM": "638532 kB",
+            "VmRSS": "544760 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-77",
+            "elapsed_ms": 21947.047,
+            "VmHWM": "638532 kB",
+            "VmRSS": "544760 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-78",
+            "elapsed_ms": 22018.736,
+            "VmHWM": "638532 kB",
+            "VmRSS": "544760 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-79",
+            "elapsed_ms": 22093.94,
+            "VmHWM": "638532 kB",
+            "VmRSS": "544792 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-80",
+            "elapsed_ms": 22165.899,
+            "VmHWM": "638532 kB",
+            "VmRSS": "544820 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-81",
+            "elapsed_ms": 22241.127,
+            "VmHWM": "638532 kB",
+            "VmRSS": "544820 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-82",
+            "elapsed_ms": 22312.036,
+            "VmHWM": "638532 kB",
+            "VmRSS": "544820 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-83",
+            "elapsed_ms": 22383.602,
+            "VmHWM": "638532 kB",
+            "VmRSS": "544824 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-84",
+            "elapsed_ms": 22454.589,
+            "VmHWM": "638532 kB",
+            "VmRSS": "544824 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-85",
+            "elapsed_ms": 22526.944,
+            "VmHWM": "638532 kB",
+            "VmRSS": "544856 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-86",
+            "elapsed_ms": 22601.518,
+            "VmHWM": "638532 kB",
+            "VmRSS": "544856 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-87",
+            "elapsed_ms": 22673.486,
+            "VmHWM": "638532 kB",
+            "VmRSS": "544860 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-88",
+            "elapsed_ms": 22746.772,
+            "VmHWM": "638532 kB",
+            "VmRSS": "544868 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-89",
+            "elapsed_ms": 22819.555,
+            "VmHWM": "638532 kB",
+            "VmRSS": "544880 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-90",
+            "elapsed_ms": 22891.471,
+            "VmHWM": "638532 kB",
+            "VmRSS": "544880 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-91",
+            "elapsed_ms": 22965.04,
+            "VmHWM": "638532 kB",
+            "VmRSS": "545144 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-92",
+            "elapsed_ms": 23035.389,
+            "VmHWM": "638532 kB",
+            "VmRSS": "545148 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-93",
+            "elapsed_ms": 23107.518,
+            "VmHWM": "638532 kB",
+            "VmRSS": "545148 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-94",
+            "elapsed_ms": 23179.581,
+            "VmHWM": "638532 kB",
+            "VmRSS": "545148 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-95",
+            "elapsed_ms": 23252.512,
+            "VmHWM": "638532 kB",
+            "VmRSS": "545148 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-96",
+            "elapsed_ms": 23327.557,
+            "VmHWM": "638532 kB",
+            "VmRSS": "545216 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-97",
+            "elapsed_ms": 23397.997,
+            "VmHWM": "638532 kB",
+            "VmRSS": "545216 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-98",
+            "elapsed_ms": 23469.831,
+            "VmHWM": "638532 kB",
+            "VmRSS": "545216 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-99",
+            "elapsed_ms": 23538.962,
+            "VmHWM": "638532 kB",
+            "VmRSS": "545216 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "closed",
+            "elapsed_ms": 26539.636,
+            "VmHWM": "638532 kB",
+            "VmRSS": "545216 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "reload-close-0",
+            "elapsed_ms": 40132.127,
+            "VmHWM": "737028 kB",
+            "VmRSS": "681236 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 359,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-1",
+            "elapsed_ms": 52890.939,
+            "VmHWM": "775008 kB",
+            "VmRSS": "719672 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 363,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-2",
+            "elapsed_ms": 64849.797,
+            "VmHWM": "804624 kB",
+            "VmRSS": "773336 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 367,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-3",
+            "elapsed_ms": 76419.172,
+            "VmHWM": "807092 kB",
+            "VmRSS": "767112 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 371,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-4",
+            "elapsed_ms": 88300.231,
+            "VmHWM": "807260 kB",
+            "VmRSS": "733316 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 375,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-5",
+            "elapsed_ms": 100150.221,
+            "VmHWM": "807260 kB",
+            "VmRSS": "733224 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 379,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-6",
+            "elapsed_ms": 111542.35,
+            "VmHWM": "807260 kB",
+            "VmRSS": "733776 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 383,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-7",
+            "elapsed_ms": 123455.129,
+            "VmHWM": "807260 kB",
+            "VmRSS": "766796 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 387,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-8",
+            "elapsed_ms": 134631.909,
+            "VmHWM": "808064 kB",
+            "VmRSS": "734256 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 391,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-9",
+            "elapsed_ms": 145689.322,
+            "VmHWM": "808144 kB",
+            "VmRSS": "734256 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 395,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-10",
+            "elapsed_ms": 157145.465,
+            "VmHWM": "816788 kB",
+            "VmRSS": "734520 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 399,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-11",
+            "elapsed_ms": 168556.02,
+            "VmHWM": "816788 kB",
+            "VmRSS": "767440 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 403,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-12",
+            "elapsed_ms": 179891.935,
+            "VmHWM": "816788 kB",
+            "VmRSS": "752108 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 407,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-13",
+            "elapsed_ms": 191064.042,
+            "VmHWM": "824548 kB",
+            "VmRSS": "743700 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 411,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-14",
+            "elapsed_ms": 202088.721,
+            "VmHWM": "841664 kB",
+            "VmRSS": "784720 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 415,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-15",
+            "elapsed_ms": 213098.722,
+            "VmHWM": "841664 kB",
+            "VmRSS": "809556 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 419,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-16",
+            "elapsed_ms": 223963.619,
+            "VmHWM": "850876 kB",
+            "VmRSS": "826736 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 423,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-17",
+            "elapsed_ms": 234527.575,
+            "VmHWM": "850876 kB",
+            "VmRSS": "810048 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 427,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-18",
+            "elapsed_ms": 245284.308,
+            "VmHWM": "850876 kB",
+            "VmRSS": "818232 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 431,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-19",
+            "elapsed_ms": 256134.434,
+            "VmHWM": "858692 kB",
+            "VmRSS": "826552 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 435,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "idle-after-lifecycle",
+            "elapsed_ms": 286149.049,
+            "VmHWM": "858692 kB",
+            "VmRSS": "826552 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 436,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          }
+        ],
+        "cancellations": 20,
+        "unexpected_errors": 0,
+        "error_logs": 0,
+        "exit_code": 0
+      },
+      "retained-with-examples": {
+        "report": "target/ablation-2026-10-25/probe-retained-with-examples.json",
+        "report_sha256": "e2692d1e182df8a80c3ae5d6c375d07e2cffbe1b5c5a3b249f16132ee129834d",
+        "server_sha256": "878010e68da590d903e0ce92ae7d91c1fa48a1752b3501f4fe331179df78f1fe",
+        "ready_ms": 1107.257,
+        "editing": {
+          "editing:textDocument/hover": {
+            "count": 100,
+            "p50_ms": 53.157,
+            "p95_ms": 56.029,
+            "p99_ms": 63.672,
+            "max_ms": 161.236,
+            "errors": []
+          },
+          "editing:textDocument/completion": {
+            "count": 100,
+            "p50_ms": 16.207,
+            "p95_ms": 17.459,
+            "p99_ms": 20.187,
+            "max_ms": 20.612,
+            "errors": []
+          },
+          "editing:textDocument/definition": {
+            "count": 100,
+            "p50_ms": 2.281,
+            "p95_ms": 2.661,
+            "p99_ms": 2.767,
+            "max_ms": 2.771,
+            "errors": []
+          }
+        },
+        "memory": [
+          {
+            "phase": "ready",
+            "elapsed_ms": 1107.289,
+            "VmHWM": "103236 kB",
+            "VmRSS": "103236 kB",
+            "Threads": "54"
+          },
+          {
+            "phase": "initial-prime-complete",
+            "elapsed_ms": 15627.861,
+            "VmHWM": "636056 kB",
+            "VmRSS": "407648 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 5,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   293 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "edit-0",
+            "elapsed_ms": 16476.398,
+            "VmHWM": "636056 kB",
+            "VmRSS": "437112 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-1",
+            "elapsed_ms": 16554.687,
+            "VmHWM": "636056 kB",
+            "VmRSS": "440716 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-2",
+            "elapsed_ms": 16628.771,
+            "VmHWM": "636056 kB",
+            "VmRSS": "442804 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-3",
+            "elapsed_ms": 16701.923,
+            "VmHWM": "636056 kB",
+            "VmRSS": "445612 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-4",
+            "elapsed_ms": 16774.863,
+            "VmHWM": "636056 kB",
+            "VmRSS": "447360 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-5",
+            "elapsed_ms": 16850.973,
+            "VmHWM": "636056 kB",
+            "VmRSS": "449356 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-6",
+            "elapsed_ms": 16927.492,
+            "VmHWM": "636056 kB",
+            "VmRSS": "451328 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-7",
+            "elapsed_ms": 16997.916,
+            "VmHWM": "636056 kB",
+            "VmRSS": "452664 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-8",
+            "elapsed_ms": 17069.73,
+            "VmHWM": "636056 kB",
+            "VmRSS": "453028 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-9",
+            "elapsed_ms": 17141.794,
+            "VmHWM": "636056 kB",
+            "VmRSS": "453524 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-10",
+            "elapsed_ms": 17215.256,
+            "VmHWM": "636056 kB",
+            "VmRSS": "454820 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-11",
+            "elapsed_ms": 17290.023,
+            "VmHWM": "636056 kB",
+            "VmRSS": "456376 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-12",
+            "elapsed_ms": 17362.546,
+            "VmHWM": "636056 kB",
+            "VmRSS": "456416 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-13",
+            "elapsed_ms": 17435.679,
+            "VmHWM": "636056 kB",
+            "VmRSS": "457464 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-14",
+            "elapsed_ms": 17506.153,
+            "VmHWM": "636056 kB",
+            "VmRSS": "458052 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-15",
+            "elapsed_ms": 17579.428,
+            "VmHWM": "636056 kB",
+            "VmRSS": "458956 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-16",
+            "elapsed_ms": 17655.148,
+            "VmHWM": "636056 kB",
+            "VmRSS": "460672 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-17",
+            "elapsed_ms": 17725.626,
+            "VmHWM": "636056 kB",
+            "VmRSS": "461800 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-18",
+            "elapsed_ms": 17796.084,
+            "VmHWM": "636056 kB",
+            "VmRSS": "462020 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-19",
+            "elapsed_ms": 17866.685,
+            "VmHWM": "636056 kB",
+            "VmRSS": "462148 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-20",
+            "elapsed_ms": 17937.993,
+            "VmHWM": "636056 kB",
+            "VmRSS": "462264 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-21",
+            "elapsed_ms": 18015.622,
+            "VmHWM": "636056 kB",
+            "VmRSS": "462812 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-22",
+            "elapsed_ms": 18090.065,
+            "VmHWM": "636056 kB",
+            "VmRSS": "462984 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-23",
+            "elapsed_ms": 18162.406,
+            "VmHWM": "636056 kB",
+            "VmRSS": "463448 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-24",
+            "elapsed_ms": 18231.636,
+            "VmHWM": "636056 kB",
+            "VmRSS": "463608 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-25",
+            "elapsed_ms": 18303.689,
+            "VmHWM": "636056 kB",
+            "VmRSS": "463704 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-26",
+            "elapsed_ms": 18376.875,
+            "VmHWM": "636056 kB",
+            "VmRSS": "464060 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-27",
+            "elapsed_ms": 18449.578,
+            "VmHWM": "636056 kB",
+            "VmRSS": "464152 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-28",
+            "elapsed_ms": 18521.907,
+            "VmHWM": "636056 kB",
+            "VmRSS": "464232 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-29",
+            "elapsed_ms": 18593.691,
+            "VmHWM": "636056 kB",
+            "VmRSS": "464548 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-30",
+            "elapsed_ms": 18664.052,
+            "VmHWM": "636056 kB",
+            "VmRSS": "464748 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-31",
+            "elapsed_ms": 18735.086,
+            "VmHWM": "636056 kB",
+            "VmRSS": "465180 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-32",
+            "elapsed_ms": 18807.142,
+            "VmHWM": "636056 kB",
+            "VmRSS": "465264 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-33",
+            "elapsed_ms": 18881.206,
+            "VmHWM": "636056 kB",
+            "VmRSS": "465320 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-34",
+            "elapsed_ms": 18950.917,
+            "VmHWM": "636056 kB",
+            "VmRSS": "465468 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-35",
+            "elapsed_ms": 19021.054,
+            "VmHWM": "636056 kB",
+            "VmRSS": "465496 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-36",
+            "elapsed_ms": 19093.399,
+            "VmHWM": "636056 kB",
+            "VmRSS": "465884 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-37",
+            "elapsed_ms": 19163.931,
+            "VmHWM": "636056 kB",
+            "VmRSS": "465996 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-38",
+            "elapsed_ms": 19231.987,
+            "VmHWM": "636056 kB",
+            "VmRSS": "466000 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-39",
+            "elapsed_ms": 19303.557,
+            "VmHWM": "636056 kB",
+            "VmRSS": "466272 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-40",
+            "elapsed_ms": 19374.947,
+            "VmHWM": "636056 kB",
+            "VmRSS": "466328 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-41",
+            "elapsed_ms": 19445.664,
+            "VmHWM": "636056 kB",
+            "VmRSS": "466692 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-42",
+            "elapsed_ms": 19516.016,
+            "VmHWM": "636056 kB",
+            "VmRSS": "466768 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-43",
+            "elapsed_ms": 19586.464,
+            "VmHWM": "636056 kB",
+            "VmRSS": "466772 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-44",
+            "elapsed_ms": 19658.959,
+            "VmHWM": "636056 kB",
+            "VmRSS": "466792 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-45",
+            "elapsed_ms": 19730.037,
+            "VmHWM": "636056 kB",
+            "VmRSS": "466956 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-46",
+            "elapsed_ms": 19802.844,
+            "VmHWM": "636056 kB",
+            "VmRSS": "467048 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-47",
+            "elapsed_ms": 19875.066,
+            "VmHWM": "636056 kB",
+            "VmRSS": "467140 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-48",
+            "elapsed_ms": 19945.541,
+            "VmHWM": "636056 kB",
+            "VmRSS": "467140 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-49",
+            "elapsed_ms": 20017.052,
+            "VmHWM": "636056 kB",
+            "VmRSS": "467376 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-50",
+            "elapsed_ms": 20088.49,
+            "VmHWM": "636056 kB",
+            "VmRSS": "467376 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-51",
+            "elapsed_ms": 20162.284,
+            "VmHWM": "636056 kB",
+            "VmRSS": "467656 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-52",
+            "elapsed_ms": 20230.8,
+            "VmHWM": "636056 kB",
+            "VmRSS": "467676 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-53",
+            "elapsed_ms": 20301.774,
+            "VmHWM": "636056 kB",
+            "VmRSS": "467676 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-54",
+            "elapsed_ms": 20372.504,
+            "VmHWM": "636056 kB",
+            "VmRSS": "467704 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-55",
+            "elapsed_ms": 20441.987,
+            "VmHWM": "636056 kB",
+            "VmRSS": "467712 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-56",
+            "elapsed_ms": 20516.374,
+            "VmHWM": "636056 kB",
+            "VmRSS": "467720 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-57",
+            "elapsed_ms": 20599.036,
+            "VmHWM": "636056 kB",
+            "VmRSS": "467740 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-58",
+            "elapsed_ms": 20670.842,
+            "VmHWM": "636056 kB",
+            "VmRSS": "468028 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-59",
+            "elapsed_ms": 20742.462,
+            "VmHWM": "636056 kB",
+            "VmRSS": "468068 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-60",
+            "elapsed_ms": 20817.153,
+            "VmHWM": "636056 kB",
+            "VmRSS": "468084 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-61",
+            "elapsed_ms": 20893.851,
+            "VmHWM": "636056 kB",
+            "VmRSS": "468472 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-62",
+            "elapsed_ms": 20964.554,
+            "VmHWM": "636056 kB",
+            "VmRSS": "468472 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-63",
+            "elapsed_ms": 21034.758,
+            "VmHWM": "636056 kB",
+            "VmRSS": "468480 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-64",
+            "elapsed_ms": 21106.743,
+            "VmHWM": "636056 kB",
+            "VmRSS": "468516 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-65",
+            "elapsed_ms": 21176.385,
+            "VmHWM": "636056 kB",
+            "VmRSS": "468524 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-66",
+            "elapsed_ms": 21250.127,
+            "VmHWM": "636056 kB",
+            "VmRSS": "468528 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-67",
+            "elapsed_ms": 21323.001,
+            "VmHWM": "636056 kB",
+            "VmRSS": "468528 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-68",
+            "elapsed_ms": 21393.649,
+            "VmHWM": "636056 kB",
+            "VmRSS": "468528 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-69",
+            "elapsed_ms": 21465.418,
+            "VmHWM": "636056 kB",
+            "VmRSS": "468564 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-70",
+            "elapsed_ms": 21537.623,
+            "VmHWM": "636056 kB",
+            "VmRSS": "468564 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-71",
+            "elapsed_ms": 21612.748,
+            "VmHWM": "636056 kB",
+            "VmRSS": "468620 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-72",
+            "elapsed_ms": 21686.817,
+            "VmHWM": "636056 kB",
+            "VmRSS": "468624 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-73",
+            "elapsed_ms": 21762.593,
+            "VmHWM": "636056 kB",
+            "VmRSS": "468624 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-74",
+            "elapsed_ms": 21836.112,
+            "VmHWM": "636056 kB",
+            "VmRSS": "468848 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-75",
+            "elapsed_ms": 21908.428,
+            "VmHWM": "636056 kB",
+            "VmRSS": "468848 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-76",
+            "elapsed_ms": 21981.585,
+            "VmHWM": "636056 kB",
+            "VmRSS": "469080 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-77",
+            "elapsed_ms": 22045.728,
+            "VmHWM": "636056 kB",
+            "VmRSS": "469080 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-78",
+            "elapsed_ms": 22118.105,
+            "VmHWM": "636056 kB",
+            "VmRSS": "469080 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-79",
+            "elapsed_ms": 22191.605,
+            "VmHWM": "636056 kB",
+            "VmRSS": "469100 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-80",
+            "elapsed_ms": 22263.077,
+            "VmHWM": "636056 kB",
+            "VmRSS": "469104 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-81",
+            "elapsed_ms": 22336.71,
+            "VmHWM": "636056 kB",
+            "VmRSS": "469104 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-82",
+            "elapsed_ms": 22407.11,
+            "VmHWM": "636056 kB",
+            "VmRSS": "469112 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-83",
+            "elapsed_ms": 22476.937,
+            "VmHWM": "636056 kB",
+            "VmRSS": "469112 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-84",
+            "elapsed_ms": 22552.183,
+            "VmHWM": "636056 kB",
+            "VmRSS": "469112 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-85",
+            "elapsed_ms": 22625.027,
+            "VmHWM": "636056 kB",
+            "VmRSS": "469112 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-86",
+            "elapsed_ms": 22698.147,
+            "VmHWM": "636056 kB",
+            "VmRSS": "469112 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-87",
+            "elapsed_ms": 22765.738,
+            "VmHWM": "636056 kB",
+            "VmRSS": "469116 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-88",
+            "elapsed_ms": 22837.265,
+            "VmHWM": "636056 kB",
+            "VmRSS": "469116 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-89",
+            "elapsed_ms": 22910.442,
+            "VmHWM": "636056 kB",
+            "VmRSS": "469116 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-90",
+            "elapsed_ms": 22982.521,
+            "VmHWM": "636056 kB",
+            "VmRSS": "469116 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-91",
+            "elapsed_ms": 23057.196,
+            "VmHWM": "636056 kB",
+            "VmRSS": "469116 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-92",
+            "elapsed_ms": 23130.063,
+            "VmHWM": "636056 kB",
+            "VmRSS": "469120 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-93",
+            "elapsed_ms": 23202.477,
+            "VmHWM": "636056 kB",
+            "VmRSS": "469124 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-94",
+            "elapsed_ms": 23276.076,
+            "VmHWM": "636056 kB",
+            "VmRSS": "469124 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-95",
+            "elapsed_ms": 23354.747,
+            "VmHWM": "636056 kB",
+            "VmRSS": "469124 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-96",
+            "elapsed_ms": 23430.613,
+            "VmHWM": "636056 kB",
+            "VmRSS": "469316 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-97",
+            "elapsed_ms": 23511.287,
+            "VmHWM": "636056 kB",
+            "VmRSS": "469316 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-98",
+            "elapsed_ms": 23585.137,
+            "VmHWM": "636056 kB",
+            "VmRSS": "469316 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "edit-99",
+            "elapsed_ms": 23657.261,
+            "VmHWM": "636056 kB",
+            "VmRSS": "469316 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "closed",
+            "elapsed_ms": 26658.188,
+            "VmHWM": "636056 kB",
+            "VmRSS": "469328 kB",
+            "Threads": "56"
+          },
+          {
+            "phase": "reload-close-0",
+            "elapsed_ms": 38498.867,
+            "VmHWM": "722784 kB",
+            "VmRSS": "478684 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 359,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-1",
+            "elapsed_ms": 49819.811,
+            "VmHWM": "722784 kB",
+            "VmRSS": "486548 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 363,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-2",
+            "elapsed_ms": 60937.56,
+            "VmHWM": "722784 kB",
+            "VmRSS": "497584 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 367,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-3",
+            "elapsed_ms": 72047.27,
+            "VmHWM": "722784 kB",
+            "VmRSS": "482060 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 371,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-4",
+            "elapsed_ms": 82629.965,
+            "VmHWM": "722784 kB",
+            "VmRSS": "496324 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 375,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-5",
+            "elapsed_ms": 92734.391,
+            "VmHWM": "722784 kB",
+            "VmRSS": "480200 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 379,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-6",
+            "elapsed_ms": 102825.942,
+            "VmHWM": "722784 kB",
+            "VmRSS": "479956 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 383,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-7",
+            "elapsed_ms": 112780.507,
+            "VmHWM": "722784 kB",
+            "VmRSS": "512952 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 387,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-8",
+            "elapsed_ms": 122714.01,
+            "VmHWM": "722784 kB",
+            "VmRSS": "505216 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 391,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-9",
+            "elapsed_ms": 132033.268,
+            "VmHWM": "722784 kB",
+            "VmRSS": "513392 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 395,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-10",
+            "elapsed_ms": 141690.871,
+            "VmHWM": "722784 kB",
+            "VmRSS": "515316 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 399,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-11",
+            "elapsed_ms": 150958.664,
+            "VmHWM": "722784 kB",
+            "VmRSS": "481072 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 403,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-12",
+            "elapsed_ms": 160570.618,
+            "VmHWM": "722784 kB",
+            "VmRSS": "488800 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 407,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-13",
+            "elapsed_ms": 169865.15,
+            "VmHWM": "722784 kB",
+            "VmRSS": "480332 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 411,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-14",
+            "elapsed_ms": 178984.921,
+            "VmHWM": "722784 kB",
+            "VmRSS": "504940 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 415,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-15",
+            "elapsed_ms": 187908.071,
+            "VmHWM": "722784 kB",
+            "VmRSS": "489516 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 419,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-16",
+            "elapsed_ms": 196696.167,
+            "VmHWM": "722784 kB",
+            "VmRSS": "531336 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 423,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-17",
+            "elapsed_ms": 205194.82,
+            "VmHWM": "722784 kB",
+            "VmRSS": "546396 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 427,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-18",
+            "elapsed_ms": 214181.455,
+            "VmHWM": "722784 kB",
+            "VmRSS": "496916 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 431,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "reload-close-19",
+            "elapsed_ms": 222947.274,
+            "VmHWM": "722784 kB",
+            "VmRSS": "480352 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 435,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          },
+          {
+            "phase": "idle-after-lifecycle",
+            "elapsed_ms": 252961.096,
+            "VmHWM": "722784 kB",
+            "VmRSS": "480424 kB",
+            "Threads": "56",
+            "analyzer_status": {
+              "jsonrpc": "2.0",
+              "id": 436,
+              "result": "sail-lsp status\n  files loaded:     199\n  index symbols:    12472\n  include graph:    41 nodes\n  allocator heap:   264 MiB (estimate)\n"
+            }
+          }
+        ],
+        "cancellations": 20,
+        "unexpected_errors": 0,
+        "error_logs": 0,
+        "exit_code": 0
+      }
+    },
+    "binary_hashes": {
+      "baseline": "a30efb812712c96a7fa0262d922fd28c4cd95dcc4c8c92d87c34556b619426bd",
+      "retained": "e022bcf5478200cc6647bb6c47b6498696581e458028d57771ddeae134fc0178",
+      "untrimmed": "850cd2ee757d44039bc181499972f8bda5127b8c0e96608bb5239a48d6c1fee8",
+      "retained-with-examples": "878010e68da590d903e0ce92ae7d91c1fa48a1752b3501f4fe331179df78f1fe"
+    },
+    "benchmark_limits": "Four isolated processes on this Linux/glibc host, each with 100 edits, 20 reloads, 20 cancellations and 30-second idle tail. Compare baseline with retained-with-examples for the simplification gate, and retained with untrimmed for the bin-only memory ablation. Timing variation is not a statistical speedup claim. Q1 has a separate five-cold-database debug/tracing microbenchmark.",
+    "debug_binary_restored": {
+      "log": "target/ablation-2026-10-25/debug-restored.log",
+      "exit_code": 0,
+      "sha256": "83b7c8612aacff51309704e1f91fc436d1ba473615a77606a0cae651fdbf706e"
+    },
+    "build_target_audit": {
+      "finding": "Initial retained build included examples; untrimmed and restored builds used bin only. Binary hashes differ despite unchanged retained source. Repeat retained probe with restored bin-only build for a strictly matched reclamation comparison.",
+      "archived_probe": "target/ablation-2026-10-25/probe-retained-with-examples.json",
+      "archived_binary_sha256": "878010e68da590d903e0ce92ae7d91c1fa48a1752b3501f4fe331179df78f1fe",
+      "matched_binary_sha256": "e022bcf5478200cc6647bb6c47b6498696581e458028d57771ddeae134fc0178",
+      "resolution": "Completed a matched bin-only retained probe; current target/release/sail-lsp hash matches this measured binary."
+    }
+  },
+  "source_delta": {
+    "files": [
+      "crates/hir/src/semantics.rs",
+      "crates/ide/src/inlay_hints/mod.rs",
+      "crates/ide/src/inlay_hints/param_name.rs"
+    ],
+    "numstat": "15\t2\tcrates/hir/src/semantics.rs\n14\t9\tcrates/ide/src/inlay_hints/mod.rs\n2\t27\tcrates/ide/src/inlay_hints/param_name.rs\n",
+    "new_regression": "parameter_hints_do_not_borrow_names_from_an_unresolved_foreign_function",
+    "final_changes_committed": false
+  }
+}

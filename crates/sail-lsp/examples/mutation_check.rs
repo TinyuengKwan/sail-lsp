@@ -379,16 +379,25 @@ fn load_workspace(
         let fid = vfs.file_id_for_url(url);
         change.change_file(fid, text.clone());
     }
-    host.apply_change(std::mem::take(&mut change));
-    let files = host.raw_database().files().clone();
-    {
-        let db = host.raw_database_mut();
-        let texts: Vec<base_db::FileText> = all
+    let roots: Vec<_> = all[project_start..]
+        .iter()
+        .map(|(url, _, _)| vfs.lookup_file_id_by_url(url).unwrap())
+        .collect();
+    change.set_source_project(base_db::preprocess::SourceProject {
+        roots: roots.clone(),
+        paths: all
             .iter()
-            .filter_map(|(url, _, _)| files.file_text(vfs.lookup_file_id_by_url(url)?))
-            .collect();
-        hir::def_query::set_workspace_files(db, texts);
-    }
+            .map(|(url, path, _)| (path.clone(), vfs.lookup_file_id_by_url(url).unwrap()))
+            .collect(),
+        library: find_sail_lib(),
+        modules: base_db::module_graph::ModuleGraph {
+            modules: vec![base_db::module_graph::ModuleData { files: roots, requires: vec![] }],
+            globals: vec![],
+        },
+        ..Default::default()
+    });
+    host.apply_change(change);
+    let files = host.raw_database().files().clone();
     let mut url_to_fid = HashMap::new();
     let mut fid_to_url = HashMap::new();
     let mut url_fids = Vec::new();
@@ -465,6 +474,22 @@ fn regen_oracle(
     let tmp = std::env::temp_dir().join("sail-lsp-mutation-oracle");
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp)?;
+
+    let probe = tmp.join("probe.sail");
+    std::fs::write(
+        &probe,
+        "default Order dec\n$include <prelude.sail>\nfunction probe() -> int = 1\n",
+    )?;
+    let checked = std::process::Command::new(&sail)
+        .args(["--no-memo-z3", "--just-check"])
+        .arg(&probe)
+        .output()?;
+    if !checked.status.success() {
+        return Err(std::io::Error::other(format!(
+            "Upstream oracle preflight failed: {}",
+            String::from_utf8_lossy(&checked.stderr)
+        )));
+    }
 
     // A file upstream already rejects cannot say anything about a mutation
     // of it: every mutant of it is "rejected", for a reason that was there
@@ -576,10 +601,13 @@ fn main() {
             std::process::exit(1);
         });
 
+    // File URLs require absolute paths; otherwise a relative corpus silently
+    // produces zero files in discover_sail_files.
+    let root = PathBuf::from(root).canonicalize().expect("resolve corpus directory");
     let handle = std::thread::Builder::new()
         .name("mutation-check".into())
         .stack_size(256 * 1024 * 1024)
-        .spawn(move || run(&PathBuf::from(root), regen, oracle_path, verbose, dump_missed))
+        .spawn(move || run(&root, regen, oracle_path, verbose, dump_missed))
         .expect("failed to spawn check thread");
     std::process::exit(handle.join().unwrap());
 }

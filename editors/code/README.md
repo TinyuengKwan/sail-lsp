@@ -6,12 +6,15 @@ This extension provides syntax highlighting, diagnostics, goto definition, refer
 
 ## Features
 
-- Syntax highlighting and language configuration for `.sail`
+- Syntax highlighting and language configuration for `.sail`, and for project manifests (`*.sail_project`, `sail.proj`)
+- In manifests: go to a module's declaration, a `$variable`'s, or a listed file; module and variable completion; load errors underlined where they are
+- A quick fix for a file no project loads: add it to a module's `files`, choosing the module when several fit, with a preview before the manifest changes
 - Diagnostics for parse, name-resolution, type, and effect errors
 - Go to definition, declaration, implementation, references, and call hierarchy
 - Hover with type information, docs, and Sail-specific semantic details
 - Inlay hints, semantic tokens, document symbols, and folding ranges
-- Commands for reloading the workspace, restarting the server, and viewing syntax/HIR/item-tree debug output
+- A status bar item showing whether the server is loading, healthy, or failed to load the project; click it for the full status
+- Commands for project navigation, reloading the workspace, restarting the server, and viewing syntax/HIR/item-tree debug output
 - Bundled `sail-lsp` binaries in platform-specific VSIX packages
 
 ## Installation
@@ -54,6 +57,9 @@ Full configuration reference: [`docs/configuration.md`](../../docs/configuration
 
 - `Sail: Reload Workspace`
 - `Sail: Restart Server`
+- `Sail: Show Server Status` — the server's status report (also on the status bar item)
+- `Sail: Open Project Manifest` — the manifest entry that lists the active file, or the entry of the file that `$include`s it
+- `Sail: Go to Parent Module` — the manifest module that lists the active file, or the `$include` that names it
 - `Sail: Show Syntax Tree`
 - `Sail: View HIR`
 - `Sail: View Item Tree`

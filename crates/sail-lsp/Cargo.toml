@@ -33,7 +33,6 @@ ide-db.workspace = true
 ide.workspace = true
 ide-assists.workspace = true
 ide-diagnostics.workspace = true
-ide-ssr.workspace = true
 stdx.workspace = true
 vfs.workspace = true
 vfs-notify.workspace = true

@@ -18,9 +18,7 @@ syntax.workspace = true
 ide-db.workspace = true
 rowan.workspace = true
 salsa.workspace = true
-url.workspace = true
 rustc-hash.workspace = true
-smol_str.workspace = true
 
 [dev-dependencies]
 ide-db = { workspace = true, features = ["test-utils"] }

@@ -244,7 +244,9 @@ impl<'a> FmtVisitor<'a> {
                 // one, formatting again produced different text.
                 let formatted = self.rewrite_exprs_of(&formatted);
                 self.push_str(&formatted);
-                self.emit_trailing_content(node);
+                if !matches!(node.kind(), SK::CALLABLE_DEF | SK::CALLABLE_SPEC) {
+                    self.emit_trailing_content(node);
+                }
             }
             None => {
                 // No definition-level rewrite. Emit source but apply

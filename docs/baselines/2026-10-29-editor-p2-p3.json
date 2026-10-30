@@ -1,0 +1,755 @@
+{
+  "date": "2026-10-29",
+  "scope": "Four requested P2 items and expression SSR P3. Zed SSH/editor UI acceptance excluded by request. No claim that every remaining semantic issue is fixed.",
+  "source": {
+    "base_commit": "717a7f19d6b46d4469d1017d7b8e6b5fcb72cc71",
+    "working_tree": "dirty; includes pre-existing P0/P1 changes",
+    "rust": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+    "code_tree": {
+      "sha256": "31834fe0179a2fb0971ea5eea7cefede21217dcee9d0745230b99b84573b4d9a",
+      "files": 746,
+      "algorithm": "SHA256 of sorted relative-path NUL file-sha256 LF records"
+    },
+    "quality_build": "cargo +1.97.1 build --release -p sail-lsp; default z3-solver features",
+    "z3": "Z3 version 4.8.12 - 64 bit",
+    "sail_lsp_binary_sha256": "fa110c36fd365d422600727b0f1e4795476f06c4ad63d2b5c252ac89ee74e5c0",
+    "example_binary_sha256": {
+      "analysis_stats": "b44b7cf73c9e1cab79b50682035cbef34b5917f6a008dccc36fd867fcc73972c",
+      "conformance_check": "a51289782e8f9ffdcc4e9265cc2b9110695277c9fb3b3ee01030bdb7a2249cb5",
+      "mutation_check": "1e6f49c56441ceabc09a0edec12f7ae28f36320dd5c0abd8528204ab78d4d464",
+      "protocol_check": "a05352d49d8bf466a4d1c17cf4c85c7d3fb152d5db56bdc10d1ffb06d110378f"
+    }
+  },
+  "corpora": {
+    "upstream_commit": "ac09f8870b9d85e528e2a3436150b03b9d805d40",
+    "upstream_dirty": false,
+    "riscv_commit": "20690c8a8d6ccbb0e6adea8e2977efd3adaf8391",
+    "riscv_dirty": false,
+    "typecheck_tree": {
+      "sha256": "7f6c7b08b61008cf305824b71d13d1ea73f6f52ba8a1e0fb3c3af9f261f78970",
+      "files": 913,
+      "algorithm": "SHA256 of sorted relative-path NUL file-sha256 LF records"
+    },
+    "extended_tree": {
+      "sha256": "5392a426fe82cd39362b0d74af7a6577e527d51de8c532e908f8eeb072774421",
+      "files": 372,
+      "algorithm": "SHA256 of sorted relative-path NUL file-sha256 LF records"
+    },
+    "riscv_model_tree": {
+      "sha256": "ab0142be9c3318abb37322f85f761cce93136d9fc5bd592657b780fa509ed4a8",
+      "files": 159,
+      "algorithm": "SHA256 of sorted relative-path NUL file-sha256 LF records"
+    },
+    "bundled_library": {
+      "sha256": "d49efe72d94f1832ee85836141e3314d8d1196cde02d29a371b17cefa71c9c5b",
+      "files": 59,
+      "algorithm": "SHA256 of sorted relative-path NUL file-sha256 LF records"
+    },
+    "upstream_sail_binary": "/home/clair/tinyueng_workplace/sail/_build/default/src/bin/sail.exe",
+    "upstream_sail_binary_sha256": "969fa94269431015e4929d06bb97ed2aab961f4cf8057d4366a4e27fe9834f86",
+    "upstream_SAIL_DIR": "/home/clair/tinyueng_workplace/sail",
+    "oracles": {
+      "upstream-accepts.txt": "0d5430be3f8cbf0f9742241c28eaaf315b0e9ec2f17b89ecf12c9da0bd9cab59",
+      "mutation-oracle.txt": "6e26003d412de652294c7d79b5411caa59ccacd5ec9447bf441614f924765c6d"
+    }
+  },
+  "results": {
+    "typecheck": {
+      "mode": "strict-bitvector on both sides",
+      "pass_clean": 276,
+      "pass_total": 276,
+      "fail_rejected": 217,
+      "fail_total": 217,
+      "diagnostic_agreement": "199/216 at upstream's caret, 127/216 in upstream's words"
+    },
+    "extended": {
+      "mode": "default bitvector; regenerated upstream OK/SCOPE/REJECT oracle",
+      "cases": 372,
+      "false_positives": 0,
+      "false_negatives": 0,
+      "scope_only": 17,
+      "by_corpus": [
+        {
+          "corpus": "builtins",
+          "agree": 30,
+          "false_positives": 0,
+          "false_negatives": 0,
+          "scope_only": 0
+        },
+        {
+          "corpus": "float",
+          "agree": 19,
+          "false_positives": 0,
+          "false_negatives": 0,
+          "scope_only": 1
+        },
+        {
+          "corpus": "lean",
+          "agree": 37,
+          "false_positives": 0,
+          "false_negatives": 0,
+          "scope_only": 0
+        },
+        {
+          "corpus": "mono",
+          "agree": 41,
+          "false_positives": 0,
+          "false_negatives": 0,
+          "scope_only": 0
+        },
+        {
+          "corpus": "ocaml",
+          "agree": 4,
+          "false_positives": 0,
+          "false_negatives": 0,
+          "scope_only": 15
+        },
+        {
+          "corpus": "pattern_completeness",
+          "agree": 43,
+          "false_positives": 0,
+          "false_negatives": 0,
+          "scope_only": 0
+        },
+        {
+          "corpus": "rocq",
+          "agree": 59,
+          "false_positives": 0,
+          "false_negatives": 0,
+          "scope_only": 1
+        },
+        {
+          "corpus": "smt",
+          "agree": 122,
+          "false_positives": 0,
+          "false_negatives": 0,
+          "scope_only": 0
+        }
+      ]
+    },
+    "riscv": {
+      "mode": "default bitvector, active model/riscv.sail_project",
+      "project_files": 156,
+      "active_include_library_files": 40,
+      "lines": 29968,
+      "expressions": 81543,
+      "unknown_types": 0,
+      "partially_unknown_types": 0,
+      "diagnostics_by_severity": "{\"Hint\": 6, \"Warning\": 62}",
+      "constraints": {
+        "schema_version": 1,
+        "scope": "committed_deferred_obligations",
+        "sites": [
+          {
+            "assumptions": [
+              "3 <= vlen_exp & vlen_exp <= 16",
+              "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+              "xlen in {32, 64}",
+              "'sew in {8, 16, 32, 64}",
+              "0 <= '_sk1_index",
+              "'sew <= vlen",
+              "EEW <= vlen",
+              "'sew <= 2 ^ vlen_exp",
+              "EEW <= 2 ^ vlen_exp"
+            ],
+            "callable": "read_single_element",
+            "cause": "Compatibility",
+            "clause": 0,
+            "compatibility_types": null,
+            "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_control.sail",
+            "goal": "2 ^ vlen_exp % 'sew == 0",
+            "location": {
+              "column": 3,
+              "end": 3007,
+              "line": 46,
+              "source": "static_assert(vlen % EEW == 0);",
+              "start": 2977
+            },
+            "origin_is_fallback": false,
+            "reason": "budget_exhausted",
+            "recovery_types": null,
+            "rigid_variables": [
+              "'_sk1_index"
+            ],
+            "status": "unknown"
+          },
+          {
+            "assumptions": [
+              "3 <= vlen_exp & vlen_exp <= 16",
+              "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+              "xlen in {32, 64}",
+              "'sew in {8, 16, 32, 64}",
+              "0 <= '_sk1_index",
+              "'sew <= vlen",
+              "EEW <= vlen",
+              "'sew <= 2 ^ vlen_exp",
+              "EEW <= 2 ^ vlen_exp"
+            ],
+            "callable": "write_single_element",
+            "cause": "Compatibility",
+            "clause": 0,
+            "compatibility_types": null,
+            "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_control.sail",
+            "goal": "2 ^ vlen_exp % 'sew == 0",
+            "location": {
+              "column": 3,
+              "end": 4753,
+              "line": 88,
+              "source": "static_assert(vlen % EEW == 0);",
+              "start": 4723
+            },
+            "origin_is_fallback": false,
+            "reason": "budget_exhausted",
+            "recovery_types": null,
+            "rigid_variables": [
+              "'_sk1_index"
+            ],
+            "status": "unknown"
+          },
+          {
+            "assumptions": [
+              "3 <= vlen_exp & vlen_exp <= 16",
+              "3 <= elen_exp & elen_exp <= 16 & elen_exp <= vlen_exp",
+              "xlen in {32, 64}",
+              "'n >= 0 & 'sew in {8, 16, 32, 64}",
+              "-3 <= '_sk1_LMUL_pow & '_sk1_LMUL_pow <= 3",
+              "'_sk1_LMUL_pow >= 0 & '_sk3_z == '_sk1_LMUL_pow | '_sk1_LMUL_pow < 0 & '_sk3_z == 0",
+              "('_sk1_LMUL_pow >= 0 & '_sk4__sk3_z == '_sk1_LMUL_pow | '_sk1_LMUL_pow < 0 & '_sk4__sk3_z == 0)",
+              "'sew <= vlen",
+              "SEW <= vlen",
+              "'sew <= 2 ^ vlen_exp",
+              "SEW <= 2 ^ vlen_exp"
+            ],
+            "callable": "write_vreg",
+            "cause": "Compatibility",
+            "clause": 0,
+            "compatibility_types": null,
+            "file": "/home/clair/tinyueng_workplace/sail-riscv/model/extensions/V/vext_control.sail",
+            "goal": "2 ^ vlen_exp % 'sew == 0",
+            "location": {
+              "column": 3,
+              "end": 6106,
+              "line": 123,
+              "source": "static_assert(vlen % SEW == 0);",
+              "start": 6076
+            },
+            "origin_is_fallback": false,
+            "reason": "budget_exhausted",
+            "recovery_types": null,
+            "rigid_variables": [
+              "'_sk1_LMUL_pow",
+              "'_sk3_z",
+              "'_sk4__sk3_z"
+            ],
+            "status": "unknown"
+          }
+        ],
+        "smt_enabled": true,
+        "totals": {
+          "proved": 2912,
+          "refuted": 0,
+          "total": 2915,
+          "unknown": 3
+        },
+        "unknown_by_reason": {
+          "budget_exhausted": 3
+        },
+        "workspace": "/home/clair/tinyueng_workplace/sail-riscv/model/riscv.sail_project"
+      },
+      "constraint_note": "Budget exhaustion is not an unknown expression type. Counts can vary with solver load; an earlier isolated run had 5 unknown obligations. This field is the final sequential run, not a historical zero/510 count."
+    },
+    "mutation": {
+      "mode": "default bitvector; legacy flat workspace; upstream base-source acceptance and mutant rejection regenerated",
+      "source_files": 364,
+      "generated": 538,
+      "scored": 274,
+      "caught": 264,
+      "missed": 10,
+      "skipped": 172,
+      "accepted_not_scored": 92,
+      "by_operator": {
+        "argorder": {
+          "caught": 26,
+          "scored": 26
+        },
+        "arity": {
+          "caught": 81,
+          "scored": 84
+        },
+        "bits": {
+          "caught": 61,
+          "scored": 61
+        },
+        "field": {
+          "caught": 21,
+          "scored": 21
+        },
+        "range": {
+          "caught": 14,
+          "scored": 14
+        },
+        "ret": {
+          "caught": 61,
+          "scored": 68
+        }
+      },
+      "misses": [
+        {
+          "mutant": "arm_FPEXC1.sail_ret_0.sail",
+          "upstream_exit_code": 1,
+          "upstream_diagnostic": "Warning: Deprecated\narm_FPEXC1.sail_ret_0.sail:16.49-62:\n16 |val set_FPEXC32_EL2 : bitvector(32, dec) -> unit effect {wreg}\n   |                                                 ^-----------^\n   | Explicit effect annotations are deprecated. They are no longer used and can be removed.\n\nType error:\narm_FPEXC1.sail_ret_0.sail:19.26-39:\n19 |  _FPEXC32_EL2[0 .. 0] = [value_name[0]];\n   |                          ^-----------^\n   | bool is not a subtype of bitvector(1)\n   | \n   | Caused by arm_FPEXC1.sail_ret_0.sail:19.2-22:\n   | 19 |  _FPEXC32_EL2[0 .. 0] = [value_name[0]];\n   |    |  ^------------------^\n   |    | vector(1, bool) is not a subtype of bitvector(1)\n",
+          "configured_manifest": {
+            "mutant": "arm_FPEXC1.sail_ret_0.sail",
+            "manifest": "target/p2-p3-2026-10-29/missed-mutants/arm_FPEXC1.sail_ret_0.sail_project",
+            "exit_code": 0,
+            "diagnostics_by_severity": "{}",
+            "errors": []
+          },
+          "classification": "confirmed manifest miss"
+        },
+        {
+          "mutant": "bool_constraint.sail_arity_1.sail",
+          "upstream_exit_code": 1,
+          "upstream_diagnostic": "Warning: \nsail/lib/arith.sail:176.0-20:\n176 |$c_reserved fdiv_int\n    |^------------------^\n    | Unrecognised directive: c_reserved\n\nWarning: \nsail/lib/arith.sail:188.0-20:\n188 |$c_reserved fmod_int\n    |^------------------^\n    | Unrecognised directive: c_reserved\n\nType error:\nbool_constraint.sail_arity_1.sail:37.5-9:\n37 |  if cond then {\n   |     ^--^\n   | Type mismatch between bool('ex191#) and (bool('b), int('n))\n",
+          "configured_manifest": {
+            "mutant": "bool_constraint.sail_arity_1.sail",
+            "manifest": "target/p2-p3-2026-10-29/missed-mutants/bool_constraint.sail_arity_1.sail_project",
+            "exit_code": 0,
+            "diagnostics_by_severity": "{}",
+            "errors": []
+          },
+          "classification": "confirmed manifest miss"
+        },
+        {
+          "mutant": "foreach_var_updates.sail_ret_0.sail",
+          "upstream_exit_code": 1,
+          "upstream_diagnostic": "Type error:\nforeach_var_updates.sail_ret_0.sail:15.8-13:\n15 |    x = x + z;\n   |        ^---^\n   | Type mismatch between int('ex26#) and bool('ex27#)\n",
+          "configured_manifest": {
+            "mutant": "foreach_var_updates.sail_ret_0.sail",
+            "manifest": "target/p2-p3-2026-10-29/missed-mutants/foreach_var_updates.sail_ret_0.sail_project",
+            "exit_code": 0,
+            "diagnostics_by_severity": "{\"Error\": 2}",
+            "errors": [
+              "file://foreach_var_updates.sail_ret_0.sail: Error: Type mismatch between int and bool (bytes 376..381)",
+              "file://foreach_var_updates.sail_ret_0.sail: Error: Type mismatch between int and bool (bytes 348..353)"
+            ]
+          },
+          "classification": "legacy flat-scope harness miss; manifest reports errors"
+        },
+        {
+          "mutant": "funcl_attribute.sail_ret_0.sail",
+          "upstream_exit_code": 1,
+          "upstream_diagnostic": "Warning: \nsail/lib/arith.sail:176.0-20:\n176 |$c_reserved fdiv_int\n    |^------------------^\n    | Unrecognised directive: c_reserved\n\nWarning: \nsail/lib/arith.sail:188.0-20:\n188 |$c_reserved fmod_int\n    |^------------------^\n    | Unrecognised directive: c_reserved\n\nType error:\nfuncl_attribute.sail_ret_0.sail:5.23-24:\n5 |function $[foo] f(x) = x\n  |                       ^\n  | Type mismatch between bool('ex143#) and int('ex130#)\n",
+          "configured_manifest": {
+            "mutant": "funcl_attribute.sail_ret_0.sail",
+            "manifest": "target/p2-p3-2026-10-29/missed-mutants/funcl_attribute.sail_ret_0.sail_project",
+            "exit_code": 0,
+            "diagnostics_by_severity": "{}",
+            "errors": []
+          },
+          "classification": "confirmed manifest miss"
+        },
+        {
+          "mutant": "if_var_updates.sail_ret_0.sail",
+          "upstream_exit_code": 1,
+          "upstream_diagnostic": "Warning: Duplicate function type definition for lt_int\nif_var_updates.sail_ret_0.sail:9.4-10:\n9 |val lt_int = pure {ocaml: \"lt_int\", lem: \"lt\"} : (int, int) -> bool\n  |    ^----^\n  | This duplicate definition is being ignored!\n  | corelib.sail(virtual):61.4-10:\n  | 61 |val lt_int : forall 'n 'm. (int('n), int('m)) -> bool('n < 'm) = pure { coq: \"Z.ltb\", lean: \"_lean_lt\", _: \"lt\" }\n  |    |    ^----^ previous definition here\n\nType error:\nif_var_updates.sail_ret_0.sail:24.8-13:\n24 |  (pos, x + y)\n   |        ^---^\n   | Type mismatch between int('ex32#) and bool('ex33#)\n",
+          "configured_manifest": {
+            "mutant": "if_var_updates.sail_ret_0.sail",
+            "manifest": "target/p2-p3-2026-10-29/missed-mutants/if_var_updates.sail_ret_0.sail_project",
+            "exit_code": 0,
+            "diagnostics_by_severity": "{\"Error\": 1}",
+            "errors": [
+              "file://if_var_updates.sail_ret_0.sail: Error: Type mismatch between int and bool (bytes 516..521)"
+            ]
+          },
+          "classification": "legacy flat-scope harness miss; manifest reports errors"
+        },
+        {
+          "mutant": "if_var_updates.sail_ret_1.sail",
+          "upstream_exit_code": 1,
+          "upstream_diagnostic": "Warning: Duplicate function type definition for lt_int\nif_var_updates.sail_ret_1.sail:9.4-10:\n9 |val lt_int = pure {ocaml: \"lt_int\", lem: \"lt\"} : (int, int) -> bool\n  |    ^----^\n  | This duplicate definition is being ignored!\n  | corelib.sail(virtual):61.4-10:\n  | 61 |val lt_int : forall 'n 'm. (int('n), int('m)) -> bool('n < 'm) = pure { coq: \"Z.ltb\", lean: \"_lean_lt\", _: \"lt\" }\n  |    |    ^----^ previous definition here\n\nType error:\nif_var_updates.sail_ret_1.sail:15.12-17:\n15 |  y : int = 0 - w;\n   |            ^---^\n   | Type mismatch between int('ex14#) and bool('ex15#)\n",
+          "configured_manifest": {
+            "mutant": "if_var_updates.sail_ret_1.sail",
+            "manifest": "target/p2-p3-2026-10-29/missed-mutants/if_var_updates.sail_ret_1.sail_project",
+            "exit_code": 0,
+            "diagnostics_by_severity": "{\"Error\": 3}",
+            "errors": [
+              "file://if_var_updates.sail_ret_1.sail: Error: Type mismatch between int and bool (bytes 441..446)",
+              "file://if_var_updates.sail_ret_1.sail: Error: Type mismatch between int and bool (bytes 483..488)",
+              "file://if_var_updates.sail_ret_1.sail: Error: Type mismatch between int and bool (bytes 383..388)"
+            ]
+          },
+          "classification": "legacy flat-scope harness miss; manifest reports errors"
+        },
+        {
+          "mutant": "phantom_num.sail_arity_0.sail",
+          "upstream_exit_code": 1,
+          "upstream_diagnostic": "Warning: Deprecated\nphantom_num.sail_arity_0.sail:5.59-72:\n5 |val test : forall ('n : Int). (implicit('n), unit) -> unit effect {wreg}\n  |                                                           ^-----------^\n  | Explicit effect annotations are deprecated. They are no longer used and can be removed.\n\nType error:\nphantom_num.sail_arity_0.sail:7.22-28:\n7 |function test(n) = if 'n > 3 then z = 0 else z = 1\n  |                      ^----^ checking function argument has type int('fv3#n)\n  | Cannot re-write sizeof('n)\n",
+          "configured_manifest": {
+            "mutant": "phantom_num.sail_arity_0.sail",
+            "manifest": "target/p2-p3-2026-10-29/missed-mutants/phantom_num.sail_arity_0.sail_project",
+            "exit_code": 0,
+            "diagnostics_by_severity": "{}",
+            "errors": []
+          },
+          "classification": "confirmed manifest miss"
+        },
+        {
+          "mutant": "typ_pat_synonym.sail_arity_0.sail",
+          "upstream_exit_code": 1,
+          "upstream_diagnostic": "Warning: \nsail/lib/arith.sail:176.0-20:\n176 |$c_reserved fdiv_int\n    |^------------------^\n    | Unrecognised directive: c_reserved\n\nWarning: \nsail/lib/arith.sail:188.0-20:\n188 |$c_reserved fmod_int\n    |^------------------^\n    | Unrecognised directive: c_reserved\n\nType error:\ntyp_pat_synonym.sail_arity_0.sail:5.21-31:\n5 |type foo('n : Int) = vector('n)\n  |                     ^--------^\n  | vector : (Int, Type) -> Type expected 2 arguments, given 1\n",
+          "configured_manifest": {
+            "mutant": "typ_pat_synonym.sail_arity_0.sail",
+            "manifest": "target/p2-p3-2026-10-29/missed-mutants/typ_pat_synonym.sail_arity_0.sail_project",
+            "exit_code": 0,
+            "diagnostics_by_severity": "{\"Warning\": 8}",
+            "errors": []
+          },
+          "classification": "confirmed manifest miss"
+        },
+        {
+          "mutant": "while_MP.sail_ret_0.sail",
+          "upstream_exit_code": 1,
+          "upstream_diagnostic": "Type error:\nwhile_MP.sail_ret_0.sail:13.33-42:\n13 |  while bool_not(INT) do count = count + 1;\n   |                                 ^-------^\n   | Type mismatch between int('ex10#) and bool('ex11#)\n",
+          "configured_manifest": {
+            "mutant": "while_MP.sail_ret_0.sail",
+            "manifest": "target/p2-p3-2026-10-29/missed-mutants/while_MP.sail_ret_0.sail_project",
+            "exit_code": 0,
+            "diagnostics_by_severity": "{\"Error\": 1, \"Hint\": 1}",
+            "errors": [
+              "file://while_MP.sail_ret_0.sail: Error: Type mismatch between int and bool (bytes 289..298)"
+            ]
+          },
+          "classification": "legacy flat-scope harness miss; manifest reports errors"
+        },
+        {
+          "mutant": "while_PP.sail_ret_0.sail",
+          "upstream_exit_code": 1,
+          "upstream_diagnostic": "Warning: Duplicate function type definition for lt_int\nwhile_PP.sail_ret_0.sail:6.4-10:\n6 |val lt_int = pure {ocaml: \"lt\", lem: \"lt\"}: (int, int) -> bool\n  |    ^----^\n  | This duplicate definition is being ignored!\n  | corelib.sail(virtual):61.4-10:\n  | 61 |val lt_int : forall 'n 'm. (int('n), int('m)) -> bool('n < 'm) = pure { coq: \"Z.ltb\", lean: \"_lean_lt\", _: \"lt\" }\n  |    |    ^----^ previous definition here\n\nType error:\nwhile_PP.sail_ret_0.sail:25.8-13:\n25 |    j = i * j;\n   |        ^---^\n   | Type mismatch between int('ex23#) and bool('ex24#)\n",
+          "configured_manifest": {
+            "mutant": "while_PP.sail_ret_0.sail",
+            "manifest": "target/p2-p3-2026-10-29/missed-mutants/while_PP.sail_ret_0.sail_project",
+            "exit_code": 0,
+            "diagnostics_by_severity": "{\"Error\": 1}",
+            "errors": [
+              "file://while_PP.sail_ret_0.sail: Error: Type mismatch between int and bool (bytes 704..709)"
+            ]
+          },
+          "classification": "legacy flat-scope harness miss; manifest reports errors"
+        }
+      ],
+      "manifest_follow_up": {
+        "tested_legacy_misses": 10,
+        "reported_errors": 5,
+        "still_missing": 5,
+        "note": "Each saved mutant was loaded as the sole root of an explicit manifest through analysis_stats. Five of ten legacy misses are diagnosed in this scope. This is not a full project-mode mutation run and must not be presented as 269/274 coverage."
+      },
+      "note": "Each missed mutant was additionally re-run through upstream Sail; all ten exited 1 with the recorded type error. Historic 98.1% used a different oracle/corpus."
+    },
+    "protocol": {
+      "scope": "all physical model .sail files, not manifest membership",
+      "files": 158,
+      "ranges_checked": 470394,
+      "mismatches": 0
+    }
+  },
+  "completed_items": {
+    "signature_help": "Use inference selected_overloads through Semantics; protocol cases for literals, typed variables, aliases, dependent widths, and existing arity fallback.",
+    "quick_fix_audit": "Current fixes are consumed, concrete actions applied/rechecked. Added conversion callable scope/shape checks, removed unsafe duplicate/shadow renames, updated the dated audit. Project-aware IDE fixtures and protocol checks.",
+    "complex_edit_acceptance": "Three branch-like manifest/rename cycles, 16 generated files per batch, alternating incomplete/valid edits in two buffers, cancellation response, dependent diagnostics, moved definitions, quiescence and removed symbol recovery. Existing reload/close/delete/stale diagnostic tests included in full gates. No fresh heap/RSS benchmark claim.",
+    "quality_unification": "README and CLAUDE now reference this single release baseline; old report is marked historical. Both oracle generators preflight a real prelude-using program. Real remaining misses and numeric proof sites are recorded.",
+    "ssr": "experimental/ssr expression preview with RA-shaped params, named/repeated captures, semantic fixed-name checks, source-order scope, all disjoint matches, selected nested matches, active branches only, parentheses, comment-loss exclusion, library exclusion, shared-include rejection, syntax validation, cancellation points and versioned document edits."
+  },
+  "explicit_limits": {
+    "ssr": [
+      "Client must support experimental/ssr; no dedicated new editor command/UI acceptance performed.",
+      "Item, type and binding-introducing rules unsupported.",
+      "Matches discarding comments are skipped. Shared include contexts are rejected.",
+      "Preview edits do not prove semantic equivalence or all dependent type obligations."
+    ],
+    "quick_fixes": "See docs/baselines/2026-10-25-quick-fix-coverage.md for the supported/unsupported matrix. Custom conversion constraints remain subject to ordinary diagnostics.",
+    "quality": "Zero error diagnostics and zero unknown expression types do not mean all numeric obligations are proved. Legacy mutation/conformance probes use a flat environment; actual manifest coverage is separately labelled. Five of the ten legacy mutation misses persist in the explicit-manifest audit."
+  },
+  "gates": {
+    "commands": [
+      {
+        "name": "workspace-default",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "test",
+          "--workspace",
+          "--",
+          "--test-threads=1"
+        ],
+        "exit_code": 0
+      },
+      {
+        "name": "workspace-no-smt",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "test",
+          "--workspace",
+          "--no-default-features",
+          "--",
+          "--test-threads=1"
+        ],
+        "exit_code": 0
+      },
+      {
+        "name": "clippy",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "clippy",
+          "--workspace",
+          "--all-targets"
+        ],
+        "exit_code": 0
+      },
+      {
+        "name": "release-build",
+        "command": [
+          "cargo",
+          "+1.97.1",
+          "build",
+          "--release",
+          "-p",
+          "sail-lsp",
+          "--bin",
+          "sail-lsp",
+          "--example",
+          "analysis_stats",
+          "--example",
+          "conformance_check",
+          "--example",
+          "mutation_check",
+          "--example",
+          "protocol_check"
+        ],
+        "exit_code": 0
+      },
+      {
+        "name": "conformance",
+        "command": [
+          "target/release/examples/conformance_check",
+          "--list",
+          "--fail-detail",
+          "/home/clair/tinyueng_workplace/sail/test/typecheck"
+        ],
+        "exit_code": 0
+      },
+      {
+        "name": "analysis-stats",
+        "command": [
+          "target/release/examples/analysis_stats",
+          "--diagnostics-only",
+          "--constraint-report",
+          "target/p2-p3-2026-10-29/constraints.json",
+          "/home/clair/tinyueng_workplace/sail-riscv/model/riscv.sail_project"
+        ],
+        "exit_code": 0
+      },
+      {
+        "name": "mutation",
+        "command": [
+          "target/release/examples/mutation_check",
+          "/home/clair/tinyueng_workplace/sail/test/typecheck/pass",
+          "--oracle",
+          "docs/mutation-oracle.txt",
+          "-v"
+        ],
+        "exit_code": 0
+      },
+      {
+        "name": "protocol",
+        "command": [
+          "target/release/examples/protocol_check",
+          "/home/clair/tinyueng_workplace/sail-riscv/model"
+        ],
+        "exit_code": 0
+      }
+    ],
+    "default": {
+      "passed": 2430,
+      "failed": 0,
+      "ignored": 18
+    },
+    "no_smt": {
+      "passed": 2415,
+      "failed": 0,
+      "ignored": 18
+    },
+    "rustfmt": "All changed Rust files pass rustfmt +1.97.1 --check with skip_children=true; git diff --check passed.",
+    "clippy": "ordinary workspace/all-targets clippy, no -D warnings claim; warnings remain including items_after_test_module in ide-ssr",
+    "parallel_attempt": "A first default test run overlapping compilation/oracle activity failed six timeout-sensitive SMT tests. The final gates ran sequentially with --test-threads=1; the failed attempt is retained in target/p2-p3-2026-10-29/workspace-default-concurrent-attempt.log.",
+    "oracle_preflight_negative": "/bin/false returns exit 2, creates no oracle; successful regeneration used the source-root SAIL_DIR."
+  },
+  "artifacts": {
+    "analysis-stats-first-isolated.log": {
+      "sha256": "92e13bfb1ca1bd363207db20914336ce2ab24fb4fa11a58800a8cb324ea957db",
+      "bytes": 2289
+    },
+    "analysis-stats.log": {
+      "sha256": "9bf46398c11852d30c385c560ed3ac285bac8275da5f6cc0c61bb1f947f5e952",
+      "bytes": 2281
+    },
+    "arm_FPEXC1.sail_ret_0-manifest.log": {
+      "sha256": "59cb663d3922b0e4b680788247e46303601d5da686558cdac4439f5900634c77",
+      "bytes": 1391
+    },
+    "bool_constraint.sail_arity_1-manifest.log": {
+      "sha256": "b5fb147c87e881096ab689b390a0e72ea95466cacefab49a6b462a0b47d17283",
+      "bytes": 1699
+    },
+    "clippy.log": {
+      "sha256": "3cd3bee81c1c049b22fbe469779448f304f5c427a9170beb64dd375f83fa1f76",
+      "bytes": 26133
+    },
+    "compile.log": {
+      "sha256": "bfae52d98ecdb46c36913916481c7e105dfd38a1e63cc4b55c2c84f7d1aa869a",
+      "bytes": 789
+    },
+    "conformance.log": {
+      "sha256": "eebda2d5f6b01dca0ed199752df5a7dbcc53fd4e76d9a51901b33fe22a89912d",
+      "bytes": 84856
+    },
+    "constraints-first-isolated.json": {
+      "sha256": "67e6f60b30f6c74551a77794d7d88640edbf75d581d61c355d9b2b88c204fcd6",
+      "bytes": 6467
+    },
+    "constraints.json": {
+      "sha256": "366246c730962ccc00be3ed03925398ed1ae7abecaf2ab234a3115a0e2d3009d",
+      "bytes": 3526
+    },
+    "conversion-protocol.log": {
+      "sha256": "ccf2fe0bbaf60fb07bbd8744f29e03ba24a5f62a435cc15258db5af78c1defb4",
+      "bytes": 546
+    },
+    "diagnostic-fix-range.log": {
+      "sha256": "869f4f914d00a4fd4feba02b34f456f6ee423676757c2320715d3bf6dcbde08d",
+      "bytes": 482
+    },
+    "final-commands.json": {
+      "sha256": "74ec0ac90fea285e26fa447f0afbb2b1c751565b1f42b9b12679415623f5e35f",
+      "bytes": 1932
+    },
+    "foreach_var_updates.sail_ret_0-manifest.log": {
+      "sha256": "6e1eaf0bfede9f2ae95c39ba1dac60dd73b545d316dd2e1a7701fa85a4168b0a",
+      "bytes": 1761
+    },
+    "funcl_attribute.sail_ret_0-manifest.log": {
+      "sha256": "da8aa28690bbfe6df6814ac618c31be59c803a61396d39d3ca6a3f1c9ddc85c2",
+      "bytes": 1465
+    },
+    "if_var_updates.sail_ret_0-manifest.log": {
+      "sha256": "625f5ce6a92f5c563bf3ab881d0608f5f45db974df25ae9759d328ec0ec65064",
+      "bytes": 1573
+    },
+    "if_var_updates.sail_ret_1-manifest.log": {
+      "sha256": "1fc7e88d2d0b6ad9c60b56a29eda73f631b5c8275ccc40281aa552addd110509",
+      "bytes": 1927
+    },
+    "lifecycle.log": {
+      "sha256": "fb4d30a31b26a3977f60440d783b471cbb6d452f0fb557800180b3ebe8137e57",
+      "bytes": 546
+    },
+    "mutation-manifest-audit.json": {
+      "sha256": "42a24c3898d9376c62689cf3f5812c4e4e760e0d6767887a3f66945abbf36043",
+      "bytes": 3866
+    },
+    "mutation-misses.json": {
+      "sha256": "59f82c8df1c7774c5407eca0a32bf6137c7f1408deeee68e5b5a70b319cddf0a",
+      "bytes": 7328
+    },
+    "mutation-regen.log": {
+      "sha256": "0c31c5c21c57b3b48b8e09c95c60bd63c187b815a31d5358b307435565059ca3",
+      "bytes": 355
+    },
+    "mutation.log": {
+      "sha256": "35189bd0ce7d0cc6830013b938b687b61657d045c438ddfd92724d2b81fd0e65",
+      "bytes": 943
+    },
+    "oracle-preflight-negative.log": {
+      "sha256": "cc8336b917e2be6fae4a5e17a6af535d3e818e6174b84cfdaeec59d9549d1c63",
+      "bytes": 68
+    },
+    "oracle-regen.log": {
+      "sha256": "0fb09797b87cd1c5444237543f8b63de0583183386ea6391c1832aefacb38290",
+      "bytes": 428
+    },
+    "phantom_num.sail_arity_0-manifest.log": {
+      "sha256": "dda00a254b55260e0008fabfc5d4e71611a4c56bc29fb519776538bdedd6e74e",
+      "bytes": 1385
+    },
+    "protocol.log": {
+      "sha256": "74106a01f9dbf4f947a1448cee4a7b8af2ead4f275088fa0ad9225d15c043ed9",
+      "bytes": 234
+    },
+    "quality-commands.json": {
+      "sha256": "214ff06cd4ac277b2c66429baae57c8c1956729011db52304d2a015d4f212c53",
+      "bytes": 1065
+    },
+    "quick-fix.log": {
+      "sha256": "235e2c3788d45ee651cfbe9a09b90b5383fcfd6cba869ed4aea1e5a0892d2ab2",
+      "bytes": 1456
+    },
+    "release-build.log": {
+      "sha256": "36b008daa64c22602ebc30bd16b6dcba81014c1ffb85abf6b00df4ef30610130",
+      "bytes": 505
+    },
+    "rustfmt.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "signature-protocol.log": {
+      "sha256": "d2b7472857583ac2b6cc2399e0d633d022f82615e6fc7635d19f5e5421c16fd8",
+      "bytes": 803
+    },
+    "signature.log": {
+      "sha256": "4287b47430708d3affc16aedfdd31fe949dead7123e45bcdb1b429a06b89d151",
+      "bytes": 1484
+    },
+    "signatures.log": {
+      "sha256": "10d8f749838e96270cdb4a112d3e950b9584176be1d793a6798851d4983257c5",
+      "bytes": 1140
+    },
+    "ssr-parse.log": {
+      "sha256": "bd228ed7ef5e3db6b1b09ee0fc39c4aa29acc2ab5590eed74135d4ba6c371c53",
+      "bytes": 1118
+    },
+    "ssr-protocol.log": {
+      "sha256": "921d30a4d17e6740e501739f2d3bbf96daea2fe173b4fc8a9879c0c3006d01af",
+      "bytes": 1068
+    },
+    "ssr.log": {
+      "sha256": "ccbcf81a1228f8625cc44b9b98add7b7a806f14234721ed14348cd1d5ca43966",
+      "bytes": 964
+    },
+    "typ_pat_synonym.sail_arity_0-manifest.log": {
+      "sha256": "1121103a35393eafeac940efc69969b48b1eafcd6f79c1f6051f3211494c0ec9",
+      "bytes": 2740
+    },
+    "while_MP.sail_ret_0-manifest.log": {
+      "sha256": "91f9ef3c6e209652d6aed412fcb3ae67bf128dd32f046c1b7226186a95443c8a",
+      "bytes": 1743
+    },
+    "while_PP.sail_ret_0-manifest.log": {
+      "sha256": "a8be556ad7517b50efd045130e6655376848d35434a93461ba3dc972918467fd",
+      "bytes": 1568
+    },
+    "workspace-default-concurrent-attempt.log": {
+      "sha256": "10b132c7ea8b7e0423a17155a23ad281a1e3470cf49f0d5cf60ef3480966b727",
+      "bytes": 54107
+    },
+    "workspace-default.log": {
+      "sha256": "8de65f35235783f6d2f6945639692b0ea57750117846914582d200c06a0bdd2d",
+      "bytes": 182431
+    },
+    "workspace-no-smt.log": {
+      "sha256": "fe17f47198debf7971fb515cba3cd3fd4eca530dc769d64e04de64bdf5f4c6d4",
+      "bytes": 181491
+    }
+  }
+}

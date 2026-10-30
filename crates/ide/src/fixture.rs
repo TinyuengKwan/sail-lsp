@@ -104,6 +104,16 @@ fn split_fixture(fixture: &str) -> (bool, Vec<(String, String)>) {
 /// prelude, when requested, is loaded but not returned, so a test never has
 /// to filter it out.
 pub fn analysis(fixture: &str) -> (Analysis, Vec<(FileId, String)>) {
+    analysis_inner(fixture, false)
+}
+
+/// An ordered project with real include expansion, for features whose safety
+/// depends on source-position name resolution.
+pub fn project_analysis(fixture: &str) -> (Analysis, Vec<(FileId, String)>) {
+    analysis_inner(fixture, true)
+}
+
+fn analysis_inner(fixture: &str, project: bool) -> (Analysis, Vec<(FileId, String)>) {
     let (with_prelude, fixture_files) = split_fixture(fixture);
 
     let mut all: Vec<(String, String)> = Vec::new();
@@ -128,12 +138,29 @@ pub fn analysis(fixture: &str) -> (Analysis, Vec<(FileId, String)>) {
         let fid = vfs.file_id_for_url(url);
         change.change_file(fid, text.clone());
     }
+    if project {
+        let roots: Vec<_> =
+            urls[fixture_start..].iter().map(|u| vfs.lookup_file_id_by_url(u).unwrap()).collect();
+        change.set_source_project(base_db::preprocess::SourceProject {
+            roots: roots.clone(),
+            paths: urls
+                .iter()
+                .map(|u| (u.to_file_path().unwrap(), vfs.lookup_file_id_by_url(u).unwrap()))
+                .collect(),
+            library: with_prelude.then(|| PathBuf::from("/sail-lib")),
+            modules: base_db::module_graph::ModuleGraph {
+                modules: vec![base_db::module_graph::ModuleData { files: roots, requires: vec![] }],
+                globals: vec![],
+            },
+            ..Default::default()
+        });
+    }
     host.apply_change(std::mem::take(&mut change));
     let files = host.raw_database().files().clone();
 
     // Same workspace registration the server and `corpus_check` perform:
     // without it cross-file resolution and `infix` declarations are inert.
-    {
+    if !project {
         let db = host.raw_database_mut();
         let file_texts: Vec<base_db::FileText> = urls
             .iter()
@@ -230,8 +257,17 @@ pub fn check_no_diagnostics(fixture: &str) {
 /// the text before the database is built, so offsets are those of the real
 /// source.
 pub fn position(fixture: &str) -> (Analysis, FileId, ide_db::LineCol) {
+    position_inner(fixture, false)
+}
+
+/// Cursor fixture using the server's manifest/include semantics.
+pub fn project_position(fixture: &str) -> (Analysis, FileId, ide_db::LineCol) {
+    position_inner(fixture, true)
+}
+
+fn position_inner(fixture: &str, project: bool) -> (Analysis, FileId, ide_db::LineCol) {
     let (cleaned, marker) = strip_cursor(fixture);
-    let (analysis, files) = analysis(&cleaned);
+    let (analysis, files) = analysis_inner(&cleaned, project);
     let (file_index, offset) = marker.expect("fixture has no `$0` cursor marker");
     let (file_id, _) = files[file_index];
     let text = file_text(&analysis, file_id);

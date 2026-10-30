@@ -102,17 +102,37 @@ Extension: [TinyuengKwan/sail-zed](https://github.com/TinyuengKwan/sail-zed)
 - **Formatting**: document + range + on-type + bitfield alignment
 - **Highlights**: semantic tokens, document highlights, matching brace
 - **Outline**: document symbols, folding ranges, selection range
-- **SSR**: structural search-replace with `$name` placeholders
+- **Structural search/replace**: expression previews via `experimental/ssr`; see [scope and limits](docs/architecture.md#ssr-engine-ide-ssr)
 
 ## Corpus quality
 
-The [2026-10-24 P1 baseline](docs/baselines/2026-10-24-p1.json) records
-276/276 accepted and 217/217 rejected upstream typecheck cases, using the suite's
-`--strict-bitvector` mode. The active RISC-V manifest contains 156 source files
-(29,968 lines): 81,543 expressions have no unknown or partially unknown types,
-and project diagnostics contain no errors. Seven false positives remain in the
-separate extended corpora; acceptance/rejection agreement does not imply identical
-diagnostic wording or locations.
+The [2026-10-30 RA audit](docs/baselines/2026-10-30-ra-improvements.json)
+records commands, source provenance, measurements and limitations. Strict upstream
+typecheck is **276/276 accepted, 217/217 rejected**. The separate 372-file extended
+corpus has **0 false positives and 0 false negatives**; 17 scope-only cases are
+counted separately. Ordered-project mutation checking detects **274/274** upstream
+rejects, including both existential constructor argument-order mutations.
+
+The active RISC-V manifest contains 156 source files (29,968 lines), plus 40 active
+included/library files. Its 81,543 expressions have no unknown or partially unknown
+types, and diagnostics contain no errors (62 warnings, 6 hints). Deferred numeric
+proof obligations are a separate measure: the final accepted run has **2,913 proved,
+0 refuted and 4 budget-exhausted unknowns**. Earlier runs observed zero or one
+unknown; a zero-unknown checkpoint is not a guarantee under finite solver budgets.
+The three originally reported divisibility obligations are handled by an exact
+non-SMT rule. The remaining budget-sensitive sites concern absolute-value bit widths
+and loop-index bounds. Goals discharged earlier do not enter the deferred count.
+
+Diagnostic starts match 205/216 upstream carets. The remaining 11 differences are
+intentional, more precise ranges or related locations; the
+[diagnostic audit](docs/baselines/2026-10-30-diagnostic-audit.json) records each case.
+Acceptance/rejection agreement does not imply identical diagnostic wording.
+
+The [2026-10-29 RA follow-up](docs/baselines/2026-10-29-ra-followup.json) and
+[P2/P3 report](docs/baselines/2026-10-29-editor-p2-p3.json) preserve earlier checks.
+For example, the historical protocol range probe covered 158 physical model files
+and found 0 mismatches in 470,394 ranges; this differs from the active manifest's
+156-file scope. Older dated reports remain snapshots, not current totals.
 
 The server defaults to ordinary Sail mode. Set `workspace.strictBitvector` for
 projects built with `--strict-bitvector`. Undefined-value and register-default
@@ -139,6 +159,22 @@ For incremental correctness and latency checks, run
 The per-file contribution index preserves unrelated inference results after
 signature edits; the probe verifies reuse and changes to consumer diagnostics.
 Append `--profile` to inspect query timing and allocation counts.
+
+For request latency, enable the dedicated tracing target and summarize its log:
+
+```bash
+SAIL_LOG=sail_lsp::latency=debug python3 scripts/editor_probe.py \
+  --server target/release/sail-lsp --workspace ../sail-riscv \
+  --cycles 20 --burst --output target/editor-burst.json
+python3 scripts/latency_summary.py target/editor-burst.stderr.log
+```
+
+The trace separates snapshot creation, worker queueing, handler execution,
+request completion, database cancellation/input/project updates, and background
+result draining. Worker samples include retries. Server request totals start
+when the main loop receives the request; the probe additionally measures
+transport and unread connection messages. Compare repeated runs on the same
+machine; a pipelined burst is a stress workload, not ordinary typing latency.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for code style and architecture details.
 

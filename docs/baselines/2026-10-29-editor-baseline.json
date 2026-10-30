@@ -1,0 +1,104 @@
+{
+  "head": "717a7f19d6b46d4469d1017d7b8e6b5fcb72cc71",
+  "scope": "HEAD plus the pre-existing semantics/inlay-hints ablation patch, before P1 edits",
+  "patch": "2026-10-25-editor-ablation.json",
+  "stages": [
+    {
+      "name": "default",
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "test",
+        "--workspace",
+        "--",
+        "--test-threads=1"
+      ],
+      "status": "passed",
+      "started": 1793288808.0477166,
+      "exit_code": 0,
+      "elapsed_seconds": 237.71814227104187
+    },
+    {
+      "name": "no-smt",
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "test",
+        "--workspace",
+        "--no-default-features",
+        "--",
+        "--test-threads=1"
+      ],
+      "status": "passed",
+      "started": 1793289045.7674,
+      "exit_code": 0,
+      "elapsed_seconds": 204.98427820205688
+    },
+    {
+      "name": "release",
+      "command": [
+        "cargo",
+        "+1.97.1",
+        "build",
+        "--release",
+        "-p",
+        "sail-lsp",
+        "--bin",
+        "sail-lsp",
+        "--example",
+        "conformance_check",
+        "--example",
+        "completion_check",
+        "--example",
+        "analysis_stats"
+      ],
+      "status": "passed",
+      "started": 1793289250.7536197,
+      "exit_code": 0,
+      "elapsed_seconds": 48.20045018196106
+    },
+    {
+      "name": "strict",
+      "command": [
+        "target/release/examples/conformance_check",
+        "--typecheck-only",
+        "../sail/test/typecheck"
+      ],
+      "status": "passed",
+      "started": 1793289298.95592,
+      "exit_code": 0,
+      "elapsed_seconds": 66.95223832130432
+    }
+  ],
+  "default": {
+    "passed": 2412,
+    "failed": 0,
+    "ignored": 17
+  },
+  "no-smt": {
+    "passed": 2397,
+    "failed": 0,
+    "ignored": 17
+  },
+  "conformance": {
+    "pass_clean": 276,
+    "pass_total": 276,
+    "fail_rejected": 217,
+    "fail_total": 217
+  },
+  "completion": {
+    "command": [
+      "target/release/examples/completion_check",
+      "--ranked",
+      "/home/clair/tinyueng_workplace/sail-riscv"
+    ],
+    "summary": "COMPLETION CHECK (prefix 3, 842 ms to load)\n============================================================\n  asked:            3000 references\n  offered:          2995 (99.8%)\n  not offered:      5\n\n  rank  top 1:      1353 (45.1%)\n  rank  top 5:      2098 (69.9%)\n  rank  top 20:     2649 (88.3%)\n\n  list size:        p50 9   p95 200   max 200\n  latency:          p50 1593 us   p95 2981 us   max 178501 us\n\n  Not offered, by syntactic context:\n    TYPE_NAMED                   3 of 873\n    IDENT_EXPR                   2 of 2127\n\n  The names most often missing:\n    ext                              2\n    mod                              2\n    implicit                         1\n\nMETRIC:completion_offered_pct:99:%\nMETRIC:completion_top1_pct:45:%\nMETRIC:completion_p95_us:2981:us\n",
+    "note": "Relative-path run produced zero references and is excluded; harness needs canonicalization and a non-empty sample check."
+  },
+  "source_snapshot": {
+    "sha256": "a9793b3dc88eb7abc42f2f764d8f5007f35d8ea085b5608d9fd02295a5f435cb",
+    "initial_patch_sha256": "bcf84d20f221c71d879f4aa7a5f732476b65388d659a3c0f95e235d65433af72",
+    "local_details": "target/p0-p1-2026-10-29/initial-state.json"
+  },
+  "legacy_report_note": "2026-10-25-editor-ablation.json is historical evidence; its aaa578e baseline is not an ancestor of current HEAD. The default/no-SMT/conformance/completion results here are fresh validation of the retained changes."
+}

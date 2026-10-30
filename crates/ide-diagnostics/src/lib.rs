@@ -608,9 +608,12 @@ pub fn semantic_diagnostics(
             let source_map = &bsm.0 .1;
 
             for diag in typed_diags {
-                if let Some(d) =
-                    AnyDiagnostic::inference_diagnostic(diag, source_map, tcr.0.def_base)
-                {
+                if let Some(d) = AnyDiagnostic::inference_diagnostic(
+                    diag,
+                    source_map,
+                    tcr.0.def_base,
+                    &tcr.0.source_tokens,
+                ) {
                     any_diags.push(d);
                 }
             }
@@ -826,6 +829,21 @@ fn invalid_type_use(
     d: &hir::diagnostics::InvalidTypeUse,
 ) -> Diagnostic {
     let mut range = node_file_range(&d.node);
+    if let Some(name) = &d.unbound_variable {
+        let token = ctx
+            .file
+            .filter(|file| file.file_id(ctx.db()) == d.node.file_id)
+            .and_then(|file| ctx.sema.parse(file))
+            .and_then(|root| d.node.value.try_to_node(&root))
+            .and_then(|node| {
+                node.descendants_with_tokens().filter_map(|el| el.into_token()).find(|token| {
+                    token.kind() == syntax::SyntaxKind::TY_VAR && token.text() == name
+                })
+            });
+        if let Some(token) = token {
+            range.range = token.text_range();
+        }
+    }
     // `p as typ` errors concern the type pattern, not the value binder.
     if d.node.value.kind() == syntax::SyntaxKind::AS_PAT {
         let pattern = ctx
@@ -834,7 +852,18 @@ fn invalid_type_use(
             .and_then(|file| ctx.sema.parse(file))
             .and_then(|root| d.node.value.try_to_node(&root))
             .and_then(|node| node.children().last());
-        if let Some(pattern) = pattern {
+        if let Some(mut pattern) = pattern {
+            if let Some(path) = &d.type_pattern_path {
+                for &index in path {
+                    let child = match pattern.kind() {
+                        syntax::SyntaxKind::TYPE_APP => pattern.children().nth(index + 1),
+                        syntax::SyntaxKind::TYPE_TUPLE => pattern.children().nth(index),
+                        _ => None,
+                    };
+                    let Some(child) = child else { break };
+                    pattern = child;
+                }
+            }
             range.range = pattern.text_range();
         }
     }

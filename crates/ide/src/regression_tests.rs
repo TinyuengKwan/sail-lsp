@@ -3732,7 +3732,7 @@ fn a_quantifier_the_body_uses_is_determined_by_a_parameter() {
 default Order dec
 val test : forall ('n : Int). (implicit('n), unit) -> int
 function test(_, n) = 'n
-//                    ^^ error: constraint cannot hold: 'n is not determined by any parameter
+//                    ^^ error: Cannot re-write sizeof('n): no runtime witness or unique constant is available
 "#,
     );
     crate::fixture::check_diagnostics(
