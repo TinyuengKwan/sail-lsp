@@ -42,6 +42,8 @@ pub mod cli;
 pub mod config;
 pub mod lsp;
 
+mod analysis_health;
+mod cache_control;
 mod code_action_helpers;
 mod diagnostics;
 mod flycheck;
@@ -54,6 +56,7 @@ mod op_queue;
 mod progress;
 mod reload;
 mod request_batch;
+mod runnables;
 mod sail_stdlib;
 mod task_pool;
 pub mod tracing_setup;

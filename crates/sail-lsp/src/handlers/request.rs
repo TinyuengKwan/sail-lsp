@@ -9,6 +9,13 @@
 //!
 //! Dispatched via `RequestDispatcher::on_sync()` or `on()` in main_loop.rs.
 
+pub(crate) fn handle_runnables(
+    snap: crate::global_state::GlobalStateSnapshot,
+    params: crate::lsp_ext::RunnablesParams,
+) -> anyhow::Result<Vec<crate::lsp_ext::Runnable>> {
+    crate::runnables::discover(&snap, &params.text_document.uri)
+}
+
 use lsp_types::request::{
     GotoDeclarationParams, GotoDeclarationResponse, GotoImplementationParams,
     GotoImplementationResponse, GotoTypeDefinitionParams, GotoTypeDefinitionResponse,
@@ -255,15 +262,13 @@ pub(crate) fn handle_selection_range(
         return Ok(None);
     };
     let line_index = ide_db::line_index::LineIndex::new(sf.text());
-    let ranges = params
-        .positions
-        .iter()
-        .filter_map(|pos| {
-            let lc = crate::from_proto::line_col(&line_index_for(&snap, uri), *pos);
-            let sr = snap.analysis.selection_range(uri, lc).ok().flatten()?;
-            Some(crate::to_proto::selection_range(&line_index, &sr))
-        })
-        .collect::<Vec<_>>();
+    let mut ranges = Vec::new();
+    for pos in params.positions {
+        let lc = crate::from_proto::line_col(&line_index, pos);
+        if let Some(sr) = snap.analysis.selection_range(uri, lc)? {
+            ranges.push(crate::to_proto::selection_range(&line_index, &sr));
+        }
+    }
     Ok(Some(ranges))
 }
 
@@ -284,7 +289,7 @@ pub(crate) fn handle_formatting(
     if let Ok(mut cached) = snap.last_format_options.lock() {
         *cached = opts.clone();
     }
-    let edits = snap.analysis.format_document(file_id, &opts).ok().flatten();
+    let edits = snap.analysis.format_document(file_id, &opts)?;
     let Some(edits) = edits else { return Ok(None) };
     let Some(sf) = snap.analysis.file(uri) else {
         return Ok(None);
@@ -367,9 +372,7 @@ pub(crate) fn handle_semantic_tokens_full(
     if !snap.config.semantic_tokens.enable {
         return Ok(None);
     }
-    let Some(ide_tokens) = snap.analysis.semantic_tokens(file_id).ok() else {
-        return Ok(None);
-    };
+    let ide_tokens = snap.analysis.semantic_tokens(file_id)?;
 
     // Convert to LSP tokens and cache for delta requests.
     let lsp_tokens: Vec<lsp_types::SemanticToken> =
@@ -432,7 +435,9 @@ pub(crate) fn handle_document_diagnostic(
         std::collections::HashMap::new();
 
     if supports_related {
-        for &dep_fid in snap.include_graph.included_by(file_id) {
+        for &dep_fid in
+            snap.analysis.include_graph().into_iter().flat_map(|graph| graph.included_by(file_id))
+        {
             if let Some(dep_url) = snap.analysis.url_for_file_id(dep_fid) {
                 let dep_diags = snap.analysis.file_diagnostics(dep_fid, &diag_config)?;
                 if let Some(dep_sf) = snap.analysis.file(dep_url) {
@@ -603,9 +608,7 @@ pub(crate) fn handle_semantic_tokens_full_delta(
     if !snap.config.semantic_tokens.enable {
         return Ok(None);
     }
-    let Some(ide_tokens) = snap.analysis.semantic_tokens(file_id).ok() else {
-        return Ok(None);
-    };
+    let ide_tokens = snap.analysis.semantic_tokens(file_id)?;
 
     // Convert to LSP tokens.
     let new_tokens: Vec<lsp_types::SemanticToken> =
@@ -1241,7 +1244,7 @@ pub(crate) fn handle_rename(
     let Some(source_change) = source_change else {
         return Ok(None);
     };
-    Ok(Some(crate::to_proto::workspace_edit(
+    let edit = crate::to_proto::workspace_edit(
         &source_change,
         &|fid| snap.analysis.url_for_file_id(fid).cloned(),
         &|fid| {
@@ -1251,6 +1254,11 @@ pub(crate) fn handle_rename(
                 .map(|f| ide_db::line_index::LineIndex::new(f.text()))
         },
         snap.client_caps.snippet_text_edit_support(),
+    );
+    Ok(Some(crate::to_proto::with_document_versions(
+        edit,
+        snap.client_caps.versioned_edit_support(),
+        |uri| snap.document_versions.get(uri).copied(),
     )))
 }
 
@@ -1270,9 +1278,7 @@ pub(crate) fn handle_code_lens(
         annotate_impls: snap.config.code_lens.implementations,
         ..Default::default()
     };
-    let Some(ide_lenses) = snap.analysis.code_lenses(file_id, &config).ok() else {
-        return Ok(None);
-    };
+    let ide_lenses = snap.analysis.code_lenses(file_id, &config)?;
     if ide_lenses.is_empty() {
         return Ok(None);
     }
@@ -1735,12 +1741,7 @@ pub(crate) fn handle_expand_include(
     snap: GlobalStateSnapshot,
     params: crate::lsp_ext::ExpandIncludeParams,
 ) -> anyhow::Result<Option<crate::lsp_ext::ExpandIncludeResult>> {
-    let Some(result) = snap
-        .analysis
-        .clone()
-        .with_include_graph_arc(snap.include_graph.clone())
-        .expand_includes(&params.text_document.uri)?
-    else {
+    let Some(result) = snap.analysis.expand_includes(&params.text_document.uri)? else {
         return Ok(None);
     };
     Ok(Some(crate::lsp_ext::ExpandIncludeResult { root: result.root, expansion: result.expansion }))
@@ -1782,8 +1783,11 @@ pub(crate) fn handle_open_project_manifest(
 ) -> anyhow::Result<Option<Location>> {
     let listed = |uri: &Url| {
         snap.projects.values().find_map(|p| {
-            let (_, range) =
-                p.declarations.iter().flat_map(|m| &m.files).find(|(f, _)| f == uri)?;
+            let (_, range) = p
+                .declarations
+                .iter()
+                .flat_map(|m| &m.files)
+                .find(|(f, _)| crate::from_proto::same_document(f, uri))?;
             Some(Location::new(Url::from_file_path(&p.manifest).ok()?, *range))
         })
     };
@@ -1817,7 +1821,7 @@ pub(crate) fn handle_parent_module(
     for project in snap.projects.values() {
         let Ok(manifest) = Url::from_file_path(&project.manifest) else { continue };
         for module in &project.declarations {
-            if module.files.iter().any(|(f, _)| *f == uri) {
+            if module.files.iter().any(|(f, _)| crate::from_proto::same_document(f, &uri)) {
                 out.push(Location::new(manifest.clone(), module.name_range));
             }
         }
@@ -1879,9 +1883,14 @@ pub(crate) fn handle_sail_lsp_status(
     stdx::format_to!(
         status,
         "  effective settings (project changes require a successful reload):\n{}\n",
-        serde_json::to_string_pretty(&snap.config)?
+        serde_json::to_string_pretty(&snap.config.diagnostic_json())?
     );
 
+    stdx::format_to!(
+        status,
+        "  native analysis health:\n{}\n",
+        serde_json::to_string_pretty(snap.analysis_health.as_ref())?
+    );
     stdx::format_to!(status, "  compiler checks:\n");
     for (target, check) in snap.flycheck_status {
         stdx::format_to!(status, "    {target:?}: {check:?}\n");
@@ -1912,6 +1921,11 @@ pub(crate) fn handle_sail_lsp_status(
         let (entries, capacity, live, total) = hir::z3_solver::cache_ownership();
         stdx::format_to!(
             status,
+            "  Z3 process-wide estimated allocations: {} bytes (subset of RSS)\n",
+            hir::z3_solver::estimated_native_bytes()
+        );
+        stdx::format_to!(
+            status,
             "  solver result cache entries: {:?} / {} (None = uninitialized or busy)\n",
             entries,
             capacity
@@ -1925,10 +1939,54 @@ pub(crate) fn handle_sail_lsp_status(
     }
     stdx::format_to!(
         status,
+        "  process RSS: {:?} bytes\n  query cache policy: {}\n",
+        profile::process_resident_bytes(),
+        snap.cache_control.report()
+    );
+    stdx::format_to!(
+        status,
         "  allocator heap:   {} MiB (estimate)\n",
         profile::MemoryUsage::now().allocated.megabytes()
     );
     Ok(status)
+}
+
+/// Export metadata without starting inference, compiling Sail or reading buffer contents.
+pub(crate) fn handle_diagnostic_report(
+    snap: GlobalStateSnapshot,
+    params: crate::lsp_ext::DiagnosticReportParams,
+) -> anyhow::Result<serde_json::Value> {
+    let active_file = if let Some(document) = params.text_document {
+        let contexts: Vec<_> = snap.analysis.include_contexts(&document.uri)?.into_iter().map(|(_, key, root)| {
+            serde_json::json!({"key":include_context_key(&key,&root,&snap.module_contexts),"root":root,
+                "project":key.module.and_then(|index|snap.module_contexts.get(index))})
+        }).collect();
+        Some(
+            serde_json::json!({"uri":document.uri,"version":snap.document_versions.get(&document.uri),"contexts":contexts}),
+        )
+    } else {
+        None
+    };
+    let projects: Vec<_> = snap
+        .projects
+        .values()
+        .map(|project| {
+            serde_json::json!({
+                "manifest":project.manifest,"configuration":project.config,
+            })
+        })
+        .collect();
+    let status = handle_sail_lsp_status(snap.clone(), ())?;
+    Ok(serde_json::json!({
+        "schemaVersion":1,"build":crate::version::metadata(),"executable":std::env::current_exe().ok(),
+        "platform":{"os":std::env::consts::OS,"arch":std::env::consts::ARCH},
+        "serverStatus":snap.server_status,"nativeAnalysis":snap.analysis_health.as_ref(),
+        "queryCache":snap.cache_control.report(),"processRssBytes":profile::process_resident_bytes(),
+        "workspace":{"roots":snap.workspace_status.roots,"loaded":snap.workspace_status.loaded,
+            "projects":projects,"loadError":snap.project_error.as_deref()},
+        "effectiveConfiguration":snap.config.diagnostic_json(),"activeFile":active_file,"analyzerStatus":status,
+        "unknownAccounting":"Reasons in the latest published semantic diagnostics; suppressed diagnostics are excluded",
+    }))
 }
 
 /// View include graph for a file.
@@ -1941,11 +1999,7 @@ pub(crate) fn handle_view_include_graph(
     if snap.analysis.file_id(&params.text_document.uri).is_none() {
         return Ok("(file not found)".to_string());
     }
-    Ok(snap
-        .analysis
-        .clone()
-        .with_include_graph_arc(snap.include_graph.clone())
-        .render_include_graph()?)
+    Ok(snap.analysis.render_include_graph()?)
 }
 
 /// Return semantic structural matches as read-only source locations.

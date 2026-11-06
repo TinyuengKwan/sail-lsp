@@ -196,6 +196,8 @@ fn verify_version(options: &Options, m: &Manifest) -> Result<()> {
     }
     Ok(())
 }
+// User-facing installer progress; this path never runs in the LSP server.
+#[allow(clippy::print_stderr)]
 fn source(options: &Options) -> Result<Payload> {
     eprintln!("Preparing a locked source build (vendored Z3; the first build can take several minutes)...");
     let checkout = tempfile::tempdir()?;
@@ -259,22 +261,9 @@ fn source(options: &Options) -> Result<Payload> {
             None
         }
     });
-    let mut c = Command::new("cargo");
-    if let Some(triple) = &build_target {
-        c.arg("--target").arg(triple);
-    }
-    c.args([
-        "build",
-        "--release",
-        "--locked",
-        "--features",
-        "vendored",
-        "--bin",
-        "sail-lsp",
-        "--target-dir",
-    ])
-    .arg(&target)
-    .current_dir(&root);
+    let c = source_build_command(&root, &target, build_target.as_deref());
+    #[cfg(windows)]
+    let mut c = c;
     #[cfg(windows)]
     {
         let flags = std::env::var("RUSTFLAGS").unwrap_or_default();
@@ -286,7 +275,7 @@ fn source(options: &Options) -> Result<Payload> {
         }
     }
     checked(c, Duration::from_secs(3600))
-        .context("Source build failed; Rust, CMake and a C++ compiler are required")?;
+        .context("Source build failed; Rust, CMake and a C++20 compiler with std::format support (GCC 13+ or current MSVC/Xcode) are required")?;
     let binary = build_target
         .map(|triple| target.join(triple))
         .unwrap_or(target)
@@ -322,4 +311,48 @@ fn source(options: &Options) -> Result<Payload> {
         editors::build_source_vsix(&root, directory.path(), &binary, &manifest)?;
     }
     Ok(Payload { directory, manifest })
+}
+
+fn source_build_command(
+    root: &Path,
+    target_dir: &Path,
+    build_target: Option<&std::ffi::OsStr>,
+) -> Command {
+    let mut command = Command::new("cargo");
+    command.arg("build");
+    if let Some(triple) = build_target {
+        command.arg("--target").arg(triple);
+    }
+    command
+        .args(["--release", "--locked", "--features", "vendored", "--bin", "sail-lsp"])
+        .arg("--target-dir")
+        .arg(target_dir)
+        .current_dir(root);
+    command
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_build_command_respects_cargo_subcommand_options() {
+        let target_dir = tempfile::tempdir().unwrap();
+        let triple = std::ffi::OsStr::new(env!("SAIL_LSP_BUILD_TARGET"));
+        for build_target in [None, Some(triple)] {
+            let output = source_build_command(
+                Path::new(env!("CARGO_MANIFEST_DIR")),
+                target_dir.path(),
+                build_target,
+            )
+            .arg("--help")
+            .output()
+            .expect("Cargo must be available to run installer tests");
+            assert!(
+                output.status.success(),
+                "Cargo rejected source-build arguments: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
 }

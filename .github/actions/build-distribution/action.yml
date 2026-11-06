@@ -25,10 +25,27 @@ runs:
     - uses: Swatinem/rust-cache@v2
       with:
         key: distribution-${{ inputs.target }}
+    - name: Linux C++20 toolchain and portable C++ runtime
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        . /etc/os-release
+        if [ "$VERSION_ID" = 22.04 ]; then
+          sudo add-apt-repository --yes ppa:ubuntu-toolchain-r/test
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends g++-13
+        fi
+        g++-13 --version
+        cxx_runtime=$(g++-13 -print-file-name=libstdc++.a)
+        test -f "$cxx_runtime"
+        echo "CC=gcc-13" >> "$GITHUB_ENV"
+        echo "CXX=g++-13" >> "$GITHUB_ENV"
+        echo "CXXSTDLIB=static=stdc++" >> "$GITHUB_ENV"
+        echo "SAIL_LSP_LINUX_RUSTFLAGS=-L native=$(dirname "$cxx_runtime")" >> "$GITHUB_ENV"
     - name: Build with vendored Z3
       shell: bash
       env:
-        RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
+        RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || env.SAIL_LSP_LINUX_RUSTFLAGS }}
         CFLAGS: ${{ runner.os == 'Windows' && '/utf-8' || '' }}
         CXXFLAGS: ${{ runner.os == 'Windows' && '/utf-8' || '' }}
         MACOSX_DEPLOYMENT_TARGET: ${{ inputs.target == 'aarch64-apple-darwin' && '11.0' || '10.15' }}

@@ -500,7 +500,6 @@ pub(crate) struct InferenceContext<'db> {
     pub(crate) has_incomplete_match: bool,
     pub(super) inference_fuel: usize,
     pub(super) fresh_var_counter: u32,
-    pub(crate) used_bindings: HashSet<String>,
     expr_scopes: hir_def::expr_store::scope::ExprScopes,
 }
 
@@ -603,7 +602,6 @@ impl<'db> InferenceContext<'db> {
             has_incomplete_match: false,
             inference_fuel: 2_000,
             fresh_var_counter: 0,
-            used_bindings: HashSet::new(),
             expr_scopes,
         }
     }
@@ -677,27 +675,9 @@ impl<'db> InferenceContext<'db> {
         //
         // ExprScopes provides the authoritative list of all bindings in each
         // scope, replacing the ad-hoc `let_binding_pats` tracking.
-        // Collect ALL identifier references from the Body arena,
-        // not just those encountered during inference traversal.
-        // This catches variables used in vector indexing, foreach bodies,
-        // match arms, and other contexts where inference may short-circuit.
-        let mut all_used = self.used_bindings.clone();
-        for (_expr_id, expr) in self.body.iter_exprs() {
-            match expr {
-                hir_def::hir::Expr::Ident(name) => {
-                    all_used.insert(name.clone());
-                }
-                hir_def::hir::Expr::TypeVar(name) => {
-                    all_used.insert(name.clone());
-                }
-                _ => {}
-            }
-        }
-
         let body_diags = crate::diagnostics::BodyValidationDiagnostic::collect(
             &self.body,
             &self.expr_scopes,
-            &all_used,
             &self.pattern_constants,
         );
         for d in body_diags {
@@ -4734,8 +4714,6 @@ impl<'db> InferenceContext<'db> {
             Expr::Literal(lit) => infer_literal_type(lit),
 
             Expr::Ident(name) => {
-                self.used_bindings.insert(name.clone());
-
                 // Upstream rewrites these three to literals while building the
                 // AST (initial_check.ml:1417), so they never reach the type
                 // checker as identifiers at all.
@@ -4805,7 +4783,6 @@ impl<'db> InferenceContext<'db> {
             }
 
             Expr::TypeVar(name) => {
-                self.used_bindings.insert(name.clone());
                 let subst = locals.type_substitution();
                 if let Some(value) = subst.values.get(name) {
                     if let Some(value) = NumericExpr::parse(value) {

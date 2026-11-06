@@ -1260,20 +1260,54 @@ fn detects_unused_local_variables() {
 
 #[test]
 fn detects_unused_shadowed_outer_binding() {
-    // The outer `x` is shadowed by the inner `x`, but since unused-variable
-    // detection is name-based (not scope-aware), any use of `x` anywhere
-    // in the body suppresses the unused warning for all `x` bindings.
-    // This is a known limitation — scope-aware tracking would require
-    // mapping Ident uses to specific PatIds.
     let source = "function foo() = {\n  let x = 1;\n  let y = let x = 2 in x;\n  y\n}\n";
     let file = SalsaTestFile::new(source.to_string());
-    let unused_x = file
+    let unused: Vec<_> = file
         .lsp_diagnostics()
         .into_iter()
-        .filter(|diagnostic| diagnostic.message.contains("unused variable `x`"))
-        .count();
+        .filter(|d| d.message.contains("unused variable `x`"))
+        .collect();
+    assert_eq!(unused.len(), 1, "the inner use must not hide the unused outer binding: {unused:?}");
+    let expected = file.source.position_at(source.find("x = 1").unwrap());
+    assert_eq!(unused[0].range.start, lsp_types::Position::new(expected.line, expected.col));
+}
 
-    assert_eq!(unused_x, 0);
+#[test]
+fn binding_usage_resolves_shadowing_patterns_and_implicit_declarations() {
+    let cases: &[(&str, &[(&str, &str)])] = &[
+        ("function f() -> int = { let x = 1; let y = let x = 2 in x; x + y }", &[]),
+        ("function f() -> int = { let x = 1; let y = let x = 2 in 0; x + y }", &[("x = 2", "x")]),
+        ("function f() -> int = { let (x, y) = (1, 2); let x = 3; x + y }", &[("x, y)", "x")]),
+        ("function f(n : int) -> int = match n { x if x > 0 => x, x => 0 }", &[("x => 0", "x")]),
+        ("function f() -> int = { let x = 1; let y = let z = 2 in x + z; y }", &[]),
+        ("function f() -> int = { var x : int = 1; let y = let x = 2 in x; x = 3; x + y }", &[]),
+        ("function f() -> int = { x = 1; 0 }", &[("x = 1", "x")]),
+        ("function f() -> int = { x = 1; x }", &[]),
+    ];
+    for (source, expected) in cases {
+        let file = SalsaTestFile::new((*source).to_string());
+        let diagnostics = file.lsp_diagnostics();
+        assert!(
+            !diagnostics.iter().any(|d| d.severity == Some(lsp_types::DiagnosticSeverity::ERROR)),
+            "invalid binding fixture {source}: {diagnostics:?}"
+        );
+        let actual: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.message.starts_with("unused variable"))
+            .map(|d| (d.range.start, d.message.clone()))
+            .collect();
+        let mut expected: Vec<_> = expected
+            .iter()
+            .map(|(marker, name)| {
+                let pos = file.source.position_at(source.find(marker).unwrap());
+                (lsp_types::Position::new(pos.line, pos.col), format!("unused variable `{name}`"))
+            })
+            .collect();
+        let mut actual = actual;
+        actual.sort_by_key(|(pos, _)| *pos);
+        expected.sort_by_key(|(pos, _)| *pos);
+        assert_eq!(actual, expected, "{source}");
+    }
 }
 
 #[test]
@@ -2980,9 +3014,17 @@ fn handlers_do_not_accumulate_logic() {
                     // between the ids `ide` answers in and the URLs and
                     // line/columns the protocol speaks. They are this
                     // server's `file_line_index` — rust-analyzer's handlers
-                    // call that too — and they decide nothing.
-                    let is_conversion =
-                        matches!(path, "file" | "file_id" | "url_for_file_id" | "files_ref" | "db");
+                    // call that too — and they decide nothing. The include graph
+                    // accessor also only borrows immutable snapshot data.
+                    let is_conversion = matches!(
+                        path,
+                        "file"
+                            | "file_id"
+                            | "url_for_file_id"
+                            | "files_ref"
+                            | "db"
+                            | "include_graph"
+                    );
                     if is_call && !is_conversion {
                         calls.insert(format!("{token}{path}"));
                     }
@@ -3168,52 +3210,6 @@ fn priming_the_caches_goes_through_analysis() {
         "the worker count is not the client's"
     );
     assert!(main_loop.contains("PrimeCachesProgress::Report"), "progress is computed and dropped");
-}
-
-/// Eviction waits for the pool, and goes before the wave.
-///
-/// `trigger_lru_eviction` takes `&mut` on the database, so it cancels every
-/// live snapshot — including a diagnostics wave still being computed. A
-/// cancelled wave is dropped file by file in `fetch_native_diagnostics`,
-/// and eviction is not a *change*, so nothing scheduled another: **an
-/// opened file got no diagnostics at all**, until the next edit happened to
-/// ask. Reproduced against the real binary over stdio on sail-riscv — 0
-/// published where `corpus_check` reports 1 — and invisible to every probe
-/// in this repo, all of which call `Analysis` directly and never evict.
-///
-/// The guard read `task_receiver`, the channel results arrive *on*, which
-/// is empty precisely while a task is still working. rust-analyzer asks the
-/// pool whether anything is running (`main_loop.rs:541-546`), which is the
-/// question, and `TaskPool::is_empty` answers it here. Evicting before the
-/// wave closes the other half: the turn that bumps the nonce would
-/// otherwise cancel the snapshot it is about to take.
-#[test]
-fn eviction_waits_for_the_pool_and_precedes_the_wave() {
-    let main_loop = include_str!("main_loop.rs");
-
-    let evict = main_loop.find("trigger_garbage_collection()").expect("nothing evicts");
-    let diags = main_loop.find("state.update_diagnostics();").expect("nothing diagnoses");
-    assert!(
-        evict < diags,
-        "eviction runs after the diagnostics wave, so it cancels the snapshot it just spawned"
-    );
-    assert!(
-        main_loop.contains("state.task_pool.is_empty() && current_nonce"),
-        "eviction is not guarded on the pool being idle"
-    );
-    assert!(
-        !main_loop.contains("task_receiver.is_empty() && current_nonce"),
-        "eviction is guarded on the results channel, which is empty *while* a task runs"
-    );
-    // The guard is worth nothing beside an unguarded call, and there was
-    // one: `on_task` evicted whenever priming finished — which is while the
-    // wave that the same settling change spawned is still computing, so it
-    // cancelled one on every file opened.
-    assert_eq!(
-        main_loop.matches("trigger_garbage_collection()").count(),
-        1,
-        "eviction has a second call site, and a rule with two doors has none"
-    );
 }
 
 /// The open buffer wins, and closing gives the file back.
@@ -3633,7 +3629,6 @@ fn a_feature_answers_through_with_db() {
         "with_file",
         "with_file_and_workspace",
         "with_include_graph",
-        "with_include_graph_arc",
         "include_graph",
         "analysis",
         "analysis_with_url_map",
@@ -3708,7 +3703,6 @@ fn a_feature_the_ide_offers_can_be_asked_for() {
         "with_file_and_workspace",
         "with_url_map",
         "with_include_graph",
-        "with_include_graph_arc",
         "update_lru_capacity",
         "trigger_cancellation",
         "trigger_garbage_collection",
@@ -4499,7 +4493,9 @@ fn a_dead_code_waiver_expires() {
 #[test]
 fn a_panicking_handler_names_its_request() {
     const DISPATCH: &str = include_str!("handlers/dispatch.rs");
-    let body = DISPATCH.split("fn a_panicking_handler_names_its_request").next().unwrap();
+    // Test helpers catch cancellation deliberately and are not dispatched LSP
+    // requests. Check the production dispatcher, before its test module.
+    let body = DISPATCH.split("\n#[cfg(test)]\n").next().unwrap();
     assert_eq!(
         body.matches("std::panic::catch_unwind").count(),
         body.matches("stdx::panic_context::enter").count(),

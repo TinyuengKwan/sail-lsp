@@ -87,21 +87,7 @@ impl Analysis {
                 ),
                 Definition::EnumVariant(member) => {
                     let view = member.file_id?;
-                    let ft = self.file_text(view)?;
-                    let tree = hir::def_query::file_item_tree(&self.db, ft).as_ref()?;
-                    let item = tree.top_level_items().iter().find(|item| {
-                        item.name(tree) == &member.parent_name
-                            && (item.fields(tree).iter().any(|f| f.name == member.name)
-                                || item
-                                    .scattered_member(tree)
-                                    .is_some_and(|(n, _)| n == member.name.as_str()))
-                    })?;
-                    let span = item
-                        .fields(tree)
-                        .iter()
-                        .find(|f| f.name == member.name)
-                        .map(|f| f.name_span)
-                        .or_else(|| item.scattered_member(tree).map(|(_, span)| span))?;
+                    let span = member.declaration_span;
                     (
                         view,
                         member.name.to_string(),
@@ -114,20 +100,12 @@ impl Analysis {
                 }
                 Definition::Field(field) => {
                     let view = field.file_id?;
-                    let tree =
-                        hir::def_query::file_item_tree(&self.db, self.file_text(view)?).as_ref()?;
-                    let member = tree
-                        .top_level_items()
-                        .iter()
-                        .filter(|i| i.name(tree) == &field.parent_name)
-                        .flat_map(|i| i.fields(tree))
-                        .find(|f| f.name == field.name)?;
                     (
                         view,
                         field.name.to_string(),
                         SymbolKind::Field,
-                        member.name_span,
-                        member.name_span,
+                        field.declaration_span,
+                        field.declaration_span,
                         field.ty_text,
                         None,
                     )

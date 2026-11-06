@@ -58,6 +58,17 @@ pub fn cache_ownership() -> (Option<usize>, usize, u64, u64) {
     )
 }
 
+/// Z3's process-global allocation estimate, without initializing a context.
+/// This is a subset of process memory, not additional bytes to add to RSS.
+pub fn estimated_native_bytes() -> u64 {
+    unsafe extern "C" {
+        fn Z3_get_estimated_alloc_size() -> u64;
+    }
+    // SAFETY: Z3's context-free allocation-counter API has no preconditions;
+    // the linked Z3 library supplies this symbol in all supported versions.
+    unsafe { Z3_get_estimated_alloc_size() }
+}
+
 #[derive(Hash, PartialEq, Eq, Clone)]
 struct Z3CacheKey {
     goal: ConstraintExpr,

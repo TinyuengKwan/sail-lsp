@@ -331,6 +331,8 @@ pub(crate) fn server_capabilities(client: &ClientCapabilities) -> ServerCapabili
             "ssrSearch": true,
             "ssrPreview": true,
             "includeContexts": true,
+            "diagnosticReport": true,
+            "runnables": { "kinds": ["sail-check", "shell"] },
             "ssrKinds": ["expression", "type", "item", "pattern"],
             "matchingBrace": true,
             "joinLines": true,

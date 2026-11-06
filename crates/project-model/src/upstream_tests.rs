@@ -306,6 +306,7 @@ impl Oracle {
             .arg("--version")
             .output()
             .unwrap_or_else(|e| panic!("cannot run {} (set SAIL_ORACLE_BIN): {e}", sail.display()));
+        assert!(output.status.success(), "oracle --version failed: {output:?}");
         let version = String::from_utf8_lossy(&output.stdout).trim().to_owned();
         eprintln!("oracle: {} = {version}", sail.display());
         Oracle { sail, version }
@@ -322,7 +323,9 @@ impl Oracle {
     ) -> Result<Vec<String>, String> {
         // Relative to the manifest, so upstream prints paths as the manifest spells them.
         let mut cmd = std::process::Command::new(&self.sail);
-        cmd.arg("--project").arg(manifest.file_name().unwrap()).arg("--list-files");
+        cmd.arg("--project")
+            .arg(manifest.file_name().unwrap())
+            .args(["--list-files-separated", "\n"]);
         for v in variables {
             cmd.arg("--variable").arg(v);
         }
@@ -335,20 +338,39 @@ impl Oracle {
         if !output.status.success() {
             return Err(String::from_utf8_lossy(&output.stderr).into_owned());
         }
-        Ok(String::from_utf8_lossy(&output.stdout).split_whitespace().map(String::from).collect())
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect())
     }
     /// Each module's `requires` set, from the project dependency graph dump.
-    fn requires(&self, manifest: &Path) -> BTreeMap<String, BTreeSet<String>> {
-        let output = std::process::Command::new(&self.sail)
-            .arg("--project")
+    fn requires(
+        &self,
+        manifest: &Path,
+        variables: &[String],
+    ) -> Result<BTreeMap<String, BTreeSet<String>>, String> {
+        let mut cmd = std::process::Command::new(&self.sail);
+        cmd.arg("--project")
             .arg(manifest.file_name().unwrap())
             .args(["--all-modules", "--just-parse-project", "--ddump-project-depgraph", "stdout"])
-            .arg("--ddump-project-depgraph-skip-deps")
-            .current_dir(manifest.parent().unwrap())
-            .output()
-            .unwrap();
+            .arg("--ddump-project-depgraph-skip-deps");
+        for variable in variables {
+            cmd.arg("--variable").arg(variable);
+        }
+        let output = cmd.current_dir(manifest.parent().unwrap()).output().unwrap();
+        if !output.status.success() {
+            return Err(format!(
+                "dependency graph command failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        let text = String::from_utf8(output.stdout).map_err(|err| err.to_string())?;
+        if !text.trim_start().starts_with("digraph ") || !text.trim_end().ends_with('}') {
+            return Err(format!("not a dependency graph: {text}"));
+        }
         let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        for line in String::from_utf8_lossy(&output.stdout).lines() {
+        for line in text.lines() {
             // `"A" -> "B" [..style=solid]` is drawn reversed: B requires A.
             let names: Vec<_> = line.split('"').skip(1).step_by(2).collect();
             if let [required, by] = names[..] {
@@ -357,7 +379,7 @@ impl Oracle {
                 }
             }
         }
-        out
+        Ok(out)
     }
 }
 
@@ -369,9 +391,8 @@ fn sibling(env: &str, relative: &str) -> PathBuf {
     path.canonicalize().unwrap_or_else(|e| panic!("{} (set {env}): {e}", path.display()))
 }
 
-fn lsp_requires(manifest: &str) -> BTreeMap<String, BTreeSet<String>> {
-    let project =
-        ProjectManifest::parse(manifest).unwrap().resolve(&ProjectOptions::default()).unwrap();
+fn lsp_requires(manifest: &str, options: &ProjectOptions) -> BTreeMap<String, BTreeSet<String>> {
+    let project = ProjectManifest::parse(manifest).unwrap().resolve(options).unwrap();
     let name = |id: usize| project.modules[id].name.clone();
     (0..project.modules.len())
         .filter(|&id| !project.modules[id].requires.is_empty())
@@ -410,8 +431,14 @@ fn compare_manifest(
             return problems;
         }
     }
-    let theirs = oracle.requires(path);
-    let ours = lsp_requires(&text);
+    let theirs = match oracle.requires(path, &cli) {
+        Ok(graph) => graph,
+        Err(error) => {
+            problems.push(format!("{label} {cli:?}: {error}"));
+            return problems;
+        }
+    };
+    let ours = lsp_requires(&text, &options);
     let theirs: BTreeMap<_, _> = theirs
         .into_iter()
         .filter_map(|(m, rs)| {
@@ -511,18 +538,7 @@ fn upstream_oracle() {
     let riscv = sibling("SAIL_ORACLE_RISCV", "sail-riscv").join("model/riscv.sail_project");
     for rmem in [false, true] {
         let variables = [("RMEM".to_owned(), ProjectValue::Bool(rmem))];
-        let text =
-            std::fs::read_to_string(&riscv).unwrap_or_else(|e| panic!("{}: {e}", riscv.display()));
-        let options =
-            ProjectOptions { variables: variables.iter().cloned().collect(), ..Default::default() };
-        let ours = listed(&text, &options).unwrap();
-        let theirs = oracle.list(&riscv, &[format!("RMEM={rmem}")], &[]);
-        if Ok(&ours) != theirs.as_ref() {
-            problems.push(format!(
-                "riscv RMEM={rmem}: sail-lsp {} files, upstream {theirs:?}",
-                ours.len()
-            ));
-        }
+        problems.extend(compare_manifest(&oracle, &riscv, &variables));
         compared += 1;
     }
 

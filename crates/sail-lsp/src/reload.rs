@@ -376,6 +376,17 @@ impl GlobalState {
             };
             message.push_str(&format!("Flycheck {}: {check}\n", path.display()));
         }
+        for (phase, failure) in &self.analysis_health.failures {
+            status.health = crate::lsp_ext::Health::Warning;
+            message.push_str(&format!("Analysis incomplete: {phase} failed: {}. Retry by editing or reloading the workspace.\n", failure.message));
+        }
+        if !self.analysis_health.reported_unknowns.is_empty() {
+            status.health = crate::lsp_ext::Health::Warning;
+            message.push_str(&format!(
+                "Undecided constraints in the latest published diagnostics: {:?}\n",
+                self.analysis_health.reported_unknowns
+            ));
+        }
         if let Some(error) = &self.project_error {
             status.health = crate::lsp_ext::Health::Error;
             message.push_str(error);
@@ -539,17 +550,25 @@ impl GlobalState {
             let mut modules = Vec::new();
             let mut source_roots = Vec::new();
             let mut inputs = DiscoveryInputs::default();
-            let files = scan_workspace_project(
-                &folders,
-                effective_sail_dir.as_deref(),
-                &config,
-                &mut modules,
-                &mut source_roots,
-                &overlays,
-                &previous,
-                &scope,
-                &mut inputs,
-            );
+            let files = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                scan_workspace_project(
+                    &folders,
+                    effective_sail_dir.as_deref(),
+                    &config,
+                    &mut modules,
+                    &mut source_roots,
+                    &overlays,
+                    &previous,
+                    &scope,
+                    &mut inputs,
+                )
+            }))
+            .unwrap_or_else(|payload| {
+                Err(format!(
+                    "Workspace discovery failed internally: {}",
+                    crate::analysis_health::panic_message(payload.as_ref())
+                ))
+            });
             if let Some(p) = progress {
                 match &files {
                     Ok(files) => p.end(&format!("{} files discovered", files.len())),

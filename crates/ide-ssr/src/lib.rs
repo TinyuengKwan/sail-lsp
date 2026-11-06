@@ -24,6 +24,25 @@ pub struct MatchFinder<'db> {
 }
 
 impl<'db> MatchFinder<'db> {
+    /// Fixed references in both sides, after resolving the invocation scope.
+    /// The workspace layer compares physical declaration identities across
+    /// include contexts before allowing any physical source replacement.
+    pub fn resolved_bindings(&self) -> Vec<(&str, bool, &hir::PathResolution)> {
+        let mut bindings: Vec<_> = self
+            .rule
+            .pattern
+            .resolved_paths
+            .iter()
+            .chain(&self.rule.template.resolved_paths)
+            .map(|((name, ty), resolution)| (name.as_str(), *ty, resolution))
+            .collect();
+        if let Some(declaration) = &self.rule.declaration {
+            bindings.push(("<declaration>", false, declaration));
+        }
+        bindings.sort_by_key(|(name, ty, _)| (*name, *ty));
+        bindings
+    }
+
     /// Search uses the same binding identities as an identity replacement.
     pub fn for_search(
         db: &'db dyn salsa::Database,

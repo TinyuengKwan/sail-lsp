@@ -20,6 +20,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Default)]
 pub struct SailLspConfig {
     pub formatting: FormattingConfig,
+    /// Retained analysis query values and optional process memory budget.
+    pub cache: CacheConfig,
     /// Diagnostics configuration.
     pub diagnostics: DiagnosticsConfig,
     /// Inlay hints configuration.
@@ -36,6 +38,74 @@ pub struct SailLspConfig {
     pub workspace: WorkspaceConfig,
     /// Running upstream Sail beside the server's own analysis.
     pub flycheck: FlycheckConfig,
+    /// Explicit project test/export commands exposed to editors.
+    pub runnables: RunnablesConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct RunnablesConfig {
+    pub tasks: Vec<ProjectTaskConfig>,
+    pub show_code_lens: bool,
+}
+impl Default for RunnablesConfig {
+    fn default() -> Self {
+        Self { tasks: Vec::new(), show_code_lens: true }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProjectTaskConfig {
+    pub label: String,
+    pub kind: ProjectTaskKind,
+    pub command: String,
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub environment: std::collections::BTreeMap<String, String>,
+    /// Manifest path relative to the workspace root; absent means every project.
+    #[serde(default)]
+    pub project: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProjectTaskKind {
+    Test,
+    Export,
+}
+
+/// Capacities count query results, not bytes. Zero disables that family's LRU.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CacheConfig {
+    pub parse_capacity: usize,
+    pub environment_capacity: usize,
+    pub inference_capacity: usize,
+    pub body_capacity: usize,
+    /// Soft RSS high-water mark; zero disables automatic pressure control.
+    pub memory_limit_mb: u32,
+}
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            parse_capacity: 0,
+            environment_capacity: 0,
+            inference_capacity: 0,
+            body_capacity: 512,
+            memory_limit_mb: 0,
+        }
+    }
+}
+impl CacheConfig {
+    pub(crate) fn capacities(&self) -> ide_db::cache::QueryCacheCapacities {
+        ide_db::cache::QueryCacheCapacities {
+            parse: self.parse_capacity,
+            environment: self.environment_capacity,
+            inference: self.inference_capacity,
+            bodies: self.body_capacity,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -450,6 +520,21 @@ impl SailLspConfig {
 }
 
 impl SailLspConfig {
+    /// Preserve task structure in reports without exporting environment values.
+    pub(crate) fn diagnostic_json(&self) -> serde_json::Value {
+        let mut value = serde_json::to_value(self).expect("configuration is JSON serializable");
+        if let Some(tasks) = value["runnables"]["tasks"].as_array_mut() {
+            for task in tasks {
+                if let Some(environment) = task["environment"].as_object_mut() {
+                    for value in environment.values_mut() {
+                        *value = serde_json::Value::String("<redacted>".into());
+                    }
+                }
+            }
+        }
+        value
+    }
+
     /// Parse initialization options or didChangeConfiguration settings,
     /// and name the settings it could not read. Missing keys retain
     /// defaults via serde.

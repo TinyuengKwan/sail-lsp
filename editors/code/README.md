@@ -65,6 +65,8 @@ Full configuration reference: [`docs/configuration.md`](../../docs/configuration
 ## Commands
 
 - `Sail: Reload Workspace`
+- `Sail: Run Project Task` — check a loaded project, run configured test scripts or export the model
+- `Sail: Cancel All Sail Tasks` — terminate process tasks and compiler checks
 - `Sail: Restart Server`
 - `Sail: Show Server Status` — the server's status report (also on the status bar item)
 - `Sail: Open Project Manifest` — the manifest entry that lists the active file, or the entry of the file that `$include`s it
@@ -76,6 +78,12 @@ Full configuration reference: [`docs/configuration.md`](../../docs/configuration
 - `Sail: Toggle Inlay Hints`
 
 The syntax tree, HIR, and item tree commands are debugging aids intended for inspecting parser and semantic state for the active file.
+
+Project tasks also appear as CodeLens links. Configure `sail-lsp.runnables.tasks`
+for tests/exports and `sail-lsp.runnables.showCodeLens` to control the links.
+Commands use the loaded project's variables/modules and the selected compiler.
+See [project task configuration](../../docs/runnables.md) for argv/context
+placeholders, script integration and stale/unsaved-input behavior.
 
 ## Development
 

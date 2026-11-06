@@ -307,6 +307,19 @@ impl lsp_types::request::Request for SailLspStatus {
     const METHOD: &'static str = "sail-lsp/analyzerStatus";
 }
 
+/// Passive, structured diagnostic report. Includes no document contents or environment values.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticReportParams {
+    pub text_document: Option<lsp_types::TextDocumentIdentifier>,
+}
+pub enum DiagnosticReport {}
+impl lsp_types::request::Request for DiagnosticReport {
+    type Params = DiagnosticReportParams;
+    type Result = serde_json::Value;
+    const METHOD: &'static str = "sail-lsp/diagnosticReport";
+}
+
 /// Parameters for `sail-lsp/viewIncludeGraph`.
 ///
 /// Sail-specific: renders the $include dependency graph.
@@ -552,6 +565,55 @@ pub enum RunFlycheck {}
 impl lsp_types::notification::Notification for RunFlycheck {
     type Params = FlycheckControlParams;
     const METHOD: &'static str = "sail-lsp/runFlycheck";
+}
+
+/// RA-compatible discovery shape; execution belongs to the client.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunnablesParams {
+    pub text_document: lsp_types::TextDocumentIdentifier,
+    pub position: Option<lsp_types::Position>,
+}
+
+pub enum Runnables {}
+impl lsp_types::request::Request for Runnables {
+    type Params = RunnablesParams;
+    type Result = Vec<Runnable>;
+    const METHOD: &'static str = "experimental/runnables";
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Runnable {
+    pub id: String,
+    pub label: String,
+    pub project: lsp_types::TextDocumentIdentifier,
+    pub fingerprint: String,
+    /// Revalidate discovery before execution; do not execute a disabled entry.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disabled: Option<String>,
+    pub documents: Vec<lsp_types::Url>,
+    #[serde(flatten)]
+    pub command: RunnableCommand,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", content = "args")]
+pub enum RunnableCommand {
+    #[serde(rename = "sail-check")]
+    Check(FlycheckControlParams),
+    #[serde(rename = "shell")]
+    Process(ProcessRunnableArgs),
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessRunnableArgs {
+    pub kind: crate::config::ProjectTaskKind,
+    pub program: String,
+    pub args: Vec<String>,
+    pub cwd: std::path::PathBuf,
+    pub environment: std::collections::BTreeMap<String, String>,
 }
 
 pub enum CancelFlycheck {}

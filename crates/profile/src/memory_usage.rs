@@ -5,6 +5,65 @@ use std::fmt;
 
 use cfg_if::cfg_if;
 
+/// Resident process memory includes native libraries. It is not the sum of
+/// query payload sizes and must not be added to the solver allocation estimate.
+pub fn process_resident_bytes() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        let kib = status
+            .lines()
+            .find_map(|line| line.strip_prefix("VmRSS:"))?
+            .split_whitespace()
+            .next()?
+            .parse::<u64>()
+            .ok()?;
+        Some(kib.saturating_mul(1024))
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::{ProcessStatus::*, Threading::GetCurrentProcess};
+        let mut counters = std::mem::MaybeUninit::<PROCESS_MEMORY_COUNTERS>::uninit();
+        // SAFETY: valid current-process handle and correctly sized output.
+        let ok = unsafe {
+            GetProcessMemoryInfo(
+                GetCurrentProcess(),
+                counters.as_mut_ptr(),
+                size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+            )
+        };
+        if ok == 0 {
+            None
+        } else {
+            Some(unsafe { counters.assume_init() }.WorkingSetSize as u64)
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut info = std::mem::MaybeUninit::<libc::mach_task_basic_info>::uninit();
+        let mut count = libc::MACH_TASK_BASIC_INFO_COUNT;
+        // SAFETY: task_info receives the matching flavor, size and writable
+        // buffer for this process. The output is read only on success.
+        let result = unsafe {
+            libc::task_info(
+                libc::mach_task_self(),
+                libc::MACH_TASK_BASIC_INFO,
+                info.as_mut_ptr().cast(),
+                &mut count,
+            )
+        };
+        if result == libc::KERN_SUCCESS {
+            Some(unsafe { info.assume_init() }.resident_size)
+        } else {
+            None
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        None
+    }
+}
+
 /// Return free allocator pages after a large background workload. This is a
 /// best-effort lifecycle operation, not a cache eviction or per-request hook.
 /// Other platforms retain their allocator's normal reclamation policy.

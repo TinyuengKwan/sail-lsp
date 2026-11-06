@@ -4,7 +4,9 @@
 //! tracked function so that re-parsing is automatically memoized and
 //! only re-runs when the file text actually changes.
 //!
-//! Created in stage .
+//! Salsa 0.25 only emits a runtime capacity setter for a nonzero literal LRU.
+//! The large seed capacity enables that API; RootDatabase installs the actual
+//! configured policy before any analysis starts.
 
 use std::sync::Arc;
 
@@ -165,7 +167,7 @@ impl std::hash::Hash for ParsedFileData {
 /// Takes a `FileText` salsa input and returns `ParsedFileData` with
 /// tokens, green node, and parse errors. Salsa memoizes the result
 /// and only re-runs when `file_text.text()` changes.
-#[salsa::tracked(returns(ref))]
+#[salsa::tracked(returns(ref), lru = 4294967295)]
 pub fn parse_file(db: &dyn salsa::Database, input: FileText) -> ParsedFileData {
     if let Some(source) = base_db::preprocess::source_text(db, input.file_id(db)) {
         return parse_file(db, source).clone();
@@ -247,7 +249,7 @@ fn text_difference<'a>(before: &str, after: &'a str) -> Option<(rowan::TextRange
 
 /// Keep source positions while removing declarations in inactive branches.
 /// The raw CST remains available for editing, formatting and syntax errors.
-#[salsa::tracked(returns(ref))]
+#[salsa::tracked(returns(ref), lru = 4294967295)]
 pub fn semantic_parse_file(db: &dyn salsa::Database, input: FileText) -> ParsedFileData {
     let parsed = parse_file(db, input);
     let Some(regions) = base_db::preprocess::file_regions(db, input.file_id(db)) else {
@@ -355,6 +357,15 @@ pub fn parsed_file_cst(db: &dyn salsa::Database, input: FileText) -> Option<ArcP
         return None;
     }
     Some(ArcParsedFile(Arc::new(cst_parsed)))
+}
+
+/// Updated by the host while no query snapshots are active.
+pub fn set_parse_cache_capacity(db: &mut dyn salsa::Database, capacity: usize) {
+    // Keep usage tracking when eviction is disabled, so a later pressure
+    // limit can reclaim already cached values rather than only new reads.
+    let capacity = if capacity == 0 { usize::MAX } else { capacity };
+    parse_file::set_lru_capacity(db, capacity);
+    semantic_parse_file::set_lru_capacity(db, capacity);
 }
 
 #[cfg(test)]

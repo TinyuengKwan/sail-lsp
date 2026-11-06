@@ -62,6 +62,10 @@ impl DiagnosticCollection {
         self.changes.extend(self.check.keys().copied());
     }
 
+    pub(crate) fn is_current_generation(&self, generation: DiagnosticsGeneration) -> bool {
+        self.generation == generation
+    }
+
     /// Clear native diagnostics for a specific file.
     ///
     /// Called when a file *outside the workspace* is closed. A workspace
@@ -228,27 +232,19 @@ pub(crate) fn fetch_native_diagnostics(
     subscriptions: &[(lsp_types::Url, base_db::FileId)],
     kind: NativeDiagnosticsFetchKind,
     config: &ide_diagnostics::DiagnosticsConfig,
-) -> Vec<(base_db::FileId, Vec<lsp_types::Diagnostic>)> {
+) -> ide::Cancellable<Vec<(base_db::FileId, Vec<lsp_types::Diagnostic>)>> {
     subscriptions
         .iter()
-        .filter_map(|(url, file_id)| {
+        .map(|(url, file_id)| {
             let diagnostics = match kind {
                 NativeDiagnosticsFetchKind::Syntax => {
-                    match analysis.syntax_diagnostics(*file_id, config) {
-                        Ok(diags) => diags,
-                        Err(_) => return None,
-                    }
+                    analysis.syntax_diagnostics(*file_id, config)?
                 }
                 NativeDiagnosticsFetchKind::Semantic => {
-                    match analysis.file_diagnostics(*file_id, config) {
-                        Ok(diags) => diags,
-                        // Cancelled: the file changed under us, and the
-                        // fetch that replaces this one is already queued.
-                        Err(_) => return None,
-                    }
+                    analysis.file_diagnostics(*file_id, config)?
                 }
             };
-            let lsp_diags: Vec<lsp_types::Diagnostic> = if let Some(sf) = analysis.file(url) {
+            let lsp_diags = if let Some(sf) = analysis.file(url) {
                 let line_index = ide_db::line_index::LineIndex::new(sf.text());
                 diagnostics
                     .iter()
@@ -259,7 +255,7 @@ pub(crate) fn fetch_native_diagnostics(
             } else {
                 Vec::new()
             };
-            Some((*file_id, lsp_diags))
+            Ok((*file_id, lsp_diags))
         })
         .collect()
 }

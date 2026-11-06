@@ -130,6 +130,7 @@ pub struct MissingFields {
 pub struct UnsolvedConstraint {
     pub constraint: String,
     pub reason: Option<&'static str>,
+    pub reason_code: Option<&'static str>,
     /// Whether the constraint was *proved* unsatisfiable, as opposed to left
     /// undecided. `'m == 8 * 'n` with `'m` fixed at 65 has no integer
     /// solution — that is an error, where "the solver did not get there" is
@@ -483,6 +484,7 @@ impl AnyDiagnostic {
                 Some(AnyDiagnostic::UnsolvedConstraint(UnsolvedConstraint {
                     constraint: constraint.clone(),
                     reason: reason.map(|reason| reason.explanation()),
+                    reason_code: reason.map(|reason| reason.as_str()),
                     proved_false: false,
                     derived_from: Vec::new(),
                     node: expr_syntax(*expr)?,
@@ -528,6 +530,7 @@ impl AnyDiagnostic {
                 Some(AnyDiagnostic::UnsolvedConstraint(UnsolvedConstraint {
                     constraint: constraint.clone(),
                     reason: None,
+                    reason_code: None,
                     proved_false: true,
                     // Recorded against the revision this result was
                     // inferred in, which need not be the current one.
@@ -631,6 +634,7 @@ impl AnyDiagnostic {
                 constraint: constraint.clone(),
                 proved_false: *proved_false,
                 reason: None,
+                reason_code: None,
                 derived_from: derived_from
                     .iter()
                     .map(|s| source_map.rebase(*s, def_base, original_tokens))

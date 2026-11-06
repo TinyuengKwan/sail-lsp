@@ -25,6 +25,7 @@ mod kind_oracle_tests;
 mod ordered_names;
 #[cfg(test)]
 mod ordered_names_tests;
+mod shared_edits;
 
 /// Snapshot of URL ↔ FileId mapping from the VFS layer.
 ///
@@ -364,6 +365,9 @@ pub struct CodeAction {
     /// edits, because an assist may reach another file — and because the
     /// handler already converts one of these for rename.
     pub source_change: ide_db::source_change::SourceChange,
+    /// Semantic input region used to validate equivalent shared-file actions.
+    /// None denotes a purely textual action such as document formatting.
+    pub semantic_range: Option<base_db::TextRange>,
     pub for_diagnostic: Option<usize>,
     pub is_preferred: Option<bool>,
     pub is_fix_all: bool,
@@ -927,7 +931,7 @@ impl Analysis {
         self.with_db(|a| a.assists_inner(url, range, config))
     }
 
-    fn assists_inner(
+    fn assists_in_view(
         &self,
         url: &url::Url,
         range: ide_db::line_index::TextRange,
@@ -954,7 +958,7 @@ impl Analysis {
         self.with_db(|a| a.code_actions_inner(url, range, diagnostics, format, assists))
     }
 
-    fn code_actions_inner(
+    fn code_actions_in_view(
         &self,
         url: &url::Url,
         range: ide_db::line_index::TextRange,
@@ -972,15 +976,28 @@ impl Analysis {
         // Client diagnostics can lag behind didChange. Revalidate against this
         // snapshot before producing an edit; a resolve fingerprint alone only
         // detects changes made *after* the code-action request.
-        let current_diagnostics = if diagnostics.is_empty() {
+        let mut current_diagnostics = if diagnostics.is_empty() {
             Vec::new()
         } else {
-            self.file_diagnostics_inner(
+            self.instance_diagnostics(
                 file_id,
                 &ide_diagnostics::DiagnosticsConfig::new(),
                 &ide_db::assists::AssistResolveStrategy::All,
             )
         };
+        // Diagnostic fixes use the current file's offsets; preserve that
+        // convention separately for each semantic view before comparing edits.
+        for diagnostic in &mut current_diagnostics {
+            for fix in diagnostic.fixes.iter_mut().flatten() {
+                if let Some(change) = &mut fix.source_change {
+                    let edits = std::mem::take(&mut change.source_file_edits)
+                        .into_values()
+                        .flatten()
+                        .collect();
+                    change.insert_source_edit(file_id, edits);
+                }
+            }
+        }
         for (i, diagnostic) in diagnostics.iter().enumerate() {
             let Some(current) = current_diagnostics.iter().find(|current| {
                 current.code.as_str() == diagnostic.code.as_str()
@@ -995,6 +1012,7 @@ impl Analysis {
                     title,
                     kind: ide_db::assists::AssistKind::QuickFix,
                     source_change: one_file(vec![edit]),
+                    semantic_range: Some(diagnostic.range.range),
                     for_diagnostic: Some(i),
                     is_preferred: Some(is_preferred),
                     is_fix_all: false,
@@ -1009,19 +1027,21 @@ impl Analysis {
                     title: fix.label.0.clone(),
                     kind: ide_db::assists::AssistKind::QuickFix,
                     source_change: source_change.clone(),
+                    semantic_range: Some(diagnostic.range.range),
                     for_diagnostic: Some(i),
                     is_preferred: None,
                     is_fix_all: false,
                 });
             }
         }
-        for assist in self.assists_inner(url, range, assists) {
+        for assist in self.assists_in_view(url, range, assists) {
             let Some(source_change) = assist.source_change else { continue };
             out.push(CodeAction {
                 import: assist.import,
                 title: assist.label.0,
                 kind: assist.id.1,
                 source_change,
+                semantic_range: Some(assist.target),
                 for_diagnostic: None,
                 is_preferred: None,
                 is_fix_all: false,
@@ -1031,6 +1051,7 @@ impl Analysis {
             if !edits.is_empty() {
                 out.push(CodeAction {
                     import: None,
+                    semantic_range: None,
                     title: "Format document".to_string(),
                     kind: ide_db::assists::AssistKind::Source,
                     source_change: one_file(edits),
@@ -1427,61 +1448,9 @@ impl Analysis {
         excluded: &std::collections::HashSet<FileId>,
     ) -> crate::Cancellable<Result<ide_db::source_change::SourceChange, String>> {
         self.with_db(|a| {
-            let instances = a.position_instances(file_id, position);
-            if instances.len() > 1 {
-                return Err("SSR context is active in multiple include instances".into());
-            }
-            let origin = instances.first().copied().unwrap_or(file_id);
-            let ft = a.file_text(origin).ok_or("SSR file is unavailable")?;
-            let file = a.file_by_id(origin).ok_or("SSR file is unavailable")?;
-            let finder = ide_ssr::MatchFinder::new(&a.db, ft, file.offset_at(&position), query)
-                .map_err(|e| e.to_string())?;
-            let mut change = ide_db::source_change::SourceChange::new();
-            if parse_only {
-                return Ok(change);
-            }
-            for (_, file) in a.all_salsa_files() {
-                let Some((_, input)) = file.file_text() else { continue };
-                let view = input.file_id(&a.db);
-                let physical = base_db::preprocess::physical_file(&a.db, view);
-                if excluded.contains(&physical) || (!selections.is_empty() && physical != file_id) {
-                    continue;
-                }
-                let Some(tree) =
-                    syntax::parse_query::semantic_parse_file(&a.db, input).syntax_node()
-                else {
-                    continue;
-                };
-                for edit in finder.edits_for_tree_in_ranges(&tree, input, selections) {
-                    if a.instances_at_offset(physical, base_db::range_start(edit.range)).len() > 1 {
-                        return Err(
-                            "SSR would edit a token shared by multiple include contexts".into()
-                        );
-                    }
-                    let target = change.source_file_edits.entry(physical).or_default();
-                    if !target.contains(&edit) {
-                        target.push(edit);
-                    }
-                }
-            }
-            // A malformed replacement must never reach the editor. Parse the
-            // complete resulting file so precedence and surrounding syntax count.
-            for (&id, edits) in &change.source_file_edits {
-                let mut text =
-                    a.file_text(id).ok_or("SSR target disappeared")?.text(&a.db).to_string();
-                let mut edits = edits.clone();
-                edits.sort_by_key(|e| std::cmp::Reverse(base_db::range_start(e.range)));
-                for edit in edits {
-                    text.replace_range(
-                        base_db::range_start(edit.range)..base_db::range_end(edit.range),
-                        &edit.new_text,
-                    );
-                }
-                if !syntax::parse_text(&text).1.is_empty() {
-                    return Err("SSR replacement would leave an invalid Sail file".into());
-                }
-            }
-            Ok(change)
+            a.structural_replace_in_all_contexts(
+                file_id, position, query, parse_only, selections, excluded,
+            )
         })
     }
 
@@ -1505,7 +1474,21 @@ impl Analysis {
         let _solver_budget =
             hir::SolverBudget::enter(hir::CancellationToken::never(), hir::SolverLimits::default());
         let this = std::panic::AssertUnwindSafe(self);
-        salsa::Cancelled::catch(move || f(*this)).map_err(|_| ide_db::ide_types::CancelledError)
+        salsa::Cancelled::catch(move || {
+            // Text-only features such as formatting need not execute a tracked
+            // query. They still must not report success for a cancelled view.
+            use salsa::Database;
+            this.db.unwind_if_revision_cancelled();
+            let result = f(*this);
+            this.db.unwind_if_revision_cancelled();
+            result
+        })
+        .map_err(|cause| match cause {
+            salsa::Cancelled::PropagatedPanic { .. } => {
+                ide_db::ide_types::CancelledError::PropagatedPanic
+            }
+            _ => ide_db::ide_types::CancelledError::PendingWrite,
+        })
     }
 
     /// The call-hierarchy item for whatever is at `position`.
@@ -1720,7 +1703,7 @@ impl Analysis {
         position: ide_db::LineCol,
         new_name: &str,
     ) -> crate::Cancellable<Result<Option<ide_db::source_change::SourceChange>, String>> {
-        self.with_db(|a| a.at_position(url, position).rename_inner(url, position, new_name))
+        self.with_db(|a| a.rename_in_all_contexts(url, position, new_name))
     }
 
     fn rename_inner(
@@ -1730,12 +1713,6 @@ impl Analysis {
         new_name: &str,
     ) -> Result<Option<ide_db::source_change::SourceChange>, String> {
         let Some(sf) = self.file(url) else { return Ok(None) };
-        let source = base_db::preprocess::physical_file(&self.db, self.file_id(url).unwrap());
-        if self.position_instances(source, position).len() > 1 {
-            return Err(
-                "This position belongs to multiple include contexts; rename is ambiguous.".into()
-            );
-        }
         ide_db::rename::IdentifierKind::classify(new_name).map_err(|e| e.to_string())?;
         if crate::references::resolve_symbol_at(&sf, position).is_none() {
             return Ok(None);
@@ -1768,18 +1745,19 @@ impl Analysis {
             .collect();
         let files: Vec<(base_db::FileId, &dyn ide_db::FileDb)> =
             owned.iter().map(|(fid, sf)| (*fid, sf as &dyn ide_db::FileDb)).collect();
-        let change = def
-            .rename(&self.db, &files, scope, &effective)
-            .map_err(|e: ide_db::rename::RenameError| e.to_string())?;
+        let mut change = ide_db::source_change::SourceChange::new();
+        for candidate in self.rename_candidates(self.file_id(url).unwrap(), def) {
+            let result = candidate
+                .rename(&self.db, &files, scope.clone(), &effective)
+                .map_err(|e: ide_db::rename::RenameError| e.to_string())?;
+            for (file, edits) in result.source_file_edits {
+                change.source_file_edits.entry(file).or_default().extend(edits);
+            }
+        }
         let mut physical = ide_db::source_change::SourceChange::new();
         for (view, edits) in change.source_file_edits {
             let source = base_db::preprocess::physical_file(&self.db, view);
             for edit in edits {
-                // A physical edit affects every inclusion of this token. Do
-                // not silently rename a different binding in another module.
-                if self.instances_at_offset(source, base_db::range_start(edit.range)).len() > 1 {
-                    return Err("This source token is active in multiple include contexts; rename would also modify the other contexts.".into());
-                }
                 let list = physical.source_file_edits.entry(source).or_default();
                 if !list.contains(&edit) {
                     list.push(edit);
@@ -2146,15 +2124,6 @@ impl Analysis {
             preferred_views: Default::default(),
             include_graph: Some(graph),
         }
-    }
-
-    /// Attach an include graph to an existing snapshot.
-    pub fn with_include_graph_arc(
-        mut self,
-        graph: std::sync::Arc<hir::include_graph::IncludeGraph>,
-    ) -> Self {
-        self.include_graph = Some(graph);
-        self
     }
 
     /// Get the include graph, if available.

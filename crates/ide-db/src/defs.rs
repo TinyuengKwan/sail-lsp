@@ -86,6 +86,8 @@ pub enum Definition {
 /// A struct or bitfield field.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Field {
+    /// Exact selected member declaration, including shadowed same-name records.
+    pub declaration_span: hir::Span,
     pub file_id: Option<base_db::FileId>,
     pub parent_name: hir::Name,
     pub name: hir::Name,
@@ -96,6 +98,7 @@ pub struct Field {
 /// An enum or union variant/constructor.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EnumVariant {
+    pub declaration_span: hir::Span,
     pub file_id: Option<base_db::FileId>,
     pub parent_name: hir::Name,
     pub name: hir::Name,
@@ -755,6 +758,7 @@ fn classify_enum_member(
                         return None;
                     }
                     found = Some(EnumVariant {
+                        declaration_span: field.name_span,
                         file_id,
                         parent_name: id.name(tree).clone(),
                         name: hir::Name::new(name),
@@ -767,6 +771,7 @@ fn classify_enum_member(
                     return None;
                 }
                 found = Some(EnumVariant {
+                    declaration_span: id.scattered_member(tree)?.1,
                     file_id,
                     parent_name: id.name(tree).clone(),
                     name: hir::Name::new(name),
@@ -912,6 +917,7 @@ fn classify_struct_field(file: &dyn crate::FileDb, name: &str, span: &hir::Span)
         )
     };
     let as_field = |parent: &str, decl: &hir::FieldDecl, file_id| Field {
+        declaration_span: decl.name_span,
         file_id,
         parent_name: hir::Name::new(parent),
         name: hir::Name::new(name),
@@ -1024,6 +1030,7 @@ fn ordered_field(
     let (tree, item) = loc.item(db)?;
     let field = item.fields(tree).iter().find(|f| f.name.as_str() == name)?;
     Some(Field {
+        declaration_span: field.name_span,
         file_id: Some(selected.file.file_id(db)),
         parent_name: hir::Name::new(record),
         name: field.name.clone(),

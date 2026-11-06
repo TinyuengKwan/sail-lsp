@@ -37,7 +37,7 @@ pub(crate) fn unsolved_constraint(
             )
         })
         .collect();
-    Diagnostic::new(
+    let mut diagnostic = Diagnostic::new(
         DiagnosticCode::SailLint(
             "unsolved-constraint",
             if d.proved_false { Severity::Error } else { Severity::Warning },
@@ -45,7 +45,11 @@ pub(crate) fn unsolved_constraint(
         message,
         crate::node_file_range(&d.node),
     )
-    .with_related(related)
+    .with_related(related);
+    if !d.proved_false {
+        diagnostic.unknown_reason = Some(d.reason_code.unwrap_or("not_established"));
+    }
+    diagnostic
 }
 
 #[cfg(test)]
@@ -58,6 +62,7 @@ mod tests {
         let diag = AnyDiagnostic::UnsolvedConstraint(UnsolvedConstraint {
             constraint: "'n >= 0".to_string(),
             reason: Some("the analyzer's constraint solving budget was exhausted"),
+            reason_code: Some("budget_exhausted"),
             proved_false: false,
             derived_from: Vec::new(),
             node: test_node(0, 5),
@@ -67,6 +72,7 @@ mod tests {
         let d = d.unwrap();
         assert!(d.message.contains("unsolved constraint"));
         assert!(d.message.contains("budget was exhausted"));
+        assert_eq!(d.unknown_reason, Some("budget_exhausted"));
         assert_eq!(d.severity, hir::diagnostics::Severity::Warning);
     }
 
@@ -76,6 +82,7 @@ mod tests {
         let diag = AnyDiagnostic::UnsolvedConstraint(UnsolvedConstraint {
             constraint: "'m == 8 * 'n".to_string(),
             reason: None,
+            reason_code: None,
             proved_false: true,
             derived_from: Vec::new(),
             node: test_node(0, 5),
@@ -83,5 +90,6 @@ mod tests {
         let d = check_dispatch(&diag).expect("dispatches");
         assert!(d.message.contains("cannot hold"));
         assert_eq!(d.severity, hir::diagnostics::Severity::Error);
+        assert_eq!(d.unknown_reason, None);
     }
 }

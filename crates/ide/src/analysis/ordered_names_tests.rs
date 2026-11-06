@@ -1705,17 +1705,19 @@ fn ordered_bitfield_rename_keeps_callable_and_local_namespaces_separate() {
 }
 
 #[test]
-fn ordered_bitfield_field_rename_rejects_multiple_physical_include_contexts() {
+fn ordered_bitfield_field_rename_accepts_identical_physical_include_contexts() {
     let defs = "bitfield A : bits(8) = { part : 3 .. 0 }\n";
     let main = "default Order dec\n$include \"defs.sail\"\n$include \"defs.sail\"\n";
     let (host, map, urls) = setup(&[("defs.sail", defs), ("main.sail", main)], &[1], vec![]);
     let a = snapshot(&host, &map);
     let file = a.file(&urls[0]).unwrap();
-    let error = a
+    let change = a
         .rename(&urls[0], file.position_at(defs.find("part").unwrap()), "other")
         .unwrap()
-        .unwrap_err();
-    assert!(error.contains("multiple include contexts"), "{error}");
+        .unwrap()
+        .expect("same member and same edits in both include occurrences");
+    assert_eq!(change.source_file_edits.len(), 1);
+    assert_eq!(change.source_file_edits[&FileId::from_raw(0)].len(), 1);
 }
 
 #[test]
@@ -3421,6 +3423,222 @@ fn unconstrained_alias_result_kind_requires_an_annotation() {
             diagnostics.iter().any(|d| d.severity == ide_diagnostics::Severity::Error),
             !accepted,
             "{source}{diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn shared_include_rename_requires_equal_bindings_and_all_context_edits() {
+    let shared = "val shared : int -> int\nfunction shared(x : int) -> int = helper(x)\n";
+    let a = "val helper : int -> int\n$include \"shared.sail\"\nfunction a(x : int) -> int = shared(x)\n";
+    let b = "val helper : int -> int\n$include \"shared.sail\"\nfunction b(x : int) -> int = shared(x)\n";
+    let (host, map, urls) = setup(
+        &[("shared.sail", shared), ("a.sail", a), ("b.sail", b)],
+        &[1, 2],
+        vec![
+            base_db::module_graph::ModuleData {
+                files: vec![FileId::from_raw(1)],
+                requires: vec![],
+            },
+            base_db::module_graph::ModuleData {
+                files: vec![FileId::from_raw(2)],
+                requires: vec![],
+            },
+        ],
+    );
+    let analysis = snapshot(&host, &map);
+    let file = analysis.file(&urls[0]).unwrap();
+    let local = analysis
+        .rename(&urls[0], file.position_at(shared.find("x :").unwrap()), "arg")
+        .unwrap()
+        .unwrap()
+        .expect("the same physical local binding is safe in both contexts");
+    assert_eq!(local.source_file_edits.len(), 1);
+    assert_eq!(local.source_file_edits[&FileId::from_raw(0)].len(), 2);
+    let global = analysis
+        .rename(&urls[0], file.position_at(shared.find("shared").unwrap()), "renamed")
+        .unwrap()
+        .unwrap()
+        .expect("shared declaration and both callers must be renamed together");
+    assert_eq!(global.source_file_edits.len(), 3, "{global:?}");
+    assert_eq!(global.source_file_edits[&FileId::from_raw(0)].len(), 2);
+    for n in [1, 2] {
+        assert_eq!(global.source_file_edits[&FileId::from_raw(n)].len(), 1);
+    }
+    let error = analysis
+        .rename(&urls[0], file.position_at(shared.find("helper").unwrap()), "renamed")
+        .unwrap()
+        .unwrap_err();
+    assert!(error.contains("different bindings"), "{error}");
+    // Starting in a parent still must validate the shared reference token.
+    let parent = analysis.file(&urls[1]).unwrap();
+    let error = analysis
+        .rename(&urls[1], parent.position_at(a.find("helper").unwrap()), "renamed")
+        .unwrap()
+        .unwrap_err();
+    assert!(error.contains("different bindings"), "{error}");
+}
+
+#[test]
+fn shared_ssr_and_assists_require_matching_semantics_and_changes() {
+    for same in [true, false] {
+        let shared = "val shared : int -> int\nfunction shared(x : int) -> int = helper(x)\n";
+        let a = "$include \"shared.sail\"\n";
+        let b = if same {
+            "$include \"shared.sail\"\n"
+        } else {
+            "val helper : int -> int\n$include \"shared.sail\"\n"
+        };
+        let common = "val helper : int -> int\n";
+        let (host, map, urls) = setup(
+            &[("shared.sail", shared), ("a.sail", a), ("b.sail", b), ("common.sail", common)],
+            &[3, 1, 2],
+            vec![
+                base_db::module_graph::ModuleData {
+                    files: vec![FileId::from_raw(3)],
+                    requires: vec![],
+                },
+                base_db::module_graph::ModuleData {
+                    files: vec![FileId::from_raw(1)],
+                    requires: vec![0],
+                },
+                base_db::module_graph::ModuleData {
+                    files: vec![FileId::from_raw(2)],
+                    requires: vec![0],
+                },
+            ],
+        );
+        let analysis = snapshot(&host, &map);
+        assert_eq!(analysis.include_contexts(&urls[0]).unwrap().len(), 2);
+        let file = analysis.file(&urls[0]).unwrap();
+        let at = shared.find("helper(x)").unwrap();
+        let ssr = analysis
+            .structural_search_replace(
+                FileId::from_raw(0),
+                file.position_at(at),
+                "helper($x) ==>> $x",
+                false,
+                &[],
+                &Default::default(),
+            )
+            .unwrap();
+        assert_eq!(ssr.is_ok(), same, "same={same}: {ssr:?}");
+        if let Ok(change) = ssr {
+            assert_eq!(change.source_file_edits.len(), 1);
+            assert_eq!(change.source_file_edits[&FileId::from_raw(0)].len(), 1);
+        }
+        let range = base_db::text_range(at, at + "helper(x)".len());
+        let assists = analysis.assists(&urls[0], range, &Default::default()).unwrap();
+        assert_eq!(
+            assists.iter().any(|a| a.id.0 == "extract_variable"),
+            same,
+            "same={same}: {assists:?}"
+        );
+        let actions = analysis
+            .code_actions(&urls[0], range, &[], &Default::default(), &Default::default())
+            .unwrap();
+        assert_eq!(
+            actions.iter().any(|a| a.title == "Extract to variable"),
+            same,
+            "same={same}: {actions:?}"
+        );
+    }
+}
+
+#[test]
+fn shared_literal_ssr_is_deduplicated_and_branch_local_edits_remain_available() {
+    let shared = "val f : unit -> int\nfunction f() = 1\n";
+    let parent = "$include \"shared.sail\"\n";
+    let (host, map, urls) =
+        setup(&[("shared.sail", shared), ("a.sail", parent), ("b.sail", parent)], &[1, 2], vec![]);
+    let analysis = snapshot(&host, &map);
+    let file = analysis.file(&urls[0]).unwrap();
+    let change = analysis
+        .structural_search_replace(
+            FileId::from_raw(0),
+            file.position_at(shared.rfind('1').unwrap()),
+            "1 ==>> 2",
+            false,
+            &[],
+            &Default::default(),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(change.source_file_edits.len(), 1);
+    assert_eq!(change.source_file_edits[&FileId::from_raw(0)].len(), 1);
+
+    let shared = "$ifdef CTXA\nprivate val f : unit -> int\nfunction f() = 1\n$else\nprivate val f : unit -> int\nfunction f() = 1\n$endif\n";
+    let a = "$include \"shared.sail\"\n";
+    let b = "$define CTXA\n$include \"shared.sail\"\n";
+    let (host, map, urls) =
+        setup(&[("shared.sail", shared), ("a.sail", a), ("b.sail", b)], &[1, 2], vec![]);
+    let analysis = snapshot(&host, &map);
+    let file = analysis.file(&urls[0]).unwrap();
+    let change = analysis
+        .structural_search_replace(
+            FileId::from_raw(0),
+            file.position_at(0),
+            "1 ==>> 2",
+            false,
+            &[],
+            &Default::default(),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(change.source_file_edits.len(), 1);
+    assert_eq!(
+        change.source_file_edits[&FileId::from_raw(0)].len(),
+        2,
+        "each branch is edited only in its active context: {change:?}"
+    );
+}
+
+#[test]
+fn shared_unused_fix_requires_a_diagnostic_in_every_active_context() {
+    let shared = "private val f : unit -> int\nfunction f() = { let unused = input(); 0 }\n";
+    for same in [true, false] {
+        let a = if same {
+            "val input : unit -> int\n$include \"shared.sail\"\n"
+        } else {
+            "enum E = {unused}\nval input : unit -> E\n$include \"shared.sail\"\n"
+        };
+        let b = "val input : unit -> int\n$include \"shared.sail\"\n";
+        let (host, map, urls) = setup(
+            &[("shared.sail", shared), ("a.sail", a), ("b.sail", b)],
+            &[1, 2],
+            vec![
+                base_db::module_graph::ModuleData {
+                    files: vec![FileId::from_raw(1)],
+                    requires: vec![],
+                },
+                base_db::module_graph::ModuleData {
+                    files: vec![FileId::from_raw(2)],
+                    requires: vec![],
+                },
+            ],
+        );
+        let analysis = snapshot(&host, &map);
+        let diagnostics =
+            analysis.file_diagnostics(FileId::from_raw(0), &Default::default()).unwrap();
+        let unused = diagnostics
+            .iter()
+            .filter(|d| d.code.as_str() == "unused-variable")
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(!unused.is_empty(), "same={same}: {diagnostics:?}");
+        let actions = analysis
+            .code_actions(
+                &urls[0],
+                unused[0].range.range,
+                &unused,
+                &Default::default(),
+                &Default::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            actions.iter().any(|a| a.title == "Rename `unused` to `_unused`"),
+            same,
+            "same={same}: {actions:?}"
         );
     }
 }

@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "workload": {"files": 128, "functionsPerFile": 8, "cycles": 24, "repeats": 5},
+  "comparison": {
+    "maximumRegressionRatio": 1.5,
+    "noiseFloorMs": 15,
+    "firstCompletionNoiseFloorMs": 100,
+    "minimumCancelledResponses": 1
+  },
+  "scope": "Fresh server processes and fixed synthetic Sail projects; same-host alternating release binaries. Cold OS caches and cross-machine parity are not asserted."
+}

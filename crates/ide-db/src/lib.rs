@@ -43,6 +43,7 @@ pub mod annotations;
 pub mod apply_change;
 /// Assist data structures shared between ide-assists and ide-diagnostics.
 pub mod assists;
+pub mod cache;
 pub mod db_query;
 pub mod defs;
 pub mod documentation;

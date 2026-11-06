@@ -989,3 +989,26 @@ fn primed_import_catalog_keeps_inactive_candidates_fresh() {
     analysis.prime_import_catalog(&hir::CancellationToken::never()).unwrap();
     assert_eq!(imports(&analysis), after);
 }
+
+#[test]
+fn equivalent_shared_auto_include_keeps_the_all_visit_validated_fix() {
+    use base_db::module_graph::ModuleData;
+    let shared = "function use() -> unit = helper()\n";
+    let (host, map, urls) = setup(
+        &[
+            ("a.sail", "$include \"shared.sail\"\n"),
+            ("b.sail", "$include \"shared.sail\"\n"),
+            ("shared.sail", shared),
+            ("helper.sail", "val helper : unit -> unit\n"),
+        ],
+        &[0, 1],
+        vec![
+            ModuleData { files: vec![FileId::from_raw(0)], requires: vec![] },
+            ModuleData { files: vec![FileId::from_raw(1)], requires: vec![] },
+        ],
+    );
+    let analysis = snapshot(&host, &map);
+    let edits = fixes(&analysis, &urls[2], shared, "helper");
+    assert_eq!(edits.len(), 1, "an include accepted by all-visit preview must remain available");
+    assert!(edits[0].new_text.contains("helper.sail"));
+}

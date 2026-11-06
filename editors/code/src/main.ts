@@ -10,6 +10,8 @@ import * as path from "path";
 import * as os from "os";
 import * as fs from "fs";
 import { managedServerPath } from "./installation";
+import { registerDiagnosticReport } from "./diagnosticReport";
+import { registerRunnables } from "./runnables";
 import { ProjectGraphEntry, GraphNode, graphChildren, isCycle } from "./projectGraph";
 import { registerStructuralReplace } from "./ssr";
 import { AnalysisContext, formatAnalysisContext } from "./analysisContext";
@@ -84,6 +86,7 @@ export interface ExtensionApi {
         status(): ServerStatus | undefined;
         projectGraph(): readonly ProjectGraphEntry[];
         ssr: { pending(): number; stale(): boolean };
+        runnables: ReturnType<typeof registerRunnables>;
     };
 }
 
@@ -100,8 +103,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     statusBar.show();
     context.subscriptions.push(statusBar);
 
-    const serverPath = getServerPath(context);
+    let startupError: string | undefined;
+    let serverPath: string | undefined;
+    registerDiagnosticReport(
+        context,
+        () => client,
+        () => ({ serverPath, startupError }),
+    );
+    serverPath = getServerPath(context);
     if (!serverPath) {
+        startupError =
+            "The server binary could not be resolved; check server.path or the managed installation";
         showMissingServerError();
         return;
     }
@@ -136,10 +148,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     };
 
     client = new LanguageClient("sail-lsp", "Sail Language Server", serverOptions, clientOptions);
+    const runnables = registerRunnables(context, () => client, getExtraEnv);
     client.onNotification("sail-lsp/serverStatus", (status: ServerStatus) => showStatus(status));
     client.onNotification("sail-lsp/projectGraphChanged", () => {
         refreshProjectGraph();
         refreshIncludeContext();
+        runnables.refresh();
     });
 
     client.onDidChangeState((event) => {
@@ -157,6 +171,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
         client = undefined;
         showStatus({ health: "error", quiescent: true, message: "The server failed to start." });
         const message = error instanceof Error ? error.message : String(error);
+        startupError = message;
         outputChannel.appendLine(`[sail-lsp] failed to start: ${message}`);
         void vscode.window.showErrorMessage(`Failed to start sail-lsp: ${message}`);
         return;
@@ -167,6 +182,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
             status: () => latestStatus,
             projectGraph: () => projectGraph,
             ssr,
+            runnables,
         },
     };
 }
@@ -313,10 +329,15 @@ function showStatus(status: ServerStatus): void {
     const tooltip = new vscode.MarkdownString("", true);
     tooltip.appendText(status.message ?? (status.quiescent ? "Sail: ready" : "Sail: loading"));
     tooltip.appendMarkdown(
-        "\n\n[Show status](command:sail-lsp.analyzerStatus) · [Recheck](command:sail-lsp.recheck) · [Cancel](command:sail-lsp.cancelFlycheck)",
+        "\n\n[Show status](command:sail-lsp.analyzerStatus) · [Export report](command:sail-lsp.exportDiagnosticReport) · [Recheck](command:sail-lsp.recheck) · [Cancel](command:sail-lsp.cancelFlycheck)",
     );
     tooltip.isTrusted = {
-        enabledCommands: ["sail-lsp.analyzerStatus", "sail-lsp.recheck", "sail-lsp.cancelFlycheck"],
+        enabledCommands: [
+            "sail-lsp.analyzerStatus",
+            "sail-lsp.exportDiagnosticReport",
+            "sail-lsp.recheck",
+            "sail-lsp.cancelFlycheck",
+        ],
     };
     statusBar.tooltip = tooltip;
 }

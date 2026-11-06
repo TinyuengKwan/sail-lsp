@@ -46,7 +46,7 @@ jobs:
           SAIL_LSP_BUILD_REVISION: ${{ github.sha }}
           CARGO_TARGET_DIR: ${{ github.workspace }}/target/distribution
           CARGO_BUILD_TARGET: ${{ matrix.target }}
-          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || env.SAIL_LSP_LINUX_RUSTFLAGS }}
           CFLAGS: ${{ runner.os == 'Windows' && '/utf-8' || '' }}
           CXXFLAGS: ${{ runner.os == 'Windows' && '/utf-8' || '' }}
         run: |

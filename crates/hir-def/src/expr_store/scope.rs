@@ -178,8 +178,19 @@ impl ExprScopes {
 
     /// Resolve a name in a scope by walking the chain.
     pub fn resolve_name_in_scope(&self, scope: ScopeId, name: &Name) -> Option<&ScopeEntry> {
-        self.scope_chain(Some(scope))
-            .find_map(|scope| self.entries(scope).iter().find(|it| it.name == *name))
+        self.resolve_name_with_scope(scope, name).map(|(_, entry)| entry)
+    }
+
+    /// Co-declarations in a mapping pattern (including vector slices) share
+    /// one binding in their nearest declaring scope, not across sibling arms.
+    pub fn resolve_name_with_scope(
+        &self,
+        scope: ScopeId,
+        name: &Name,
+    ) -> Option<(ScopeId, &ScopeEntry)> {
+        self.scope_chain(Some(scope)).find_map(|scope| {
+            self.entries(scope).iter().find(|it| it.name == *name).map(|entry| (scope, entry))
+        })
     }
 
     /// Get the innermost scope that contains `expr`.

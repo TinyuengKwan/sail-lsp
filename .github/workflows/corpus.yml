@@ -1,9 +1,7 @@
 name: Pinned corpus and editor regression
 
 on:
-  pull_request:
-  push:
-    branches: [main]
+  workflow_call:
   workflow_dispatch:
 
 concurrency:
@@ -43,6 +41,11 @@ jobs:
           repository: riscv/sail-riscv
           ref: 20690c8a8d6ccbb0e6adea8e2977efd3adaf8391
           path: sail-riscv
+      - uses: actions/checkout@v4
+        with:
+          repository: rems-project/sail-arm
+          ref: 7d0581642d0e3aaca367bbc5650aca7c53057543
+          path: sail-arm
       - uses: dtolnay/rust-toolchain@1.97.1
       - name: Install solver
         run: |
@@ -57,7 +60,7 @@ jobs:
         run: opam install . --deps-only --yes
       - name: Build pinned stock compiler
         working-directory: sail
-        run: opam exec -- dune build --release src/bin/sail.exe
+        run: opam exec -- dune build --release src/bin/sail.exe src/sail_c_backend/sail_plugin_c.cmxs
       - name: Build server and measurement tools
         run: cargo build --release -p sail-lsp --bin sail-lsp --examples
       - name: Record provenance
@@ -72,6 +75,16 @@ jobs:
           sha256sum target/release/sail-lsp "$SAIL_ORACLE_BIN" > target/corpus/binaries.sha256
       - name: Manifest oracle (missing inputs fail)
         run: cargo test -p project-model upstream_oracle -- --ignored --nocapture 2>&1 | tee target/corpus/project-oracle.log
+      - name: Classified multi-model project oracle
+        run: |
+          cargo build --release -p project-model --example project_oracle
+          python3 scripts/test_upstream_monitor.py
+          python3 scripts/upstream_monitor.py --compiler "$SAIL_ORACLE_BIN" --lsp-oracle target/release/examples/project_oracle --sail-src ../sail --riscv ../sail-riscv --arm-src ../sail-arm --output target/corpus/project-monitor.json
+      - name: Project runnable exports with the stock compiler
+        env:
+          SAIL_RUNNABLE_AUDIT_DIR: ${{ github.workspace }}/sail-lsp/target/corpus/runnables-export
+          SAIL_RUNNABLE_PLUGIN_DIR: ${{ github.workspace }}/sail/_build/default/src/sail_c_backend
+        run: cargo test -p sail-lsp project_runnable_exports_with_the_real_compiler -- --ignored --nocapture 2>&1 | tee target/corpus/runnable-export.log
       - name: Alias kind oracle (missing compiler fails)
         run: cargo test -p ide upstream_kind_oracle -- --ignored --nocapture 2>&1 | tee target/corpus/kind-oracle.log
       - name: Formatter corpus safety and idempotence
@@ -140,4 +153,5 @@ jobs:
             sail-lsp/target/corpus/*.txt
             sail-lsp/target/corpus/*.sha256
             sail-lsp/target/corpus/formatter/report.json
+            sail-lsp/target/corpus/runnables-export/
           if-no-files-found: error

@@ -92,7 +92,7 @@ impl RootDatabase {
     pub fn with_event_callback(
         event_callback: Option<Box<dyn Fn(salsa::Event) + Send + Sync + 'static>>,
     ) -> Self {
-        let db = Self {
+        let mut db = Self {
             storage: ManuallyDrop::new(salsa::Storage::new(event_callback)),
             nonce: Nonce::default(),
             files: Files::default(),
@@ -107,6 +107,7 @@ impl RootDatabase {
             Default::default(),
             Default::default(),
         );
+        crate::cache::QueryCacheCapacities::default().apply(&mut db);
         db
     }
 

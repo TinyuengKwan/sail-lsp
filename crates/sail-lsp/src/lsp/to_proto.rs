@@ -128,6 +128,54 @@ pub fn hover(line_index: &LineIndex, h: &HoverResult, markdown: bool) -> lsp_typ
     }
 }
 
+/// Prefer versioned document edits when the client supports them. Legacy
+/// clients retain the `changes` form; closed documents have an unknown version.
+pub fn with_document_versions(
+    mut edit: lsp_types::WorkspaceEdit,
+    supported: bool,
+    version: impl Fn(&Url) -> Option<i32>,
+) -> lsp_types::WorkspaceEdit {
+    if !supported {
+        return edit;
+    }
+    use lsp_types::{
+        DocumentChangeOperation, DocumentChanges, OneOf, OptionalVersionedTextDocumentIdentifier,
+        TextDocumentEdit,
+    };
+    if let Some(changes) = edit.changes.take() {
+        let mut changes: Vec<_> = changes.into_iter().collect();
+        changes.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+        edit.document_changes = Some(DocumentChanges::Edits(
+            changes
+                .into_iter()
+                .map(|(uri, edits)| TextDocumentEdit {
+                    text_document: OptionalVersionedTextDocumentIdentifier {
+                        version: version(&uri),
+                        uri,
+                    },
+                    edits: edits.into_iter().map(OneOf::Left).collect(),
+                })
+                .collect(),
+        ));
+    }
+    match &mut edit.document_changes {
+        Some(DocumentChanges::Edits(edits)) => {
+            for edit in edits {
+                edit.text_document.version = version(&edit.text_document.uri);
+            }
+        }
+        Some(DocumentChanges::Operations(operations)) => {
+            for op in operations {
+                if let DocumentChangeOperation::Edit(edit) = op {
+                    edit.text_document.version = version(&edit.text_document.uri);
+                }
+            }
+        }
+        None => {}
+    }
+    edit
+}
+
 /// Convert a `SourceChange` to an LSP `WorkspaceEdit`.
 /// via the provided lookup closure, then converts each file's
 /// TextEdits to LSP TextEdits using line indices.
@@ -323,6 +371,9 @@ pub fn diagnostic(
         severity: Some(diagnostic_severity(d.severity)),
         code: Some(lsp_types::NumberOrString::String(d.code.as_str().to_string())),
         message: d.message.clone(),
+        data: d
+            .unknown_reason
+            .map(|reason| serde_json::json!({"analysis": {"status":"unknown", "reason":reason}})),
         tags: if tags.is_empty() { None } else { Some(tags) },
         related_information: (!related.is_empty()).then_some(related),
         ..Default::default()

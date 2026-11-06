@@ -1,4 +1,6 @@
 //! Salsa tracked queries for type inference.
+//! Nonzero seed LRU literals enable Salsa 0.25 runtime capacity setters; the
+//! analysis host installs configured limits (including unbounded retention).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -42,7 +44,7 @@ pub fn declaring_type_file(
 ///
 /// Uses structural semantic equality so that
 /// body-only edits skip downstream re-computation.
-#[salsa::tracked(returns(ref))]
+#[salsa::tracked(returns(ref), lru = 4294967295)]
 pub fn top_level_env(db: &dyn salsa::Database, input: FileText) -> ArcTopLevelEnv {
     let _span = tracing::info_span!("top_level_env").entered();
     let text: &str = input.text(db);
@@ -141,8 +143,8 @@ impl std::hash::Hash for ArcInferenceResult {
 ///
 /// Returns the InferenceResult directly, suitable for SourceAnalyzer
 /// and other consumers that need per-expression type information.
-/// No LRU — salsa retains all results until GC.
-#[salsa::tracked(returns(ref))]
+/// LRU capacity is configurable by the analysis host; zero retains all results.
+#[salsa::tracked(returns(ref), lru = 4294967295)]
 pub fn infer_for_body<'db>(
     db: &'db dyn salsa::Database,
     id: hir_def::def_query::DefWithBodyId<'db>,
@@ -157,7 +159,7 @@ pub fn infer_for_body<'db>(
 /// Does NOT merge InferenceResult across callables -- only collects
 /// diagnostics for workspace-level diagnostic push. Consumers that
 /// need per-callable type info should query `infer` directly.
-#[salsa::tracked(returns(ref))]
+#[salsa::tracked(returns(ref), lru = 4294967295)]
 pub fn infer_body(db: &dyn salsa::Database, input: FileText) -> ArcInferenceResult {
     let callable_ids = hir_def::def_query::file_def_with_body_ids(db, input);
     let mut all_diagnostics = Vec::new();
@@ -176,9 +178,9 @@ pub fn infer_body(db: &dyn salsa::Database, input: FileText) -> ArcInferenceResu
 /// Per-callable inference query (salsa-tracked).
 ///
 /// Finest-grained inference query: editing one function body only
-/// re-infers that function. No LRU -- salsa retains all results
-/// until GC.
-#[salsa::tracked(returns(ref))]
+/// re-infers that function. The analysis host can bound retained results
+/// without changing semantic dependencies.
+#[salsa::tracked(returns(ref), lru = 4294967295)]
 pub fn infer<'db>(
     db: &'db dyn salsa::Database,
     id: hir_def::def_query::DefWithBodyId<'db>,
@@ -309,6 +311,21 @@ pub fn transitive_effects(db: &dyn salsa::Database, input: FileText) -> ArcTrans
 
 // ── Backward-compatible aliases (old `_query` names) ──────────────
 // These allow downstream code that hasn't been updated yet to keep
+
+/// Configure retained query values without changing dependency tracking.
+/// Zero disables LRU. The caller must own exclusive database access.
+pub fn set_inference_cache_capacities(
+    db: &mut dyn salsa::Database,
+    environment: usize,
+    inference: usize,
+) {
+    let environment = if environment == 0 { usize::MAX } else { environment };
+    let inference = if inference == 0 { usize::MAX } else { inference };
+    top_level_env::set_lru_capacity(db, environment);
+    infer::set_lru_capacity(db, inference);
+    infer_for_body::set_lru_capacity(db, inference);
+    infer_body::set_lru_capacity(db, inference);
+}
 
 #[cfg(test)]
 mod tests {

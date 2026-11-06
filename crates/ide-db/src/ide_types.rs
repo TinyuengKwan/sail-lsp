@@ -9,12 +9,18 @@ use crate::line_index::TextRange;
 pub type Cancellable<T> = Result<T, CancelledError>;
 
 /// Error type for cancelled queries.
-#[derive(Debug)]
-pub struct CancelledError;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CancelledError {
+    PendingWrite,
+    PropagatedPanic,
+}
 
 impl std::fmt::Display for CancelledError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "query cancelled")
+        f.write_str(match self {
+            Self::PendingWrite => "query cancelled",
+            Self::PropagatedPanic => "dependent query panicked",
+        })
     }
 }
 

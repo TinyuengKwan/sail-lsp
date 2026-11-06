@@ -197,6 +197,18 @@ jobs:
     permissions:
       contents: read
 
+  performance:
+    name: Editor performance regression
+    uses: ./.github/workflows/performance.yaml
+    permissions:
+      contents: read
+
+  corpus:
+    name: Pinned upstream and editor corpus
+    uses: ./.github/workflows/corpus.yml
+    permissions:
+      contents: read
+
   typos:
     name: Typos
     runs-on: ubuntu-latest
@@ -211,7 +223,7 @@ jobs:
   conclusion:
     name: Conclusion
     if: always()
-    needs: [rust, rustfmt, clippy, vscode, distribution, typos]
+    needs: [rust, rustfmt, clippy, vscode, distribution, performance, corpus, typos]
     runs-on: ubuntu-latest
     steps:
       - name: Check job results

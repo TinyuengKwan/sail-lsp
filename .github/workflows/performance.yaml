@@ -1,0 +1,64 @@
+name: Editor performance regression
+on:
+  workflow_call:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: performance-baseline
+          workspaces: '. -> target/performance-build/baseline'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: performance-candidate
+          workspaces: '. -> target/performance-build/candidate'
+      - name: Select actual comparison source
+        shell: bash
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BASE: ${{ github.event.before }}
+        run: |
+          base="$PR_BASE"
+          if [ -z "$base" ]; then base="$PUSH_BASE"; fi
+          if [ -z "$base" ] || [ "$base" = 0000000000000000000000000000000000000000 ]; then
+            base=$(git rev-parse HEAD^)
+          fi
+          git cat-file -e "$base^{commit}"
+          echo "BASE_SHA=$base" >> "$GITHUB_ENV"
+          git worktree add --detach "$RUNNER_TEMP/sail-lsp-perf-base" "$base"
+      - name: Build both release servers with the same toolchain and SMT linkage
+        shell: bash
+        run: |
+          mkdir -p target/performance-results
+          SAIL_LSP_BUILD_REVISION="$BASE_SHA" cargo build --release --locked --features vendored -p sail-lsp --manifest-path "$RUNNER_TEMP/sail-lsp-perf-base/Cargo.toml" --target-dir "$GITHUB_WORKSPACE/target/performance-build/baseline"
+          cp target/performance-build/baseline/release/sail-lsp target/performance-results/baseline-server
+          SAIL_LSP_BUILD_REVISION="$GITHUB_SHA" cargo build --release --locked --features vendored -p sail-lsp --target-dir "$GITHUB_WORKSPACE/target/performance-build/candidate"
+          cp target/performance-build/candidate/release/sail-lsp target/performance-results/candidate-server
+          rustc --version > target/performance-results/rustc.txt
+          echo "$BASE_SHA" > target/performance-results/baseline-source.txt
+          git rev-parse HEAD > target/performance-results/candidate-source.txt
+      - name: Alternating same-host repeated stdio comparisons
+        shell: bash
+        run: |
+          affinity=$(python3 -c 'import os; print(",".join(map(str,sorted(os.sched_getaffinity(0))[:2])))')
+          python3 scripts/performance_gate.py --baseline-server target/performance-results/baseline-server --server target/performance-results/candidate-server --cpu-affinity "$affinity" --output target/performance-results/measurements
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: editor-performance-comparison
+          path: |
+            target/performance-results/**/*.json
+            target/performance-results/**/*.log
+            target/performance-results/*.txt
+          if-no-files-found: error

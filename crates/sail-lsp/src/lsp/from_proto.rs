@@ -7,6 +7,44 @@ use ide_db::line_index::{LineCol, LineIndex, TextRange};
 use ide_diagnostics::{Diagnostic, Severity};
 use lsp_types::{Position, Range};
 
+/// Compare file identities after decoding URI escapes and the native drive
+/// prefix. Clients may send `file:///c%3A/...` for a path loaded as `C:/...`.
+/// Keep non-file URIs and query/fragment identities exact.
+pub(crate) fn same_document(a: &url::Url, b: &url::Url) -> bool {
+    a == b
+        || (a.scheme() == "file"
+            && b.scheme() == "file"
+            && a.query() == b.query()
+            && a.fragment() == b.fragment()
+            && a.to_file_path().ok().zip(b.to_file_path().ok()).is_some_and(|(a, b)| a == b))
+}
+
+#[cfg(test)]
+mod document_identity_tests {
+    use super::*;
+
+    #[test]
+    fn escaped_file_paths_share_identity_without_aliasing_other_documents() {
+        let plain = url::Url::from_file_path(std::env::temp_dir().join("main.sail")).unwrap();
+        let escaped = url::Url::parse(&plain.as_str().replace("main.sail", "%6dain.sail")).unwrap();
+        assert!(same_document(&plain, &escaped));
+        assert!(!same_document(&plain, &plain.join("other.sail").unwrap()));
+        let mut fragment = plain.clone();
+        fragment.set_fragment(Some("other"));
+        assert!(!same_document(&plain, &fragment));
+        assert!(!same_document(&url::Url::parse("untitled:///tmp/main.sail").unwrap(), &plain));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn vscode_drive_uri_matches_native_file_uri() {
+        let native = url::Url::parse("file:///C:/model/main.sail").unwrap();
+        let editor = url::Url::parse("file:///c%3A/model/main.sail").unwrap();
+        assert!(same_document(&native, &editor));
+        assert!(!same_document(&native, &url::Url::parse("file:///D:/model/main.sail").unwrap()));
+    }
+}
+
 /// Convert an LSP Position to a byte offset.
 ///
 /// `Position::character` is a **UTF-16** column: that is LSP's default

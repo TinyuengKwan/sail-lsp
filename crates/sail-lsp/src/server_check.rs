@@ -35,6 +35,221 @@ use lsp_types::Url;
 /// `SAIL_DIR` is process-wide, so fixtures run one at a time.
 static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+#[test]
+fn escaped_file_uri_preserves_project_tasks_and_navigation() {
+    let mut server = ServerFixture::new(
+        "escaped-project-file-uri",
+        &[("sail.proj", "Main { files main.sail }\n"), ("main.sail", "val answer : int\n")],
+    );
+    server.did_open("main.sail", "val answer : int\n");
+    server.pull("main.sail");
+    let normal = server.url("main.sail").to_string();
+    let escaped = normal.replace("main.sail", "%6dain.sail");
+    let params = serde_json::json!({"textDocument":{"uri":escaped}});
+    let tasks = server.ask("experimental/runnables", params.clone());
+    assert_eq!(tasks.as_array().unwrap().len(), 1, "{tasks}");
+    let manifest = server.ask("sail-lsp/openProjectManifest", params.clone());
+    assert_eq!(manifest["uri"], server.url("sail.proj").to_string());
+    let parents = server.ask("sail-lsp/parentModule", params);
+    assert_eq!(parents.as_array().unwrap().len(), 1, "{parents}");
+}
+
+#[test]
+fn project_runnables_use_loaded_overrides_and_revalidate_manifest_and_task_changes() {
+    use serde_json::json;
+    let settings = |adapter: &str| {
+        json!({
+            "workspace": {
+                "projectVariables": {"MODE":"global"}, "projectModules":["NotARoot"],
+                "linkedProjects":[
+                    {"projectFile":"a.sail_project","projectVariables":{"MODE":"A value"},"projectModules":["A"]},
+                    {"projectFile":"b.sail_project","projectVariables":{"MODE":"B value"},"projectModules":["B"]}
+                ]
+            },
+            "flycheck":{"enable":false,"command":"/tool chain/chosen-sail"},
+            "runnables":{"tasks":[
+                {"label":"Export C","kind":"export","project":"a.sail_project","command":"${sail}","args":["-c","${projectArgs}"]},
+            {"label":"Suite","kind":"test","command":adapter,"args":["${projectContext}"],"environment":{"API_TOKEN":"runnable-environment-value-must-not-be-exported"}}
+            ]}
+        })
+    };
+    let a = "variable MODE = default_mode\nA { files a.sail, shared.sail }\n";
+    let mut server = ServerFixture::open_with_options(
+        "project-runnables",
+        &[
+            ("a.sail_project", a),
+            ("b.sail_project", "variable MODE = default_mode\nB { files b.sail, shared.sail }\n"),
+            ("a.sail", "val a : int\n"),
+            ("b.sail", "val b : int\n"),
+            ("shared.sail", "val shared : int\n"),
+        ],
+        Root::Real,
+        None,
+        settings("adapter-one"),
+    );
+    assert_eq!(
+        server.capabilities["experimental"]["runnables"]["kinds"],
+        json!(["sail-check", "shell"])
+    );
+    let list = |s: &mut ServerFixture| {
+        s.ask("experimental/runnables", json!({"textDocument":{"uri":s.url("shared.sail")}}))
+    };
+    let first = list(&mut server);
+    let entries = first.as_array().unwrap();
+    assert_eq!(entries.len(), 5, "{first}");
+    assert!(entries.iter().all(|r| r.get("disabled").is_none()), "{first}");
+    let export = entries.iter().find(|r| r["args"]["kind"] == "export").unwrap();
+    assert_eq!(export["args"]["program"], "/tool chain/chosen-sail");
+    assert_eq!(
+        export["args"]["args"],
+        json!(["-c", "--project", "a.sail_project", "--variable", "MODE=A value", "A"])
+    );
+    let suites: Vec<_> = entries.iter().filter(|r| r["args"]["kind"] == "test").collect();
+    let contexts: Vec<serde_json::Value> = suites
+        .iter()
+        .map(|r| serde_json::from_str(r["args"]["args"][0].as_str().unwrap()).unwrap())
+        .collect();
+    assert_eq!(contexts[0]["variables"]["MODE"], "A value");
+    assert_eq!(contexts[0]["modules"], json!(["A"]));
+    assert_eq!(contexts[1]["variables"]["MODE"], "B value");
+    assert_eq!(contexts[1]["modules"], json!(["B"]));
+    assert_ne!(contexts[0]["manifest"], contexts[1]["manifest"]);
+    let report = server.ask("sail-lsp/diagnosticReport", json!({}));
+    assert!(!report.to_string().contains("runnable-environment-value-must-not-be-exported"));
+    assert_eq!(
+        report["effectiveConfiguration"]["runnables"]["tasks"][1]["environment"]["API_TOKEN"],
+        "<redacted>"
+    );
+    server.configure(settings("adapter-two"));
+    let changed = list(&mut server);
+    let updated = changed.as_array().unwrap().iter().find(|r| r["id"] == suites[0]["id"]).unwrap();
+    assert_ne!(updated["fingerprint"], suites[0]["fingerprint"]);
+    assert_eq!(updated["args"]["program"], "adapter-two");
+    server.did_open("a.sail_project", &format!("{a}// unsaved manifest\n"));
+    let draft = list(&mut server);
+    let entries = draft.as_array().unwrap();
+    assert!(
+        entries
+            .iter()
+            .filter(|r| r["project"]["uri"] == server.url("a.sail_project").as_str())
+            .all(|r| r["disabled"].as_str().unwrap().contains("manifest")),
+        "{draft}"
+    );
+    assert!(
+        entries
+            .iter()
+            .filter(|r| r["project"]["uri"] == server.url("b.sail_project").as_str())
+            .all(|r| r.get("disabled").is_none()),
+        "{draft}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn project_runnable_check_runs_with_automatic_flycheck_disabled() {
+    use serde_json::json;
+    use std::os::unix::fs::PermissionsExt;
+    let mut server = ServerFixture::new_project(
+        "manual-runnable-check",
+        &[("main.sail", "function answer() -> int = 42\n")],
+    );
+    let log = server.base.join("compiler-arguments.txt");
+    let checker = server.base.join("chosen compiler");
+    std::fs::write(
+        &checker,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$PWD\" \"$@\" > '{}'\n",
+            log.display().to_string().replace('\'', "'\"'\"'")
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&checker, std::fs::Permissions::from_mode(0o755)).unwrap();
+    server.configure(json!({"flycheck":{"enable":false,"command":checker,"debounceMs":0},"workspace":{"projectModules":["Main"],"projectVariables":{"CHOSEN":"value with spaces"}}}));
+    server.log.clear();
+    server.wait_until("project configuration reload", |s| {
+        s.log.iter().any(|line| line.contains("ready"))
+    });
+    assert!(!log.exists(), "disabled automatic checks must not launch a compiler");
+    let list = server
+        .ask("experimental/runnables", json!({"textDocument":{"uri":server.url("main.sail")}}));
+    let check = &list[0];
+    assert_eq!(check["kind"], "sail-check");
+    server.notify("sail-lsp/runFlycheck", check["args"].clone());
+    server.wait_until("explicit compiler check", |_| log.exists());
+    let captured = std::fs::read_to_string(log).unwrap();
+    assert!(
+        captured.contains(
+            "--project\nsail.proj\n--just-check\n--variable\nCHOSEN=value with spaces\nMain\n"
+        ),
+        "{captured}"
+    );
+}
+
+#[test]
+#[ignore = "requires a real stock Sail compiler in SAIL_ORACLE_BIN; exports C using the discovered task"]
+fn project_runnable_exports_with_the_real_compiler_and_selected_configuration() {
+    use serde_json::json;
+    let compiler = PathBuf::from(
+        std::env::var_os("SAIL_ORACLE_BIN").expect("set SAIL_ORACLE_BIN to a stock Sail compiler"),
+    );
+    let environment: std::collections::BTreeMap<String, String> =
+        std::env::var_os("SAIL_RUNNABLE_PLUGIN_DIR")
+            .map(|path| {
+                ("SAIL_PLUGIN_DIR".into(), PathBuf::from(path).to_string_lossy().into_owned())
+            })
+            .into_iter()
+            .collect();
+    let mut server = ServerFixture::open_with_options("runnable-real-export", &[
+        ("sail.proj", "variable CHOOSE = false\nMain { files if $CHOOSE then chosen.sail else broken.sail }\n"),
+        ("chosen.sail", "function answer() -> int = 42\nval main : unit -> unit\nfunction main() = ()\n"),
+        ("broken.sail", "function this is deliberately invalid\n"),
+    ], Root::Real, None, json!({
+        "workspace":{"projectVariables":{"CHOOSE":false},"projectModules":["NotTheRoot"],"strictBitvector":true,
+            "linkedProjects":[{"projectFile":"sail.proj","projectVariables":{"CHOOSE":true},"projectModules":["Main"]}]},
+        "flycheck":{"command":compiler},
+        "runnables":{"tasks":[{"label":"Export C","kind":"export","command":"${sail}","args":["-c","${projectArgs}","-o","${projectDir}/output name/model"],"environment":environment}]}
+    }));
+    let list = server
+        .ask("experimental/runnables", json!({"textDocument":{"uri":server.url("chosen.sail")}}));
+    let task: crate::lsp_ext::Runnable = serde_json::from_value(list[1].clone()).unwrap();
+    assert!(task.disabled.is_none(), "{list}");
+    let crate::lsp_ext::RunnableCommand::Process(args) = task.command else {
+        panic!("export process expected")
+    };
+    assert_eq!(std::path::Path::new(&args.program), compiler);
+    std::fs::create_dir_all(server.root.join("output name")).unwrap();
+    let version = std::process::Command::new(&args.program)
+        .arg("--version")
+        .envs(&args.environment)
+        .env_remove("SAIL_DIR")
+        .output()
+        .unwrap();
+    assert!(version.status.success());
+    let result = std::process::Command::new(&args.program)
+        .args(&args.args)
+        .current_dir(&args.cwd)
+        .envs(&args.environment)
+        .env_remove("SAIL_DIR")
+        .output()
+        .expect("compiler process must start");
+    if let Some(directory) = std::env::var_os("SAIL_RUNNABLE_AUDIT_DIR") {
+        let directory = PathBuf::from(directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("invocation.json"), serde_json::to_string_pretty(&json!({
+            "program":args.program,"args":args.args,"cwd":args.cwd,"environment":args.environment,
+            "version":String::from_utf8_lossy(&version.stdout),"exitCode":result.status.code(),
+            "stdout":String::from_utf8_lossy(&result.stdout),"stderr":String::from_utf8_lossy(&result.stderr),
+        })).unwrap()).unwrap();
+        if result.status.success() {
+            std::fs::copy(server.root.join("output name/model.c"), directory.join("model.c"))
+                .unwrap();
+        }
+    }
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    let generated = std::fs::read_to_string(server.root.join("output name/model.c")).unwrap();
+    assert!(generated.contains("zmain"), "selected program entry must reach the generated model");
+}
+
 /// How long a scenario waits for the server to answer before failing.
 const PATIENCE: Duration = Duration::from_secs(60);
 
@@ -625,8 +840,8 @@ fn mentions(diags: &[lsp_types::Diagnostic], needle: &str) -> bool {
 /// with no diagnostics at all, exactly as the release binary did. What it
 /// does *not* catch on a fixture this small is the second, unguarded call
 /// site on its own, because priming here finishes before the wave starts;
-/// `eviction_waits_for_the_pool_and_precedes_the_wave` holds that one by
-/// counting call sites.
+/// `eviction_waits_for_the_pool_and_the_next_wave_publishes_its_findings`
+/// also holds a worker snapshot across an attempted idle collection.
 #[test]
 fn initialization_options_select_the_project_before_discovery() {
     let source = "function bad() -> int = true\n";
@@ -1602,7 +1817,12 @@ fn repeated_include_contexts_survive_editor_requests_and_edits() {
             "position": {"line": 5, "character": 21}, "newName": "renamed_second"
         }),
     );
-    let changes = rename["changes"].as_object().expect("rename edits");
+    let changes: serde_json::Map<String, serde_json::Value> = rename["documentChanges"]
+        .as_array()
+        .expect("versioned rename edits")
+        .iter()
+        .map(|doc| (doc["textDocument"]["uri"].as_str().unwrap().to_owned(), doc["edits"].clone()))
+        .collect();
     assert!(changes.contains_key(server.url("shared.sail").as_str()), "{rename}");
     assert!(changes.contains_key(server.url("b.sail").as_str()), "{rename}");
     assert!(!changes.contains_key(server.url("a.sail").as_str()), "{rename}");
@@ -1794,15 +2014,16 @@ fn repeated_manifest_roots_keep_topological_module_owners() {
         "textDocument/rename",
         serde_json::json!({
             "textDocument": {"uri": server.url("shared.sail")},
-            "position": {"line": 0, "character": 5}, "newName": "unsafe_rename"
+            "position": {"line": 0, "character": 5}, "newName": "renamed_repeated"
         }),
     );
     let response = server.wait_for_response(request);
-    assert!(
-        response.error.as_ref().is_some_and(|e| e.message.contains("include contexts")),
-        "{response:?}"
-    );
-    assert!(response.result.is_none());
+    assert!(response.error.is_none(), "equivalent contexts can rename despite an existing duplicate-definition error: {response:?}");
+    let edit = response.result.unwrap();
+    let documents = edit["documentChanges"].as_array().unwrap();
+    assert_eq!(documents.len(), 1);
+    assert_eq!(documents[0]["textDocument"]["version"], 2);
+    assert_eq!(documents[0]["edits"].as_array().unwrap().len(), 2, "{edit}");
     server.notify(
         "textDocument/didChange",
         serde_json::json!({
@@ -3122,7 +3343,24 @@ fn cross_file_rename_updates_signature_implementation_and_calls() {
         rename_params["newName"] = serde_json::json!("renamed_helper");
         let edit: lsp_types::WorkspaceEdit =
             serde_json::from_value(server.ask("textDocument/rename", rename_params)).unwrap();
-        let changes = edit.changes.expect("rename changes");
+        let Some(lsp_types::DocumentChanges::Edits(documents)) = edit.document_changes else {
+            panic!("expected versioned rename edits")
+        };
+        let changes: std::collections::HashMap<_, Vec<lsp_types::TextEdit>> = documents
+            .into_iter()
+            .map(|doc| {
+                (
+                    doc.text_document.uri,
+                    doc.edits
+                        .into_iter()
+                        .map(|e| match e {
+                            lsp_types::OneOf::Left(e) => e,
+                            _ => panic!("unexpected annotation"),
+                        })
+                        .collect(),
+                )
+            })
+            .collect();
         assert_eq!(changes.len(), 3, "{changes:?}");
         for (name, text) in files {
             let mut edits = changes[&server.url(name)].clone();
@@ -3202,6 +3440,11 @@ fn binding_quick_fixes_remove_their_diagnostic_after_application() {
             "unused",
             "Rename `unused` to `_unused`",
         ),
+        (
+            "function f() -> int = { let x = 1; let y = let x = 2 in x; y }\n",
+            "unused variable `x`",
+            "Rename `x` to `_x`",
+        ),
         ("function f() -> int = { return 1; 2 }\n", "unreachable", "Remove unreachable code"),
     ] {
         let mut server =
@@ -3238,6 +3481,13 @@ fn binding_quick_fixes_remove_their_diagnostic_after_application() {
             let start = crate::from_proto::offset(&index, edit.range.start);
             let end = crate::from_proto::offset(&index, edit.range.end);
             updated.replace_range(start..end, &edit.new_text);
+        }
+        if source.contains("let y = let x") {
+            assert_eq!(
+                updated,
+                source.replacen("let x", "let _x", 1),
+                "the fix must leave the used inner binding unchanged"
+            );
         }
         server.notify(
             "textDocument/didChange",
@@ -4049,9 +4299,23 @@ fn local_rename_preserves_shadowed_global_and_non_code_occurrences() {
         }),
     ))
     .unwrap();
-    let changes = edit.changes.unwrap();
-    assert_eq!(changes.len(), 1);
-    let mut edits = changes[&server.url("main.sail")].clone();
+    let Some(lsp_types::DocumentChanges::Edits(documents)) = edit.document_changes else {
+        panic!("versioned rename expected")
+    };
+    assert_eq!(documents.len(), 1);
+    assert_eq!(documents[0].text_document.uri, server.url("main.sail"));
+    assert_eq!(documents[0].text_document.version, Some(1));
+    let mut edits: Vec<lsp_types::TextEdit> = documents
+        .into_iter()
+        .next()
+        .unwrap()
+        .edits
+        .into_iter()
+        .map(|e| match e {
+            lsp_types::OneOf::Left(e) => e,
+            _ => panic!("unexpected annotation"),
+        })
+        .collect();
     assert_eq!(edits.len(), 2, "{edits:?}");
     edits.sort_by_key(|edit| std::cmp::Reverse(edit.range.start));
     let mut updated = source.to_owned();
@@ -4415,7 +4679,7 @@ fn signature_help_distinguishes_dependent_widths_and_aliases() {
 }
 
 #[test]
-fn ssr_selects_nested_matches_and_rejects_ambiguous_include_contexts() {
+fn ssr_selects_nested_matches_and_checks_shared_include_contexts() {
     {
         let source =
             "val combine : (int, int) -> int\nfunction f() -> int = combine(combine(1, 2), 3)\n";
@@ -4436,9 +4700,10 @@ fn ssr_selects_nested_matches_and_rejects_ambiguous_include_contexts() {
     );
     let request = server.request("experimental/ssr", serde_json::json!({"query":"1 ==>> 2","textDocument":{"uri":server.url("shared.sail")},"position":{"line":0,"character":27},"selections":[]}));
     let response = server.wait_for_response(request);
-    let error = response.error.expect("ambiguous context must not produce edits");
-    assert_eq!(error.code, lsp_server::ErrorCode::InvalidParams as i32);
-    assert!(error.message.contains("include"), "{error:?}");
+    assert!(response.error.is_none(), "same literal and same edit in both contexts: {response:?}");
+    let change = response.result.unwrap();
+    assert_eq!(change["documentChanges"].as_array().unwrap().len(), 1);
+    assert_eq!(change["documentChanges"][0]["edits"].as_array().unwrap().len(), 1);
 }
 
 #[test]
@@ -4621,6 +4886,7 @@ fn every_experimental_capability_has_a_handler() {
         ("ssrSearch", SsrSearch::METHOD),
         ("ssrPreview", SsrPreview::METHOD),
         ("includeContexts", IncludeContexts::METHOD),
+        ("diagnosticReport", crate::lsp_ext::DiagnosticReport::METHOD),
         ("matchingBrace", MatchingBrace::METHOD),
         ("joinLines", JoinLines::METHOD),
         ("onEnter", OnEnter::METHOD),
@@ -4958,4 +5224,116 @@ fn stale_include_selection_returns_an_intentional_protocol_error() {
     let error = server.wait_for_response(id).error.unwrap();
     assert_eq!(error.code, lsp_server::ErrorCode::InvalidParams as i32);
     assert!(error.message.contains("no longer active"));
+}
+
+#[test]
+fn diagnostic_report_contains_effective_context_and_no_source_text() {
+    let source = "function report_target() -> int = 42\n";
+    let mut server = ServerFixture::new_project("diagnostic-report", &[("main.sail", source)]);
+    server.did_open("main.sail", source);
+    let report = server.ask(
+        "sail-lsp/diagnosticReport",
+        serde_json::json!({"textDocument":{"uri":server.url("main.sail")}}),
+    );
+    assert_eq!(report["schemaVersion"], 1);
+    assert!(report["build"]["stdlibRevision"].is_string());
+    assert_eq!(report["workspace"]["loaded"], true);
+    assert_eq!(report["activeFile"]["uri"], server.url("main.sail").as_str());
+    assert!(report["nativeAnalysis"]["failures"].is_object());
+    assert!(report["effectiveConfiguration"]["workspace"].is_object());
+    assert!(
+        !serde_json::to_string(&report).unwrap().contains(source.trim()),
+        "reports do not contain source buffers"
+    );
+    std::fs::write(server.root.join("sail.proj"), "Main { files").unwrap();
+    server.notify(
+        "workspace/didChangeWatchedFiles",
+        serde_json::json!({"changes":[{"uri":server.url("sail.proj"),"type":2}]}),
+    );
+    server.wait_until("invalid manifest is visible", |s| {
+        s.statuses.last().is_some_and(|status| status.health == crate::lsp_ext::Health::Error)
+    });
+    let report = server.ask("sail-lsp/diagnosticReport", serde_json::json!({}));
+    assert!(report["workspace"]["loadError"].as_str().is_some_and(|s| !s.is_empty()));
+    assert_eq!(report["serverStatus"]["health"], "error");
+}
+
+#[test]
+fn shared_refactor_protocol_deduplicates_edits_rechecks_and_rejects_stale_actions() {
+    // Both includes contribute clauses to one scattered function. The stock
+    // upstream compiler accepts this project; ordinary duplicate definitions
+    // would already be invalid before any edit.
+    let shared = "\nfunction clause f(x) = { let saved = x; saved }\n";
+    let a = "val f : int -> int\nscattered function f\n$include \"shared.sail\"\n";
+    let b = "$include \"shared.sail\"\nend f\n";
+    let binding = shared.lines().nth(1).unwrap().find("x)").unwrap();
+    let mut server = ServerFixture::new(
+        "shared-safe-actions",
+        &[
+            ("sail.proj", "A { files a.sail } B { requires A files b.sail }"),
+            ("a.sail", a),
+            ("b.sail", b),
+            ("shared.sail", shared),
+        ],
+    );
+    server.did_open("shared.sail", shared);
+    assert_eq!(errors(&server.pull("shared.sail")), 0, "valid upstream scattered fixture");
+    let start = shared.lines().nth(1).unwrap().find("saved }").unwrap();
+    let result = server.ask("experimental/ssr", serde_json::json!({
+        "query":"$x ==>> $x", "textDocument":{"uri":server.url("shared.sail")},
+        "position":{"line":1,"character":start},
+        "selections":[{"start":{"line":1,"character":start},"end":{"line":1,"character":start+5}}]}));
+    let edits = result["documentChanges"].as_array().unwrap();
+    assert_eq!(edits.len(), 1, "{result}");
+    assert_eq!(edits[0]["textDocument"]["version"], 1);
+    assert_eq!(edits[0]["edits"].as_array().unwrap().len(), 1);
+    let request = serde_json::json!({"textDocument":{"uri":server.url("shared.sail")},
+        "range":{"start":{"line":1,"character":start},"end":{"line":1,"character":start+5}},
+        "context":{"diagnostics":[],"only":["refactor.extract"]}});
+    let actions = server.ask("textDocument/codeAction", request);
+    let action = actions
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["title"] == "Extract to variable")
+        .expect("same extraction in both contexts")
+        .clone();
+    let resolved = server.ask("codeAction/resolve", action.clone());
+    assert!(!resolved["edit"].is_null(), "{resolved}");
+    let rename = server.ask(
+        "textDocument/rename",
+        serde_json::json!({
+        "textDocument":{"uri":server.url("shared.sail")},
+        "position":{"line":1,"character":binding}, "newName":"arg" }),
+    );
+    let document = &rename["documentChanges"][0];
+    assert_eq!(document["textDocument"]["version"], 1, "{rename}");
+    assert_eq!(
+        document["edits"].as_array().unwrap().len(),
+        2,
+        "deduplicated local rename: {rename}"
+    );
+    let updated = apply_preview(shared, document);
+    server.notify("textDocument/didChange", serde_json::json!({"textDocument":{"uri":server.url("shared.sail"),"version":2},"contentChanges":[{"text":updated}]}));
+    let diagnostics = server.pull("shared.sail");
+    assert_eq!(
+        errors(&diagnostics),
+        0,
+        "renamed shared code must recheck: {updated}\n{diagnostics:?}"
+    );
+    let fresh = server.ask(
+        "textDocument/rename",
+        serde_json::json!({
+        "textDocument":{"uri":server.url("shared.sail")},
+        "position":{"line":1,"character":binding}, "newName":"argument" }),
+    );
+    assert_eq!(fresh["documentChanges"][0]["textDocument"]["version"], 2);
+    assert_eq!(
+        rename["documentChanges"][0]["textDocument"]["version"], 1,
+        "the earlier edit retains the version a client must reject after didChange"
+    );
+    let id = server.request("codeAction/resolve", action);
+    let stale =
+        server.wait_for_response(id).error.expect("a stale shared-file action must be rejected");
+    assert_eq!(stale.code, lsp_server::ErrorCode::ContentModified as i32);
 }

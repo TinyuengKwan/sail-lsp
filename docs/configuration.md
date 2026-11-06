@@ -368,7 +368,26 @@ completion and navigation. The status bar shows the chosen module, or `Auto`,
 when several instances exist. The choice belongs to the open document and is
 cleared on close. An instance that disappears or is inactive at the cursor
 falls back to an active view. This choice does not authorize edits to shared
-source: rename and SSR retain their checks across affected include instances.
+source. Rename, SSR and assists compare all relevant active include instances.
+A shared edit is available only when the affected names resolve to the same
+physical declarations and each context produces the same physical changes.
+Equivalent declarations have their references collected across all semantic
+views; edits to a shared source token are emitted once. The check also covers
+shared references reached from an unshared parent file. Field and constructor
+identities retain the exact selected member declaration, including shadowed
+same-name records.
+
+Differences in bindings, replacement text, generated files or available quick
+fixes make the operation unavailable. Inactive branches are checked only in the
+contexts where they are active; a replacement spanning incompatible conditional
+regions is rejected. Missing resolution, including ownerless type variables,
+is not treated as proof of identity. Auto-include keeps its separate preview
+of the post-insertion bindings and diagnostics across every include visit, and
+repeats that validation when resolving the action. Selecting a read context does
+not bypass these conditions. Rename returns document versions when the client supports
+them; SSR previews are versioned, and lazy code actions revalidate source
+fingerprints before resolving. Clients must honor those version preconditions
+when applying retained edits.
 
 Workspace symbol queries match ordered abbreviations as well as exact names,
 prefixes and substrings. Exact and prefix matches rank first. The default limit
@@ -430,3 +449,70 @@ been pushed, merged or released upstream. Stock 0.20.2/0.20.3 continue to use
 the legacy CLI for representable contexts; extended contexts require a probe
 reply of exactly `1`. A different protocol version is skipped with a visible
 reason rather than checked under an approximate configuration.
+
+## Analysis cache policy
+
+Query results can be limited independently through `sail-lsp.cache.parseCapacity`,
+`environmentCapacity`, `inferenceCapacity`, and `bodyCapacity`. These count results
+per query, not bytes. Defaults retain all parse, type environment and inference
+results, and 512 callable-body/source-map results. Zero disables eviction for a
+family. Usage tracking remains enabled so changing a limit can reclaim existing
+results as well as subsequently queried results.
+
+`sail-lsp.cache.memoryLimitMb` defaults to zero (disabled). A positive value is a
+soft process RSS high-water mark in MiB. At an idle boundary, with no worker or
+retained analysis snapshot, the server samples RSS at most once every five seconds.
+Above the target, unbounded families use 32 results and bounded families use one
+quarter of their configured capacity (at least one). It restores configured limits
+when RSS falls below 80% of the target. Repeated pressure does not repeatedly divide
+capacities. The server collects the LRU values and asks the allocator to release
+unused pages where supported. Configuration changes take effect at the next safe
+idle boundary; they do not cancel requests to force reclamation.
+
+This is not a hard process limit: file inputs, indexes, shared trees, retained
+snapshots, native solver contexts and allocator overhead can prevent reaching the
+target. RSS includes native allocations. Analyzer status and diagnostic reports
+separately show Z3's process-wide allocation estimate, which is a subset of process
+memory and must not be added to RSS. If RSS is unavailable, automatic pressure is
+not inferred from incomplete text-byte counts.
+
+A reproducible retention/recomputation probe is available as
+`cargo run --release -p sail-lsp --example query_cache_stats`. In the recorded
+64-file/512-function synthetic workload, a capacity of 32 retained 32 inference
+results instead of 512 but required 480 inference executions on revisit. This is
+why a smaller fixed default has not been imposed on ordinary editing sessions.
+The probe records actual weak ownership, query execution counts, heap estimates
+and revisit latency; heap numbers are not per-query byte attribution.
+
+## Exporting an analysis diagnostic report
+
+VS Code provides **Sail: Export Diagnostic Report**, also linked from the Sail
+status bar tooltip. It saves a local JSON file containing the client/server build,
+project configuration and load status, active file version/context, latest native
+analysis failures, published solver Unknown reason counts, bounded slow/error
+request history, and cache/memory observations. The command remains available when
+the server executable is missing or cannot start; that report records the client
+startup failure instead.
+
+The server endpoint is `sail-lsp/diagnosticReport` with an optional `textDocument`.
+Reports do not collect source buffers, request parameters or the process environment.
+Declared project-task environment values are redacted.
+They do contain local paths, effective settings and error messages, so inspect the
+saved file before sharing it. Export does not run inference or invoke the compiler.
+
+Normal edit/client cancellation is recorded separately from a worker panic or a
+Salsa propagated panic. A current-generation native diagnostic failure produces a
+warning status and clears the failed phase's obsolete findings; a later successful
+wave restores its status. Stale waves cannot overwrite newer findings or health.
+Solver Unknown is incomplete proof, not a refuted constraint or an internal crash;
+its reason is attached to the diagnostic data and summarized for the latest
+published semantic wave. Counts describe observed current-generation waves, not
+all attempted work across the lifetime of the process.
+
+## Project checks, tests and exports
+
+`runnables.tasks` defines explicit test/export commands and
+`runnables.showCodeLens` controls their VS Code links. Loaded projects also offer
+an explicit compiler check, which works independently of automatic Flycheck.
+See [project tasks](runnables.md) for configuration, typed context, execution and
+cancellation behavior.

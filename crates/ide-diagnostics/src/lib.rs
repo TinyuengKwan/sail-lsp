@@ -163,6 +163,8 @@ pub struct Diagnostic {
     pub severity: Severity,
     pub unused: bool,
     pub experimental: bool,
+    /// Stable reason for an undecided proof, independent of rendered text.
+    pub unknown_reason: Option<&'static str>,
     /// Fix actions attached to this diagnostic.
     pub fixes: Option<Vec<Assist>>,
     /// The syntax node this diagnostic is attached to.
@@ -195,6 +197,7 @@ impl Diagnostic {
             severity,
             unused: false,
             experimental: false,
+            unknown_reason: None,
             fixes: None,
             main_node: None,
             related: Vec::new(),

@@ -10,7 +10,7 @@ The repository includes user-scoped installers, standalone release packaging and
 optional editor integration. **The first release with the new standalone assets
 must be published before the prebuilt quick-install command can work.**
 
-From a checkout today (Rust, CMake and a C++ compiler required):
+From a checkout today (Rust, CMake and a C++20 compiler with `std::format` support required):
 
 ```sh
 git clone https://github.com/TinyuengKwan/sail-lsp.git

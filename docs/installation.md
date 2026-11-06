@@ -30,8 +30,9 @@ select prerelease tags explicitly.
 
 Prebuilt installation needs no Rust, Node.js, Python, upstream Sail compiler or
 system Z3. Unix needs a POSIX shell, curl for online installation, tar and a SHA256
-utility (`sha256sum`, `shasum` or `openssl`). Linux still needs glibc and libstdc++;
-these are native binaries, not fully static Linux executables. Windows uses the
+utility (`sha256sum`, `shasum` or `openssl`). Linux release builds bundle the C++
+standard library but still need glibc and libgcc_s; these are native binaries,
+not fully static Linux executables. Windows uses the
 native ZIP APIs and statically linked MSVC runtime. The standard library and Z3
 are embedded. Upstream `sail` is optional and needed only for Flycheck.
 
@@ -67,8 +68,13 @@ sh install.sh --path "$PWD" --rev FULL_COMMIT_SHA
 ```
 
 On Windows replace `sh install.sh` with `& .\install.ps1`. Source builds require
-Rust/Cargo, Git when fetching sources, CMake and a C++ compiler; use the MSVC C++
-build tools on Windows. A vendored Z3 build can take several minutes. The CLI
+Rust/Cargo, Git when fetching sources, CMake and a C++20 compiler with working
+`std::format` support (for example GCC 13 or newer); use the MSVC C++ build tools
+on Windows. Ubuntu 22.04's default GCC 11 is insufficient for the current Z3
+source. Install a newer toolchain and set `CC=gcc-13 CXX=g++-13` when building
+there. Release builds use GCC 13 on Ubuntu 22.04 and statically link its C++
+standard library, so the compiler upgrade does not silently raise the required
+system libstdc++ version. A vendored Z3 build can take several minutes. The CLI
 build timeout is one hour. Dependencies are locked with `--locked`.
 
 Without `--path`, `--from-source --rev FULL_COMMIT_SHA` fetches that revision;
@@ -152,6 +158,11 @@ sessions are not covered by the automated native installation tests.
 Run the bootstrap again to upgrade; repeat `--editor` when you also want updated
 editor integration. The stable executable path is unchanged.
 
+Retained versions are identified by their payload contents. Reinstalling the
+same payload keeps the installation state unchanged. Rebuilding the same source
+revision can produce different bytes (for example, MSVC timestamps and PDB
+GUIDs); those builds are retained separately and can be selected for rollback.
+
 ```sh
 sh install.sh                           # latest published release
 sh install.sh --version vX.Y.Z           # pinned release
@@ -223,16 +234,17 @@ particular project's typechecking or remote editor integration.
 
 | Target | CI priority | Declared release runtime |
 | --- | --- | --- |
-| Linux x86_64 GNU | primary | glibc >= 2.35, libstdc++6 |
+| Linux x86_64 GNU | primary | glibc >= 2.35, libgcc_s |
 | Windows x86_64 MSVC | primary | Windows 10+, static CRT |
 | macOS ARM64 | primary | macOS 11+ deployment target |
-| Linux ARM64 GNU | preview | glibc >= 2.39, libstdc++6 |
+| Linux ARM64 GNU | preview | glibc >= 2.39, libgcc_s |
 | macOS x86_64 | preview | macOS 10.15+ deployment target |
 | Windows ARM64 MSVC | preview | Windows 11+, static CRT |
 
 These are build requirements/targets, not claims that this change has already run
 on every OS version. New native CI results become evidence only after the changed
-workflow runs. Local validation on Linux x86_64 does not validate Windows/macOS.
+workflow runs. Native macOS installer/editor acceptance remains pending;
+no Mac execution environment is available for local validation. Local validation on Linux x86_64 does not validate Windows/macOS.
 The local developer binary may require a newer glibc than the release floor;
 packaging rejects that for a release and records the measured floor for explicitly
 allowed dirty local packages. Alpine/musl, 32-bit systems and other targets do not

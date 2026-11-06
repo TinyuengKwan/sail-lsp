@@ -29,11 +29,10 @@ impl BodyValidationDiagnostic {
     pub fn collect(
         body: &Body,
         expr_scopes: &ExprScopes,
-        used_bindings: &HashSet<String>,
         pattern_constants: &HashSet<String>,
     ) -> Vec<Self> {
         let mut result = Vec::new();
-        collect_unused_variables(body, expr_scopes, used_bindings, pattern_constants, &mut result);
+        collect_unused_variables(body, expr_scopes, pattern_constants, &mut result);
         collect_trailing_return(body, &mut result);
         collect_unnecessary_else(body, &mut result);
         result
@@ -43,20 +42,46 @@ impl BodyValidationDiagnostic {
 /// Detect unused variable bindings via ExprScopes.
 ///
 /// Walks all scopes in ExprScopes. For each binding entry, checks if
-/// the name was referenced during inference (via `used_bindings` set).
+/// a reference resolves to that exact pattern identity. This traverses every
+/// lowered expression, including expressions skipped by inference recovery.
 ///
 /// Skips:
 /// - Root scope entries (function parameters — always "used" by the caller)
 /// - Underscore-prefixed names (convention for intentionally unused)
-/// - Names that appear in `used_bindings`
+/// - Bindings referenced in their lexical scope
 ///
 fn collect_unused_variables(
     body: &Body,
     expr_scopes: &ExprScopes,
-    used_bindings: &HashSet<String>,
     pattern_constants: &HashSet<String>,
     out: &mut Vec<BodyValidationDiagnostic>,
 ) {
+    let mut used_bindings = HashSet::<PatId>::new();
+    for (id, expr) in body.iter_exprs() {
+        let name = match expr {
+            Expr::Ident(name) | Expr::TypeVar(name) | Expr::Ref(name) => name,
+            _ => continue,
+        };
+        if expr_scopes.implicit_binding(id).is_some() {
+            continue;
+        }
+        let Some(scope) = expr_scopes.scope_for(id) else { continue };
+        let Some((owner, binding)) =
+            expr_scopes.resolve_name_with_scope(scope, &hir_def::name::Name::new(name))
+        else {
+            continue;
+        };
+        // A bidirectional mapping or split bitvector pattern can spell the
+        // same binding at several pattern sites. Mark that lexical group,
+        // while keeping shadowed bindings and sibling arms independent.
+        used_bindings.extend(
+            expr_scopes
+                .entries(owner)
+                .iter()
+                .filter(|entry| entry.name() == binding.name())
+                .map(|entry| entry.pat()),
+        );
+    }
     // The root scope (index 0) contains function parameters.
     // Skip those — parameters are not "unused" in the traditional sense.
     let root_scope = expr_scopes.scope_chain(expr_scopes.scope_for(body.root())).last();
@@ -83,7 +108,7 @@ fn collect_unused_variables(
                 continue;
             }
             // Skip if used
-            if used_bindings.contains(name) {
+            if used_bindings.contains(&entry.pat()) {
                 continue;
             }
             // Skip if it looks like a constructor (capitalized name)

@@ -308,10 +308,39 @@ def source_check(checkout,revision):
         assert json.loads((config/"vscode.json").read_text())["path"]==str(binary)
         lsp_smoke(binary,root)
         before=(prefix/"install-state.json").read_bytes()
+        previous=json.loads(before)
+        configurations={Path(change["path"]):Path(change["path"]).read_bytes() for change in previous["changes"]}
         run(bootstrap(args),timeout=3600)
-        assert (prefix/"install-state.json").read_bytes()==before
+        after=(prefix/"install-state.json").read_bytes()
+        current=json.loads(after)
+        assert metadata(binary)==info, "Source reinstall changed build identity"
+        assert current["changes"]==previous["changes"], "Source reinstall changed configuration ownership"
+        assert current["userPathAdded"]==previous["userPathAdded"]
+        assert all(path.read_bytes()==content for path,content in configurations.items()), "Source reinstall changed editor configuration"
+        assert all(current["versions"].get(key)==value for key,value in previous["versions"].items()), "Source reinstall lost an installed version"
+        active=current["versions"][current["active"]]
+        assert hashlib.sha256(binary.read_bytes()).hexdigest()==active["manifest"]["binarySha256"]
+        for version,entry in current["versions"].items():
+            for name,digest in entry["files"].items():
+                assert hashlib.sha256((prefix/"versions"/version/name).read_bytes()).hexdigest()==digest, f"Installed inventory mismatch: {version}/{name}"
+        if current["active"]==previous["active"]:
+            assert after==before, "Identical source payload changed installation state"
+        else:
+            # MSVC may change PE timestamps/PDB GUIDs when rebuilding the same
+            # clean revision. Distinct payloads are deliberately separate,
+            # content-addressed versions; both must remain usable for rollback.
+            assert current["previous"]==previous["active"]
+            assert set(current["versions"])==set(previous["versions"])|{current["active"]}
+            old_manifest=previous["versions"][previous["active"]]["manifest"]
+            assert {k:v for k,v in active["manifest"].items() if k!="binarySha256"}=={k:v for k,v in old_manifest.items() if k!="binarySha256"}
+            for selected in [previous["active"],current["active"]]:
+                run(bootstrap(["--prefix",prefix,"--config-home",config,"--no-modify-path","--rollback","--version",selected]))
+                assert hashlib.sha256(binary.read_bytes()).hexdigest()==current["versions"][selected]["manifest"]["binarySha256"]
+                assert metadata(binary)==info
+        repeat_smoke=root/"repeat-smoke";repeat_smoke.mkdir()
+        lsp_smoke(binary,repeat_smoke)
         run(bootstrap(["--prefix",prefix,"--config-home",config,"--no-modify-path","--uninstall"]))
-    return ["clean pinned checkout source bootstrap, vendored solver, source VSIX with CLI stub, all editor configuration, real LSP and uninstall"]
+    return ["clean pinned checkout source bootstrap, vendored solver, source VSIX with CLI stub, all editor configuration, content-aware repeat install/rollback, real LSP and uninstall"]
 
 
 def clean_container(folder):

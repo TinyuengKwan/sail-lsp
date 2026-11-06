@@ -366,7 +366,13 @@ where
                 message.push_str(": ");
                 message.push_str(panic_message);
             } else if let Ok(cancelled) = panic.downcast::<salsa::Cancelled>() {
-                log::error!("Cancellation propagated out of salsa! This is a bug");
+                if matches!(*cancelled, salsa::Cancelled::PropagatedPanic { .. }) {
+                    return Ok(Response::new_err(
+                        id,
+                        lsp_server::ErrorCode::InternalError as i32,
+                        "dependent query panicked".into(),
+                    ));
+                }
                 return Err(HandlerCancelledError { inner: Some(*cancelled) });
             };
 
@@ -419,10 +425,18 @@ where
             let error = e.downcast::<RequestError>().unwrap();
             Response::new_err(id, error.code as i32, error.message.to_owned())
         }
-        Err(e) if e.downcast_ref::<ide_db::ide_types::CancelledError>().is_some() => {
+        Err(e)
+            if e.downcast_ref::<ide_db::ide_types::CancelledError>()
+                == Some(&ide_db::ide_types::CancelledError::PendingWrite) =>
+        {
             return Err(HandlerCancelledError { inner: None })
         }
         Err(e) => match e.downcast::<salsa::Cancelled>() {
+            Ok(salsa::Cancelled::PropagatedPanic { .. }) => Response::new_err(
+                id,
+                lsp_server::ErrorCode::InternalError as i32,
+                "dependent query panicked".into(),
+            ),
             Ok(cancelled) => return Err(HandlerCancelledError { inner: Some(cancelled) }),
             Err(e) => {
                 Response::new_err(id, lsp_server::ErrorCode::InternalError as i32, e.to_string())
@@ -445,7 +459,7 @@ mod tests {
 
     fn probe(_snapshot: GlobalStateSnapshot, cancel: bool) -> anyhow::Result<()> {
         if cancel {
-            Err(ide_db::ide_types::CancelledError.into())
+            Err(ide_db::ide_types::CancelledError::PendingWrite.into())
         } else {
             Ok(())
         }
@@ -493,6 +507,84 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn cancelled_feature_queries_do_not_become_empty_successes() {
+        let (sender, _messages) = crossbeam_channel::unbounded();
+        let (task_sender, _tasks) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender, task_sender);
+        let uri = lsp_types::Url::from_file_path(
+            std::env::temp_dir().join("sail-lsp-cancelled-features.sail"),
+        )
+        .unwrap();
+        crate::handlers::notification::handle_did_open_text_document(
+            &mut state,
+            lsp_types::DidOpenTextDocumentParams {
+                text_document: lsp_types::TextDocumentItem {
+                    uri: uri.clone(),
+                    language_id: "sail".into(),
+                    version: 1,
+                    text: "val answer : unit -> int\nfunction answer() = 42\n".into(),
+                },
+            },
+        )
+        .unwrap();
+        state.process_changes();
+        let snap = state.snapshot();
+        let file = snap.analysis.file_id(&uri).unwrap();
+        assert!(snap.analysis.file_by_id(file).is_some(), "fixture must be loaded");
+        let mut host = std::mem::take(&mut state.analysis_host);
+        let writer = std::thread::spawn(move || host.trigger_cancellation());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if snap.analysis.semantic_tokens(file).is_err() {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "writer did not cancel the snapshot");
+            std::thread::yield_now();
+        }
+
+        fn check<R: LspRequest>(
+            snap: GlobalStateSnapshot,
+            handler: fn(GlobalStateSnapshot, R::Params) -> anyhow::Result<R::Result>,
+            params: serde_json::Value,
+        ) -> bool
+        where
+            R::Params: serde::de::DeserializeOwned,
+            R::Result: serde::Serialize,
+        {
+            let params = serde_json::from_value(params).unwrap();
+            let result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(snap, params)));
+            thread_result_to_response::<R>(1.into(), result).is_err()
+        }
+        let text_document = serde_json::json!({ "uri": uri });
+        let cancelled = [
+            check::<lsp_types::request::Formatting>(
+                snap.clone(),
+                crate::handlers::request::handle_formatting,
+                serde_json::json!({"textDocument": text_document, "options": {"tabSize": 2, "insertSpaces": true}}),
+            ),
+            check::<lsp_types::request::SemanticTokensFullRequest>(
+                snap.clone(),
+                crate::handlers::request::handle_semantic_tokens_full,
+                serde_json::json!({"textDocument": text_document}),
+            ),
+            check::<lsp_types::request::SemanticTokensFullDeltaRequest>(
+                snap.clone(),
+                crate::handlers::request::handle_semantic_tokens_full_delta,
+                serde_json::json!({"textDocument": text_document, "previousResultId": "old"}),
+            ),
+            check::<lsp_types::request::CodeLensRequest>(
+                snap.clone(),
+                crate::handlers::request::handle_code_lens,
+                serde_json::json!({"textDocument": text_document}),
+            ),
+        ];
+        drop(snap);
+        writer.join().unwrap();
+        assert_eq!(cancelled, [true; 4], "a cancelled query must reach the dispatch policy");
     }
 
     #[test]

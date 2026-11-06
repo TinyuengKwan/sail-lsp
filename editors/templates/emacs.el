@@ -1,4 +1,5 @@
-;;; Managed Sail integration; Emacs 29+ includes Eglot.
+;;; sail-lsp.el --- Managed Sail integration -*- lexical-binding: t; -*-
+;; Emacs 29+ includes Eglot.
 (require 'eglot)
 (unless (fboundp 'sail-mode)
   (define-derived-mode sail-mode prog-mode "Sail" "Edit Sail source."))

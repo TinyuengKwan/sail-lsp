@@ -366,7 +366,7 @@ pub(crate) fn handle_work_done_progress_cancel(
 
 /// Explicit check request, independent of a workspace reload.
 pub(crate) fn handle_recheck(state: &mut GlobalState, _: ()) -> anyhow::Result<()> {
-    state.recheck_flycheck();
+    state.run_flycheck(None);
     Ok(())
 }
 

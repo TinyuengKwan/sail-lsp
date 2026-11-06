@@ -10,6 +10,7 @@ async function main(): Promise<void> {
         extensionDevelopmentPath,
         extensionTestsPath,
         extensionTestsEnv: {
+            SAIL_LSP_TEST_NODE: process.execPath,
             SAIL_LSP_TEST_SERVER:
                 process.env.SAIL_LSP_TEST_SERVER ??
                 path.resolve(
@@ -21,6 +22,7 @@ async function main(): Promise<void> {
         launchArgs: [
             path.resolve(extensionDevelopmentPath, "test-fixture"),
             "--disable-gpu",
+            "--disable-workspace-trust",
             ...(process.platform === "linux" ? ["--ozone-platform=headless"] : []),
         ],
     });

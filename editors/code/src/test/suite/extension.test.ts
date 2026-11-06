@@ -1,5 +1,9 @@
 import * as assert from "node:assert/strict";
 import * as vscode from "vscode";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import type { Runnable } from "../../runnables";
 
 interface ProjectGraphEntry {
     manifest: string;
@@ -11,6 +15,7 @@ interface ExtensionApi {
         status(): { health: string; quiescent: boolean; message?: string } | undefined;
         projectGraph(): readonly ProjectGraphEntry[];
         ssr: { pending(): number; stale(): boolean };
+        runnables: { list(uri: vscode.Uri): Promise<Runnable[]>; activeTasks(): number };
     };
 }
 
@@ -24,6 +29,246 @@ async function eventually(message: string, predicate: () => boolean, timeout = 2
 }
 
 suite("sail-lsp extension", () => {
+    test("project tasks execute argv/context, expose failure, cancel and reject stale or dirty runs", async () => {
+        const extension = vscode.extensions.getExtension<ExtensionApi>("Lunarwwww.sail-lsp")!;
+        const api = await extension.activate();
+        await eventually("server ready", () => api.test.status()?.quiescent === true);
+        const root = vscode.workspace.workspaceFolders![0].uri;
+        const uri = vscode.Uri.joinPath(root, "sample.sail");
+        const document = await vscode.workspace.openTextDocument(uri);
+        await vscode.window.showTextDocument(document);
+        const temp = fs.mkdtempSync(path.join(os.tmpdir(), "sail tasks "));
+        const config = vscode.workspace.getConfiguration("sail-lsp");
+        const keys = [
+            "workspace.projectVariables",
+            "workspace.projectModules",
+            "runnables.tasks",
+            "flycheck.command",
+            "server.extraEnv",
+        ];
+        const saved = keys.map((key) => config.inspect(key)?.workspaceValue);
+        const compiler = path.join(temp, "selected compiler with spaces");
+        const outputs = ["ok", "fail", "wait"].map((name) => path.join(temp, `${name}.json`));
+        const tasks = ["ok", "fail", "wait"].map((mode, index) => ({
+            label: mode,
+            kind: index === 0 ? "export" : "test",
+            command: process.env.SAIL_LSP_TEST_NODE!,
+            args: [
+                vscode.Uri.joinPath(root, "tools", "task-probe.mjs").fsPath,
+                mode,
+                outputs[index],
+                index === 0 ? "@environment" : "${projectContext}",
+                "literal $(never-exec) && value with spaces",
+            ],
+            environment: {
+                TASK_COMPILER: "${sail}",
+                SAIL_LSP_PROJECT_CONTEXT: "${projectContext}",
+            },
+        }));
+        tasks.push({
+            label: "CLI only",
+            kind: "export",
+            command: "${sail}",
+            args: ["${projectArgs}"],
+            environment: { TASK_COMPILER: "${sail}", SAIL_LSP_PROJECT_CONTEXT: "" },
+        });
+        const fresh = async (): Promise<Runnable[]> => {
+            const deadline = Date.now() + 20_000;
+            while (Date.now() < deadline) {
+                const entries = await api.test.runnables.list(uri);
+                if (
+                    entries.length === 5 &&
+                    entries
+                        .filter((entry) => !entry.label.startsWith("CLI only"))
+                        .every((entry) => !entry.disabled)
+                )
+                    return entries;
+                await new Promise((resolve) => setTimeout(resolve, 50));
+            }
+            throw new Error("Project tasks did not become available");
+        };
+        const execute = async (
+            entry: Runnable,
+            afterStart?: () => Promise<void>,
+        ): Promise<number | undefined> => {
+            let timer: NodeJS.Timeout | undefined;
+            let subscription: vscode.Disposable | undefined;
+            const ended = new Promise<number | undefined>((resolve, reject) => {
+                timer = setTimeout(() => reject(new Error("Task did not exit")), 20_000);
+                subscription = vscode.tasks.onDidEndTaskProcess((event) => {
+                    if (event.execution.task.definition.id === entry.id) resolve(event.exitCode);
+                });
+            });
+            try {
+                await vscode.commands.executeCommand(
+                    "sail-lsp.runProjectTask",
+                    uri,
+                    entry.id,
+                    entry.fingerprint,
+                );
+                await afterStart?.();
+                return await ended;
+            } finally {
+                clearTimeout(timer);
+                subscription?.dispose();
+            }
+        };
+        try {
+            assert.ok(process.env.SAIL_LSP_TEST_NODE);
+            await config.update(
+                "workspace.projectVariables",
+                { TYPED: "true", FLAG: false, LITERAL: "${workspaceFolder}" },
+                vscode.ConfigurationTarget.Workspace,
+            );
+            await config.update(
+                "workspace.projectModules",
+                ["Main"],
+                vscode.ConfigurationTarget.Workspace,
+            );
+            await config.update("flycheck.command", compiler, vscode.ConfigurationTarget.Workspace);
+            await config.update(
+                "server.extraEnv",
+                { PROJECT_TASK_TEST_EXTRA: "inherited value" },
+                vscode.ConfigurationTarget.Workspace,
+            );
+            await config.update("runnables.tasks", tasks, vscode.ConfigurationTarget.Workspace);
+            const entries = await fresh();
+            const selected = (mode: string) =>
+                entries.find((entry) => entry.label.startsWith(`${mode} (`))!;
+            const unsupported = selected("CLI only");
+            assert.match(unsupported.disabled!, /projectContext/);
+            await assert.rejects(
+                async () =>
+                    vscode.commands.executeCommand(
+                        "sail-lsp.runProjectTask",
+                        uri,
+                        unsupported.id,
+                        unsupported.fingerprint,
+                    ),
+                /projectContext/,
+            );
+            const lenses = await vscode.commands.executeCommand<vscode.CodeLens[]>(
+                "vscode.executeCodeLensProvider",
+                uri,
+            );
+            assert.ok(lenses?.some((lens) => lens.command?.command === "sail-lsp.runProjectTask"));
+            assert.equal(await execute(selected("ok")), 0);
+            const result = JSON.parse(fs.readFileSync(outputs[0], "utf8"));
+            assert.equal(path.relative(result.cwd, root.fsPath), "");
+            assert.deepEqual(result.context.variables, {
+                FLAG: false,
+                LITERAL: "${workspaceFolder}",
+                TYPED: "true",
+            });
+            assert.deepEqual(result.context.modules, ["Main"]);
+            assert.equal(result.context.compiler, compiler);
+            assert.equal(result.compiler, compiler);
+            assert.equal(result.inherited, "inherited value");
+            assert.deepEqual(result.args, ["literal $(never-exec) && value with spaces"]);
+            assert.equal(await execute(selected("fail")), 7);
+            await execute(selected("wait"), async () => {
+                await eventually(
+                    "task actually started",
+                    () => fs.existsSync(outputs[2]) && api.test.runnables.activeTasks() === 1,
+                );
+                await vscode.commands.executeCommand("sail-lsp.cancelProjectTasks");
+            });
+            await eventually(
+                "task resources released",
+                () => api.test.runnables.activeTasks() === 0,
+            );
+            const stopped = JSON.parse(fs.readFileSync(outputs[2], "utf8"));
+            for (const pid of [stopped.pid, stopped.descendant]) {
+                assert.equal(typeof pid, "number");
+                await eventually("task process tree exited", () => {
+                    try {
+                        process.kill(pid, 0);
+                        return false;
+                    } catch (error) {
+                        return (error as NodeJS.ErrnoException).code === "ESRCH";
+                    }
+                });
+            }
+            const editor = await vscode.window.showTextDocument(document);
+            await editor.edit((edit) =>
+                edit.insert(new vscode.Position(0, 0), "// dirty task input\n"),
+            );
+            await assert.rejects(
+                async () =>
+                    vscode.commands.executeCommand(
+                        "sail-lsp.runProjectTask",
+                        uri,
+                        selected("ok").id,
+                        selected("ok").fingerprint,
+                    ),
+                /Save .*before running/,
+            );
+            await vscode.commands.executeCommand("workbench.action.files.revert");
+            const old = selected("ok");
+            await config.update(
+                "runnables.tasks",
+                tasks.map((task) => ({ ...task, label: `${task.label} changed` })),
+                vscode.ConfigurationTarget.Workspace,
+            );
+            const deadline = Date.now() + 20_000;
+            while (Date.now() < deadline) {
+                const entry = (await fresh()).find((entry) => entry.id === old.id)!;
+                if (entry.fingerprint !== old.fingerprint) break;
+                await new Promise((resolve) => setTimeout(resolve, 50));
+            }
+            await assert.rejects(
+                async () =>
+                    vscode.commands.executeCommand(
+                        "sail-lsp.runProjectTask",
+                        uri,
+                        old.id,
+                        old.fingerprint,
+                    ),
+                /task changed/,
+            );
+        } finally {
+            await vscode.commands.executeCommand("sail-lsp.cancelProjectTasks");
+            await vscode.window.showTextDocument(document);
+            if (document.isDirty)
+                await vscode.commands.executeCommand("workbench.action.files.revert");
+            for (let index = 0; index < keys.length; index++)
+                await config.update(
+                    keys[index],
+                    saved[index],
+                    vscode.ConfigurationTarget.Workspace,
+                );
+            fs.rmSync(temp, { recursive: true, force: true });
+        }
+    });
+
+    test("exports a diagnostic report through the real server and command", async () => {
+        const extension = vscode.extensions.getExtension<ExtensionApi>("Lunarwwww.sail-lsp")!;
+        const api = await extension.activate();
+        await eventually("server ready", () => api.test.status()?.quiescent === true);
+        const root = vscode.workspace.workspaceFolders![0].uri;
+        const document = await vscode.workspace.openTextDocument(
+            vscode.Uri.joinPath(root, "sample.sail"),
+        );
+        await vscode.window.showTextDocument(document);
+        const target = vscode.Uri.joinPath(root, "diagnostic-report-test.json");
+        try {
+            await vscode.commands.executeCommand("sail-lsp.exportDiagnosticReport", target);
+            const report = JSON.parse(
+                Buffer.from(await vscode.workspace.fs.readFile(target)).toString(),
+            );
+            assert.equal(report.schemaVersion, 1);
+            assert.equal(report.server.schemaVersion, 1);
+            assert.equal(report.server.activeFile.uri, document.uri.toString());
+            assert.equal(report.server.workspace.loaded, true);
+            assert.ok(report.server.nativeAnalysis.failures);
+            assert.ok(report.server.build.stdlibRevision);
+            assert.ok(!JSON.stringify(report).includes(document.getText().trim()));
+            assert.equal(report.client.extraEnv, undefined);
+        } finally {
+            await vscode.workspace.fs.delete(target, { useTrash: false });
+        }
+    });
+
     test("SSR preview is cancellable, rejects stale sources, applies and re-diagnoses", async () => {
         const extension = vscode.extensions.getExtension<ExtensionApi>("Lunarwwww.sail-lsp")!;
         const api = await extension.activate();

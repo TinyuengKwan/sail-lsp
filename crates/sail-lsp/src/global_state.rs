@@ -138,6 +138,7 @@ pub(crate) struct GlobalState {
 
     /// Per-file diagnostic state with generation tracking.
     pub(crate) diagnostics: crate::diagnostics::DiagnosticCollection,
+    pub(crate) analysis_health: Arc<crate::analysis_health::AnalysisHealth>,
     /// Per-file semantic token cache for delta requests.
     pub(crate) semantic_tokens_cache: crate::lsp::semantic_tokens::SemanticTokensCache,
 
@@ -152,6 +153,7 @@ pub(crate) struct GlobalState {
     // Diagnostics are triggered directly in the quiescent block when
     // `became_quiescent || state_changed || memdocs_changed`.
     pub(crate) last_gc_revision: u64,
+    pub(crate) cache_control: crate::cache_control::CacheController,
     /// The progress sequence a running cache-priming reports under.
     pub(crate) prime_caches_progress: Option<crate::progress::ProgressReporter>,
     /// The token of the one progress sequence the client may cancel.
@@ -243,11 +245,13 @@ impl GlobalState {
             sender,
             last_status: None,
             diagnostics: crate::diagnostics::DiagnosticCollection::default(),
+            analysis_health: Default::default(),
             semantic_tokens_cache: crate::lsp::semantic_tokens::SemanticTokensCache::new(),
             fetch_workspaces_queue: crate::op_queue::OpQueue::default(),
             pending_reload_scope: None,
             prime_caches_queue: crate::op_queue::OpQueue::default(),
             last_gc_revision: 0,
+            cache_control: Default::default(),
             prime_caches_progress: None,
             cancellable_progress: None,
             prime_caches_cancel: hir::CancellationToken::new(),
@@ -293,6 +297,14 @@ impl GlobalState {
         self.request_states.remove(&response.id);
         if let Some((method, started)) = self.req_queue.incoming.complete(&response.id) {
             let took = started.elapsed();
+            let error_code = response.error.as_ref().map(|error| error.code);
+            if took >= std::time::Duration::from_millis(200) || error_code.is_some() {
+                Arc::make_mut(&mut self.analysis_health).record_request(
+                    method.clone(),
+                    took.as_millis().try_into().unwrap_or(u64::MAX),
+                    error_code,
+                );
+            }
             tracing::debug!(target: "sail_lsp::latency",
                 "request_complete id={} method={method} total_us={} error={:?}",
                 response.id, took.as_micros(), response.error.as_ref().map(|error| error.code));
@@ -396,8 +408,14 @@ impl GlobalState {
     /// request that is merely slow was never cancelled at all — the client
     /// waited for an answer it had already given up on.
     pub(crate) fn cancel(&mut self, id: lsp_server::RequestId) {
-        if let Some(response) = self.req_queue.incoming.cancel(id) {
-            self.respond(response);
+        if !self.req_queue.incoming.is_completed(&id) {
+            // Complete through respond, so cancellation retains its method and
+            // duration in the bounded report history just like other replies.
+            self.respond(Response::new_err(
+                id,
+                lsp_server::ErrorCode::RequestCanceled as i32,
+                "canceled by client".into(),
+            ));
         }
     }
 
@@ -630,11 +648,16 @@ impl GlobalState {
     /// Immutable snapshot passed to handler (sync or async).
     pub(crate) fn snapshot(&mut self) -> GlobalStateSnapshot {
         GlobalStateSnapshot {
+            analysis_health: self.analysis_health.clone(),
+            cache_control: self.cache_control.clone(),
+            server_status: self.current_status(),
             workspace_status: WorkspaceStatus {
                 roots: self.workspace_folders.iter().cloned().collect(),
                 manifests: self.projects.values().map(|p| p.manifest.clone()).collect(),
                 loaded: self.workspace_loaded,
-                loading: self.loading_project_config.is_some(),
+                loading: self.loading_project_config.is_some()
+                    || self.fetch_workspaces_queue.op_requested()
+                    || self.fetch_workspaces_queue.op_in_progress(),
                 config_errors: self.config_errors.clone(),
                 sail_dir: self.effective_sail_dir.clone(),
                 sail_dir_origin: self.sail_dir_origin,
@@ -642,7 +665,6 @@ impl GlobalState {
             analysis: self.analysis_snapshot(),
             config: self.config.clone(),
             semantic_tokens_cache: self.semantic_tokens_cache.clone(),
-            include_graph: Arc::new(self.include_graph.clone()),
             client_caps: self.client_caps.clone(),
             last_format_options: self.last_format_options.clone(),
             library_files: Arc::new(self.library_root.clone()),
@@ -699,6 +721,9 @@ impl GlobalState {
 /// mutating shared state. Clone is cheap (salsa Arc + index Arc).
 #[derive(Clone)]
 pub(crate) struct GlobalStateSnapshot {
+    pub(crate) cache_control: crate::cache_control::CacheController,
+    pub(crate) analysis_health: Arc<crate::analysis_health::AnalysisHealth>,
+    pub(crate) server_status: crate::lsp_ext::ServerStatusParams,
     pub(crate) module_contexts: Arc<Vec<serde_json::Value>>,
     pub(crate) check_diagnostics:
         Arc<std::collections::HashMap<base_db::FileId, Vec<lsp_types::Diagnostic>>>,
@@ -717,9 +742,6 @@ pub(crate) struct GlobalStateSnapshot {
     pub config: SailLspConfig,
     /// Per-file semantic token cache (shared via Arc<Mutex>).
     pub semantic_tokens_cache: crate::lsp::semantic_tokens::SemanticTokensCache,
-    /// Include dependency graph for cross-file diagnostic propagation.
-    /// Sail-specific: explicit $include graph for cross-file diagnostics.
-    pub include_graph: Arc<hir::include_graph::IncludeGraph>,
     /// Client capabilities for feature detection.
     pub client_caps: crate::lsp::capabilities::ClientCapabilities,
     /// Cached formatting options from the last `textDocument/formatting`

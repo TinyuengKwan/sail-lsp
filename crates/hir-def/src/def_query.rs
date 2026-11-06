@@ -514,6 +514,13 @@ pub fn update_workspace_fixities(
     }
 }
 
+/// Exclusive host-side cache configuration. Zero disables LRU.
+pub fn set_body_cache_capacity(db: &mut dyn salsa::Database, capacity: usize) {
+    let capacity = if capacity == 0 { usize::MAX } else { capacity };
+    callable_body::set_lru_capacity(db, capacity);
+    body_with_source_map::set_lru_capacity(db, capacity);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

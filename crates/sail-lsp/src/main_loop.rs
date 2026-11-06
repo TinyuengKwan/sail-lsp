@@ -56,6 +56,14 @@ pub(crate) use crate::diagnostics::NativeDiagnosticsFetchKind;
 /// ```
 #[derive(Debug)]
 pub(crate) enum DiagnosticsTaskKind {
+    Unavailable {
+        kind: NativeDiagnosticsFetchKind,
+        generation: crate::diagnostics::DiagnosticsGeneration,
+        files: Vec<base_db::FileId>,
+        /// None means normal cancellation, Some means internal failure.
+        failure: Option<String>,
+    },
+
     Syntax(
         crate::diagnostics::DiagnosticsGeneration,
         Vec<(base_db::FileId, Vec<lsp_types::Diagnostic>)>,
@@ -64,6 +72,37 @@ pub(crate) enum DiagnosticsTaskKind {
         crate::diagnostics::DiagnosticsGeneration,
         Vec<(base_db::FileId, Vec<lsp_types::Diagnostic>)>,
     ),
+}
+
+impl DiagnosticsTaskKind {
+    fn compute(
+        kind: NativeDiagnosticsFetchKind,
+        generation: crate::diagnostics::DiagnosticsGeneration,
+        files: Vec<base_db::FileId>,
+        compute: impl FnOnce() -> ide::Cancellable<Vec<(base_db::FileId, Vec<lsp_types::Diagnostic>)>>,
+    ) -> Self {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            salsa::Cancelled::catch(std::panic::AssertUnwindSafe(compute))
+        }));
+        let unavailable = |failure| Self::Unavailable { kind, generation, files, failure };
+        match result {
+            Ok(Ok(Ok(diags))) => match kind {
+                NativeDiagnosticsFetchKind::Syntax => Self::Syntax(generation, diags),
+                NativeDiagnosticsFetchKind::Semantic => Self::Semantic(generation, diags),
+            },
+            Ok(Ok(Err(ide_db::ide_types::CancelledError::PendingWrite))) => unavailable(None),
+            Ok(Ok(Err(ide_db::ide_types::CancelledError::PropagatedPanic))) => {
+                unavailable(Some("dependent query panicked".into()))
+            }
+            Ok(Err(salsa::Cancelled::PropagatedPanic { .. })) => {
+                unavailable(Some("dependent query panicked".into()))
+            }
+            Ok(Err(_)) => unavailable(None),
+            Err(payload) => {
+                unavailable(Some(crate::analysis_health::panic_message(payload.as_ref())))
+            }
+        }
+    }
 }
 
 impl GlobalState {
@@ -110,59 +149,41 @@ impl GlobalState {
     /// Bumps generation ONCE per call. Spawns a single worker task
     /// that computes syntax + semantic diagnostics for all subscribed
     /// files, sending batch results via `Task::Diagnostics(DiagnosticsTaskKind)`.
-    #[allow(clippy::print_stderr)]
     fn update_diagnostics(&mut self) {
-        // Closing the last buffer must invalidate an in-flight wave too.
         let generation = self.diagnostics.next_generation();
         let subscribed = self.subscribed_files();
         if subscribed.is_empty() {
+            let health = std::sync::Arc::make_mut(&mut self.analysis_health);
+            health.recovered("syntaxDiagnostics");
+            health.recovered("semanticDiagnostics");
+            health.reported_unknowns.clear();
             return;
         }
-
         let analysis = self.analysis_snapshot();
         let diag_config = self.config.diagnostics.to_ide_config();
-
-        // Spawn single task: syntax first, then semantic.
-        //
-        // (main_loop.rs:669, 685) — on panic, returns empty diagnostics.
         self.task_pool.spawn_with_sender(
             stdx::thread::ThreadIntent::LatencySensitive,
             move |sender| {
-                use std::panic::AssertUnwindSafe;
-
-                // Syntax diagnostics (fast).
-                let syntax_diags = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    crate::diagnostics::fetch_native_diagnostics(
-                        &analysis,
-                        &subscribed,
-                        NativeDiagnosticsFetchKind::Syntax,
-                        &diag_config,
-                    )
-                }))
-                .unwrap_or_else(|_| {
-                    eprintln!("[diag] SYNTAX PANIC caught");
-                    subscribed.iter().map(|(_, fid)| (*fid, Vec::new())).collect()
-                });
-                let _ = sender
-                    .send(Task::Diagnostics(DiagnosticsTaskKind::Syntax(generation, syntax_diags)));
-
-                // Semantic diagnostics (slow).
-                let semantic_diags = std::panic::catch_unwind(AssertUnwindSafe(|| {
-                    crate::diagnostics::fetch_native_diagnostics(
-                        &analysis,
-                        &subscribed,
-                        NativeDiagnosticsFetchKind::Semantic,
-                        &diag_config,
-                    )
-                }))
-                .unwrap_or_else(|_| {
-                    eprintln!("[diag] SEMANTIC PANIC caught");
-                    subscribed.iter().map(|(_, fid)| (*fid, Vec::new())).collect()
-                });
-                let _ = sender.send(Task::Diagnostics(DiagnosticsTaskKind::Semantic(
-                    generation,
-                    semantic_diags,
-                )));
+                for kind in
+                    [NativeDiagnosticsFetchKind::Syntax, NativeDiagnosticsFetchKind::Semantic]
+                {
+                    let task = DiagnosticsTaskKind::compute(
+                        kind,
+                        generation,
+                        subscribed.iter().map(|(_, id)| *id).collect(),
+                        || {
+                            crate::diagnostics::fetch_native_diagnostics(
+                                &analysis,
+                                &subscribed,
+                                kind,
+                                &diag_config,
+                            )
+                        },
+                    );
+                    if sender.send(Task::Diagnostics(task)).is_err() {
+                        break;
+                    }
+                }
             },
         );
     }
@@ -387,7 +408,7 @@ impl GlobalState {
         {
             return;
         }
-        self.request_flycheck_targets(self.flycheck_targets_for_file(saved));
+        self.request_flycheck_targets(self.flycheck_targets_for_file(saved), false);
     }
 
     fn flycheck_targets_for_file(
@@ -448,7 +469,7 @@ impl GlobalState {
                 }
             }
         }
-        self.request_flycheck_targets(targets);
+        self.request_flycheck_targets(targets, false);
     }
 
     fn flycheck_control_targets(
@@ -461,6 +482,13 @@ impl GlobalState {
                 .values()
                 .map(|project| crate::flycheck::CheckTarget::Project(project.manifest.clone()))
                 .collect();
+            for path in self.mem_docs.iter().filter_map(|uri| uri.to_file_path().ok()) {
+                for target in self.flycheck_targets_for_file(&path) {
+                    if !targets.contains(&target) {
+                        targets.push(target);
+                    }
+                }
+            }
             for target in self
                 .flycheck_workers
                 .keys()
@@ -481,12 +509,8 @@ impl GlobalState {
     }
 
     pub(crate) fn run_flycheck(&mut self, document: Option<&lsp_types::TextDocumentIdentifier>) {
-        if document.is_none() {
-            self.recheck_flycheck();
-        } else {
-            let targets = self.flycheck_control_targets(document);
-            self.request_flycheck_targets(targets);
-        }
+        let targets = self.flycheck_control_targets(document);
+        self.request_flycheck_targets(targets, true);
     }
 
     pub(crate) fn cancel_flycheck(&mut self, document: Option<&lsp_types::TextDocumentIdentifier>) {
@@ -543,8 +567,12 @@ impl GlobalState {
         self.diagnostics.retain_check_targets(|target| !targets.contains(target));
     }
 
-    fn request_flycheck_targets(&mut self, targets: Vec<crate::flycheck::CheckTarget>) {
-        if !self.config.flycheck.enable
+    fn request_flycheck_targets(
+        &mut self,
+        targets: Vec<crate::flycheck::CheckTarget>,
+        manual: bool,
+    ) {
+        if (!manual && !self.config.flycheck.enable)
             || self.fetch_workspaces_queue.op_requested()
             || self.fetch_workspaces_queue.op_in_progress()
             || self.loading_project_config.is_some()
@@ -1026,11 +1054,7 @@ fn main_loop(
             //
             // It also runs *before* the wave, so the turn that bumps the
             // nonce cannot cancel the snapshot it is about to take.
-            let current_nonce = state.analysis_host.raw_database().nonce();
-            if state.task_pool.is_empty() && current_nonce != state.last_gc_revision {
-                state.analysis_host.trigger_garbage_collection();
-                state.last_gc_revision = current_nonce;
-            }
+            state.collect_caches_if_idle();
 
             // A client that pulls gets the server's own findings from
             // `textDocument/diagnostic`; pushing them as well shows each
@@ -1350,17 +1374,24 @@ fn on_task(state: &mut GlobalState, task: Task) {
                 // one guarded call is enough — it fires as soon as the pool
                 // is idle and the nonce has moved.
                 state.prime_caches_queue.op_completed(());
+                if !failed && !cancelled {
+                    std::sync::Arc::make_mut(&mut state.analysis_health).recovered("cachePriming");
+                }
                 if failed {
+                    std::sync::Arc::make_mut(&mut state.analysis_health).failed(
+                        "cachePriming",
+                        0,
+                        "Cache priming failed; on-demand analysis remains available".into(),
+                    );
                     state.log_message(lsp_types::MessageType::ERROR,
                         "Cache priming failed; analysis remains available on demand. Reload the workspace to retry.");
                 } else if cancelled {
+                    std::sync::Arc::make_mut(&mut state.analysis_health).cancelled_waves += 1;
                     state.prime_caches_queue.request_op("restart after cancellation".into(), ());
                 }
             }
         },
         Task::Diagnostics(task_kind) => {
-            // Batch of (FileId, diagnostics) stored in DiagnosticCollection.
-            // Actual publish happens via take_changes() at end of loop.
             let (kind, generation, diags) = match task_kind {
                 DiagnosticsTaskKind::Syntax(gen, diags) => {
                     (NativeDiagnosticsFetchKind::Syntax, gen, diags)
@@ -1368,7 +1399,57 @@ fn on_task(state: &mut GlobalState, task: Task) {
                 DiagnosticsTaskKind::Semantic(gen, diags) => {
                     (NativeDiagnosticsFetchKind::Semantic, gen, diags)
                 }
+                DiagnosticsTaskKind::Unavailable { kind, generation, files, failure } => {
+                    if state.diagnostics.is_current_generation(generation) {
+                        let phase = match kind {
+                            NativeDiagnosticsFetchKind::Syntax => "syntaxDiagnostics",
+                            NativeDiagnosticsFetchKind::Semantic => "semanticDiagnostics",
+                        };
+                        if let Some(message) = failure {
+                            state.log_message(
+                                MessageType::ERROR,
+                                format!("{phase} failed: {message}"),
+                            );
+                            std::sync::Arc::make_mut(&mut state.analysis_health)
+                                .failed(phase, generation, message);
+                            state.diagnostics.set_native_diagnostics(
+                                kind,
+                                generation,
+                                files.into_iter().map(|id| (id, Vec::new())).collect(),
+                            );
+                        } else {
+                            std::sync::Arc::make_mut(&mut state.analysis_health).cancelled_waves +=
+                                1;
+                        }
+                    }
+                    return;
+                }
             };
+            if !state.diagnostics.is_current_generation(generation) {
+                return;
+            }
+            let phase = match kind {
+                NativeDiagnosticsFetchKind::Syntax => "syntaxDiagnostics",
+                NativeDiagnosticsFetchKind::Semantic => "semanticDiagnostics",
+            };
+            let health = std::sync::Arc::make_mut(&mut state.analysis_health);
+            health.recovered(phase);
+            if matches!(kind, NativeDiagnosticsFetchKind::Semantic) {
+                health.reported_unknowns.clear();
+                for (_, diagnostics) in &diags {
+                    for diagnostic in diagnostics {
+                        if let Some(reason) = diagnostic
+                            .data
+                            .as_ref()
+                            .and_then(|d| d.get("analysis"))
+                            .and_then(|d| d.get("reason"))
+                            .and_then(serde_json::Value::as_str)
+                        {
+                            *health.reported_unknowns.entry(reason.to_string()).or_default() += 1;
+                        }
+                    }
+                }
+            }
             state.diagnostics.set_native_diagnostics(kind, generation, diags);
         }
     }
@@ -1482,8 +1563,10 @@ fn on_request(state: &mut GlobalState, req: Request) {
         .on::<false, crate::lsp_ext::ExpandInclude>(handlers::handle_expand_include)
         .on::<false, crate::lsp_ext::EffectAnnotations>(handlers::handle_effect_annotations)
         .on::<false, crate::lsp_ext::SailLspStatus>(handlers::handle_sail_lsp_status)
+        .on::<false, crate::lsp_ext::DiagnosticReport>(handlers::handle_diagnostic_report)
         .on::<false, crate::lsp_ext::OpenProjectManifest>(handlers::handle_open_project_manifest)
         .on::<false, crate::lsp_ext::ParentModule>(handlers::handle_parent_module)
+        .on::<false, crate::lsp_ext::Runnables>(handlers::handle_runnables)
         .on::<false, crate::lsp_ext::ViewIncludeGraph>(handlers::handle_view_include_graph)
         .on::<false, crate::lsp_ext::MoveItem>(handlers::handle_move_item)
         .finish();
@@ -1538,6 +1621,191 @@ fn noop_response(_state: &mut GlobalState, response: lsp_server::Response) {
 #[cfg(test)]
 mod project_reload_tests {
     use super::*;
+
+    #[test]
+    fn eviction_waits_for_the_pool_and_the_next_wave_publishes_its_findings() {
+        let (sender, _messages) = crossbeam_channel::unbounded();
+        let (task_sender, tasks) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender, task_sender);
+        let dir = tempfile::tempdir().unwrap();
+        let url = Url::from_file_path(dir.path().join("bad.sail")).unwrap();
+        crate::handlers::notification::handle_did_open_text_document(
+            &mut state,
+            lsp_types::DidOpenTextDocumentParams {
+                text_document: lsp_types::TextDocumentItem {
+                    uri: url.clone(),
+                    language_id: "sail".into(),
+                    version: 1,
+                    text: "function bad() -> int = true\n".into(),
+                },
+            },
+        )
+        .unwrap();
+        state.process_changes();
+        state.config.cache.inference_capacity = 1;
+        let retained = state.analysis_host.db_snapshot();
+        let (release, blocked) = crossbeam_channel::bounded::<()>(0);
+        state.task_pool.spawn(stdx::thread::ThreadIntent::Worker, move || {
+            blocked.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+            drop(retained);
+            Task::Response(lsp_server::Response::new_ok(0.into(), ()))
+        });
+        assert!(!state.task_pool.is_empty());
+        assert!(!state.collect_caches_if_idle());
+        release.send(()).unwrap();
+        let _ = tasks.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !state.task_pool.is_empty() {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert!(state.collect_caches_if_idle());
+        state.update_diagnostics();
+        for _ in 0..2 {
+            let task = tasks.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+            assert!(matches!(task, Task::Diagnostics(_)));
+            on_task(&mut state, task);
+        }
+        let file = state.vfs.file_id_for_url(&url);
+        assert!(
+            state
+                .diagnostics
+                .diagnostics_for(file)
+                .any(|d| d.severity == Some(lsp_types::DiagnosticSeverity::ERROR)),
+            "collection must leave the following diagnostics wave operational"
+        );
+        assert!(state.analysis_health.failures.is_empty());
+    }
+
+    #[test]
+    fn rename_keeps_legacy_clients_compatible_with_unversioned_workspace_edits() {
+        let (sender, _messages) = crossbeam_channel::unbounded();
+        let (tasks, _receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender, tasks);
+        let url = Url::from_file_path(std::env::temp_dir().join("legacy-rename.sail")).unwrap();
+        crate::handlers::notification::handle_did_open_text_document(
+            &mut state,
+            lsp_types::DidOpenTextDocumentParams {
+                text_document: lsp_types::TextDocumentItem {
+                    uri: url.clone(),
+                    language_id: "sail".into(),
+                    version: 1,
+                    text: "function f(x : int) -> int = x\n".into(),
+                },
+            },
+        )
+        .unwrap();
+        state.process_changes();
+        let file = state.vfs.file_id_for_url(&url);
+        state.ensure_workspace_files(vec![file]);
+        assert!(!state.client_caps.versioned_edit_support());
+        let edit = crate::handlers::request::handle_rename(
+            state.snapshot(),
+            lsp_types::RenameParams {
+                text_document_position: lsp_types::TextDocumentPositionParams {
+                    text_document: lsp_types::TextDocumentIdentifier { uri: url.clone() },
+                    position: lsp_types::Position::new(0, 11),
+                },
+                new_name: "arg".into(),
+                work_done_progress_params: Default::default(),
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert!(edit.document_changes.is_none());
+        assert_eq!(edit.changes.unwrap()[&url].len(), 2);
+    }
+
+    #[test]
+    fn cache_collection_waits_for_retained_snapshots_and_applies_live_configuration() {
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let (tasks, _task_receiver) = crossbeam_channel::unbounded();
+        let mut state = crate::global_state::GlobalState::new(sender, tasks);
+        state.config.cache.inference_capacity = 7;
+        let retained = state.analysis_host.db_snapshot();
+        assert!(
+            !state.collect_caches_if_idle(),
+            "a retained snapshot must not be cancelled or block collection"
+        );
+        assert_eq!(state.cache_control.report()["effectiveCapacities"]["inference"], 0);
+        drop(retained);
+        assert!(state.collect_caches_if_idle());
+        assert_eq!(state.cache_control.report()["effectiveCapacities"]["inference"], 7);
+        state.config.cache.inference_capacity = 0;
+        assert!(state.collect_caches_if_idle());
+        assert_eq!(state.cache_control.report()["effectiveCapacities"]["inference"], 0);
+        assert!(!state.collect_caches_if_idle(), "no repeated write on every idle request");
+    }
+
+    #[test]
+    fn cancelled_request_is_recorded_once_without_source_or_internal_failure() {
+        let (sender, responses) = crossbeam_channel::unbounded();
+        let (tasks, _results) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender, tasks);
+        let request = Request::new(
+            1.into(),
+            "textDocument/references".into(),
+            serde_json::json!({"privateSource":"not collected"}),
+        );
+        state.register_request(&request);
+        state.cancel(request.id.clone());
+        state.cancel(request.id);
+        assert_eq!(state.analysis_health.recent_requests.len(), 1);
+        assert_eq!(state.analysis_health.recent_requests[0].method, "textDocument/references");
+        assert_eq!(
+            state.analysis_health.recent_requests[0].error_code,
+            Some(lsp_server::ErrorCode::RequestCanceled as i32)
+        );
+        assert!(state.analysis_health.failures.is_empty());
+        assert!(!serde_json::to_string(state.analysis_health.as_ref())
+            .unwrap()
+            .contains("not collected"));
+        assert_eq!(responses.try_iter().filter(|m| matches!(m, Message::Response(_))).count(), 1);
+    }
+
+    #[test]
+    fn diagnostic_worker_failure_is_visible_cancelled_work_is_not_failure_and_retry_recovers() {
+        let (sender, _messages) = crossbeam_channel::unbounded();
+        let (tasks, _results) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender, tasks);
+        let file = base_db::FileId::from_raw(0);
+        let generation = state.diagnostics.next_generation();
+        let kind = NativeDiagnosticsFetchKind::Semantic;
+        let failed = DiagnosticsTaskKind::compute(kind, generation, vec![file], || {
+            panic!("inference fault")
+        });
+        on_task(&mut state, Task::Diagnostics(failed));
+        assert!(state
+            .current_status()
+            .message
+            .unwrap()
+            .contains("Analysis incomplete: semanticDiagnostics failed: inference fault"));
+        assert_eq!(state.diagnostics.diagnostics_for(file).count(), 0);
+        let cancelled = DiagnosticsTaskKind::compute(kind, generation, vec![file], || {
+            Err(ide_db::ide_types::CancelledError::PendingWrite)
+        });
+        on_task(&mut state, Task::Diagnostics(cancelled));
+        assert_eq!(state.analysis_health.cancelled_waves, 1);
+        assert!(state.analysis_health.failures.contains_key("semanticDiagnostics"));
+        let next = state.diagnostics.next_generation();
+        on_task(
+            &mut state,
+            Task::Diagnostics(DiagnosticsTaskKind::Semantic(next, vec![(file, Vec::new())])),
+        );
+        assert!(state.analysis_health.failures.is_empty());
+        let stale =
+            DiagnosticsTaskKind::compute(kind, generation, vec![file], || panic!("old fault"));
+        on_task(&mut state, Task::Diagnostics(stale));
+        assert!(state.analysis_health.failures.is_empty(), "stale failures cannot undo recovery");
+        let dependent = DiagnosticsTaskKind::compute(kind, next, vec![file], || {
+            Err(ide_db::ide_types::CancelledError::PropagatedPanic)
+        });
+        on_task(&mut state, Task::Diagnostics(dependent));
+        assert!(state.analysis_health.failures["semanticDiagnostics"]
+            .message
+            .contains("dependent query panicked"));
+        assert_eq!(state.analysis_health.cancelled_waves, 1);
+    }
 
     #[test]
     fn shutdown_batch_answers_requests_until_exit() {

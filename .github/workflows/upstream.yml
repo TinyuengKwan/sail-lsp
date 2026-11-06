@@ -1,0 +1,77 @@
+name: Latest upstream compatibility
+
+on:
+  schedule:
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: latest-upstream-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  latest:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: sail-lsp
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: sail-lsp
+      - uses: actions/checkout@v4
+        with:
+          repository: rems-project/sail
+          path: sail
+      - uses: actions/checkout@v4
+        with:
+          repository: riscv/sail-riscv
+          path: sail-riscv
+      - uses: actions/checkout@v4
+        with:
+          repository: rems-project/sail-arm
+          path: sail-arm
+      - name: Record selected revisions before building
+        run: |
+          mkdir -p target/upstream
+          for repo in sail-lsp sail sail-riscv sail-arm; do
+            git -C "../$repo" rev-parse HEAD > "target/upstream/$repo-revision.txt"
+          done
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: 5.2.1
+          opam-local-packages: sail/*.opam
+      - name: Install latest compiler dependencies
+        working-directory: sail
+        run: opam install . --deps-only --yes 2>&1 | tee ../sail-lsp/target/upstream/dependencies.log
+      - name: Build latest unmodified compiler
+        working-directory: sail
+        run: opam exec -- dune build --release src/bin/sail.exe 2>&1 | tee ../sail-lsp/target/upstream/compiler-build.log
+      - name: Build project evaluation bridge
+        run: cargo build --release --locked -p project-model --example project_oracle 2>&1 | tee target/upstream/bridge-build.log
+      - name: Compare and classify
+        run: |
+          python3 scripts/upstream_monitor.py --compiler ../sail/_build/default/src/bin/sail.exe --lsp-oracle target/release/examples/project_oracle --sail-src ../sail --riscv ../sail-riscv --arm-src ../sail-arm --output target/upstream/report.json
+      - name: Record infrastructure failure before comparison
+        if: failure()
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path('target/upstream/report.json')
+          path.parent.mkdir(parents=True, exist_ok=True)
+          if not path.exists():
+              path.write_text(json.dumps({'schema_version': 1, 'passed': False, 'classification': 'infrastructure_failure', 'detail': 'Setup or build failed before comparison. See revision files and build logs.'}, indent=2) + '\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: latest-upstream-report
+          path: sail-lsp/target/upstream/
+          if-no-files-found: error

@@ -52,7 +52,7 @@ if [ "$lifecycle" = true ]; then
     exit $?
 fi
 if [ "$from_source" = true ]; then
-    command -v cargo >/dev/null 2>&1 || fail 'source installation requires Rust (cargo), CMake and a C++ compiler'
+    command -v cargo >/dev/null 2>&1 || fail 'source installation requires Rust (cargo), CMake and a C++20 compiler with std::format support (for example GCC 13+)'
     if [ -z "$source_dir" ]; then
         script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
         if [ -f "$script_dir/crates/sail-lsp/Cargo.toml" ] && [ -z "$revision" ] && [ "$version" = latest ]; then
