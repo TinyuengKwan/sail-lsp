@@ -579,8 +579,63 @@ fn arithmetic_lower_bound(
     {
         return true;
     }
+    if minimum == 0 && matches!(value, N::Var(_) | N::Symbol(_)) {
+        // Loop indices can start at div(a, d). For a >= 0 and d > 0,
+        // that lower bound is nonnegative too. Inspect direct facts only;
+        // do not recursively follow variable bounds and create proof cycles.
+        let mut pending: Vec<_> = facts.iter().collect();
+        for _ in 0..256 {
+            let Some(fact) = pending.pop() else { break };
+            if let ConstraintExpr::And(items) = fact {
+                pending.extend(items);
+                continue;
+            }
+            let (bound, target) = match fact {
+                ConstraintExpr::Compare { lhs, op: CompareOp::Lte | CompareOp::Lt, rhs } => {
+                    (lhs, rhs)
+                }
+                ConstraintExpr::Compare { lhs, op: CompareOp::Gte | CompareOp::Gt, rhs } => {
+                    (rhs, lhs)
+                }
+                _ => continue,
+            };
+            if super::constraint::subst_numeric_expr(target, subst) != *value {
+                continue;
+            }
+            let bound = super::constraint::subst_numeric_expr(bound, subst);
+            let (numerator, denominator) = match &bound {
+                N::Div(a, b) => (a.as_ref(), b.as_ref()),
+                N::App { name, args } if name == "div" && args.len() == 2 => (&args[0], &args[1]),
+                _ => continue,
+            };
+            if !total_integer_polynomial(numerator, 0)
+                || !super::integer::eval(denominator, subst, facts).is_some_and(|n| n > 0.into())
+            {
+                continue;
+            }
+            let nonnegative = ConstraintExpr::Compare {
+                lhs: N::Const(0),
+                op: CompareOp::Lte,
+                rhs: numerator.clone(),
+            };
+            if constraint_implied_by_assumptions(facts, &nonnegative, subst)
+                || decide_from_membership(&nonnegative, subst, facts)
+                    == Some(ConstraintStatus::Satisfied)
+            {
+                return true;
+            }
+        }
+    }
     let lower = |v: &N, n| arithmetic_lower_bound(v, n, subst, facts, depth + 1);
     match value {
+        N::App { name, args }
+            if name == "abs"
+                && minimum == 0
+                && args.len() == 1
+                && total_integer_polynomial(&args[0], 0) =>
+        {
+            true
+        }
         N::Mul(a, b) if minimum == 0 && a == b && total_integer_polynomial(a, 0) => true,
         N::Exp(exponent) if minimum <= 1 => lower(exponent, 0),
         N::Mul(a, b) if minimum == 0 || minimum == 1 => lower(a, minimum) && lower(b, minimum),
@@ -589,6 +644,9 @@ fn arithmetic_lower_bound(
             (lower(a, 1) && lower(b, 0)) || (lower(a, 0) && lower(b, 1))
         }
         N::Div(a, b) if minimum == 0 => lower(a, 0) && lower(b, 1),
+        N::App { name, args } if name == "div" && args.len() == 2 && minimum == 0 => {
+            lower(&args[0], 0) && lower(&args[1], 1)
+        }
         _ => false,
     }
 }
@@ -620,11 +678,42 @@ fn arithmetic_ordering(
 ) -> bool {
     use crate::ty::NumericExpr as N;
     let (lo, hi) = match op {
-        CompareOp::Lte => (lhs, rhs),
-        CompareOp::Gte => (rhs, lhs),
+        CompareOp::Lt | CompareOp::Lte => (lhs, rhs),
+        CompareOp::Gt | CompareOp::Gte => (rhs, lhs),
         _ => return false,
     };
+    if let N::App { name, args } = lo {
+        if name == "abs"
+            && args.len() == 1
+            && total_integer_polynomial(&args[0], 0)
+            && (total_integer_polynomial(hi, 0) || super::integer::eval(hi, subst, facts).is_some())
+        {
+            // |a| < b iff a < b and -a < b (and likewise for <=).
+            // Prove both via the existing exact difference-constraint graph.
+            // Finite width enumeration makes powers concrete before this rule;
+            // no guessed machine-width or negative-exponent facts are added.
+            let negated = if matches!(op, CompareOp::Lt | CompareOp::Gt) {
+                CompareOp::Gte
+            } else {
+                CompareOp::Gt
+            };
+            return [args[0].clone(), N::Neg(Box::new(args[0].clone()))].into_iter().all(|lhs| {
+                let mut with_negation = facts.to_vec();
+                with_negation.push(ConstraintExpr::Compare { lhs, op: negated, rhs: hi.clone() });
+                super::integer::contradictory(&with_negation, subst)
+            });
+        }
+    }
     let lower = |v: &N, n| arithmetic_lower_bound(v, n, subst, facts, 0);
+    // Over integers, c < n is equivalent to c + 1 <= n. Keep strict
+    // comparisons out of the non-strict symbolic rules below, and avoid
+    // overflowing the literal when computing its successor.
+    if matches!(op, CompareOp::Lt | CompareOp::Gt) {
+        return match lo {
+            N::Const(n) => n.checked_add(1).is_some_and(|minimum| lower(hi, minimum)),
+            _ => false,
+        };
+    }
     if let N::Const(minimum @ (0 | 1)) = lo {
         if lower(hi, *minimum) {
             return true;
@@ -894,6 +983,109 @@ mod tests {
     fn check(goal: &str, assumptions: &[&str]) -> ConstraintStatus {
         let assumptions = assumptions.iter().map(|t| parse_constraint_text(t)).collect::<Vec<_>>();
         solve(&parse_constraint_text(goal), &Subst::default(), &assumptions)
+    }
+
+    #[test]
+    fn loop_lower_bound_inherits_a_nonnegative_integer_quotient_without_smt() {
+        let prove = |facts: &[&str]| {
+            let facts = facts.iter().map(|s| parse_constraint_text(s)).collect::<Vec<_>>();
+            super::solve_without_smt(
+                &parse_constraint_text("0 <= 'index"),
+                &Subst::default(),
+                &facts,
+            )
+        };
+        for fact in ["div('csr, 4) <= 'index", "'index >= div('csr, 4)"] {
+            assert_eq!(
+                prove(&["0 <= 'csr & 'csr <= 2 ^ xlen - 1", fact]),
+                ConstraintStatus::Satisfied
+            );
+        }
+        for goal in ["0 <= div('csr, 4)", "div('csr, 4) >= 0"] {
+            assert_eq!(
+                super::solve_without_smt(
+                    &parse_constraint_text(goal),
+                    &Subst::default(),
+                    &[parse_constraint_text("0 <= 'csr")],
+                ),
+                ConstraintStatus::Satisfied
+            );
+        }
+        for facts in [
+            vec!["'csr < 0", "div('csr, 4) <= 'index"],
+            vec!["'csr >= 0", "div('csr, 0) <= 'index"],
+            vec!["'csr >= 0", "div('csr, -4) <= 'index"],
+            vec!["'csr >= 0", "'index <= div('csr, 4)"],
+            vec!["div('index, 4) <= 'index"],
+        ] {
+            assert_ne!(prove(&facts), ConstraintStatus::Satisfied, "{facts:?}");
+        }
+    }
+
+    #[test]
+    fn absolute_value_of_a_signed_element_fits_its_unsigned_width_without_smt() {
+        let facts: Vec<_> = [
+            "'width in {8, 16, 32, 64}",
+            "-(2 ^ ('width - 1)) <= 'value",
+            "'value <= 2 ^ ('width - 1) - 1",
+        ]
+        .iter()
+        .map(|s| parse_constraint_text(s))
+        .collect();
+        let goal =
+            parse_constraint_text("'width >= 0 & 0 <= abs('value) & abs('value) < 2 ^ 'width");
+        assert_eq!(
+            super::solve_without_smt(&goal, &Subst::default(), &facts),
+            ConstraintStatus::Satisfied
+        );
+        for goal in ["abs('value) <= 8", "8 >= abs('value)", "abs('value) < 9", "9 > abs('value)"] {
+            let facts = ["-8 <= 'value", "'value <= 8"]
+                .iter()
+                .map(|s| parse_constraint_text(s))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                super::solve_without_smt(&parse_constraint_text(goal), &Subst::default(), &facts),
+                ConstraintStatus::Satisfied,
+                "{goal}"
+            );
+        }
+        for (goal, facts) in [
+            ("abs('value) < 8", vec!["-8 <= 'value", "'value <= 7"]),
+            ("0 <= abs(div(1, 'd))", vec![]),
+            ("abs('value) < 2 ^ 'width", vec!["'width in {0, 8}", "'value == -1"]),
+        ] {
+            let facts: Vec<_> = facts.iter().map(|s| parse_constraint_text(s)).collect();
+            assert_ne!(
+                super::solve_without_smt(&parse_constraint_text(goal), &Subst::default(), &facts),
+                ConstraintStatus::Satisfied,
+                "{goal}"
+            );
+        }
+    }
+
+    #[test]
+    fn strict_integer_bounds_use_cheap_nonnegative_proofs() {
+        let prove =
+            |text| super::solve_without_smt(&parse_constraint_text(text), &Subst::default(), &[]);
+        for goal in [
+            "'x * 'x > -1",
+            "-1 < 'x * 'x",
+            "'x * 'x + 1 > 0",
+            "0 < 'x * 'x + 1",
+            "('x - 'y) * ('x - 'y) > -1",
+        ] {
+            assert_eq!(prove(goal), ConstraintStatus::Satisfied, "{goal}");
+        }
+        // Strictness and partial arithmetic must not manufacture a proof.
+        for goal in [
+            "'x * 'x > 0",
+            "'x * 'y > -1",
+            "div(1, 'd) * div(1, 'd) > -1",
+            "(2 ^ 'n) * (2 ^ 'n) > -1",
+            "'x * 'x > 9223372036854775807",
+        ] {
+            assert_ne!(prove(goal), ConstraintStatus::Satisfied, "{goal}");
+        }
     }
 
     #[test]

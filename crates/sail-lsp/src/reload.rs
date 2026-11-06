@@ -1550,6 +1550,35 @@ mod tests {
     }
 
     #[test]
+    fn recreated_known_manifest_keeps_reload_scoped() {
+        let (sender, _receiver) = crossbeam_channel::unbounded();
+        let (tasks, _tasks_receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender, tasks);
+        let root = std::env::temp_dir().join("known-manifest-watch");
+        let known = syntax::preprocess::normalize_path(&root.join("known.sail_project"));
+        std::sync::Arc::make_mut(&mut state.projects).insert(
+            Url::from_directory_path(&root).unwrap(),
+            FolderProject { manifest: known.clone(), ..Default::default() },
+        );
+        for (path, expected) in [
+            (known.clone(), ReloadScope::project(known)),
+            (root.join("new.sail_project"), ReloadScope::All),
+        ] {
+            crate::handlers::notification::handle_did_change_watched_files(
+                &mut state,
+                lsp_types::DidChangeWatchedFilesParams {
+                    changes: vec![lsp_types::FileEvent {
+                        uri: Url::from_file_path(path).unwrap(),
+                        typ: lsp_types::FileChangeType::CREATED,
+                    }],
+                },
+            )
+            .unwrap();
+            assert_eq!(state.take_reload_scope(), expected);
+        }
+    }
+
+    #[test]
     fn manifest_watch_events_reload_without_parsing_manifests_as_sail() {
         let (sender, _receiver) = crossbeam_channel::unbounded();
         let (tasks, _tasks_receiver) = crossbeam_channel::unbounded();

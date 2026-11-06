@@ -170,8 +170,18 @@ pub(crate) fn handle_did_change_watched_files(
                 if is_sail {
                     merge_scope(&mut reload_scope, crate::reload::ReloadScope::All);
                 } else if is_project_file {
-                    // A new manifest can change discovery precedence.
-                    merge_scope(&mut reload_scope, crate::reload::ReloadScope::All);
+                    // Atomic replacement can recreate an already-loaded
+                    // manifest. Only genuinely new manifests can change
+                    // discovery precedence for unrelated projects.
+                    let known = uri
+                        .to_file_path()
+                        .ok()
+                        .map(|path| syntax::preprocess::normalize_path(&path))
+                        .filter(|path| state.projects.values().any(|p| &p.manifest == path));
+                    let scope = known
+                        .map(crate::reload::ReloadScope::project)
+                        .unwrap_or(crate::reload::ReloadScope::All);
+                    merge_scope(&mut reload_scope, scope);
                 }
                 if !is_sail {
                     continue;

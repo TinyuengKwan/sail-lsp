@@ -365,6 +365,15 @@ constant division and remainder follow Sail's Euclidean convention. Overflow
 and zero division defer. The optional Z3 backend translates opaque numeric
 functions with their arguments, uses structural cache keys, and adds only
 valid exponent facts. Lightweight evaluation remains bounded by `i64`.
+Strict integer bounds against literals reuse the same cheap nonnegative and
+positive proofs via a checked successor (`n > -1` becomes `n >= 0`). Partial
+arithmetic keeps its domain requirements. Absolute-value bounds use both signed
+interval inequalities; finite width facts can make large powers concrete without
+SMT. A loop lower bound `div(a, d) <= i` preserves nonnegativity when `a >= 0`
+and `d > 0`; this inspects bounded direct facts without recursive bound cycles.
+Solver cache keys ignore identical
+repeated assumptions but retain every distinct fact and substitution; timeout
+and cancellation outcomes remain uncached.
 
 `ScopedObligation` retains the goal, cause, source expression, lexical assumptions
 and referenced inference placeholders. Finalization resolves live bindings before

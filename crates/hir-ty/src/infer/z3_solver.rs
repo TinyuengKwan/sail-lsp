@@ -801,7 +801,12 @@ fn build_cache_key(
     let mut types = subst.types.entries.to_vec();
     values.sort_by(|a, b| a.0.cmp(&b.0));
     types.sort_by(|a, b| a.0.cmp(&b.0));
-    Z3CacheKey { goal: expr.clone(), assumptions: assumptions.to_vec(), values, types }
+    // A repeated conjunct does not change a proof's context. Keep first-use
+    // order and all distinct facts/substitutions, while sharing cached proofs
+    // across inference paths that append the same assumption again.
+    let mut seen = std::collections::HashSet::new();
+    let assumptions = assumptions.iter().filter(|fact| seen.insert(*fact)).cloned().collect();
+    Z3CacheKey { goal: expr.clone(), assumptions, values, types }
 }
 
 #[cfg(test)]
@@ -840,54 +845,167 @@ mod cancellation_tests {
         assert_eq!(cache_lookup(&key), Some(ConstraintStatus::Satisfied));
     }
     #[test]
-    #[ignore = "explicit SMT contention probe; reports timing-dependent outcomes rather than asserting editor-budget proofs"]
-    fn parallel_editor_budget_probe() {
+    fn repeated_assumptions_reuse_proofs_without_spending_another_budget() {
+        use super::super::parse_constraint_text;
         use crate::solver_budget::{SolverBudget, SolverLimits};
-        use std::time::Duration;
-        let workers = std::thread::available_parallelism().map_or(8, usize::from).clamp(8, 32);
+        let goal = parse_constraint_text("'duplicate_fact_cache > 1");
+        let fact = parse_constraint_text("'duplicate_fact_cache > 2");
+        let subst = Subst::default();
+        {
+            let _budget = SolverBudget::enter(
+                crate::CancellationToken::never(),
+                SolverLimits {
+                    total: std::time::Duration::from_secs(10),
+                    per_check: std::time::Duration::from_secs(5),
+                    checks: 64,
+                },
+            );
+            assert_eq!(
+                try_solve(&goal, &subst, std::slice::from_ref(&fact)),
+                ConstraintStatus::Satisfied
+            );
+        }
+        let _budget = SolverBudget::enter(
+            crate::CancellationToken::never(),
+            SolverLimits { checks: 0, ..Default::default() },
+        );
+        for count in 2..=8 {
+            assert_eq!(
+                try_solve(&goal, &subst, &vec![fact.clone(); count]),
+                ConstraintStatus::Satisfied
+            );
+        }
+        // A different fact/substitution remains a different proof context.
+        let other = parse_constraint_text("'duplicate_fact_cache < 0");
+        assert_eq!(try_solve(&goal, &subst, &[other]), ConstraintStatus::Unknown);
+        let mut changed = subst.clone();
+        changed.values.insert("'duplicate_fact_cache".into(), "0".into());
+        assert_eq!(try_solve(&goal, &changed, &[fact]), ConstraintStatus::Unknown);
+    }
+
+    #[test]
+    #[ignore = "explicit production/SMT contention measurements; scheduler-dependent"]
+    #[allow(clippy::print_stdout)]
+    fn production_contention_probe() {
+        use crate::solver_budget::{SolverBudget, SolverLimits};
+        use std::sync::atomic::AtomicUsize;
+        use std::time::{Duration, Instant};
+        let workers = std::env::var("SAIL_SOLVER_PROBE_WORKERS")
+            .ok()
+            .map(|n| n.parse::<usize>().expect("positive worker count"))
+            .unwrap_or_else(|| std::thread::available_parallelism().map_or(8, usize::from));
+        assert!((1..=64).contains(&workers));
         for generous in [false, true] {
-            let gate = std::sync::Barrier::new(workers);
-            let unknown = AtomicU64::new(0);
-            let exhausted = AtomicU64::new(0);
-            std::thread::scope(|scope| {
-                for worker in 0..workers {
-                    let (gate, unknown, exhausted) = (&gate, &unknown, &exhausted);
-                    scope.spawn(move || {
-                        gate.wait();
-                        for round in 0..8 {
-                            let limits = if generous {
-                                SolverLimits {
-                                    total: Duration::from_secs(10),
-                                    per_check: Duration::from_secs(5),
-                                    checks: 64,
+            for workload in [
+                "backend_square",
+                "square",
+                "strict_square",
+                "positive_sum",
+                "model_abs",
+                "loop_lower",
+                "repeated_smt",
+                "unsupported",
+            ] {
+                let gate = std::sync::Barrier::new(workers);
+                let proved = AtomicUsize::new(0);
+                let budget_unknown = AtomicUsize::new(0);
+                let incomplete_unknown = AtomicUsize::new(0);
+                let unsupported_unknown = AtomicUsize::new(0);
+                let other_unknown = AtomicUsize::new(0);
+                let started = Instant::now();
+                let misses_before = Z3_CACHE_MISSES.load(Ordering::Relaxed);
+                let hits_before = Z3_CACHE_HITS.load(Ordering::Relaxed);
+                std::thread::scope(|scope| {
+                    for worker in 0..workers {
+                        let (
+                            gate,
+                            proved,
+                            budget_unknown,
+                            incomplete_unknown,
+                            unsupported_unknown,
+                            other_unknown,
+                        ) = (
+                            &gate,
+                            &proved,
+                            &budget_unknown,
+                            &incomplete_unknown,
+                            &unsupported_unknown,
+                            &other_unknown,
+                        );
+                        scope.spawn(move || {
+                            gate.wait();
+                            for round in 0..8 {
+                                let limits = if generous {
+                                    SolverLimits {
+                                        total: Duration::from_secs(10),
+                                        per_check: Duration::from_secs(5),
+                                        checks: 64,
+                                    }
+                                } else {
+                                    SolverLimits::default()
+                                };
+                                let _budget =
+                                    SolverBudget::enter(crate::CancellationToken::never(), limits);
+                                let name = if workload == "repeated_smt" {
+                                    format!("'shared_{generous}")
+                                } else {
+                                    format!("'p_{workload}_{generous}_{worker}_{round}")
+                                };
+                                let width = format!("'w_{generous}_{worker}_{round}");
+                                let source = match workload {
+                                    "strict_square" | "repeated_smt" => {
+                                        format!("{name} * {name} > -1")
+                                    }
+                                    "positive_sum" => format!("{name} * {name} + 1 > 0"),
+                                    "loop_lower" => format!("0 <= {name}"),
+                                    "model_abs" => format!("{width} >= 0 & 0 <= abs({name}) & abs({name}) < 2 ^ {width}"),
+                                    _ => format!("{name} * {name} >= 0"),
+                                };
+                                let goal = if workload == "unsupported" {
+                                    ConstraintExpr::Unsupported
+                                } else {
+                                    super::super::parse_constraint_text(&source)
+                                };
+                                let facts = if workload == "model_abs" {
+                                    [format!("{width} in {{8, 16, 32, 64}}"), format!("-(2 ^ ({width} - 1)) <= {name}"),
+                                     format!("{name} <= 2 ^ ({width} - 1) - 1")]
+                                        .iter().map(|s| super::super::parse_constraint_text(s)).collect()
+                                } else if workload == "loop_lower" {
+                                    [format!("0 <= {width}"), format!("div({width}, 4) <= {name}")]
+                                        .iter().map(|s| super::super::parse_constraint_text(s)).collect()
+                                } else { Vec::new() };
+                                let result = if workload == "backend_square" {
+                                    try_solve(&goal, &Subst::default(), &[])
+                                } else {
+                                    super::super::solver::solve(&goal, &Subst::default(), &facts)
+                                };
+                                if result == ConstraintStatus::Satisfied {
+                                    proved.fetch_add(1, Ordering::Relaxed);
+                                } else {
+                                    assert_eq!(result, ConstraintStatus::Unknown, "{source}");
+                                    let counter = if workload == "unsupported" {
+                                        unsupported_unknown
+                                    } else if SolverBudget::budget_exhaustion_count() > 0 {
+                                        budget_unknown
+                                    } else if SolverBudget::incomplete_count() > 0 {
+                                        incomplete_unknown
+                                    } else {
+                                        other_unknown
+                                    };
+                                    counter.fetch_add(1, Ordering::Relaxed);
                                 }
-                            } else {
-                                SolverLimits::default()
-                            };
-                            let _budget =
-                                SolverBudget::enter(crate::CancellationToken::never(), limits);
-                            let var =
-                                NumericExpr::Var(format!("probe_{generous}_{worker}_{round}"));
-                            let expr = ConstraintExpr::Compare {
-                                lhs: NumericExpr::Mul(Box::new(var.clone()), Box::new(var)),
-                                op: CompareOp::Gte,
-                                rhs: NumericExpr::Const(0),
-                            };
-                            let result = try_solve(&expr, &Subst::default(), &[]);
-                            if result == ConstraintStatus::Unknown {
-                                unknown.fetch_add(1, Ordering::Relaxed);
-                                if SolverBudget::budget_exhaustion_count() > 0 {
-                                    exhausted.fetch_add(1, Ordering::Relaxed);
-                                }
-                            } else {
-                                assert_eq!(result, ConstraintStatus::Satisfied);
                             }
-                        }
-                    });
+                        });
+                    }
+                });
+                println!("CONTENTION workers={workers} generous={generous} workload={workload} goals={} proved={} budget_unknown={} incomplete_unknown={} unsupported_unknown={} other_unknown={} cache_hits={} cache_misses={} elapsed_ms={}",
+                    workers * 8, proved.load(Ordering::Relaxed), budget_unknown.load(Ordering::Relaxed),
+                    incomplete_unknown.load(Ordering::Relaxed), unsupported_unknown.load(Ordering::Relaxed),
+                    other_unknown.load(Ordering::Relaxed), Z3_CACHE_HITS.load(Ordering::Relaxed) - hits_before,
+                    Z3_CACHE_MISSES.load(Ordering::Relaxed) - misses_before, started.elapsed().as_millis());
+                if generous && workload != "unsupported" {
+                    assert_eq!(proved.load(Ordering::Relaxed), workers * 8);
                 }
-            });
-            if generous {
-                assert_eq!(unknown.load(Ordering::Relaxed), 0);
             }
         }
     }

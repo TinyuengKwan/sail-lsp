@@ -3931,21 +3931,28 @@ fn extracting_an_include_creates_a_file_and_keeps_semantic_order() {
             "contentChanges": [{"text": updated}],
         }),
     );
+    // An old empty publication can still be queued before didChange. Wait
+    // for the new file to be part of the model, then check current diagnostics.
+    let deadline = Instant::now() + PATIENCE;
+    loop {
+        let locations = server.ask("textDocument/definition", serde_json::json!({
+            "textDocument": {"uri": server.url("main.sail")}, "position": {"line": 1, "character": 32},
+        }));
+        if locations.as_array().is_some_and(|locations| {
+            locations
+                .iter()
+                .any(|location| location["uri"] == server.url("helper_extracted.sail").as_str())
+        }) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "extracted include never loaded: {locations}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let diagnostics = server.pull("main.sail");
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
     server.wait_for_diagnostics("main.sail", "extracted include to remain linked", |ds| {
         ds.is_empty()
     });
-    assert!(server.pull("main.sail").is_empty());
-    let locations = server.ask("textDocument/definition", serde_json::json!({
-        "textDocument": {"uri": server.url("main.sail")}, "position": {"line": 1, "character": 32},
-    }));
-    assert!(
-        locations
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|location| location["uri"] == server.url("helper_extracted.sail").as_str()),
-        "{locations}"
-    );
     let stale = server.request("codeAction/resolve", action);
     assert_eq!(
         server.wait_for_response(stale).error.unwrap().code,

@@ -103,6 +103,9 @@ jobs:
           target/release/examples/mutation_check "$SAIL_ORACLE_SRC/test/typecheck/pass" --oracle target/corpus/mutation-oracle.txt 2>&1 | tee target/corpus/mutation.log
       - name: Incomplete editing correctness
         run: python3 scripts/editing_replay.py --server target/release/sail-lsp --output target/corpus/editing-replay.json
+      - name: Multi-file resource recovery
+        run: |
+          python3 scripts/resource_replay.py --server target/release/sail-lsp --files 128 --functions 8 --open-files 16 --rounds 16 --duration-seconds 0 --reload-every 4 --watch-reloads --output target/corpus/resource-replay.json
       - name: Repeated stdio measurements
         env:
           SAIL_LOG: sail_lsp::latency=debug
@@ -132,6 +135,7 @@ jobs:
           name: corpus-and-editor-results
           path: |
             sail-lsp/target/corpus/*.json
+            sail-lsp/target/corpus/*.jsonl
             sail-lsp/target/corpus/*.log
             sail-lsp/target/corpus/*.txt
             sail-lsp/target/corpus/*.sha256
