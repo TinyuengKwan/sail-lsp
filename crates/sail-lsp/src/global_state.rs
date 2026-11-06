@@ -602,12 +602,28 @@ impl GlobalState {
         let db = self.analysis_host.db_snapshot();
         let (url_to_fid, fid_to_url) = self.vfs.url_map_snapshot();
         let url_map = ide::analysis::UrlMap::new(url_to_fid, fid_to_url);
-        Analysis::with_include_graph(
+        let analysis = Analysis::with_include_graph(
             db,
             files,
             url_map,
             std::sync::Arc::new(self.include_graph.clone()),
-        )
+        );
+        let mut preferred = std::collections::HashMap::new();
+        for uri in self.mem_docs.iter() {
+            let document = self.mem_docs.get(uri).unwrap();
+            let Some(selected) = &document.selected_context else { continue };
+            let Ok(contexts) = analysis.include_contexts(uri) else { continue };
+            for (view, key, root) in contexts {
+                if crate::handlers::request::include_context_key(&key, &root, &self.module_contexts)
+                    == *selected
+                {
+                    if let Some(source) = analysis.file_id(uri) {
+                        preferred.insert(source, view);
+                    }
+                }
+            }
+        }
+        analysis.with_preferred_views(preferred)
     }
 
     /// Create GlobalStateSnapshot for request handlers.

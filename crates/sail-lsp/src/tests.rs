@@ -21,7 +21,7 @@ use ide::goto_type_definition::{parse_named_type, typed_bindings};
 use ide::navigation::{
     implementation_locations, resolve_workspace_symbol, symbol_declaration_locations,
     symbol_definition_locations, type_alias_edges, type_name_candidates_at_position, type_subtypes,
-    type_supertypes, will_rename_file_edits,
+    type_supertypes,
 };
 use ide::references::{
     reference_locations, rename_edits, resolve_symbol_at, symbol_spans_for_file,
@@ -1490,14 +1490,17 @@ fn finds_type_candidates_at_position() {
 }
 
 #[test]
-fn creates_will_rename_file_edits() {
-    let uri = Url::parse("file:///tmp/main.sail").unwrap();
-    let file = SalsaTestFile::new("let inc = \"old.sail\"\n".to_string());
-    let rename_pairs =
-        vec![("file:///tmp/old.sail".to_string(), "file:///tmp/new.sail".to_string())];
-    let changes = will_rename_file_edits(std::iter::once((&uri, &file)), &rename_pairs)
-        .expect("expected edits");
-    assert_eq!(changes.len(), 1);
+fn only_include_directives_are_file_references() {
+    let source = "let inc = \"old.sail\"\n// $include \"old.sail\"\n$include \"dir/old.sail\" // trailing \"ignored\"\n";
+    let (root, _) = syntax::parse_text(source);
+    let references: Vec<_> =
+        root.children().filter_map(|node| syntax::preprocess::include_path(&node)).collect();
+    assert_eq!(references.len(), 1);
+    assert_eq!(references[0].1, "dir/old.sail");
+    assert_eq!(
+        &source[usize::from(references[0].0.start())..usize::from(references[0].0.end())],
+        "dir/old.sail"
+    );
 }
 
 #[test]

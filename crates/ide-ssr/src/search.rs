@@ -17,17 +17,18 @@ pub(crate) fn search_in_tree(
     let pattern = &rule.pattern.node;
     let mut matches = Vec::new();
 
-    for node in root
-        .descendants()
-        .filter(|node| ide_db::syntax_helpers::node_ext::is_expr_kind(node.kind()))
-    {
+    for node in root.descendants().filter(|node| rule.kind.accepts(node.kind())) {
         db.unwind_if_revision_cancelled();
         // Skip trivia-only or too-small nodes.
         if node.text_range().len() == rowan::TextSize::from(0u32) {
             continue;
         }
         if let Ok(captures) = matcher.try_match(pattern, &node) {
-            matches.push(Match { matched_node: node.clone(), placeholder_values: captures });
+            matches.push(Match {
+                token_mapping: matcher.token_mapping(pattern, &node),
+                matched_node: node.clone(),
+                placeholder_values: captures,
+            });
         }
     }
 

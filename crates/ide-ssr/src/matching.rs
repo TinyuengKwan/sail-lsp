@@ -6,7 +6,7 @@
 use parser::SyntaxKind;
 use rowan::NodeOrToken;
 use rustc_hash::FxHashMap;
-use syntax::{SyntaxNode, SyntaxToken};
+use syntax::{SyntaxElement, SyntaxNode, SyntaxToken};
 
 use crate::parsing::{Constraint, NodeKind, Placeholder, Var, PLACEHOLDER_PREFIX};
 
@@ -16,7 +16,8 @@ pub(crate) struct Match {
     /// The matched syntax node.
     pub(crate) matched_node: SyntaxNode,
     /// Captured placeholder values.
-    pub(crate) placeholder_values: FxHashMap<Var, SyntaxNode>,
+    pub(crate) placeholder_values: FxHashMap<Var, SyntaxElement>,
+    pub(crate) token_mapping: FxHashMap<usize, usize>,
 }
 
 /// CST-level matcher.
@@ -37,10 +38,57 @@ impl<'a> Matcher<'a> {
         &self,
         pattern: &SyntaxNode,
         code: &SyntaxNode,
-    ) -> Result<FxHashMap<Var, SyntaxNode>, ()> {
+    ) -> Result<FxHashMap<Var, SyntaxElement>, ()> {
         let mut captures = FxHashMap::default();
         self.attempt_match_node(pattern, code, &mut captures)?;
         Ok(captures)
+    }
+
+    pub fn token_mapping(
+        &self,
+        pattern: &SyntaxNode,
+        code: &SyntaxNode,
+    ) -> FxHashMap<usize, usize> {
+        fn walk(
+            m: &Matcher<'_>,
+            p: &SyntaxNode,
+            c: &SyntaxNode,
+            out: &mut FxHashMap<usize, usize>,
+        ) {
+            if m.get_placeholder_for_node(p).is_some() {
+                let pt = p.first_token();
+                let ct = c
+                    .descendants_with_tokens()
+                    .filter_map(|e| e.into_token())
+                    .find(|t| !t.kind().is_trivia());
+                if let (Some(pt), Some(ct)) = (pt, ct) {
+                    out.insert(
+                        usize::from(pt.text_range().start()),
+                        usize::from(ct.text_range().start()),
+                    );
+                }
+                return;
+            }
+            for (a, b) in p
+                .children_with_tokens()
+                .filter(|e| !e.kind().is_trivia())
+                .zip(c.children_with_tokens().filter(|e| !e.kind().is_trivia()))
+            {
+                match (a, b) {
+                    (NodeOrToken::Node(a), NodeOrToken::Node(b)) => walk(m, &a, &b, out),
+                    (NodeOrToken::Token(a), NodeOrToken::Token(b)) => {
+                        out.insert(
+                            usize::from(a.text_range().start()),
+                            usize::from(b.text_range().start()),
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut out = FxHashMap::default();
+        walk(self, pattern, code, &mut out);
+        out
     }
 
     /// Recursive node matching.
@@ -54,7 +102,7 @@ impl<'a> Matcher<'a> {
         &self,
         pattern: &SyntaxNode,
         code: &SyntaxNode,
-        captures: &mut FxHashMap<Var, SyntaxNode>,
+        captures: &mut FxHashMap<Var, SyntaxElement>,
     ) -> Result<(), ()> {
         // Check if the entire pattern node is a placeholder wrapper.
         if let Some(placeholder) = self.get_placeholder_for_node(pattern) {
@@ -119,13 +167,11 @@ impl<'a> Matcher<'a> {
         &self,
         pattern_token: &SyntaxToken,
         code_token: &SyntaxToken,
-        captures: &mut FxHashMap<Var, SyntaxNode>,
+        captures: &mut FxHashMap<Var, SyntaxElement>,
     ) -> Result<(), ()> {
         // Check if pattern token is a placeholder.
         if let Some(placeholder) = self.get_placeholder_for_token(pattern_token) {
-            let node = code_token.parent().ok_or(())?;
-            let pm = node;
-            return self.record_binding(&placeholder, pm, captures);
+            return self.record_binding(&placeholder, code_token.clone().into(), captures);
         }
 
         // Exact text match for literal tokens.
@@ -143,28 +189,27 @@ impl<'a> Matcher<'a> {
         &self,
         placeholder: &Placeholder,
         code: &SyntaxNode,
-        captures: &mut FxHashMap<Var, SyntaxNode>,
+        captures: &mut FxHashMap<Var, SyntaxElement>,
     ) -> Result<(), ()> {
         // Check constraints.
         if !self.check_constraints(&placeholder.constraints, code) {
             return Err(());
         }
 
-        let pm = code.clone();
-        self.record_binding(placeholder, pm, captures)
+        self.record_binding(placeholder, code.clone().into(), captures)
     }
 
     /// Record a placeholder binding, checking consistency.
     fn record_binding(
         &self,
         placeholder: &Placeholder,
-        new_match: SyntaxNode,
-        captures: &mut FxHashMap<Var, SyntaxNode>,
+        new_match: SyntaxElement,
+        captures: &mut FxHashMap<Var, SyntaxElement>,
     ) -> Result<(), ()> {
         let var = placeholder.ident.clone();
         if let Some(existing) = captures.get(&var) {
             // Same placeholder must match same text.
-            if existing.text() != new_match.text() {
+            if existing.to_string() != new_match.to_string() {
                 return Err(());
             }
         } else {

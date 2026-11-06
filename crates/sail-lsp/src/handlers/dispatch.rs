@@ -56,26 +56,19 @@ impl RequestDispatcher<'_> {
         };
 
         let (id, params) = match parse::<R>(req) {
-            Some(it) => it,
-            None => return self,
+            Ok(it) => it,
+            Err(response) => {
+                self.global_state.respond(response);
+                return self;
+            }
         };
 
         let result = f(self.global_state, params);
-        let response = match result {
-            Ok(value) => match serde_json::to_value(value) {
-                Ok(json) => Response::new_ok(id, json),
-                Err(err) => Response::new_err(
-                    id,
-                    lsp_server::ErrorCode::InternalError as i32,
-                    format!("serialization error: {err}"),
-                ),
-            },
-            Err(err) => Response::new_err(
-                id,
-                lsp_server::ErrorCode::InternalError as i32,
-                format!("{err:#}"),
-            ),
-        };
+        let response = result_to_response::<R>(id.clone(), result).unwrap_or_else(|_| Response {
+            id,
+            result: None,
+            error: Some(on_cancelled()),
+        });
         self.global_state.respond(response);
         self
     }
@@ -99,8 +92,11 @@ impl RequestDispatcher<'_> {
         };
 
         let (id, params) = match parse::<R>(req) {
-            Some(it) => it,
-            None => return self,
+            Ok(it) => it,
+            Err(response) => {
+                self.global_state.respond(response);
+                return self;
+            }
         };
 
         // The client may have cancelled while this sat in the queue; the
@@ -169,8 +165,11 @@ impl RequestDispatcher<'_> {
         };
 
         let (id, params) = match parse::<R>(req.clone()) {
-            Some(it) => it,
-            None => return self,
+            Ok(it) => it,
+            Err(response) => {
+                self.global_state.respond(response);
+                return self;
+            }
         };
 
         if self.global_state.is_completed(&id) {
@@ -212,10 +211,11 @@ impl RequestDispatcher<'_> {
     pub(crate) fn finish(&mut self) {
         if let Some(req) = self.req.take() {
             log::error!("unknown request: {}", req.method);
-            let error = crate::lsp::utils::invalid_params_error(format!(
-                "unknown request method: {}",
-                req.method
-            ));
+            let error = lsp_server::ResponseError {
+                code: lsp_server::ErrorCode::MethodNotFound as i32,
+                message: format!("unknown request method: {}", req.method),
+                data: None,
+            };
             let response = Response { id: req.id, result: None, error: Some(error) };
             self.global_state.respond(response);
         }
@@ -290,16 +290,20 @@ fn panic_frame<R: LspRequest>(id: &lsp_server::RequestId) -> String {
     format!("request: {} (id {id})", R::METHOD)
 }
 
-fn parse<R: LspRequest>(req: Request) -> Option<(lsp_server::RequestId, R::Params)>
+fn parse<R: LspRequest>(req: Request) -> Result<(lsp_server::RequestId, R::Params), Response>
 where
     R::Params: for<'de> serde::Deserialize<'de>,
 {
     // Use crate::from_json for deserialization with clear error messages.
     match crate::from_json::<R::Params>(R::METHOD, &req.params) {
-        Ok(params) => Some((req.id, params)),
+        Ok(params) => Ok((req.id, params)),
         Err(err) => {
             log::error!("failed to deserialize request {}: {err}", R::METHOD);
-            None
+            Err(Response::new_err(
+                req.id,
+                lsp_server::ErrorCode::InvalidParams as i32,
+                err.to_string(),
+            ))
         }
     }
 }
@@ -492,14 +496,17 @@ mod tests {
     }
 
     #[test]
-    fn parse_returns_none_on_bad_json() {
+    fn parse_returns_invalid_params_on_bad_json() {
         let req = Request {
             id: 1.into(),
             method: lsp_types::request::GotoDefinition::METHOD.to_string(),
             params: serde_json::json!("not an object"),
         };
         let result = parse::<lsp_types::request::GotoDefinition>(req);
-        assert!(result.is_none());
+        assert_eq!(
+            result.unwrap_err().error.unwrap().code,
+            lsp_server::ErrorCode::InvalidParams as i32
+        );
     }
 
     #[test]

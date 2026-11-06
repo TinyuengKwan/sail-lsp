@@ -581,3 +581,38 @@ impl lsp_types::request::Request for ExplainAnalysis {
     type Result = serde_json::Value;
     const METHOD: &'static str = "sail-lsp/explainAnalysis";
 }
+
+/// Emitted after a new project model is installed, including configuration
+/// reloads. Consumers should request the graph again and discard older replies.
+pub enum ProjectGraphChanged {}
+impl lsp_types::notification::Notification for ProjectGraphChanged {
+    type Params = ();
+    const METHOD: &'static str = "sail-lsp/projectGraphChanged";
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SelectIncludeContextParams {
+    pub text_document: lsp_types::TextDocumentIdentifier,
+    pub context: Option<String>,
+}
+pub enum IncludeContexts {}
+impl lsp_types::request::Request for IncludeContexts {
+    type Params = lsp_types::TextDocumentIdentifier;
+    type Result = serde_json::Value;
+    const METHOD: &'static str = "sail-lsp/includeContexts";
+}
+pub enum SelectIncludeContext {}
+impl lsp_types::request::Request for SelectIncludeContext {
+    type Params = SelectIncludeContextParams;
+    type Result = ();
+    const METHOD: &'static str = "sail-lsp/selectIncludeContext";
+}
+
+/// Includes the exact source used to compute each edit, including closed files.
+pub enum SsrPreview {}
+impl lsp_types::request::Request for SsrPreview {
+    type Params = SsrParams;
+    type Result = serde_json::Value;
+    const METHOD: &'static str = "sail-lsp/ssrPreview";
+}

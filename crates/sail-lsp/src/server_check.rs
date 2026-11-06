@@ -61,6 +61,7 @@ pub(crate) struct ServerFixture {
     log: Vec<String>,
     messages: Vec<lsp_types::ShowMessageParams>,
     statuses: Vec<crate::lsp_ext::ServerStatusParams>,
+    graph_changes: usize,
     /// The method of every request the server sent the client.
     server_requests: Vec<String>,
     load_failed: bool,
@@ -193,6 +194,7 @@ impl ServerFixture {
             log: Vec::new(),
             messages: Vec::new(),
             statuses: Vec::new(),
+            graph_changes: 0,
             server_requests: Vec::new(),
             load_failed: false,
             capabilities: serde_json::Value::Null,
@@ -314,6 +316,9 @@ impl ServerFixture {
                     }
                     "window/showMessage" => {
                         self.messages.push(serde_json::from_value(n.params).expect("showMessage"));
+                    }
+                    "sail-lsp/projectGraphChanged" => {
+                        self.graph_changes += 1;
                     }
                     "sail-lsp/serverStatus" => {
                         self.statuses.push(serde_json::from_value(n.params).expect("serverStatus"));
@@ -4202,7 +4207,6 @@ fn ssr_previews_all_matches_and_respects_bindings_selections_and_versions() {
         "combine($a, $b) ==>> flipped($c, $a)",
         "combine($a, $b) ==>> (",
         "combine($a, $b) ==>> absent($a)",
-        "let x = $a in x ==>> $a",
     ] {
         let mut invalid = params.clone();
         invalid["query"] = rule.into();
@@ -4603,7 +4607,9 @@ fn ssr_search_deduplicates_physical_locations_across_include_views() {
 /// request types and dispatcher registrations are arranged in source files.
 #[test]
 fn every_experimental_capability_has_a_handler() {
-    use crate::lsp_ext::{JoinLines, MatchingBrace, MoveItem, OnEnter, Ssr, SsrSearch};
+    use crate::lsp_ext::{
+        IncludeContexts, JoinLines, MatchingBrace, MoveItem, OnEnter, Ssr, SsrPreview, SsrSearch,
+    };
     use lsp_types::request::Request as _;
 
     let source = "function answer() -> int = 42\n";
@@ -4613,6 +4619,8 @@ fn every_experimental_capability_has_a_handler() {
     let methods = [
         ("ssr", Ssr::METHOD),
         ("ssrSearch", SsrSearch::METHOD),
+        ("ssrPreview", SsrPreview::METHOD),
+        ("includeContexts", IncludeContexts::METHOD),
         ("matchingBrace", MatchingBrace::METHOD),
         ("joinLines", JoinLines::METHOD),
         ("onEnter", OnEnter::METHOD),
@@ -4632,10 +4640,322 @@ fn every_experimental_capability_has_a_handler() {
             "positions": [{"line": 0, "character": 15}],
             "ranges": [], "selections": [],
             "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 28}},
-            "direction": "Up", "parseOnly": true,
+            "direction": "Up", "parseOnly": true, "uri":server.url("main.sail"),
             "query": if name == "ssrSearch" { "42" } else { "42 ==>> 43" }
         }));
         let response = server.wait_for_response(id);
         assert!(response.error.is_none(), "{name} ({method}): {:?}", response.error);
     }
+}
+
+#[test]
+fn protocol_distinguishes_unknown_methods_and_invalid_parameters() {
+    let mut server = ServerFixture::new("protocol-errors", &[]);
+    let id = server.request("sail-lsp/nonexistent", serde_json::json!({}));
+    let response = server.wait_for_response(id);
+    assert_eq!(response.error.unwrap().code, lsp_server::ErrorCode::MethodNotFound as i32);
+    let id = server.request("textDocument/hover", serde_json::json!({"position": false}));
+    let response = server.wait_for_response(id);
+    assert_eq!(response.error.unwrap().code, lsp_server::ErrorCode::InvalidParams as i32);
+    // A malformed request must not poison the next request on the connection.
+    let id = server.request("sail-lsp/projectGraph", serde_json::Value::Null);
+    assert!(server.wait_for_response(id).error.is_none());
+}
+
+#[test]
+fn file_moves_update_only_resolved_paths_and_use_buffer_versions() {
+    let source = "$include \"a/util.sail\" // \"util.sail\"\n$include \"b/util.sail\"\nlet text = \"util.sail\"\n";
+    let mut server = ServerFixture::new(
+        "path-rename",
+        &[
+            ("main.sail", source),
+            ("a/util.sail", "val a : int\n"),
+            ("b/util.sail", "val b : int\n"),
+            ("sail.proj", "Main { files main.sail, a/util.sail, b/util.sail }"),
+        ],
+    );
+    server.did_open("main.sail", source);
+    server.did_open("sail.proj", "Main { files main.sail, a/util.sail, b/util.sail }");
+    let edit = server.ask(
+        "workspace/willRenameFiles",
+        serde_json::json!({"files":[
+            {"oldUri":server.url("a"),"newUri":server.url("moved")},
+            {"oldUri":server.url("main.sail"),"newUri":server.url("b/main.sail")}
+        ]}),
+    );
+    let changes = edit["documentChanges"].as_array().unwrap();
+    assert_eq!(changes.len(), 2, "{edit}");
+    let main = changes
+        .iter()
+        .find(|d| d["textDocument"]["uri"] == server.url("main.sail").as_str())
+        .unwrap();
+    assert_eq!(main["textDocument"]["version"], 1);
+    let replacements: Vec<_> =
+        main["edits"].as_array().unwrap().iter().map(|e| e["newText"].as_str().unwrap()).collect();
+    assert_eq!(replacements, ["../moved/util.sail", "util.sail"]);
+    assert_eq!(main["edits"][0]["range"]["start"]["line"], 0);
+    assert_eq!(main["edits"][1]["range"]["start"]["line"], 1);
+    let manifest = changes
+        .iter()
+        .find(|d| d["textDocument"]["uri"] == server.url("sail.proj").as_str())
+        .unwrap();
+    assert_eq!(manifest["textDocument"]["version"], 1);
+    let edits = manifest["edits"].as_array().unwrap();
+    assert_eq!(edits.len(), 2, "{edit}");
+    assert_eq!(edits[0]["newText"], "\"b/main.sail\"");
+    assert_eq!(edits[1]["newText"], "\"moved/util.sail\"");
+}
+
+#[test]
+fn workspace_symbol_subsequences_filters_and_identifier_ranges() {
+    let mut server = ServerFixture::new_project("symbol-query", &[("main.sail",
+        "val memory_read : int -> int\nfunction memory_read(x : int) -> int = x\nstruct MachineRegister = { value : int }\n")]);
+    let result = server.ask(
+        "workspace/symbol",
+        serde_json::json!({"query":"mr kind:function scope:workspace limit:1"}),
+    );
+    let symbols = result.as_array().unwrap();
+    assert_eq!(symbols.len(), 1, "{result}");
+    assert_eq!(symbols[0]["name"], "memory_read");
+    assert_eq!(
+        symbols[0]["location"]["range"]["start"],
+        serde_json::json!({"line":1,"character":9})
+    );
+    assert_eq!(symbols[0]["location"]["range"]["end"]["character"], 20);
+    assert!(symbols[0]["containerName"].as_str().unwrap().contains("Main"));
+    let result = server.ask("workspace/symbol", serde_json::json!({"query":"#mr"}));
+    assert_eq!(result[0]["name"], "MachineRegister", "{result}");
+    assert!(server
+        .ask("workspace/symbol", serde_json::json!({"query":"mr scope:library"}))
+        .is_null());
+}
+
+#[test]
+fn include_context_selection_changes_reads_but_keeps_shared_edits_unsafe() {
+    let shared = "function use(x : int) -> int = helper(x)\n";
+    let mut server = ServerFixture::new(
+        "context-choice",
+        &[
+            ("sail.proj", "A { files a.sail } B { files b.sail }"),
+            ("a.sail", "val helper : int -> int\n$include \"shared.sail\"\n"),
+            ("b.sail", "val helper : bool -> bool\n$include \"shared.sail\"\n"),
+            ("shared.sail", shared),
+        ],
+    );
+    server.did_open("shared.sail", shared);
+    let contexts = server
+        .ask("sail-lsp/includeContexts", serde_json::json!({"uri":server.url("shared.sail")}));
+    let contexts = contexts.as_array().unwrap();
+    assert_eq!(contexts.len(), 2, "{contexts:?}");
+    let selected = contexts.iter().find(|c| c["project"]["module"] == "B").unwrap()["key"].clone();
+    server.ask(
+        "sail-lsp/selectIncludeContext",
+        serde_json::json!({"textDocument":{"uri":server.url("shared.sail")},"context":selected}),
+    );
+    let position = serde_json::json!({"textDocument":{"uri":server.url("shared.sail")},"position":{"line":0,"character":32}});
+    let hover = server.ask("textDocument/hover", position.clone());
+    assert!(hover.to_string().contains("bool"), "{hover}");
+    let id = server.request(
+        "experimental/ssr",
+        serde_json::json!({"textDocument":{"uri":server.url("shared.sail")},
+        "position":{"line":0,"character":32},"query":"$x ==>> $x","parseOnly":false}),
+    );
+    let response = server.wait_for_response(id);
+    assert!(response.error.unwrap().message.contains("multiple include"));
+    server.did_change_appending("shared.sail", 0, "// inserted before the function\n");
+    let hover=server.ask("textDocument/hover",serde_json::json!({"textDocument":{"uri":server.url("shared.sail")},"position":{"line":1,"character":32}}));
+    assert!(hover.to_string().contains("bool"), "{hover}");
+    server.did_close("shared.sail");
+    server.did_open("shared.sail", shared);
+    let contexts = server
+        .ask("sail-lsp/includeContexts", serde_json::json!({"uri":server.url("shared.sail")}));
+    assert!(contexts.as_array().unwrap().iter().all(|c| c["selected"] == false));
+}
+
+#[test]
+fn project_graph_notifies_after_installing_saved_model() {
+    let mut server = ServerFixture::new_project("graph-refresh", &[("main.sail", "val x : int\n")]);
+    let graph = server.ask("sail-lsp/projectGraph", serde_json::Value::Null);
+    assert_eq!(graph[0]["modules"].as_array().unwrap().len(), 1);
+    let baseline = server.graph_changes;
+    let manifest = "Main { files main.sail } Extra { }";
+    server.did_open("sail.proj", manifest);
+    let graph = server.ask("sail-lsp/projectGraph", serde_json::Value::Null);
+    assert_eq!(graph[0]["modules"].as_array().unwrap().len(), 1);
+    assert_eq!(server.graph_changes, baseline, "unsaved editor text must not install a graph");
+    server.save("sail.proj", manifest);
+    server.wait_until("graph changed notification", |s| s.graph_changes > baseline);
+    let graph = server.ask("sail-lsp/projectGraph", serde_json::Value::Null);
+    assert_eq!(graph[0]["modules"].as_array().unwrap().len(), 2, "{graph}");
+}
+
+fn apply_preview(source: &str, change: &serde_json::Value) -> String {
+    let mut edits: Vec<lsp_types::TextEdit> =
+        serde_json::from_value(change["edits"].clone()).unwrap();
+    edits.sort_by_key(|e| std::cmp::Reverse(e.range.start));
+    let index = ide_db::line_index::LineIndex::new(source);
+    let mut output = source.to_owned();
+    for edit in edits {
+        output.replace_range(
+            crate::from_proto::offset(&index, edit.range.start)
+                ..crate::from_proto::offset(&index, edit.range.end),
+            &edit.new_text,
+        );
+    }
+    output
+}
+
+#[test]
+fn ssr_supports_semantic_type_item_and_binding_fragments() {
+    for (name, source, query, expected) in [
+        (
+            "types",
+            "val convert : bitvector(8) -> bitvector(8)\n",
+            "type: bitvector($n) ==>> vector($n, bool)",
+            "vector(8, bool)",
+        ),
+        (
+            "items",
+            "val convert : bitvector(8) -> bitvector(8)\n",
+            "item: val $f : bitvector($n) -> bitvector($n) ==>> val $f : bitvector($n) -> int",
+            "val convert : bitvector(8) -> int",
+        ),
+        (
+            "let-bindings",
+            "function f() -> int = let x = 1 in x\n",
+            "let x = $v in x ==>> let x = $v in x + 1",
+            "sail_ssr_x_0",
+        ),
+        (
+            "captured-bindings",
+            "function f() -> int = let x = 1 in x + 2\n",
+            "let $x = $v in $body ==>> let $x = $v in $body + 1",
+            "x + 2",
+        ),
+        (
+            "patterns",
+            "function f() -> int = let (x, y) = (1, 2) in x\n",
+            "pattern: ($a, $b) ==>> ($b, $a)",
+            "(y, x)",
+        ),
+    ] {
+        let mut server =
+            ServerFixture::new_project(&format!("ssr-fragment-{name}"), &[("main.sail", source)]);
+        server.did_open("main.sail", source);
+        let value=server.ask("experimental/ssr",serde_json::json!({"textDocument":{"uri":server.url("main.sail")},"position":{"line":0,"character":0},"query":query}));
+        let changes = value["documentChanges"].as_array().unwrap();
+        assert_eq!(changes.len(), 1, "{name}: {value}");
+        let after = apply_preview(source, &changes[0]);
+        assert!(after.contains(expected), "{name}: {after}");
+        assert!(syntax::parse_text(&after).1.is_empty(), "{name}: {after}");
+    }
+}
+
+#[test]
+fn ssr_type_identity_does_not_cross_unrelated_module_aliases() {
+    let a = "type Word = int\nval a : Word\n";
+    let b = "type Word = bool\nval b : Word\n";
+    let mut server = ServerFixture::new(
+        "ssr-type-identity",
+        &[("sail.proj", "A { files a.sail } B { files b.sail }"), ("a.sail", a), ("b.sail", b)],
+    );
+    server.did_open("a.sail", a);
+    let value=server.ask("experimental/ssr",serde_json::json!({"textDocument":{"uri":server.url("a.sail")},"position":{"line":1,"character":8},"query":"type: Word ==>> int"}));
+    let changes = value["documentChanges"].as_array().unwrap();
+    assert_eq!(changes.len(), 1, "{value}");
+    assert_eq!(changes[0]["textDocument"]["uri"], server.url("a.sail").as_str());
+}
+
+#[test]
+fn ssr_hygiene_does_not_capture_outer_variables_or_let_bindings_escape() {
+    let source = "function f(x : int) -> int = x + 1\nfunction g() -> int = let x = 2 in x + 1\n";
+    let mut server = ServerFixture::new_project("ssr-hygiene", &[("main.sail", source)]);
+    server.did_open("main.sail", source);
+    let params = serde_json::json!({"textDocument":{"uri":server.url("main.sail")},"position":{"line":0,"character":28},"query":"$body + 1 ==>> let x = 0 in $body + x"});
+    let value = server.ask("experimental/ssr", params);
+    let after = apply_preview(source, &value["documentChanges"][0]);
+    assert!(after.contains("sail_ssr_x_0"), "{after}");
+    assert!(after.contains("(x) + sail_ssr_x_0"), "outer x must remain free: {after}");
+    let value=server.ask("experimental/ssr",serde_json::json!({"textDocument":{"uri":server.url("main.sail")},"position":{"line":0,"character":28},"query":"let $x = $value in $body ==>> $body"}));
+    assert!(
+        value["documentChanges"].as_array().unwrap().is_empty(),
+        "bound x would escape: {value}"
+    );
+}
+
+#[test]
+fn ssr_captured_binding_names_cannot_escape_or_be_deleted_from_patterns() {
+    let source = "function f() -> int = let x = 1 in x\n";
+    let mut server = ServerFixture::new_project("ssr-binder-escape", &[("main.sail", source)]);
+    server.did_open("main.sail", source);
+    for query in ["let $x = $v in $x ==>> $x", "pattern: $p ==>> _"] {
+        let value=server.ask("experimental/ssr",serde_json::json!({"textDocument":{"uri":server.url("main.sail")},"position":{"line":0,"character":0},"query":query}));
+        assert!(value["documentChanges"].as_array().unwrap().is_empty(), "{query}: {value}");
+    }
+}
+
+#[test]
+fn ssr_fixed_item_names_resolve_to_the_selected_declaration() {
+    let source = "type Word = int\nval value : Word\n";
+    let mut server = ServerFixture::new(
+        "ssr-item-identity",
+        &[
+            ("sail.proj", "A { files a.sail } B { files b.sail }"),
+            ("a.sail", source),
+            ("b.sail", source),
+        ],
+    );
+    server.did_open("a.sail", source);
+    for line in [0, 1] {
+        let result=server.ask("experimental/ssr",serde_json::json!({"textDocument":{"uri":server.url("a.sail")},
+            "position":{"line":line,"character":0},"query":"item: type Word = int ==>> type Word = bool"}));
+        let changes = result["documentChanges"].as_array().unwrap();
+        assert_eq!(changes.len(), 1, "{result}");
+        assert_eq!(changes[0]["textDocument"]["uri"], server.url("a.sail").as_str());
+    }
+}
+
+#[test]
+fn ssr_quantified_types_and_nested_expression_scopes_remain_hygienic() {
+    for (name, source, query) in [
+        (
+            "quantifier",
+            "val f : forall ('n : Int). bitvector('n) -> bitvector('n)\n",
+            "type: bitvector($n) ==>> {'n, 'n >= 0. ($n, bitvector('n))}",
+        ),
+        (
+            "match",
+            "function f(x : int) -> int = match x { y => y }\n",
+            "match $value { y => $body } ==>> match $value { y => $body + 1 }",
+        ),
+        (
+            "foreach",
+            "function f() -> unit = foreach (i from 0 to 3) { let x = i; () }\n",
+            "foreach (i from 0 to $end) $body ==>> foreach (i from 0 to $end) $body",
+        ),
+    ] {
+        let mut server =
+            ServerFixture::new_project(&format!("ssr-hygiene-{name}"), &[("main.sail", source)]);
+        server.did_open("main.sail", source);
+        let result=server.ask("experimental/ssr",serde_json::json!({"textDocument":{"uri":server.url("main.sail")},"position":{"line":0,"character":0},"query":query}));
+        let changes = result["documentChanges"].as_array().unwrap();
+        assert!(!changes.is_empty(), "{name}: {result}");
+        let after = apply_preview(source, &changes[0]);
+        assert!(syntax::parse_text(&after).1.is_empty(), "{name}: {after}");
+        assert!(after.contains("sail_ssr_"), "{name}: {after}");
+    }
+}
+
+#[test]
+fn stale_include_selection_returns_an_intentional_protocol_error() {
+    let source = "val x : int\n";
+    let mut server = ServerFixture::new_project("stale-include-choice", &[("main.sail", source)]);
+    server.did_open("main.sail", source);
+    let id = server.request(
+        "sail-lsp/selectIncludeContext",
+        serde_json::json!({"textDocument":{"uri":server.url("main.sail")},"context":"expired-key"}),
+    );
+    let error = server.wait_for_response(id).error.unwrap();
+    assert_eq!(error.code, lsp_server::ErrorCode::InvalidParams as i32);
+    assert!(error.message.contains("no longer active"));
 }

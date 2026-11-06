@@ -10,6 +10,7 @@ interface ExtensionApi {
     test: {
         status(): { health: string; quiescent: boolean; message?: string } | undefined;
         projectGraph(): readonly ProjectGraphEntry[];
+        ssr: { pending(): number; stale(): boolean };
     };
 }
 
@@ -23,6 +24,111 @@ async function eventually(message: string, predicate: () => boolean, timeout = 2
 }
 
 suite("sail-lsp extension", () => {
+    test("SSR preview is cancellable, rejects stale sources, applies and re-diagnoses", async () => {
+        const extension = vscode.extensions.getExtension<ExtensionApi>("Lunarwwww.sail-lsp")!;
+        const api = await extension.activate();
+        await eventually("server ready", () => api.test.status()?.quiescent === true);
+        const uri = vscode.Uri.joinPath(vscode.workspace.workspaceFolders![0].uri, "sample.sail");
+        const document = await vscode.workspace.openTextDocument(uri);
+        const original = document.getText();
+        const show = async () => {
+            const editor = await vscode.window.showTextDocument(document);
+            editor.selection = new vscode.Selection(1, 37, 1, 37);
+            return editor;
+        };
+        try {
+            await show();
+            const count = await vscode.commands.executeCommand<number>(
+                "sail-lsp.structuralReplace",
+                "42 ==>> 43",
+            );
+            assert.equal(count, 1);
+            assert.equal(document.getText(), original);
+            assert.equal(api.test.ssr.pending(), 1);
+            await vscode.commands.executeCommand("sail-lsp.cancelStructuralReplace");
+            assert.equal(api.test.ssr.pending(), 0);
+            assert.equal(document.getText(), original);
+            const editor = await show();
+            await vscode.commands.executeCommand("sail-lsp.structuralReplace", "42 ==>> 43");
+            await editor.edit((edit) =>
+                edit.insert(new vscode.Position(0, 0), "// edited after preview\n"),
+            );
+            await eventually("preview invalidated", () => api.test.ssr.stale());
+            assert.equal(
+                await vscode.commands.executeCommand("sail-lsp.applyStructuralReplace"),
+                false,
+            );
+            assert.ok(document.getText().includes("= 42"));
+            await vscode.commands.executeCommand("sail-lsp.cancelStructuralReplace");
+            await vscode.commands.executeCommand("workbench.action.files.revert");
+            await show();
+            assert.equal(
+                await vscode.commands.executeCommand("sail-lsp.structuralReplace", "42 ==>> true"),
+                1,
+            );
+            assert.equal(
+                await vscode.commands.executeCommand("sail-lsp.applyStructuralReplace"),
+                true,
+            );
+            assert.ok(document.getText().includes("true"));
+            await eventually("replacement was re-diagnosed", () =>
+                vscode.languages
+                    .getDiagnostics(uri)
+                    .some((d) => d.severity === vscode.DiagnosticSeverity.Error),
+            );
+        } finally {
+            await vscode.commands.executeCommand("sail-lsp.cancelStructuralReplace");
+            await vscode.window.showTextDocument(document);
+            await vscode.commands.executeCommand("workbench.action.files.revert");
+            assert.equal(document.getText(), original);
+        }
+    });
+
+    test("graph refreshes automatically and module navigation uses the unsaved manifest", async () => {
+        const extension = vscode.extensions.getExtension<ExtensionApi>("Lunarwwww.sail-lsp")!;
+        const api = await extension.activate();
+        await eventually("initial graph installed", () => api.test.projectGraph().length === 1);
+        const uri = vscode.Uri.joinPath(vscode.workspace.workspaceFolders![0].uri, "sail.proj");
+        const document = await vscode.workspace.openTextDocument(uri);
+        const original = document.getText();
+        try {
+            const editor = await vscode.window.showTextDocument(document);
+            await editor.edit((edit) =>
+                edit.insert(new vscode.Position(0, 0), "// unsaved line\n"),
+            );
+            await vscode.commands.executeCommand(
+                "sail-lsp.openGraphModule",
+                uri.toString(),
+                "Main",
+            );
+            assert.equal(vscode.window.activeTextEditor?.selection.start.line, 1);
+            await editor.edit((edit) =>
+                edit.insert(document.positionAt(document.getText().length), "Extra { }\n"),
+            );
+            await document.save();
+            await eventually(
+                "graph refreshed after save",
+                () => api.test.projectGraph()[0].modules.length === 2,
+            );
+        } finally {
+            const editor = await vscode.window.showTextDocument(document);
+            await editor.edit((edit) =>
+                edit.replace(
+                    new vscode.Range(
+                        document.positionAt(0),
+                        document.positionAt(document.getText().length),
+                    ),
+                    original,
+                ),
+            );
+            await document.save();
+            await eventually(
+                "graph restored",
+                () => api.test.projectGraph()[0].modules.length === 1,
+            );
+        }
+    });
+
     test("package manifest exposes bundled server setting", async () => {
         const extension = vscode.extensions.getExtension("Lunarwwww.sail-lsp");
         assert.ok(extension, "extension should be present in test host");

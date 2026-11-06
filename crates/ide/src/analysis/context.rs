@@ -4,6 +4,46 @@ use ide_db::defs::Definition;
 use serde_json::{json, Value};
 
 impl Analysis {
+    /// Stable preprocessing identities and their existing semantic views.
+    pub fn include_contexts(
+        &self,
+        uri: &url::Url,
+    ) -> crate::Cancellable<Vec<(FileId, base_db::preprocess::InstanceKey, url::Url)>> {
+        self.with_db(|a| {
+            let Some(source) = a.file_id(uri) else { return Vec::new() };
+            let Some(project) = base_db::preprocess::WorkspaceSourceProject::try_get(&a.db) else {
+                return Vec::new();
+            };
+            hir::preprocess::workspace_plan(&a.db, project)
+                .instances
+                .iter()
+                .filter_map(|instance| {
+                    if instance.source != source || !instance.active {
+                        return None;
+                    }
+                    let view = if instance.primary {
+                        source
+                    } else {
+                        a.db.include_instance_id(&instance.key)?
+                    };
+                    Some((
+                        view,
+                        instance.key.clone(),
+                        a.url_for_file_id(instance.key.root)?.clone(),
+                    ))
+                })
+                .collect()
+        })
+    }
+
+    pub fn with_preferred_views(
+        mut self,
+        views: std::collections::HashMap<FileId, FileId>,
+    ) -> Self {
+        self.preferred_views = std::sync::Arc::new(views);
+        self
+    }
+
     pub fn explain_position(
         &self,
         file: FileId,
@@ -91,7 +131,7 @@ impl Analysis {
                         .map(|url| url.as_str().to_owned())
                 })
                 .collect();
-            contexts.push(json!({"view":view.index(), "moduleIndex":module, "active":active,
+            contexts.push(json!({"view":view.index(), "selected":self.preferred_views.get(&file) == Some(&view), "moduleIndex":module, "active":active,
                 "name":name, "resolved":resolved,
                 "resolution": if !active { "inactive conditional source region" }
                     else if membership == Some(false) { "file is outside the loaded project" }

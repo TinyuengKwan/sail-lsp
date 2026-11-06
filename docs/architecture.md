@@ -105,7 +105,7 @@ features can be ported between the two projects with minimal friction.
 
 | Crate | Role |
 |-------|------|
-| `sail-lsp` | LSP server with **lib + bin split**: `main.rs` (thin binary entry calling `sail_lsp::main()`), `lib.rs` (library exposing all server logic). **main_loop.rs**: `GlobalState`, event loop matching RA `handle_event` exactly: select! -> coalesce -> process_changes (vfs_done gated) -> quiescence block (diagnostics, GC) -> op queues -> take_changes -> publish -> status -> timing. **global_state.rs**: `GlobalStateSnapshot` with `include_graph` + `client_caps`. **handlers/**: `dispatch.rs` (RequestDispatcher with `on_sync`/`on` -- both `catch_unwind`), `request.rs`, `notification.rs`. **lsp/**: `capabilities.rs` (server + client capabilities), `from_proto.rs`, `to_proto.rs`, `ext.rs`. **mem_docs.rs**: MemDocs with `take_changes()`. **task_pool.rs**: rayon-backed TaskPool with `catch_unwind` at spawn level. **reload.rs**: workspace reload logic. **op_queue.rs**: typed operation queue. **diagnostics.rs**: DiagnosticCollection + fetch_native_diagnostics (catch_unwind). **config.rs**: SailLspConfig. **cli.rs**: command-line interface. **hover_ext.rs**, **code_action_helpers.rs**: handler helpers. **integrated_benchmarks.rs**: `#[cfg(test)]` benchmarks (run via `RUN_SLOW_BENCHES=1`). **tests.rs**: LSP integration tests. |
+| `sail-lsp` | LSP server with **lib + bin split**: `main.rs` (thin binary entry calling `sail_lsp::main()`), `lib.rs` (library exposing all server logic). **main_loop.rs**: `GlobalState`, event loop matching RA `handle_event` exactly: select! -> coalesce -> process_changes (vfs_done gated) -> quiescence block (diagnostics, GC) -> op queues -> take_changes -> publish -> status -> timing. **global_state.rs**: `GlobalStateSnapshot` with its `Analysis` (including the immutable include graph) + `client_caps`. **handlers/**: `dispatch.rs` (RequestDispatcher with `on_sync`/`on` -- both `catch_unwind`), `request.rs`, `notification.rs`. **lsp/**: `capabilities.rs` (server + client capabilities), `from_proto.rs`, `to_proto.rs`, `ext.rs`. **mem_docs.rs**: MemDocs with `take_changes()`. **task_pool.rs**: `stdx::thread::Pool`-backed TaskPool with `catch_unwind` at spawn level. **reload.rs**: workspace reload logic. **op_queue.rs**: typed operation queue. **diagnostics.rs**: DiagnosticCollection + fetch_native_diagnostics (catch_unwind). **config.rs**: SailLspConfig. **cli.rs**: command-line interface. **hover_ext.rs**, **code_action_helpers.rs**: handler helpers. **integrated_benchmarks.rs**: `#[cfg(test)]` benchmarks (run via `RUN_SLOW_BENCHES=1`). **tests.rs**: LSP integration tests. |
 
 ## Key Design Patterns
 
@@ -204,16 +204,15 @@ current source tokens; ExprId/PatId diagnostics use the current map directly.
 The origin belongs to the inference result: Salsa can update an equal body
 query value while keeping its dependants backdated.
 
-Cache policy is based on end-to-end editing workloads, not RA's capacities
-alone. Both per-callable body queries retain their 512-entry LRU; expensive
-inference results and physical/semantic parses are not capped by an arbitrary
-file count. The 2026-10-30 experiment capped both parse queries at 128: on 158
-model files, six sweeps ended at 969 MiB estimated heap rather than 734 MiB,
-and took about 204 seconds rather than 152 seconds to reach the last sweep.
-The cap was rejected. The uncapped run plateaued across late sweeps and three
-reloads, but this finite workload does not prove a universal memory bound.
-See `baselines/2026-10-30-ra-improvements.json` for artifacts, binary hashes,
-RSS versus allocator estimates, and cancellation retries.
+Cache defaults retain all parse, environment and inference results and use a
+512-entry LRU for callable bodies and source maps. The host can change these
+capacities at a safe idle boundary; a configured soft RSS target uses bounded
+hysteresis rather than repeatedly shrinking caches. Cache collection requires
+exclusive database ownership, including the absence of retained request snapshots.
+See [cache configuration](configuration.md#analysis-cache-policy) for the policy
+and `query_cache_stats` for its retention/recomputation probe. Smaller capacities
+trade retained query results for recomputation; they do not impose a hard bound
+on process memory.
 
 Type inference and type navigation use an incremental declaration index in
 `hir-ty/src/infer/dependencies/index.rs`. The complete `workspace_context` query
@@ -292,8 +291,8 @@ tokens and validation, and retain parser errors separately. Changed fixities or
 unsafe syntax use full parsing. The cache is not semantic state: text and fixities
 fully determine results, regardless of which snapshot last populated the seed.
 `reparse_stats` compares this normal path with the same query after clearing its
-seed, checking trees, tokens and errors on every edit. Measurements and scope are
-recorded in `baselines/2026-10-29-ra-followup.json`.
+seed, checking trees, tokens and errors on every edit. Run it against the current
+source to measure the effect; historical timings do not establish current reuse.
 
 ### Type inference state and applied types
 
@@ -483,43 +482,53 @@ use type-specific defaults and pattern fixes use wildcards.
 
 ### SSR engine (ide-ssr)
 
-The `experimental/ssr` request returns versioned `WorkspaceEdit` previews for
-Sail expressions. Its parameters follow RA: `query`, `parseOnly`, flattened
-`textDocument`/`position`, and `selections` (empty means project sources).
-For example, `combine($a, $b) ==>> flipped($b, $a)` swaps captured arguments.
+`experimental/ssr` returns versioned `WorkspaceEdit` previews. Parameters follow
+RA: `query`, `parseOnly`, flattened `textDocument`/`position`, and `selections`
+(empty means project sources). Expressions are the default; `type:`, `item:` and
+`pattern:` select a fragment grammar. For example,
+`combine($a, $b) ==>> flipped($b, $a)` swaps captured arguments.
 
-Rules resolve fixed names in the invocation scope and compare definition/local
-binding identity at each match. Captures and whole replacements are parenthesized
-to preserve precedence; all disjoint matches are returned. Nested matches keep
-the outermost match within the selected ranges. Search has cancellation points;
-selection filtering precedes overlap removal. The client applies the preview.
+Rules resolve fixed references in their value/type namespace at the invocation
+scope. Fixed item names identify declarations; captured item names permit
+matching different declarations. Expression captures retain parentheses for
+precedence; type/item/name captures use their grammatical context. Nested
+matches keep the outermost selected match. Search checks cancellation and
+filters selections before overlap removal. The IDE owns workspace traversal,
+library exclusions and include-instance safety; the finder owns matching,
+source correspondence and rendering. No second workspace cache is maintained.
 
-`MatchFinder::new` parses and resolves one replacement rule at an explicit
-invocation position. The IDE owns workspace traversal and passes each file and
-its active syntax tree to the finder, which returns a vector of edits. There is
-no separate workspace cache or comment-rule entry point.
+Fragment bindings reuse HIR lowering and expression scopes. Rendering freshens
+introduced fixed binders, updates captured references to their original owners,
+and checks binding origins again in the parsed result. Outer references must
+stay outer, and removed binders cannot let captured references escape. Type
+quantifiers receive the same capture protection. Binding-pattern replacements
+preserve bound names; item replacements preserve the declaration name. Ambiguous
+fixed binder correspondences can prevent a match. SSR checks syntax and binding
+identity, not behavioral equivalence or all dependent type obligations.
 
-`sail-lsp/ssrSearch` is a read-only expression search, advertised as
-`experimental.ssrSearch`. It accepts `query` (a pattern without `==>>`), flattened
-`textDocument`/`position`, and optional `selections`, returning LSP `Location[]`.
-For example, `combine($a, $b)` finds calls to the same semantic binding as the
-invocation position. It includes nested matches, filters selections before
-reporting, excludes library sources, and deduplicates physical locations across
-semantic views. An ambiguous invocation include context is rejected. It returns
-locations without producing edits or requiring the surrounding file to parse
-without errors. Binding-introducing, item and type patterns retain the existing
-SSR restrictions. Queued obsolete searches are cancelled after edits.
-In VS Code, **Sail: Structural Search** prompts for a pattern and shows the
-result locations in the references view. The command offers cancellable
-progress and discards results if the invocation document changes or closes.
-It does not apply edits.
+`sail-lsp/ssrSearch` uses the same fragment grammars for read-only search and
+returns physical, deduplicated `Location[]`, including nested matches. A selected
+active include context disambiguates reads; an ambiguous unselected invocation
+is rejected. Edits retain stricter all-instance checks even after selection.
+Both paths exclude library sources. Replacements that discard comments are
+skipped, and the full resulting file must parse before edits are returned.
 
-Current limits are explicit: expression rules cannot introduce bindings; item,
-type and binding-pattern rules are rejected. Library sources are excluded.
-Shared tokens active in multiple include contexts are rejected. Matches that
-would discard comments are skipped, and replacements that leave invalid file
-syntax are rejected. SSR validates syntax and binding identity, not equivalence
-or all dependent type obligations. `parseOnly` validates without editing.
+`sail-lsp/ssrPreview` wraps the existing replacement request with the exact source
+text/version for every edited document, including closed files. The VS Code
+client checks those texts, opens the sources and records their versions before
+showing per-file diffs. Apply and Cancel are explicit commands. A source edit or
+close invalidates the preview; application rechecks versions and uses VS Code's
+versioned workspace-edit transaction. Starting another preview disposes the old
+one, including listeners and virtual diff contents. Normal didChange handling
+re-diagnoses applied edits.
+
+`includeContexts` and `selectIncludeContext` expose existing semantic views,
+identified by root/include occurrence and manifest/module identity rather than
+transient module indexes. Selection belongs to the open document. Analysis
+snapshots order active views by preference, retaining the complete instance
+list so shared-source edits cannot hide behind a selected view. Project model
+installation emits `projectGraphChanged`; the client discards obsolete graph
+responses and resolves module navigation against live manifest symbols.
 
 ### FileDb trait (ide-db)
 

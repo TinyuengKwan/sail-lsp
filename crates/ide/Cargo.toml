@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 base-db.workspace = true
+paths.workspace = true
 salsa.workspace = true
 parser.workspace = true
 syntax.workspace = true

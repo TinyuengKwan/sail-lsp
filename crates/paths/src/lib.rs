@@ -435,3 +435,53 @@ fn normalize_path(path: &Utf8Path) -> Utf8PathBuf {
     }
     ret
 }
+
+/// Apply a simultaneous batch of file/directory moves. The most specific
+/// source wins; destinations are never fed through the batch again.
+pub fn renamed_path(path: &Path, renames: &[(PathBuf, PathBuf)]) -> PathBuf {
+    renames
+        .iter()
+        .filter_map(|(old, new)| {
+            Some((old.components().count(), new.join(path.strip_prefix(old).ok()?)))
+        })
+        .max_by_key(|(length, _)| *length)
+        .map_or_else(|| path.to_path_buf(), |(_, p)| p)
+}
+
+/// Lexical relative path, without consulting the filesystem or symlinks.
+pub fn relative_path(from_dir: &Path, to: &Path) -> Option<PathBuf> {
+    let a: Vec<_> = from_dir.components().collect();
+    let b: Vec<_> = to.components().collect();
+    let common = a.iter().zip(&b).take_while(|(a, b)| a == b).count();
+    if common == 0 {
+        return None;
+    }
+    let mut result = PathBuf::new();
+    for _ in &a[common..] {
+        result.push("..");
+    }
+    for component in &b[common..] {
+        result.push(component.as_os_str());
+    }
+    Some(result)
+}
+
+#[cfg(test)]
+mod rename_tests {
+    use super::*;
+    #[test]
+    fn moves_are_component_wise_specific_and_simultaneous() {
+        let moves = vec![
+            ("/p/a".into(), "/p/b".into()),
+            ("/p/b".into(), "/p/a".into()),
+            ("/p/a/x.sail".into(), "/q/z.sail".into()),
+        ];
+        assert_eq!(renamed_path(Path::new("/p/a/x.sail"), &moves), Path::new("/q/z.sail"));
+        assert_eq!(renamed_path(Path::new("/p/a/y.sail"), &moves), Path::new("/p/b/y.sail"));
+        assert_eq!(renamed_path(Path::new("/p/ab/y.sail"), &moves), Path::new("/p/ab/y.sail"));
+        assert_eq!(
+            relative_path(Path::new("/p/b"), Path::new("/q/z.sail")),
+            Some("../../q/z.sail".into())
+        );
+    }
+}

@@ -16,7 +16,6 @@ use ide_db::FileDb;
 // Re-export from ide_db::rename for downstream consumers.
 pub use ide_db::rename::{IdentifierKind as IdKind, RenameError as Error};
 
-pub use crate::navigation::will_rename_file_edits as will_rename_file;
 pub use crate::references::{normalize_validated_rename, rename_edits};
 
 /// The name under the cursor and its range, if it can be renamed.

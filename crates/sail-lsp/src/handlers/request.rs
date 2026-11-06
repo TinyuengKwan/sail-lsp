@@ -9,8 +9,6 @@
 //!
 //! Dispatched via `RequestDispatcher::on_sync()` or `on()` in main_loop.rs.
 
-use std::collections::HashMap;
-
 use lsp_types::request::{
     GotoDeclarationParams, GotoDeclarationResponse, GotoImplementationParams,
     GotoImplementationResponse, GotoTypeDefinitionParams, GotoTypeDefinitionResponse,
@@ -1375,27 +1373,109 @@ pub(crate) fn handle_workspace_symbol(
     snap: GlobalStateSnapshot,
     params: WorkspaceSymbolParams,
 ) -> anyhow::Result<Option<WorkspaceSymbolResponse>> {
+    use ide_db::symbol_index::Query;
+    let mut words = Vec::new();
+    let mut scope = "all";
+    let mut project_filter = None;
+    let mut kind = None;
+    let mut types = false;
+    let mut limit = 128usize;
+    for word in params.query.split_whitespace() {
+        if let Some(v) = word.strip_prefix("scope:") {
+            scope = v;
+        } else if let Some(v) = word.strip_prefix("project:") {
+            project_filter = Some(v);
+        } else if let Some(v) = word.strip_prefix("limit:") {
+            limit = v.parse::<usize>().unwrap_or(128).min(1024);
+        } else if let Some(v) = word.strip_prefix("kind:") {
+            kind = Some(v);
+        } else if let Some(v) = word.strip_prefix('#') {
+            types = true;
+            words.push(v);
+        } else {
+            words.push(word);
+        }
+    }
+    let mut query = Query::new(words.join("")).limit(limit);
+    if types {
+        query = query.only_types();
+    }
+    if let Some(kind) = kind {
+        let kind = match kind {
+            "function" => hir::DefKind::Function,
+            "val" => hir::DefKind::ValSpec,
+            "struct" => hir::DefKind::Struct,
+            "enum" => hir::DefKind::Enum,
+            "union" => hir::DefKind::Union,
+            "type" => hir::DefKind::TypeAlias,
+            "mapping" => hir::DefKind::Mapping,
+            "register" => hir::DefKind::Register,
+            _ => anyhow::bail!("Unknown symbol kind: {kind}"),
+        };
+        query = query.kind(kind);
+    }
+    anyhow::ensure!(
+        ["all", "workspace", "library"].contains(&scope),
+        "Unknown symbol scope: {scope}"
+    );
+    let allowed: std::collections::HashSet<_> = snap
+        .analysis
+        .all_salsa_files()
+        .into_iter()
+        .filter_map(|(uri, _)| {
+            let id = snap.analysis.file_id(&uri)?;
+            let library = snap.is_library(id);
+            if (scope == "workspace" && library) || (scope == "library" && !library) {
+                return None;
+            }
+            if let Some(filter) = project_filter {
+                if !snap.projects.values().any(|p| {
+                    p.manifest.to_string_lossy().contains(filter)
+                        && p.discovered_files.iter().any(|(u, _)| u == &uri)
+                }) {
+                    return None;
+                }
+            }
+            Some(uri)
+        })
+        .collect();
+    let mut seen = std::collections::HashSet::new();
     let results: Vec<SymbolInformation> = snap
         .analysis
-        .workspace_symbols(&params.query)?
+        .workspace_symbols(&query, Some(&allowed))?
         .into_iter()
         .filter_map(|nav| {
-            let sf = snap.analysis.file(&nav.url)?;
-            // The symbol's own file, not the request's — a workspace
-            // search answers about files the client never named.
+            if !seen.insert((nav.url.clone(), nav.focus_range, nav.name.clone())) {
+                return None;
+            }
             let index = line_index_for(&snap, &nav.url);
-            let p = crate::to_proto::position_from_line_col(
-                &index,
-                sf.position_at(base_db::range_start(nav.full_range)),
-            );
+            let path = nav.url.to_file_path().ok()?;
+            let mut owners = Vec::new();
+            for project in snap.projects.values() {
+                if let Some(resolved) = &project.resolved {
+                    for module in &resolved.modules {
+                        if module.files.iter().any(|f| {
+                            syntax::preprocess::normalize_path(
+                                &project.manifest.parent().unwrap().join(f),
+                            ) == path
+                        }) {
+                            owners.push(format!("{}::{}", project.manifest.display(), module.name));
+                        }
+                    }
+                }
+            }
             #[allow(deprecated)]
             Some(SymbolInformation {
                 name: nav.name,
                 kind: crate::lsp_ext::lsp_symbol_kind(nav.kind),
                 tags: None,
                 deprecated: None,
-                location: Location::new(nav.url, Range::new(p, p)),
-                container_name: None,
+                location: Location::new(nav.url, crate::to_proto::range(&index, nav.focus_range)),
+                container_name: Some(if owners.is_empty() {
+                    path.display().to_string()
+                } else {
+                    format!("{} · {}", owners.join(", "), path.display())
+                }),
             })
         })
         .collect();
@@ -1461,19 +1541,74 @@ pub(crate) fn handle_will_rename_files(
 ) -> anyhow::Result<Option<WorkspaceEdit>> {
     let rename_pairs: Vec<(String, String)> =
         params.files.iter().map(|r| (r.old_uri.clone(), r.new_uri.clone())).collect();
-    let edits = snap.analysis.will_rename_file_edits(&rename_pairs)?;
-    Ok(edits.map(|changes| {
-        let lsp_changes: HashMap<Url, Vec<TextEdit>> = changes
-            .into_iter()
-            .filter_map(|(uri, ide_edits)| {
-                let sf = snap.analysis.file(&uri)?;
-                let li = ide_db::line_index::LineIndex::new(sf.text());
-                let lsp_edits =
-                    ide_edits.iter().map(|e| crate::to_proto::text_edit(&li, e)).collect();
-                Some((uri, lsp_edits))
-            })
-            .collect();
-        WorkspaceEdit { changes: Some(lsp_changes), ..Default::default() }
+    let mut changes =
+        snap.analysis.will_rename_file_edits(&rename_pairs)?.map_err(anyhow::Error::msg)?;
+    let moves: Vec<_> = rename_pairs
+        .iter()
+        .filter_map(|(a, b)| {
+            Some((
+                Url::parse(a).ok()?.to_file_path().ok()?,
+                Url::parse(b).ok()?.to_file_path().ok()?,
+            ))
+        })
+        .collect();
+    let mut documents = Vec::new();
+    for project in snap.projects.values() {
+        let uri = Url::from_file_path(&project.manifest)
+            .map_err(|_| anyhow::anyhow!("Invalid manifest path"))?;
+        let text = crate::manifest_editing::text(&snap, &uri)
+            .ok_or_else(|| anyhow::anyhow!("Cannot read {uri}"))?;
+        let parsed = project_model::ProjectManifest::parse(&text)
+            .map_err(|e| anyhow::anyhow!("Cannot safely update {uri}: {}", e.message))?;
+        let edits = parsed
+            .rename_file_edits(
+                &text,
+                &project.manifest,
+                &paths::renamed_path(&project.manifest, &moves),
+                &crate::manifest_editing::project_options(&snap, &uri),
+                &moves,
+            )
+            .map_err(anyhow::Error::msg)?;
+        if !edits.is_empty() {
+            let li = ide_db::line_index::LineIndex::new(&text);
+            documents.push(lsp_types::TextDocumentEdit {
+                text_document: lsp_types::OptionalVersionedTextDocumentIdentifier {
+                    uri: uri.clone(),
+                    version: snap.document_versions.get(&uri).copied(),
+                },
+                edits: edits
+                    .into_iter()
+                    .map(|(r, new_text)| {
+                        lsp_types::OneOf::Left(TextEdit {
+                            range: crate::to_proto::range(&li, base_db::text_range(r.start, r.end)),
+                            new_text,
+                        })
+                    })
+                    .collect(),
+            });
+        }
+    }
+    for (uri, ide_edits) in changes.drain() {
+        let Some(sf) = snap.analysis.file(&uri) else { continue };
+        let li = ide_db::line_index::LineIndex::new(sf.text());
+        documents.push(lsp_types::TextDocumentEdit {
+            text_document: lsp_types::OptionalVersionedTextDocumentIdentifier {
+                version: snap.document_versions.get(&uri).copied(),
+                uri,
+            },
+            edits: ide_edits
+                .iter()
+                .map(|e| lsp_types::OneOf::Left(crate::to_proto::text_edit(&li, e)))
+                .collect(),
+        });
+    }
+    if documents.is_empty() {
+        return Ok(None);
+    }
+    documents.sort_by(|a, b| a.text_document.uri.cmp(&b.text_document.uri));
+    Ok(Some(WorkspaceEdit {
+        document_changes: Some(lsp_types::DocumentChanges::Edits(documents)),
+        ..Default::default()
     }))
 }
 
@@ -1975,4 +2110,75 @@ pub(crate) fn handle_explain_analysis(
         "Project configuration takes effect after saving and a successful reload"
     );
     Ok(result)
+}
+
+/// The module's identity includes its manifest and name, not its transient index.
+/// Root/occurrence/include ordinals survive ordinary source edits.
+pub(crate) fn include_context_key(
+    key: &base_db::preprocess::InstanceKey,
+    root: &Url,
+    modules: &[serde_json::Value],
+) -> String {
+    let module = key
+        .module
+        .and_then(|i| modules.get(i))
+        .map(|m| serde_json::json!({"manifest":m["manifest"],"module":m["module"]}));
+    serde_json::json!({"root":root,"occurrence":key.occurrence,"includes":key.includes,"module":module}).to_string()
+}
+
+pub(crate) fn handle_include_contexts(
+    state: &mut crate::global_state::GlobalState,
+    params: lsp_types::TextDocumentIdentifier,
+) -> anyhow::Result<serde_json::Value> {
+    let analysis = state.analysis_snapshot();
+    let selected = state.mem_docs.get(&params.uri).and_then(|d| d.selected_context.as_ref());
+    let contexts = analysis.include_contexts(&params.uri)?.into_iter().map(|(_,key,root)| {
+        let identity = include_context_key(&key,&root,&state.module_contexts);
+        serde_json::json!({"key":identity,"root":root,"includes":key.includes,
+            "project":key.module.and_then(|i|state.module_contexts.get(i)),"selected":selected == Some(&identity)})
+    }).collect::<Vec<_>>();
+    Ok(serde_json::json!(contexts))
+}
+
+pub(crate) fn handle_select_include_context(
+    state: &mut crate::global_state::GlobalState,
+    params: crate::lsp_ext::SelectIncludeContextParams,
+) -> anyhow::Result<()> {
+    if let Some(selected) = &params.context {
+        let contexts = state.analysis_snapshot().include_contexts(&params.text_document.uri)?;
+        if !contexts.iter().any(|(_, key, root)| {
+            include_context_key(key, root, &state.module_contexts) == *selected
+        }) {
+            return Err(super::dispatch::RequestError {
+                code: lsp_server::ErrorCode::InvalidParams,
+                message: "Include context is no longer active; select it again".into(),
+            }
+            .into());
+        }
+    }
+    let document = state
+        .mem_docs
+        .get_mut(&params.text_document.uri)
+        .ok_or_else(|| anyhow::anyhow!("Open the document before selecting a context"))?;
+    document.selected_context = params.context;
+    state.analysis_host.trigger_cancellation();
+    Ok(())
+}
+
+pub(crate) fn handle_ssr_preview(
+    snap: GlobalStateSnapshot,
+    params: crate::lsp_ext::SsrParams,
+) -> anyhow::Result<serde_json::Value> {
+    let edit = handle_ssr(snap.clone(), params)?;
+    let mut documents = Vec::new();
+    if let Some(lsp_types::DocumentChanges::Edits(edits)) = &edit.document_changes {
+        for doc in edits {
+            let file = snap
+                .analysis
+                .file(&doc.text_document.uri)
+                .ok_or_else(|| anyhow::anyhow!("SSR source disappeared"))?;
+            documents.push(serde_json::json!({"uri":doc.text_document.uri,"version":doc.text_document.version,"text":file.text()}));
+        }
+    }
+    Ok(serde_json::json!({"edit":edit,"documents":documents}))
 }

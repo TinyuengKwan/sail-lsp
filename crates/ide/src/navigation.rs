@@ -1,4 +1,4 @@
-use ide_db::ide_types::{CallItem, FileLocation, IdeTextEdit, SymbolKind, TypeHierarchyItem};
+use ide_db::ide_types::{CallItem, FileLocation, SymbolKind, TypeHierarchyItem};
 use ide_db::line_index::TextRange;
 use ide_db::{extract_symbol_decls, find_callable_signature, token_symbol_key, FileDb};
 
@@ -436,61 +436,6 @@ where
         }
     }
     None
-}
-
-fn basename_from_uri(uri: &str) -> Option<String> {
-    Url::parse(uri).ok().and_then(|url| {
-        url.path_segments().and_then(|mut segments| segments.next_back().map(str::to_string))
-    })
-}
-
-/// Rename file pairs: `(old_uri_str, new_uri_str)`.
-pub fn will_rename_file_edits<'a, F, I>(
-    files: I,
-    rename_pairs_raw: &[(String, String)],
-) -> Option<HashMap<Url, Vec<IdeTextEdit>>>
-where
-    F: FileDb + 'a,
-    I: IntoIterator<Item = (&'a Url, &'a F)>,
-{
-    let rename_pairs: Vec<(String, String)> = rename_pairs_raw
-        .iter()
-        .filter_map(|(old_uri, new_uri)| {
-            let old_name = basename_from_uri(old_uri)?;
-            let new_name = basename_from_uri(new_uri)?;
-            if old_name == new_name {
-                return None;
-            }
-            Some((format!("\"{old_name}\""), format!("\"{new_name}\"")))
-        })
-        .collect();
-
-    if rename_pairs.is_empty() {
-        return None;
-    }
-
-    let mut changes: HashMap<Url, Vec<IdeTextEdit>> = HashMap::new();
-    for (uri, file) in files {
-        let text = file.text();
-        let mut edits = Vec::new();
-        for (old_text, new_text) in &rename_pairs {
-            for (start, _) in text.match_indices(old_text) {
-                let end = start + old_text.len();
-                edits.push(IdeTextEdit {
-                    range: base_db::text_range(start, end),
-                    new_text: new_text.clone(),
-                });
-            }
-        }
-        if !edits.is_empty() {
-            changes.insert(uri.clone(), edits);
-        }
-    }
-
-    if changes.is_empty() {
-        return None;
-    }
-    Some(changes)
 }
 
 // There were four `*_dyn` wrappers here, written "so callers that only

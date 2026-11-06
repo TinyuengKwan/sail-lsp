@@ -301,6 +301,14 @@ pub(crate) fn server_capabilities(client: &ClientCapabilities) -> ServerCapabili
                                 options: None,
                             },
                         },
+                        FileOperationFilter {
+                            scheme: Some("file".to_string()),
+                            pattern: FileOperationPattern {
+                                glob: "**/{*.sail_project,sail.proj}".to_string(),
+                                matches: Some(FileOperationPatternKind::File),
+                                options: None,
+                            },
+                        },
                         // Match directories (moving a folder of .sail files).
                         FileOperationFilter {
                             scheme: Some("file".to_string()),
@@ -321,6 +329,9 @@ pub(crate) fn server_capabilities(client: &ClientCapabilities) -> ServerCapabili
         experimental: Some(serde_json::json!({
             "ssr": true,
             "ssrSearch": true,
+            "ssrPreview": true,
+            "includeContexts": true,
+            "ssrKinds": ["expression", "type", "item", "pattern"],
             "matchingBrace": true,
             "joinLines": true,
             "onEnter": true,

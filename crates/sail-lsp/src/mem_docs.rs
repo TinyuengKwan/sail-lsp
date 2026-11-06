@@ -14,6 +14,8 @@ pub(crate) struct DocumentData {
     pub lifetime: u64,
     /// Disk baseline for manifest buffers; ordinary source buffers leave it empty.
     pub saved_manifest_text: Option<String>,
+    /// Stable root/module/include occurrence chosen for reads; dropped on close.
+    pub selected_context: Option<String>,
 }
 
 impl DocumentData {
@@ -70,6 +72,7 @@ impl DocumentData {
             data,
             lifetime: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             saved_manifest_text: None,
+            selected_context: None,
         }
     }
 }

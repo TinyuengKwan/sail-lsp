@@ -390,7 +390,7 @@ DAG mirrors RA: `syntax → hir-expand → hir-def → hir-ty → hir → ide-db
 - **Assist handlers** (ide-assists): AssistContext -> handlers::all() -> Assists accumulator (51 handlers, RA pattern).
 - **Diagnostic handlers** (ide-diagnostics): 40 handlers with `err_recover` pattern, `DiagnosticsContext` with `sema: Semantics`.
 - **Two-stage search** (ide-db/search.rs): index candidate files -> per-file occurrence scan.
-- **SSR** (ide-ssr): expression-only `experimental/ssr` previews with `$name` placeholders, semantic binding checks, selections and versioned edits. See `docs/architecture.md` for unsupported binding/item/type rules and include-context restrictions.
+- **SSR** (ide-ssr): expression/type/item/binding-pattern rules, semantic namespace and binding checks, hygienic rendering, selections and versioned previews. VS Code offers guarded diff/apply/cancel through `sail-lsp/ssrPreview`. See `docs/architecture.md` for declaration-name and include-context restrictions.
 - **lsp-types confinement**: only sail-lsp depends on lsp-types; all IDE crates use internal types.
 - **Cancellation**: catch_cancelled in dispatch.rs; salsa::Cancelled -> ContentModified error.
 

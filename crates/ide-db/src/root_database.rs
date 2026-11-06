@@ -130,6 +130,14 @@ impl RootDatabase {
         Arc::strong_count(&self.snapshot_owners).saturating_sub(1)
     }
 
+    /// Resolve an existing preprocessing view; never allocate during a read.
+    pub fn include_instance_id(
+        &self,
+        key: &base_db::preprocess::InstanceKey,
+    ) -> Option<base_db::FileId> {
+        self.include_instances.get(key).copied()
+    }
+
     pub(crate) fn include_instance(
         &mut self,
         key: base_db::preprocess::InstanceKey,

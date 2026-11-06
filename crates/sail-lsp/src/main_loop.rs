@@ -223,6 +223,7 @@ impl GlobalState {
             ),
         );
         self.projects = std::sync::Arc::new(inputs.projects);
+        self.send_notification::<crate::lsp_ext::ProjectGraphChanged>(());
         self.module_contexts = std::sync::Arc::new(crate::reload::loaded_module_contexts(
             &self.projects,
             &self.config.workspace,
@@ -1396,6 +1397,10 @@ fn on_request(state: &mut GlobalState, req: Request) {
         // This only serializes loaded project metadata. Reading it directly
         // avoids constructing an analysis snapshot while cache priming owns
         // Salsa state during startup.
+        .on_sync_mut::<crate::lsp_ext::IncludeContexts>(handlers::handle_include_contexts)
+        .on_sync_mut::<crate::lsp_ext::SelectIncludeContext>(
+            handlers::handle_select_include_context,
+        )
         .on_sync_mut::<crate::lsp_ext::ProjectGraph>(handlers::handle_project_graph_sync)
         // On the main thread, and only these: rust-analyzer keeps
         // `SelectionRange` and `OnTypeFormatting` sync too, because both are
@@ -1415,6 +1420,7 @@ fn on_request(state: &mut GlobalState, req: Request) {
         )
         .on_latency_sensitive::<true, request::InlayHintRequest>(handlers::handle_inlay_hint)
         .on::<false, crate::lsp_ext::ExplainAnalysis>(handlers::handle_explain_analysis)
+        .on::<false, crate::lsp_ext::SsrPreview>(handlers::handle_ssr_preview)
         .on::<false, crate::lsp_ext::Ssr>(handlers::handle_ssr)
         .on::<false, crate::lsp_ext::SsrSearch>(handlers::handle_ssr_search)
         .on_latency_sensitive::<true, request::SignatureHelpRequest>(

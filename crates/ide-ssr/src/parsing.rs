@@ -12,6 +12,7 @@ use crate::fragments;
 /// A parsed SSR rule with pattern and template as syntax trees.
 #[derive(Debug, Clone)]
 pub(crate) struct ParsedRule {
+    pub(crate) kind: fragments::FragmentKind,
     /// Placeholder metadata, keyed by stand-in name (e.g., `__ssr_0_a`).
     pub(crate) placeholders_by_stand_in: FxHashMap<String, Placeholder>,
     /// The parsed pattern as a syntax tree.
@@ -90,8 +91,9 @@ pub(crate) fn split_rule(input: &str) -> Result<(&str, &str), SsrError> {
     Ok((search, replace))
 }
 
-/// Parse the expression pair accepted by the SSR request.
+/// Parse the fragment pair accepted by the SSR request.
 pub(crate) fn parse_rule(input: &str) -> Result<ParsedRule, SsrError> {
+    let (kind, input) = fragments::FragmentKind::split(input);
     let (search, replace) = split_rule(input)?;
     let (search, placeholders) = replace_placeholders(search)?;
     let (replace, replacement_placeholders) = replace_placeholders(replace)?;
@@ -100,11 +102,10 @@ pub(crate) fn parse_rule(input: &str) -> Result<ParsedRule, SsrError> {
             bail!("Placeholder ${} in replace not found in search", placeholder.ident.0);
         }
     }
-    let (Some(pattern), Some(template)) = (fragments::expr(&search), fragments::expr(&replace))
-    else {
-        bail!("Search and replacement must be valid Sail expressions; item, type and binding-pattern rules are unsupported");
+    let (Some(pattern), Some(template)) = (kind.parse(&search), kind.parse(&replace)) else {
+        bail!("Search and replacement must be valid Sail fragments of the same category");
     };
-    Ok(ParsedRule { placeholders_by_stand_in: placeholders, pattern, template })
+    Ok(ParsedRule { kind, placeholders_by_stand_in: placeholders, pattern, template })
 }
 
 /// Replace `$name` and `${name:constraint}` with stand-in identifiers.

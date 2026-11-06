@@ -1,9 +1,10 @@
-//! Semantic structural search/replace for Sail expressions.
+//! Semantic structural search/replace for Sail fragments.
 //! A finder resolves one rule at its invocation position; the IDE owns file
 //! selection, include-instance checks and validation of the resulting edits.
 
 #[macro_use]
 mod errors;
+mod bindings;
 mod fragments;
 mod matching;
 mod nester;
@@ -30,7 +31,8 @@ impl<'db> MatchFinder<'db> {
         offset: usize,
         pattern: &str,
     ) -> Result<Self, SsrError> {
-        Self::new(db, origin, offset, &format!("{pattern}\n ==>> {pattern}"))
+        let (_, bare) = fragments::FragmentKind::split(pattern);
+        Self::new(db, origin, offset, &format!("{pattern}\n ==>> {bare}"))
     }
 
     /// Read-only matches, including nested occurrences. Replacement overlap
@@ -53,7 +55,7 @@ impl<'db> MatchFinder<'db> {
             .collect()
     }
 
-    /// Parse and resolve an expression replacement in the invocation scope.
+    /// Parse and resolve a fragment replacement in the invocation scope.
     pub fn new(
         db: &'db dyn salsa::Database,
         origin: base_db::FileText,
@@ -62,19 +64,6 @@ impl<'db> MatchFinder<'db> {
     ) -> Result<Self, SsrError> {
         let sema = hir::Semantics::new(db);
         let parsed = parsing::parse_rule(query)?;
-        for node in [&parsed.pattern, &parsed.template] {
-            if node.descendants().any(|n| {
-                matches!(
-                    n.kind(),
-                    parser::SyntaxKind::LET_EXPR
-                        | parser::SyntaxKind::MATCH_EXPR
-                        | parser::SyntaxKind::FOREACH_EXPR
-                        | parser::SyntaxKind::VAR_EXPR
-                )
-            }) {
-                bail!("SSR currently supports expressions without introduced bindings; item, type and binding-pattern rules are unsupported");
-            }
-        }
         let rule = ResolutionScope::new(&sema, db, origin, offset).resolve_rule(&parsed)?;
         Ok(Self { sema, db, rule })
     }
@@ -101,7 +90,16 @@ impl<'db> MatchFinder<'db> {
             .rev()
             .filter_map(|m| {
                 let range = m.matched_node.text_range();
-                let new_text = replacing::render_template(&self.rule, m);
+                let new_text = replacing::render_template(&self.rule, m, |name| {
+                    matches!(
+                        self.resolve_name(
+                            file,
+                            usize::from(m.matched_node.text_range().start()),
+                            name.as_str()
+                        ),
+                        Some(hir::PathResolution::Def(_))
+                    )
+                })?;
                 let original = &before[usize::from(range.start())..usize::from(range.end())];
                 comments_preserved(original, &new_text)
                     .then_some(ide_db::text_edit::TextEdit { range, new_text })
@@ -111,44 +109,92 @@ impl<'db> MatchFinder<'db> {
 
     fn bindings_match(&self, file: base_db::FileText, m: &Match) -> bool {
         let rule = &self.rule;
-        // Only references in the pattern itself constrain identity. References
-        // captured by a placeholder belong to the matched program, not the rule.
-        for node in
-            m.matched_node.descendants().filter(|n| n.kind() == parser::SyntaxKind::IDENT_EXPR)
-        {
-            if m.placeholder_values
-                .values()
-                .any(|capture| capture.text_range().contains_range(node.text_range()))
-            {
-                continue;
-            }
-            let name = node.text().to_string();
-            let expected = rule.pattern.resolved_paths.get(name.trim()).cloned();
-            let actual =
-                self.resolve_name(file, usize::from(node.text_range().start()), name.trim());
-            if expected.is_none() || expected != actual {
+        if let Some(expected) = &rule.declaration {
+            let (Some(name), Some(span)) = (
+                syntax::definition_name(&m.matched_node),
+                syntax::definition_name_span(&m.matched_node),
+            ) else {
+                return false;
+            };
+            if self.sema.resolve_path(self.db, file, span.start, &name).as_ref() != Some(expected) {
                 return false;
             }
         }
-        let template = &rule.template;
-        for node in
-            template.node.descendants().filter(|n| n.kind() == parser::SyntaxKind::IDENT_EXPR)
-        {
-            let name = node.text().to_string();
-            if template.placeholders_by_stand_in.contains_key(name.trim()) {
+        let actual = bindings::Bindings::of_with_globals(&m.matched_node, |name| {
+            matches!(
+                self.resolve_name(
+                    file,
+                    usize::from(m.matched_node.text_range().start()),
+                    name.as_str()
+                ),
+                Some(hir::PathResolution::Def(_))
+            )
+        });
+        for (&reference, target) in &rule.pattern.bindings.references {
+            let Some(target) = target else { continue };
+            let (Some(actual_ref), Some(actual_target)) =
+                (m.token_mapping.get(&reference), m.token_mapping.get(target))
+            else {
+                return false;
+            };
+            if actual.references.get(actual_ref) != Some(&Some(*actual_target)) {
+                return false;
+            }
+        }
+        for (token, ty) in bindings::references(&m.matched_node) {
+            let offset = usize::from(token.text_range().start());
+            if m.placeholder_values
+                .values()
+                .any(|capture| capture.text_range().contains_range(token.text_range()))
+                || actual.references.get(&offset).is_some_and(|v| v.is_some())
+            {
                 continue;
             }
-            let expected = template.resolved_paths.get(name.trim()).cloned();
-            let actual = self.resolve_name(
+            let name = token.text();
+            let expected = rule.pattern.resolved_paths.get(&(name.to_owned(), ty));
+            let found = self.resolve_reference(file, offset, name, ty);
+            if expected.is_none() || expected != found.as_ref() {
+                return false;
+            }
+        }
+        for (token, ty) in bindings::references(&rule.template.node) {
+            let name = token.text();
+            if rule.template.placeholders_by_stand_in.contains_key(name)
+                || rule
+                    .template
+                    .bindings
+                    .references
+                    .get(&usize::from(token.text_range().start()))
+                    .is_some_and(|v| v.is_some())
+            {
+                continue;
+            }
+            let expected = rule.template.resolved_paths.get(&(name.to_owned(), ty));
+            let found = self.resolve_reference(
                 file,
                 usize::from(m.matched_node.text_range().start()),
-                name.trim(),
+                name,
+                ty,
             );
-            if expected.is_none() || expected != actual {
+            if expected.is_none() || expected != found.as_ref() {
                 return false;
             }
         }
         true
+    }
+
+    fn resolve_reference(
+        &self,
+        file: base_db::FileText,
+        offset: usize,
+        name: &str,
+        ty: bool,
+    ) -> Option<hir::PathResolution> {
+        if ty {
+            self.sema.resolve_type_path(file, offset, name)
+        } else {
+            self.resolve_name(file, offset, name)
+        }
     }
 
     fn resolve_name(

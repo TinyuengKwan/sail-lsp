@@ -10,4 +10,3 @@ pub(crate) mod ext;
 pub mod from_proto;
 pub(crate) mod semantic_tokens;
 pub mod to_proto;
-pub(crate) mod utils;

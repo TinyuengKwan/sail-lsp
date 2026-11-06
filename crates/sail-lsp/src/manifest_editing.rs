@@ -4,7 +4,9 @@
 //! features read its text through `project_model::editing`. rust-analyzer
 //! leaves Cargo.toml to other extensions; Sail has none, so the server
 //! answers for its own manifest format.
-use std::path::{Component, Path, PathBuf};
+use std::path::Path;
+
+use paths::relative_path;
 
 use lsp_types::{
     CompletionItem, CompletionItemKind, DocumentSymbol, DocumentSymbolResponse, Hover,
@@ -20,7 +22,7 @@ pub(crate) fn is_manifest(uri: &Url) -> bool {
 }
 
 /// The manifest as the editor has it, else as it is on disk.
-fn text(snap: &GlobalStateSnapshot, uri: &Url) -> Option<String> {
+pub(crate) fn text(snap: &GlobalStateSnapshot, uri: &Url) -> Option<String> {
     if let Some(text) = snap.manifest_texts.get(uri) {
         return Some(text.data.clone());
     }
@@ -33,7 +35,10 @@ fn offset(snap: &GlobalStateSnapshot, uri: &Url, position: Position) -> Option<(
     Some((text, crate::from_proto::offset(&index, position)))
 }
 
-fn project_options(snap: &GlobalStateSnapshot, uri: &Url) -> project_model::ProjectOptions {
+pub(crate) fn project_options(
+    snap: &GlobalStateSnapshot,
+    uri: &Url,
+) -> project_model::ProjectOptions {
     let path = uri.to_file_path().ok();
     let project = snap.projects.values().find(|p| Some(&p.manifest) == path.as_ref());
     let mut options = project.map_or(&snap.config.workspace, |p| &p.config).project_options();
@@ -326,19 +331,6 @@ pub(crate) fn formatting(snap: &GlobalStateSnapshot, uri: &Url) -> Option<Vec<Te
     )])
 }
 
-/// `to` relative to the directory `from`, with `..` where it must climb.
-fn relative(from: &Path, to: &Path) -> Option<PathBuf> {
-    let from: Vec<_> = from.components().collect();
-    let to: Vec<_> = to.components().collect();
-    let shared = from.iter().zip(&to).take_while(|(a, b)| a == b).count();
-    if shared == 0 {
-        return None;
-    }
-    let mut out: PathBuf = from[shared..].iter().map(|_| Component::ParentDir).collect();
-    out.extend(&to[shared..]);
-    Some(out)
-}
-
 /// For a file no project lists: add it to a module. Each module that already
 /// lists files nearest the new one's directory is offered; when only one is,
 /// it is the preferred fix. The edit appends to the module's last `files`
@@ -400,7 +392,7 @@ pub(crate) fn add_to_project(
         }
         let Some(text) = text(snap, &manifest_uri) else { continue };
         let Ok(manifest) = project_model::ProjectManifest::parse(&text) else { continue };
-        let Some(written) = relative(manifest_dir, &path) else { continue };
+        let Some(written) = relative_path(manifest_dir, &path) else { continue };
         let written = written.to_string_lossy().replace('\\', "/");
         let literal = editing::path_literal(&written);
         let Some((at, insert)) = manifest.file_insertion(&text, &module, &literal) else {
@@ -594,7 +586,7 @@ mod tests {
     #[test]
     fn relative_paths_climb_where_they_must() {
         let rel = |a: &str, b: &str| {
-            relative(Path::new(a), Path::new(b)).map(|p| p.display().to_string())
+            relative_path(Path::new(a), Path::new(b)).map(|p| p.display().to_string())
         };
         assert_eq!(rel("/w/model", "/w/model/core/x.sail").as_deref(), Some("core/x.sail"));
         assert_eq!(rel("/w/model", "/w/extra/x.sail").as_deref(), Some("../extra/x.sail"));

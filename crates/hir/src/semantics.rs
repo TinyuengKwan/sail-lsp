@@ -415,6 +415,41 @@ impl<'db> Semantics<'db> {
         None
     }
 
+    /// Resolve a type name in an explicitly selected namespace, independent
+    /// of the syntax at the invocation cursor (used by type-pattern SSR).
+    pub fn resolve_type_path(
+        &self,
+        file: FileText,
+        offset: usize,
+        name: &str,
+    ) -> Option<crate::PathResolution> {
+        use hir_def::source_order::{
+            self,
+            bindings::{self, Namespace},
+        };
+        if let Some(at) = source_order::at_offset(self.db, file, offset) {
+            if let Some(declaration) =
+                bindings::resolve(self.db, at, hir_def::Name::new(name), Namespace::Type)
+            {
+                return crate::def_at_declaration_in_namespace(
+                    self.db,
+                    declaration,
+                    name,
+                    Namespace::Type,
+                )
+                .map(crate::PathResolution::Def);
+            }
+            return (name.starts_with('\'') || hir_def::is_builtin_type_name(name)).then(|| {
+                crate::PathResolution::TypeVar(crate::TypeVar { name: hir_def::Name::new(name) })
+            });
+        }
+        let analyzer = self.imp.analyze(file, offset, false)?;
+        let resolver = analyzer.make_resolver();
+        resolver
+            .resolve_path_in_type_ns(self.db, name)
+            .map(|ns| crate::PathResolution::from_type_ns(self.db, file, ns))
+    }
+
     /// Map an `InFile<SyntaxNodePtr>` to a `FileRange` for diagnostic display.
     ///
     /// RA handles macro expansion mapping. Sail has no macros, so this is

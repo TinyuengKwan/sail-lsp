@@ -207,39 +207,9 @@ impl SymbolIndex {
         self.by_name.get(name).map_or(&[], |v| v.as_slice())
     }
 
-    /// Search by case-insensitive substring with relevance ranking.
-    ///
-    /// C6: Enhanced from flat substring filter to scored ranking:
-    /// - Exact match (case-insensitive): score 100
-    /// - Prefix match: score 80
-    /// - Substring match: score 50
-    /// - Results sorted by score (descending), then alphabetically.
+    /// Ranked subsequence search, bounded by the same query as workspace search.
     pub fn search(&self, query: &str) -> Vec<&SymbolEntry> {
-        if query.is_empty() {
-            return Vec::new();
-        }
-        let query_lower = query.to_ascii_lowercase();
-        let mut scored: Vec<(u32, &SymbolEntry)> = self
-            .by_name
-            .values()
-            .flatten()
-            .filter_map(|e| {
-                let name_lower = e.name.to_ascii_lowercase();
-                let score = if name_lower == query_lower {
-                    100 // exact match
-                } else if name_lower.starts_with(&query_lower) {
-                    80 // prefix match
-                } else if name_lower.contains(&query_lower) {
-                    50 // substring match
-                } else {
-                    return None;
-                };
-                Some((score, e))
-            })
-            .collect();
-        // Sort: highest score first, then alphabetical for ties
-        scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.name.cmp(&b.1.name)));
-        scored.into_iter().map(|(_, e)| e).collect()
+        self.query(&Query::new(query.to_owned()))
     }
 
     /// Get aggregated reference count for a symbol.
@@ -330,7 +300,7 @@ pub enum SearchMode {
     Exact,
     /// Name starts with query.
     Prefix,
-    /// Name contains query substring.
+    /// Ordered subsequence, preferring exact, prefix and word-boundary matches.
     Fuzzy,
 }
 
@@ -343,19 +313,21 @@ pub struct Query {
     mode: SearchMode,
     case_sensitive: bool,
     only_types: bool,
+    kind: Option<DefKind>,
     limit: usize,
 }
 
 impl Query {
     /// Create a new query.
     pub fn new(query: String) -> Query {
-        let lowercased = query.to_ascii_lowercase();
+        let lowercased = query.to_lowercase();
         Query {
             query,
             lowercased,
             mode: SearchMode::Fuzzy,
             case_sensitive: false,
             only_types: false,
+            kind: None,
             limit: 128,
         }
     }
@@ -372,7 +344,7 @@ impl Query {
         self
     }
 
-    /// Set search mode to fuzzy (substring) match.
+    /// Set search mode to fuzzy subsequence match.
     pub fn fuzzy(mut self) -> Self {
         self.mode = SearchMode::Fuzzy;
         self
@@ -390,6 +362,11 @@ impl Query {
         self
     }
 
+    pub fn kind(mut self, kind: DefKind) -> Self {
+        self.kind = Some(kind);
+        self
+    }
+
     /// Set result limit.
     pub fn limit(mut self, n: usize) -> Self {
         self.limit = n;
@@ -400,55 +377,74 @@ impl Query {
 impl SymbolIndex {
     /// Search the index using a structured `Query`.
     pub fn query(&self, q: &Query) -> Vec<&SymbolEntry> {
-        if q.query.is_empty() {
+        self.query_filtered(q, |_| true)
+    }
+
+    /// Filter scope before limiting, so library/project matches cannot starve
+    /// the requested scope. No second index or result cache is needed.
+    pub fn query_filtered(
+        &self,
+        q: &Query,
+        mut accept: impl FnMut(&SymbolEntry) -> bool,
+    ) -> Vec<&SymbolEntry> {
+        if q.query.is_empty() || q.limit == 0 {
             return Vec::new();
         }
-
-        let mut results: Vec<(u32, &SymbolEntry)> = self
+        let mut results: Vec<_> = self
             .by_name
             .values()
             .flatten()
+            .filter(|e| {
+                accept(e)
+                    && (!q.only_types || is_type_kind(e.kind))
+                    && q.kind.is_none_or(|k| k == e.kind)
+            })
             .filter_map(|e| {
-                // Type filter
-                if q.only_types && !is_type_kind(e.kind) {
-                    return None;
-                }
-
-                let name_cmp = if q.case_sensitive {
-                    e.name.as_str()
-                } else {
-                    // Can't borrow temp; use lowercased field
-                    return self.query_match_score(e, q).map(|score| (score, e));
-                };
-
-                let query_cmp = if q.case_sensitive { &q.query } else { &q.lowercased };
+                let name = if q.case_sensitive { e.name.clone() } else { e.name.to_lowercase() };
+                let query = if q.case_sensitive { q.query.as_str() } else { q.lowercased.as_str() };
                 let score = match q.mode {
-                    SearchMode::Exact if name_cmp == query_cmp.as_str() => 100,
-                    SearchMode::Prefix if name_cmp.starts_with(query_cmp.as_str()) => 80,
-                    SearchMode::Fuzzy if name_cmp.contains(query_cmp.as_str()) => 50,
-                    _ => return None,
-                };
+                    SearchMode::Exact => (name == query).then_some(10000),
+                    SearchMode::Prefix => name.starts_with(query).then_some(9000),
+                    SearchMode::Fuzzy => subsequence_score(&name, query),
+                }?;
                 Some((score, e))
             })
             .collect();
-
-        results.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.name.cmp(&b.1.name)));
+        results.sort_by(|a, b| {
+            b.0.cmp(&a.0)
+                .then(a.1.name.cmp(&b.1.name))
+                .then(a.1.file_id.cmp(&b.1.file_id))
+                .then(a.1.name_span.start.cmp(&b.1.name_span.start))
+        });
         results.truncate(q.limit);
         results.into_iter().map(|(_, e)| e).collect()
     }
+}
 
-    fn query_match_score(&self, e: &SymbolEntry, q: &Query) -> Option<u32> {
-        let name_lower = e.name.to_ascii_lowercase();
-        if q.only_types && !is_type_kind(e.kind) {
-            return None;
-        }
-        match q.mode {
-            SearchMode::Exact if name_lower == q.lowercased => Some(100),
-            SearchMode::Prefix if name_lower.starts_with(&q.lowercased) => Some(80),
-            SearchMode::Fuzzy if name_lower.contains(&q.lowercased) => Some(50),
-            _ => None,
-        }
+fn subsequence_score(name: &str, query: &str) -> Option<u32> {
+    if name == query {
+        return Some(10000);
     }
+    if name.starts_with(query) {
+        return Some(9000);
+    }
+    if name.contains(query) {
+        return Some(8000);
+    }
+    let mut chars = name.char_indices();
+    let mut score = 1000u32;
+    let mut previous = None;
+    for wanted in query.chars() {
+        let (offset, ch) = chars.find(|(_, ch)| *ch == wanted)?;
+        if offset == 0 || name[..offset].ends_with(['_', '-']) {
+            score += 100;
+        }
+        if previous == Some(offset) {
+            score += 20;
+        }
+        previous = Some(offset + ch.len_utf8());
+    }
+    Some(score.saturating_sub(name.chars().count() as u32))
 }
 
 fn is_type_kind(kind: DefKind) -> bool {

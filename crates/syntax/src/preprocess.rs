@@ -269,6 +269,22 @@ impl Event {
     }
 }
 
+/// The physical path token inside an include directive. Ordinary strings and
+/// comments are never path references. Keep quoting rules identical to `Event`.
+pub fn include_path(node: &crate::SyntaxNode) -> Option<(crate::TextRange, String, bool)> {
+    let Event::Include { path, library } = Event::from_node(node)? else { return None };
+    let raw = node.text().to_string();
+    let text = strip_pragma_comment(&raw);
+    let arg = strip_directive(text, "include")?;
+    let start =
+        usize::from(node.text_range().start()) + arg.as_ptr() as usize - raw.as_ptr() as usize + 1;
+    Some((
+        crate::TextRange::new((start as u32).into(), ((start + path.len()) as u32).into()),
+        path,
+        library,
+    ))
+}
+
 /// Resolve exact paths; never guess by basename. Search paths are an LSP
 /// extension used only after the compiler's normal relative/library path.
 pub fn include_candidates(

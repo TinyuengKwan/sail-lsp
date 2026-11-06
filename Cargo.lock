@@ -645,6 +645,7 @@ dependencies = [
  "ide-diagnostics",
  "ide-ssr",
  "parser",
+ "paths",
  "pulldown-cmark",
  "rowan",
  "salsa",

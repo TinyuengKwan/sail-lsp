@@ -1,8 +1,72 @@
+diff --git a/doc/check-context-v1.schema.json b/doc/check-context-v1.schema.json
+new file mode 100644
+index 000000000..5a33d1619
+--- /dev/null
++++ b/doc/check-context-v1.schema.json
+@@ -0,0 +1,15 @@
++{
++  "$schema": "https://json-schema.org/draft/2020-12/schema",
++  "title": "Sail check-only context, version 1",
++  "type": "object",
++  "additionalProperties": false,
++  "required": ["version", "target", "includePaths", "variables", "generatedFiles"],
++  "properties": {
++    "version": {"const": 1},
++    "target": {"type": ["string", "null"]},
++    "includePaths": {"type": "array", "items": {"type": "string", "description": "Absolute host filesystem path"}},
++    "variables": {"type": "object", "additionalProperties": {"type": ["boolean", "string"]}},
++    "generatedFiles": {"type": "object", "additionalProperties": {"type": "string", "description": "Absolute physical source path"}}
++  },
++  "$comment": "All object keys must be unique. Paths must be absolute according to the compiler host's filename rules; the parser enforces this platform-specific constraint."
++}
+diff --git a/doc/check-context.md b/doc/check-context.md
+new file mode 100644
+index 000000000..57d78be55
+--- /dev/null
++++ b/doc/check-context.md
+@@ -0,0 +1,37 @@
++# Check-only context interface (proposal, version 1)
++
++This optional CLI interface lets editor clients reproduce preprocessing and
++project evaluation without selecting a code-generation backend. It is a local
++proposal, not a statement that an official Sail release includes the interface.
++
++`--check-context-version` prints `1` and exits before loading any sources.
++Clients must probe the compiler they will invoke. A client supporting only v1
++must not send a v1 context to a compiler advertising a different version.
++Unsupported options or versions must remain visible to the user; running an
++approximate configuration would make compiler diagnostics misleading.
++
++`--check-context '<JSON>'` accepts the object described by
++[the schema](check-context-v1.schema.json). All five fields are required. The
++parser rejects duplicate keys, unknown fields, unsupported versions, invalid
++value types, and relative filesystem paths before changing compiler state.
++String variables retain their contents, including whitespace and strings that
++spell boolean values. Include paths retain their order. Virtual source aliases
++point to physical files, so their includes and errors retain physical origins.
++File-relative includes take precedence over fallback include paths.
++
++The context implies check-only mode. `target` controls `$iftarget` preprocessing;
++it does not run a code generator. Existing `--project`, root-module selection,
++and ordinary checker options still apply. This interface does not change which
++modules the compiler typechecks before filtering selected output roots.
++
++Build and validate from a checkout with the proposal applied:
++
++```sh
++dune build --release src/bin/sail.exe
++SAIL_UNIT_TESTS=true dune runtest --release test/unit
++_build/default/src/bin/sail.exe --check-context-version
++```
++
++The pure `Check_context` module owns schema validation; the CLI adapter applies
++only a fully parsed context. This keeps the interface testable independently of
++command-line option ordering and limits the compiler entry-point patch.
 diff --git a/src/bin/sail.ml b/src/bin/sail.ml
-index 7ca4a5e76..5c06df0af 100644
+index 7ca4a5e76..8cbb2bdf7 100644
 --- a/src/bin/sail.ml
 +++ b/src/bin/sail.ml
-@@ -67,6 +67,45 @@ let opt_all_modules = ref false
+@@ -67,6 +67,32 @@ let opt_all_modules = ref false
  let opt_show_sail_dir = ref false
  let opt_project_files : string list ref = ref []
  let opt_variable_assignments : string list ref = ref []
@@ -11,53 +75,47 @@ index 7ca4a5e76..5c06df0af 100644
 +(* Versioned, typed check context. Paths are absolute so project-directory
 +   changes cannot alter include search or generated-source identity. *)
 +let parse_check_context text =
-+  let bad message = raise (Arg.Bad ("--check-context: " ^ message)) in
-+  let absolute = function
-+    | `String path when not (Filename.is_relative path) -> path
-+    | _ -> bad "expected an absolute path"
-+  in
-+  let fields =
-+    try match Yojson.Safe.from_string text with `Assoc fields -> fields | _ -> bad "expected an object"
-+    with Yojson.Json_error message -> bad message
-+  in
-+  let get name = match List.assoc_opt name fields with Some value -> value | None -> bad ("missing " ^ name) in
-+  List.iter (fun (name, _) ->
-+    if not (List.mem name ["version"; "target"; "includePaths"; "variables"; "generatedFiles"]) then
-+      bad ("unknown field " ^ name)) fields;
-+  if get "version" <> `Int 1 then bad "unsupported version";
-+  let target = match get "target" with `Null -> None | `String name -> Some name | _ -> bad "invalid target" in
-+  let includes = match get "includePaths" with `List paths -> List.map absolute paths | _ -> bad "invalid includePaths" in
-+  let variables = match get "variables" with
-+    | `Assoc vars -> List.fold_left (fun map (name, value) ->
-+        let value = match value with
-+          | `Bool b -> Project.bool_value b
-+          | `String s -> Project.string_value s
-+          | _ -> bad ("variable " ^ name ^ " must be a boolean or string")
-+        in Util.StringMap.add name value map) Util.StringMap.empty vars
-+    | _ -> bad "invalid variables"
-+  in
-+  let generated = match get "generatedFiles" with
-+    | `Assoc files -> List.fold_left (fun map (name, path) -> Util.StringMap.add name (absolute path) map) Util.StringMap.empty files
-+    | _ -> bad "invalid generatedFiles"
-+  in
-+  Preprocess.check_target := target;
-+  Preprocess.include_paths := includes;
-+  Project.virtual_file_paths := generated;
-+  check_variables := variables;
-+  opt_just_check := true
++  match Check_context.parse text with
++  | Error message -> raise (Arg.Bad ("--check-context: " ^ message))
++  | Ok context ->
++      Preprocess.check_target := context.target;
++      Preprocess.include_paths := context.include_paths;
++      Project.virtual_file_paths :=
++        List.fold_left
++          (fun map (name, path) -> Util.StringMap.add name path map)
++          Util.StringMap.empty context.generated_files;
++      check_variables :=
++        List.fold_left
++          (fun map (name, value) ->
++            let value =
++              match value with
++              | Check_context.Bool b -> Project.bool_value b
++              | Check_context.String s -> Project.string_value s
++            in
++            Util.StringMap.add name value map
++          )
++          Util.StringMap.empty context.variables;
++      opt_just_check := true
  let opt_model_config_file : string option ref = ref None
  let opt_sail_config_file : string option ref = ref None
  let opt_slice_instantiation_types : bool ref = ref false
-@@ -239,6 +278,8 @@ let rec options =
+@@ -239,6 +265,15 @@ let rec options =
          Arg.String (fun assignment -> opt_variable_assignments := assignment :: !opt_variable_assignments),
          "<variable=value> assign a module variable to a value"
        );
-+      ("-check_context_version", Arg.Unit (fun () -> print_endline "1"; exit 0), " print supported check-context protocol version");
++      ( "-check_context_version",
++        Arg.Unit
++          (fun () ->
++            print_endline (string_of_int Check_context.version);
++            exit 0
++          ),
++        " print supported check-context protocol version"
++      );
 +      ("-check_context", Arg.String parse_check_context, "<json> typed check-only context (protocol version 1)");
        ( "-instantiate",
          Arg.String (fun inst -> parse_instantiation inst),
          " <type variable=value> instantiate an abstract type variable"
-@@ -496,6 +537,7 @@ let run_sail (config : Yojson.Safe.t option) tgt =
+@@ -496,6 +531,7 @@ let run_sail (config : Yojson.Safe.t option) tgt =
                raise (Reporting.err_general Parse_ast.Unknown ("Could not parse assignment " ^ assignment))
            )
            !opt_variable_assignments;
@@ -65,6 +123,94 @@ index 7ca4a5e76..5c06df0af 100644
          let modules = if !opt_all_modules then None else Some frees in
          Frontend.load_project ~no_core:!opt_no_core ~target:tgt ?modules ~options:!options ~variables
            ~just_parse:!opt_just_parse_project ~default_sail_dir:Locations.sail_dir project_files
+diff --git a/src/lib/check_context.ml b/src/lib/check_context.ml
+new file mode 100644
+index 000000000..3c1b2c7ed
+--- /dev/null
++++ b/src/lib/check_context.ml
+@@ -0,0 +1,63 @@
++type variable = Bool of bool | String of string
++
++type t = {
++  target : string option;
++  include_paths : string list;
++  variables : (string * variable) list;
++  generated_files : (string * string) list;
++}
++
++let version = 1
++
++exception Invalid of string
++
++let parse text =
++  let bad message = raise (Invalid message) in
++  let object_fields name = function
++    | `Assoc fields ->
++        let _ =
++          List.fold_left
++            (fun seen (key, _) ->
++              if Util.StringSet.mem key seen then bad ("duplicate " ^ name ^ " field " ^ key);
++              Util.StringSet.add key seen
++            )
++            Util.StringSet.empty fields
++        in
++        fields
++    | _ -> bad ("expected " ^ name ^ " object")
++  in
++  let absolute = function
++    | `String path when not (Filename.is_relative path) -> path
++    | _ -> bad "expected an absolute path"
++  in
++  try
++    let fields = object_fields "context" (Yojson.Safe.from_string text) in
++    let get name = match List.assoc_opt name fields with Some value -> value | None -> bad ("missing " ^ name) in
++    List.iter
++      (fun (name, _) ->
++        if not (List.mem name ["version"; "target"; "includePaths"; "variables"; "generatedFiles"]) then
++          bad ("unknown field " ^ name)
++      )
++      fields;
++    if get "version" <> `Int version then bad "unsupported version";
++    let target = match get "target" with `Null -> None | `String name -> Some name | _ -> bad "invalid target" in
++    let include_paths =
++      match get "includePaths" with `List paths -> List.map absolute paths | _ -> bad "invalid includePaths"
++    in
++    let variables =
++      object_fields "variables" (get "variables")
++      |> List.map (fun (name, value) ->
++          let value =
++            match value with
++            | `Bool b -> Bool b
++            | `String s -> String s
++            | _ -> bad ("variable " ^ name ^ " must be a boolean or string")
++          in
++          (name, value)
++      )
++    in
++    let generated_files =
++      object_fields "generatedFiles" (get "generatedFiles") |> List.map (fun (name, value) -> (name, absolute value))
++    in
++    Ok { target; include_paths; variables; generated_files }
++  with Invalid message | Yojson.Json_error message -> Error message
+diff --git a/src/lib/check_context.mli b/src/lib/check_context.mli
+new file mode 100644
+index 000000000..eee1d3047
+--- /dev/null
++++ b/src/lib/check_context.mli
+@@ -0,0 +1,13 @@
++(** Typed, versioned context for check-only compiler invocations. Parsing is independent of command-line state and does
++    not mutate compiler options. *)
++type variable = Bool of bool | String of string
++
++type t = {
++  target : string option;
++  include_paths : string list;
++  variables : (string * variable) list;
++  generated_files : (string * string) list;
++}
++
++val version : int
++val parse : string -> (t, string) result
 diff --git a/src/lib/preprocess.ml b/src/lib/preprocess.ml
 index 4c7ed0885..9226f230c 100644
 --- a/src/lib/preprocess.ml
@@ -156,3 +302,93 @@ index 223d48ce2..3ea49db08 100644
  val parse_assignment : variables:value Util.StringMap.t ref -> string -> bool
  
  type exp =
+diff --git a/test/unit/dune b/test/unit/dune
+index 37bbf9e8f..991d3dd55 100644
+--- a/test/unit/dune
++++ b/test/unit/dune
+@@ -1,5 +1,5 @@
+ (test
+  (name test_libsail)
+- (libraries libsail alcotest)
++ (libraries libsail alcotest yojson)
+  (enabled_if
+   (= %{env:SAIL_UNIT_TESTS=false} true)))
+diff --git a/test/unit/test_check_context.ml b/test/unit/test_check_context.ml
+new file mode 100644
+index 000000000..745f65417
+--- /dev/null
++++ b/test/unit/test_check_context.ml
+@@ -0,0 +1,63 @@
++open Libsail
++
++let base =
++  [
++    ("version", `Int 1);
++    ("target", `Null);
++    ("includePaths", `List []);
++    ("variables", `Assoc []);
++    ("generatedFiles", `Assoc []);
++  ]
++let parse fields = Check_context.parse (Yojson.Safe.to_string (`Assoc fields))
++let replace name value = (name, value) :: List.remove_assoc name base
++let invalid fields () =
++  match parse fields with Error _ -> () | Ok _ -> Alcotest.fail "invalid check context was accepted"
++
++let suites =
++  [
++    ( "check context",
++      [
++        Alcotest.test_case "typed values and path order" `Quick (fun () ->
++            let fields =
++              List.map
++                (function
++                  | "variables", _ ->
++                      ("variables", `Assoc [("A", `Bool true); ("B", `String "true"); ("C", `String " padded ")])
++                  | "includePaths", _ -> ("includePaths", `List [`String "/second"; `String "/first"])
++                  | "generatedFiles", _ ->
++                      ("generatedFiles", `Assoc [("generated.sail", `String "/physical/source.sail")])
++                  | field -> field
++                  )
++                base
++            in
++            match parse fields with
++            | Error message -> Alcotest.fail message
++            | Ok context ->
++                Alcotest.(check (list string)) "ordered fallback paths" ["/second"; "/first"] context.include_paths;
++                assert (
++                  context.variables
++                  = [
++                      ("A", Check_context.Bool true);
++                      ("B", Check_context.String "true");
++                      ("C", Check_context.String " padded ");
++                    ]
++                );
++                Alcotest.(check (list (pair string string)))
++                  "physical virtual source"
++                  [("generated.sail", "/physical/source.sail")]
++                  context.generated_files
++        );
++        Alcotest.test_case "unknown version" `Quick (invalid (replace "version" (`Int 2)));
++        Alcotest.test_case "missing version" `Quick (invalid (List.remove_assoc "version" base));
++        Alcotest.test_case "unknown field" `Quick (invalid (("future", `Bool true) :: base));
++        Alcotest.test_case "duplicate field" `Quick (invalid (("version", `Int 1) :: base));
++        Alcotest.test_case "duplicate variable" `Quick
++          (invalid (replace "variables" (`Assoc [("X", `Bool true); ("X", `Bool false)])));
++        Alcotest.test_case "relative include" `Quick (invalid (replace "includePaths" (`List [`String "relative"])));
++        Alcotest.test_case "relative generated file" `Quick
++          (invalid (replace "generatedFiles" (`Assoc [("x", `String "relative")])));
++        Alcotest.test_case "numeric variable" `Quick (invalid (replace "variables" (`Assoc [("X", `Int 1)])));
++        Alcotest.test_case "malformed JSON" `Quick (fun () -> assert (Result.is_error (Check_context.parse "{")));
++      ]
++    );
++  ]
+diff --git a/test/unit/test_libsail.ml b/test/unit/test_libsail.ml
+index 3679c9dd5..545f18772 100644
+--- a/test/unit/test_libsail.ml
++++ b/test/unit/test_libsail.ml
+@@ -5,4 +5,4 @@
+    single run covers the whole library. To test a new file, add a
+    [test_<file>.ml] module and append its [suites] below. *)
+ 
+-let () = Alcotest.run "libsail" (List.concat [Test_ast_util.suites; Test_sail_file.suites])
++let () = Alcotest.run "libsail" (List.concat [Test_ast_util.suites; Test_sail_file.suites; Test_check_context.suites])

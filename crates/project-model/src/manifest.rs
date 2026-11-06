@@ -85,6 +85,175 @@ impl ResolvedProject {
     }
 }
 impl ProjectManifest {
+    /// Rewrite file expressions through simultaneous moves without changing
+    /// conditions, variable declarations or non-file strings. Dynamic scalar
+    /// references use an equality guard so other variable values retain their
+    /// meaning. Moving the manifest with dynamic/list-valued paths is rejected
+    /// when their meaning cannot be preserved for all configurations.
+    pub fn rename_file_edits(
+        &self,
+        source: &str,
+        old_manifest: &std::path::Path,
+        new_manifest: &std::path::Path,
+        options: &ProjectOptions,
+        moves: &[(PathBuf, PathBuf)],
+    ) -> std::result::Result<Vec<(Range<usize>, String)>, String> {
+        fn quoted(s: &str) -> String {
+            format!(
+                "\"{}\"",
+                s.replace('\\', "\\\\")
+                    .replace('"', "\\\"")
+                    .replace('\n', "\\n")
+                    .replace('\r', "\\r")
+                    .replace('\t', "\\t")
+            )
+        }
+        fn normalize(p: &std::path::Path) -> PathBuf {
+            let mut out = PathBuf::new();
+            for c in p.components() {
+                if c == std::path::Component::ParentDir {
+                    out.pop();
+                } else if c != std::path::Component::CurDir {
+                    out.push(c);
+                }
+            }
+            out
+        }
+        fn dynamic(e: &Expr) -> bool {
+            match &e.kind {
+                ExprKind::Variable(_) => true,
+                ExprKind::Binary(a, _, b) => dynamic(a) || dynamic(b),
+                _ => false,
+            }
+        }
+        struct Rewrite<'a> {
+            source: &'a str,
+            old: &'a std::path::Path,
+            new: &'a std::path::Path,
+            moves: &'a [(PathBuf, PathBuf)],
+            vars: BTreeMap<String, ProjectValue>,
+            edits: Vec<(Range<usize>, String)>,
+        }
+        impl Rewrite<'_> {
+            fn expr(&mut self, e: &Expr) -> std::result::Result<(), String> {
+                match &e.kind {
+                    ExprKind::List(xs) => {
+                        for x in xs {
+                            self.expr(x)?;
+                        }
+                        return Ok(());
+                    }
+                    ExprKind::If(_, a, b) => {
+                        self.expr(a)?;
+                        self.expr(b)?;
+                        return Ok(());
+                    }
+                    ExprKind::Value(ProjectValue::Virtual(_)) => return Ok(()),
+                    _ => {}
+                }
+                let value = eval(e, &self.vars).map_err(|err| err.message)?;
+                let path = match value {
+                    ProjectValue::String(path) => path,
+                    ProjectValue::Virtual(_) => return Ok(()),
+                    other => {
+                        let affected = flatten(other).into_iter().any(|value| {
+                            let ProjectValue::String(path) = value else { return false };
+                            let old = normalize(&self.old.join(&path));
+                            normalize(&self.new.join(&path))
+                                != paths::renamed_path(&old, self.moves)
+                        });
+                        if !affected {
+                            return Ok(());
+                        }
+                        return Err(format!("Cannot safely rewrite a computed file list at byte {}; update its variable or generatedFiles configuration",e.range.start));
+                    }
+                };
+                let old_target = normalize(&self.old.join(&path));
+                let new_target = paths::renamed_path(&old_target, self.moves);
+                let is_dynamic = dynamic(e);
+                if is_dynamic && self.old != self.new {
+                    return Err(format!(
+                        "Cannot safely move a manifest containing a dynamic file path at byte {}",
+                        e.range.start
+                    ));
+                }
+                if normalize(&self.new.join(&path)) == new_target {
+                    return Ok(());
+                }
+                let replacement = if std::path::Path::new(&path).is_absolute() {
+                    new_target.clone()
+                } else {
+                    paths::relative_path(self.new, &new_target)
+                        .ok_or("Cannot express the moved manifest path")?
+                };
+                let new_text = quoted(replacement.to_str().ok_or("Non-UTF-8 manifest path")?);
+                let new_text = if is_dynamic {
+                    format!(
+                        "if {} == {} then {} else {}",
+                        &self.source[e.range.clone()],
+                        quoted(&path),
+                        new_text,
+                        &self.source[e.range.clone()]
+                    )
+                } else {
+                    new_text
+                };
+                // Preserve comments/trivia between the tokens of a constant
+                // concatenation when replacing it by an equivalent literal.
+                let new_text = if !is_dynamic {
+                    let original = &self.source[e.range.clone()];
+                    let tokens = lex(original).map_err(|err| err.message)?;
+                    let mut trivia = String::new();
+                    let mut end = 0;
+                    for token in tokens {
+                        trivia.push_str(&original[end..token.range.start]);
+                        end = token.range.end;
+                    }
+                    trivia.push_str(&original[end..]);
+                    format!("{trivia}{new_text}")
+                } else {
+                    new_text
+                };
+                self.edits.push((e.range.clone(), new_text));
+                Ok(())
+            }
+            fn decls(&mut self, decls: &[Decl]) -> std::result::Result<(), String> {
+                for decl in decls {
+                    match decl {
+                        Decl::Variable((name, _), e) => {
+                            let v = eval(e, &self.vars).map_err(|err| err.message)?;
+                            self.vars.entry(name.clone()).or_insert(v);
+                        }
+                        Decl::Module(_, _, body) => self.decls(body)?,
+                        Decl::Files(es) => {
+                            for e in es {
+                                self.expr(e)?;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(())
+            }
+        }
+        for (name, path) in &options.virtual_files {
+            let old = normalize(&old_manifest.parent().ok_or("Manifest has no parent")?.join(path));
+            if paths::renamed_path(&old, moves) != old {
+                return Err(format!("Moving virtual source {name} requires updating workspace.generatedFiles; no partial path edits were produced"));
+            }
+        }
+        let mut r = Rewrite {
+            source,
+            old: old_manifest.parent().ok_or("Manifest has no parent")?,
+            new: new_manifest.parent().ok_or("Moved manifest has no parent")?,
+            moves,
+            vars: options.variables.clone(),
+            edits: Vec::new(),
+        };
+        r.decls(&self.declarations)?;
+        Ok(r.edits)
+    }
+
     /// Where to write `literal` so that `module` lists it, and the text to
     /// write: after the module's last `files` entry, or in a new `files`
     /// line at the top of its body. Purely syntactic, so it works for a
@@ -1046,5 +1215,81 @@ B { requires "#;
         let spelled: Vec<_> = m.file_ranges.iter().map(|r| &text[r.clone()]).collect();
         let branch = "if true then [b.sail, c.sail] else []";
         assert_eq!(spelled, ["a.sail", branch, branch]);
+    }
+}
+
+#[cfg(test)]
+mod rename_tests {
+    use super::*;
+    use std::path::Path;
+    fn apply(source: &str, old: &str, new: &str, moves: &[(&str, &str)]) -> String {
+        let parsed = ProjectManifest::parse(source).unwrap();
+        let moves =
+            moves.iter().map(|(a, b)| (PathBuf::from(a), PathBuf::from(b))).collect::<Vec<_>>();
+        let mut edits = parsed
+            .rename_file_edits(
+                source,
+                Path::new(old),
+                Path::new(new),
+                &ProjectOptions::default(),
+                &moves,
+            )
+            .unwrap();
+        edits.sort_by_key(|(r, _)| std::cmp::Reverse(r.start));
+        let mut result = source.to_owned();
+        for (range, text) in edits {
+            result.replace_range(range, &text);
+        }
+        result
+    }
+    #[test]
+    fn moves_preserve_both_conditional_branches_and_nonpath_variables() {
+        let source="variable FLAG = true\nvariable TEXT = \"dir/a.sail\"\nM { files if $FLAG then [dir/a.sail] else [dir/b.sail] }";
+        let result = apply(source, "/p/sail.proj", "/p/sail.proj", &[("/p/dir", "/p/moved")]);
+        assert!(result.contains("variable TEXT = \"dir/a.sail\""));
+        for flag in [true, false] {
+            let options = ProjectOptions {
+                variables: BTreeMap::from([("FLAG".into(), ProjectValue::Bool(flag))]),
+                ..Default::default()
+            };
+            let project = ProjectManifest::parse(&result).unwrap().resolve(&options).unwrap();
+            assert_eq!(
+                project.files,
+                vec![PathBuf::from(if flag { "moved/a.sail" } else { "moved/b.sail" })]
+            );
+        }
+    }
+    #[test]
+    fn dynamic_scalar_keeps_alternative_configuration_values() {
+        let source = "variable FILE = a.sail\nM { files $FILE }";
+        let result = apply(source, "/p/sail.proj", "/p/sail.proj", &[("/p/a.sail", "/p/new.sail")]);
+        for (value, expected) in [("a.sail", "new.sail"), ("other.sail", "other.sail")] {
+            let options = ProjectOptions {
+                variables: BTreeMap::from([("FILE".into(), ProjectValue::String(value.into()))]),
+                ..Default::default()
+            };
+            assert_eq!(
+                ProjectManifest::parse(&result).unwrap().resolve(&options).unwrap().files,
+                vec![PathBuf::from(expected)]
+            );
+        }
+    }
+    #[test]
+    fn moved_manifest_rebases_paths_and_keeps_comments() {
+        let result = apply(
+            "M { files \"dir\" /* comment */ / \"a.sail\" }",
+            "/p/sail.proj",
+            "/p/nested/sail.proj",
+            &[],
+        );
+        assert!(result.contains("/* comment */"));
+        assert_eq!(
+            ProjectManifest::parse(&result)
+                .unwrap()
+                .resolve(&ProjectOptions::default())
+                .unwrap()
+                .files,
+            vec![PathBuf::from("../dir/a.sail")]
+        );
     }
 }

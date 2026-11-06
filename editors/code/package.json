@@ -567,6 +567,22 @@
         "command": "sail-lsp.toggleInlayHints",
         "title": "Toggle Inlay Hints",
         "category": "Sail"
+      },
+      {
+        "command": "sail-lsp.selectIncludeContext",
+        "title": "Sail: Select Include Context"
+      },
+      {
+        "command": "sail-lsp.structuralReplace",
+        "title": "Sail: Structural Replace"
+      },
+      {
+        "command": "sail-lsp.applyStructuralReplace",
+        "title": "Sail: Apply Structural Replace"
+      },
+      {
+        "command": "sail-lsp.cancelStructuralReplace",
+        "title": "Sail: Cancel Structural Replace"
       }
     ],
     "views": {

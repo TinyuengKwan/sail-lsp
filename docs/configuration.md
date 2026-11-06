@@ -359,3 +359,74 @@ options; comment and string contents are preserved.
 Indentation follows the client's `tabSize` and `insertSpaces`. The VS Code
 extension defaults Sail documents to two spaces; other editors should configure
 these options explicitly when editing sail-riscv.
+
+## Include contexts, symbols and refactoring
+
+When a physical file is included more than once, **Sail: Select Include
+Context** chooses the semantic view used by position-based reads such as hover,
+completion and navigation. The status bar shows the chosen module, or `Auto`,
+when several instances exist. The choice belongs to the open document and is
+cleared on close. An instance that disappears or is inactive at the cursor
+falls back to an active view. This choice does not authorize edits to shared
+source: rename and SSR retain their checks across affected include instances.
+
+Workspace symbol queries match ordered abbreviations as well as exact names,
+prefixes and substrings. Exact and prefix matches rank first. The default limit
+is 128, with an explicit maximum of 1024. Optional whitespace-separated filters:
+
+- `#mr`: only type declarations matching `mr`.
+- `mr kind:function`: filter by `function`, `val`, `struct`, `enum`, `union`,
+  `type`, `mapping` or `register`.
+- `mr scope:workspace` / `scope:library` / `scope:all`: select the source scope.
+- `mr project:riscv`: restrict to projects whose manifest path contains `riscv`.
+- `mr limit:20`: limit results after scope filtering and physical deduplication.
+
+Results point at the declared identifier and show the owning module/manifest
+and source path. The project graph refreshes after an installed model changes;
+module nodes open declarations in the current manifest buffer, including
+unsaved edits. Saving still controls when the project model changes.
+
+**Sail: Structural Replace** validates `pattern ==>> replacement`, prepares a
+review panel with per-file diffs, and offers explicit Apply/Cancel actions.
+Sources remain unchanged until Apply. The server supplies every source text
+used to compute the preview; the client checks those texts and keeps the files
+open with version guards. Editing or closing a source invalidates the preview.
+Applying edits uses the normal document-change and diagnostic pipeline.
+
+Expression rules remain the default. Other fragment categories use a prefix:
+
+```text
+type: bitvector($n) ==>> vector($n, bool)
+item: val $f : $a -> $b ==>> val $f : $a -> option($b)
+pattern: ($a, $b) ==>> ($b, $a)
+let $x = $value in $body ==>> let $x = $value in $body + 1
+```
+
+Fixed type and value references must keep their semantic identity. Fixed item
+names identify the selected declaration; placeholders allow matching different
+names. Item rules replace one declaration and preserve its declared name;
+use Rename to change a symbol's name. Binding-pattern rules preserve the set of
+bound names. Introduced local/type binders are freshened, and captured references
+must retain their owners; rules that would capture a free variable or let a
+binding escape are not applied. Use binder placeholders to match different
+spellings. A repeated fixed binder name whose correspondence is ambiguous can
+prevent an unsafe match. Library sources, shared include tokens and replacements
+that discard comments or leave invalid syntax remain protected.
+
+File/folder moves update resolved `$include` paths and loaded manifests using
+versioned edits. Relative paths are rebased when the referencing file moves;
+ordinary strings/comments and unrelated same-basename files are untouched.
+Literal lists, concatenations and both conditional branches are rewritten.
+Computed scalar paths use a guard for the currently resolved spelling so other
+variable values retain their meaning. A computed list, a dynamically rooted
+manifest move or an unrepresentable include path is refused atomically when it
+cannot be rewritten safely. Virtual-file aliases remain configuration entries;
+update `workspace.generatedFiles` when moving their physical source files.
+
+The companion compiler proposal now has a pure `Check_context` parser, schema
+and unit tests in its Sail patch. See its `doc/check-context.md` for the protocol
+contract and build commands. It is prepared for upstream review; it has not
+been pushed, merged or released upstream. Stock 0.20.2/0.20.3 continue to use
+the legacy CLI for representable contexts; extended contexts require a probe
+reply of exactly `1`. A different protocol version is skipped with a visible
+reason rather than checked under an approximate configuration.

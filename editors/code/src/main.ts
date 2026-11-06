@@ -10,6 +10,7 @@ import * as path from "path";
 import * as os from "os";
 import * as fs from "fs";
 import { ProjectGraphEntry, GraphNode, graphChildren, isCycle } from "./projectGraph";
+import { registerStructuralReplace } from "./ssr";
 import { AnalysisContext, formatAnalysisContext } from "./analysisContext";
 import {
     LanguageClient,
@@ -67,11 +68,21 @@ let statusBar: vscode.StatusBarItem;
 let activationErrorShown = false;
 let latestStatus: ServerStatus | undefined;
 let projectGraph: ProjectGraphEntry[] = [];
+let refreshProjectGraph: () => void = () => {};
+let refreshIncludeContext: () => void = () => {};
+type IncludeContextChoice = {
+    key: string;
+    root: string;
+    includes: number[];
+    selected: boolean;
+    project: { manifest: string; module: string | null } | null;
+};
 
 export interface ExtensionApi {
     test: {
         status(): ServerStatus | undefined;
         projectGraph(): readonly ProjectGraphEntry[];
+        ssr: { pending(): number; stale(): boolean };
     };
 }
 
@@ -125,12 +136,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
 
     client = new LanguageClient("sail-lsp", "Sail Language Server", serverOptions, clientOptions);
     client.onNotification("sail-lsp/serverStatus", (status: ServerStatus) => showStatus(status));
+    client.onNotification("sail-lsp/projectGraphChanged", () => {
+        refreshProjectGraph();
+        refreshIncludeContext();
+    });
 
     client.onDidChangeState((event) => {
         outputChannel.appendLine(`[sail-lsp] client state ${event.oldState} -> ${event.newState}`);
     });
 
     // Register commands
+    const ssr = registerStructuralReplace(context, () => client);
     registerCommands(context);
 
     // Start the client (and server)
@@ -149,6 +165,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
         test: {
             status: () => latestStatus,
             projectGraph: () => projectGraph,
+            ssr,
         },
     };
 }
@@ -296,8 +313,69 @@ function showStatus(status: ServerStatus): void {
 // ── Commands ─────────────────────────────────────────────────────
 
 function registerCommands(context: vscode.ExtensionContext): void {
-    const changed = new vscode.EventEmitter<GraphNode | undefined>();
+    const includeBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left);
+    includeBar.command = "sail-lsp.selectIncludeContext";
+    let contextRequest = 0;
+    refreshIncludeContext = () => {
+        const request = ++contextRequest;
+        const currentClient = client;
+        const editor = vscode.window.activeTextEditor;
+        if (!currentClient || editor?.document.languageId !== "sail") {
+            includeBar.hide();
+            return;
+        }
+        const document = editor.document;
+        void currentClient
+            .sendRequest<IncludeContextChoice[]>("sail-lsp/includeContexts", {
+                uri: document.uri.toString(),
+            })
+            .then((contexts) => {
+                if (request !== contextRequest || client !== currentClient || document.isClosed)
+                    return;
+                if (contexts.length <= 1) {
+                    includeBar.hide();
+                    return;
+                }
+                const selected = contexts.find((context) => context.selected);
+                includeBar.text = `$(references) Sail: ${selected?.project?.module ?? "Auto"} (${contexts.length})`;
+                includeBar.tooltip = selected
+                    ? `${selected.project?.manifest ?? selected.root}\n${selected.root}\nClick to select an include instance`
+                    : "Multiple include instances. Click to choose the context used by navigation, hover and completion.";
+                includeBar.show();
+            })
+            .catch(() => {
+                if (request === contextRequest) includeBar.hide();
+            });
+    };
     context.subscriptions.push(
+        includeBar,
+        vscode.window.onDidChangeActiveTextEditor(() => refreshIncludeContext()),
+        new vscode.Disposable(() => {
+            ++contextRequest;
+            refreshIncludeContext = () => {};
+        }),
+    );
+    const changed = new vscode.EventEmitter<GraphNode | undefined>();
+    let graphRequest = 0;
+    refreshProjectGraph = () => {
+        const request = ++graphRequest;
+        const currentClient = client;
+        void currentClient
+            ?.sendRequest(ProjectGraphRequest)
+            .then((projects) => {
+                if (client !== currentClient || request !== graphRequest) return;
+                projectGraph = projects ?? [];
+                changed.fire(undefined);
+            })
+            .catch((error: unknown) => {
+                outputChannel.appendLine(`[sail-lsp] project graph failed: ${String(error)}`);
+            });
+    };
+    context.subscriptions.push(
+        new vscode.Disposable(() => {
+            ++graphRequest;
+            refreshProjectGraph = () => {};
+        }),
         changed,
         vscode.window.createTreeView("sail-lsp.projectGraph", {
             treeDataProvider: {
@@ -336,6 +414,11 @@ function registerCommands(context: vscode.ExtensionContext): void {
                             (module) => module.name === node.name,
                         );
                         item.label = node.name;
+                        item.command = {
+                            command: "sail-lsp.openGraphModule",
+                            title: "Open module declaration",
+                            arguments: [node.project.manifest, node.name],
+                        };
                         item.description = isCycle(node)
                             ? "cycle"
                             : !module
@@ -388,20 +471,88 @@ function registerCommands(context: vscode.ExtensionContext): void {
                         vscode.ConfigurationTarget.Workspace,
                     );
         }),
+        vscode.commands.registerCommand(
+            "sail-lsp.selectIncludeContext",
+            async (chosen?: string | null) => {
+                const currentClient = client;
+                const editor = vscode.window.activeTextEditor;
+                if (!currentClient || !editor || editor.document.languageId !== "sail") return;
+                const document = editor.document;
+                const contexts = await currentClient.sendRequest<IncludeContextChoice[]>(
+                    "sail-lsp/includeContexts",
+                    { uri: document.uri.toString() },
+                );
+                if (chosen === undefined) {
+                    const selected = await vscode.window.showQuickPick(
+                        [
+                            {
+                                label: "Automatic context",
+                                description: "Use the first active include instance",
+                                key: null as string | null,
+                            },
+                            ...contexts.map((context) => ({
+                                label: `${context.selected ? "$(check) " : ""}${context.project?.module ?? "Global"}`,
+                                description: context.project?.manifest ?? context.root,
+                                detail: `${context.root} · include occurrence ${context.includes.join(" → ") || "root"}`,
+                                key: context.key,
+                            })),
+                        ],
+                        { title: "Sail: Select Include Context", ignoreFocusOut: true },
+                    );
+                    if (!selected) return;
+                    chosen = selected.key;
+                }
+                if (document.isClosed || client !== currentClient) return;
+                await currentClient.sendRequest("sail-lsp/selectIncludeContext", {
+                    textDocument: { uri: document.uri.toString() },
+                    context: chosen,
+                });
+                refreshIncludeContext();
+                void vscode.commands.executeCommand("editor.action.showHover");
+            },
+        ),
+        vscode.commands.registerCommand(
+            "sail-lsp.openGraphModule",
+            async (manifest: string, name: string) => {
+                const uri = vscode.Uri.parse(manifest);
+                const document = await vscode.workspace.openTextDocument(uri);
+                // Resolve against the current editor buffer, so unsaved insertions
+                // cannot send the user to an obsolete saved-model offset.
+                const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
+                    "vscode.executeDocumentSymbolProvider",
+                    uri,
+                );
+                const find = (
+                    nodes: vscode.DocumentSymbol[],
+                ): vscode.DocumentSymbol | undefined => {
+                    for (const node of nodes) {
+                        if (node.name === name && node.kind === vscode.SymbolKind.Module)
+                            return node;
+                        const nested = find(node.children ?? []);
+                        if (nested) return nested;
+                    }
+                    return undefined;
+                };
+                const symbol = find(symbols ?? []);
+                const editor = await vscode.window.showTextDocument(document);
+                if (symbol) {
+                    editor.selection = new vscode.Selection(
+                        symbol.selectionRange.start,
+                        symbol.selectionRange.end,
+                    );
+                    editor.revealRange(
+                        symbol.selectionRange,
+                        vscode.TextEditorRevealType.InCenterIfOutsideViewport,
+                    );
+                }
+            },
+        ),
         vscode.commands.registerCommand("sail-lsp.showProjectGraph", async () => {
             // Opening the view is immediate. Populate it when the server
             // answers; a busy analysis worker must not leave the command
             // palette invocation itself pending.
             void vscode.commands.executeCommand("sail-lsp.projectGraph.focus");
-            void client
-                ?.sendRequest(ProjectGraphRequest)
-                .then((projects) => {
-                    projectGraph = projects ?? [];
-                    changed.fire(undefined);
-                })
-                .catch((error: unknown) => {
-                    outputChannel.appendLine(`[sail-lsp] project graph failed: ${String(error)}`);
-                });
+            refreshProjectGraph();
         }),
         vscode.commands.registerCommand("sail-lsp.recheck", async () => {
             await client?.sendNotification(RecheckNotification);

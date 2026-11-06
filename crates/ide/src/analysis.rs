@@ -389,6 +389,7 @@ pub struct Analysis {
     url_map: UrlMap,
     /// Selected semantic view for a position-based request. URLs remain physical.
     context: Option<(FileId, FileId)>,
+    preferred_views: std::sync::Arc<std::collections::HashMap<FileId, FileId>>,
     /// Include graph for scope-aware analysis.
     include_graph: Option<std::sync::Arc<hir::include_graph::IncludeGraph>>,
     // No `symbol_index` field. It was an override only `analysis_stats`
@@ -401,16 +402,23 @@ pub struct Analysis {
 impl Analysis {
     /// Create from an AnalysisHost db snapshot + Files (VFS) snapshot.
     pub fn new(db: RootDatabase, files: Files) -> Self {
-        Self { db, files, url_map: UrlMap::default(), context: None, include_graph: None }
+        Self {
+            db,
+            files,
+            url_map: UrlMap::default(),
+            context: None,
+            preferred_views: Default::default(),
+            include_graph: None,
+        }
     }
 
-    /// Create with URL map (from VFS snapshot).
-    /// Edits that keep `$include` paths correct when files move.
+    /// Update actual include references through simultaneous file/folder moves.
+    /// Preserve compiler lookup precedence, including inactive directives.
     pub fn will_rename_file_edits(
         &self,
         renames: &[(String, String)],
     ) -> crate::Cancellable<
-        Option<std::collections::HashMap<url::Url, Vec<ide_db::text_edit::TextEdit>>>,
+        Result<std::collections::HashMap<url::Url, Vec<ide_db::text_edit::TextEdit>>, String>,
     > {
         self.with_db(|a| a.will_rename_file_edits_inner(renames))
     }
@@ -418,9 +426,79 @@ impl Analysis {
     fn will_rename_file_edits_inner(
         &self,
         renames: &[(String, String)],
-    ) -> Option<std::collections::HashMap<url::Url, Vec<ide_db::text_edit::TextEdit>>> {
-        let owned = self.all_salsa_files_vec();
-        crate::navigation::will_rename_file_edits(owned.iter().map(|(u, s)| (u, s)), renames)
+    ) -> Result<std::collections::HashMap<url::Url, Vec<ide_db::text_edit::TextEdit>>, String> {
+        use syntax::preprocess::{include_candidates, normalize_path};
+        let moves: Vec<_> = renames
+            .iter()
+            .filter_map(|(a, b)| {
+                Some((
+                    url::Url::parse(a).ok()?.to_file_path().ok()?,
+                    url::Url::parse(b).ok()?.to_file_path().ok()?,
+                ))
+            })
+            .collect();
+        // Walk physical sources, including inactive/preprocessed-out files.
+        // Semantic workspace files alone omit those references and can contain
+        // several views of the same buffer.
+        let files: Vec<_> = self
+            .url_map
+            .all_url_file_ids()
+            .filter_map(|(url, id)| Some((url.clone(), self.file_by_id(id)?)))
+            .collect();
+        let known: std::collections::HashSet<_> =
+            files.iter().filter_map(|(u, _)| u.to_file_path().ok()).collect();
+        let moved: std::collections::HashSet<_> =
+            known.iter().map(|p| paths::renamed_path(p, &moves)).collect();
+        let project = base_db::preprocess::WorkspaceSourceProject::try_get(&self.db)
+            .map(|p| p.project(&self.db));
+        let library = project.and_then(|p| p.library.as_deref());
+        let search = project.map_or(&[][..], |p| p.include_paths.as_slice());
+        let mut result = std::collections::HashMap::new();
+        for (uri, file) in &files {
+            let Ok(from) = uri.to_file_path() else { continue };
+            if library.is_some_and(|lib| from.starts_with(lib)) {
+                continue;
+            }
+            let Some(root) = file.syntax() else { continue };
+            let after = paths::renamed_path(&from, &moves);
+            let mut edits = Vec::new();
+            for node in root.children() {
+                let Some((range, path, is_library)) = syntax::preprocess::include_path(&node)
+                else {
+                    continue;
+                };
+                let Some(target) = include_candidates(&from, &path, is_library, library, search)
+                    .into_iter()
+                    .find(|p| known.contains(p))
+                else {
+                    continue;
+                };
+                let new_target = paths::renamed_path(&target, &moves);
+                let still_resolved = include_candidates(&after, &path, is_library, library, search)
+                    .into_iter()
+                    .find(|p| moved.contains(p));
+                if still_resolved.as_ref() == Some(&new_target) {
+                    continue;
+                }
+                if is_library {
+                    return Err(format!("Cannot move library include {path} in {uri}"));
+                }
+                let new_path =
+                    paths::relative_path(after.parent().unwrap(), &normalize_path(&new_target))
+                        .and_then(|p| p.to_str().map(str::to_owned))
+                        .ok_or_else(|| {
+                            format!("Cannot express include path to {}", new_target.display())
+                        })?;
+                if new_path.contains(['"', '\n', '\r']) {
+                    return Err("Sail include paths cannot contain quotes or newlines".into());
+                }
+                edits.push(ide_db::text_edit::TextEdit { range, new_text: new_path });
+            }
+            if !edits.is_empty() {
+                result.insert(uri.clone(), edits);
+            }
+        }
+        Ok(result)
     }
 
     /// Types whose alias edges resolve to this declaration.
@@ -1139,11 +1217,8 @@ impl Analysis {
             .filter(|(from, _, _)| *from == file_id)
             .filter_map(|&(_, event, target)| {
                 let node = events.get(event)?;
-                let text = node.text().to_string();
-                let open = text.find(['"', '<'])?;
-                let close = text.rfind(['"', '>']).filter(|&c| c > open)?;
-                let start = usize::from(node.text_range().start());
-                Some((base_db::text_range(start + open + 1, start + close), target))
+                let (range, _, _) = syntax::preprocess::include_path(node)?;
+                Some((range, target))
             })
             .collect()
     }
@@ -1308,7 +1383,7 @@ impl Analysis {
     ) -> crate::Cancellable<Result<Vec<crate::FileRange>, String>> {
         self.with_db(|a| {
             let instances = a.position_instances(file_id, position);
-            if instances.len() > 1 {
+            if instances.len() > 1 && a.preferred_views.get(&file_id) != instances.first() {
                 return Err("SSR context is active in multiple include instances".into());
             }
             let origin = instances.first().copied().unwrap_or(file_id);
@@ -1992,14 +2067,16 @@ impl Analysis {
     /// places looks like from the outside.
     pub fn workspace_symbols(
         &self,
-        query: &str,
+        query: &ide_db::symbol_index::Query,
+        files: Option<&std::collections::HashSet<url::Url>>,
     ) -> crate::Cancellable<Vec<crate::navigation_target::NavigationTarget>> {
-        self.with_db(|a| a.workspace_symbols_inner(query))
+        self.with_db(|a| a.workspace_symbols_inner(query, files))
     }
 
     fn workspace_symbols_inner(
         &self,
-        query: &str,
+        query: &ide_db::symbol_index::Query,
+        files: Option<&std::collections::HashSet<url::Url>>,
     ) -> Vec<crate::navigation_target::NavigationTarget> {
         // Through `symbol_index`, which falls back to the salsa query. Read
         // straight off the field, this answered *nothing* in the server: only
@@ -2007,8 +2084,20 @@ impl Analysis {
         // `workspace/symbol` returned null for every query a user typed while
         // the index it needed was one method away and built.
         let Some(index) = self.symbol_index() else { return Vec::new() };
+        let mut seen = std::collections::HashSet::new();
         index
-            .search(&query.to_ascii_lowercase())
+            .query_filtered(query, |e| {
+                let Some(uri) = self.url_for_file_id(e.file_id) else {
+                    return false;
+                };
+                files.is_none_or(|files| files.contains(uri))
+                    && seen.insert((
+                        uri.clone(),
+                        e.name_span.start,
+                        e.name_span.end,
+                        e.name.clone(),
+                    ))
+            })
             .into_iter()
             .filter_map(|entry| {
                 let range = base_db::text_range(entry.name_span.start, entry.name_span.end);
@@ -2032,7 +2121,14 @@ impl Analysis {
     }
 
     pub(crate) fn with_url_map(db: RootDatabase, files: Files, url_map: UrlMap) -> Self {
-        Self { db, files, url_map, context: None, include_graph: None }
+        Self {
+            db,
+            files,
+            url_map,
+            context: None,
+            preferred_views: Default::default(),
+            include_graph: None,
+        }
     }
 
     /// Create with include graph for scope-aware analysis.
@@ -2042,7 +2138,14 @@ impl Analysis {
         url_map: UrlMap,
         graph: std::sync::Arc<hir::include_graph::IncludeGraph>,
     ) -> Self {
-        Self { db, files, url_map, context: None, include_graph: Some(graph) }
+        Self {
+            db,
+            files,
+            url_map,
+            context: None,
+            preferred_views: Default::default(),
+            include_graph: Some(graph),
+        }
     }
 
     /// Attach an include graph to an existing snapshot.
@@ -2090,13 +2193,17 @@ impl Analysis {
                 region += 1;
             }
         }
-        candidates
+        let mut active: Vec<_> = candidates
             .into_iter()
             .filter(|&view| {
                 base_db::preprocess::file_regions(&self.db, view)
                     .is_none_or(|regions| regions.get(region).copied().unwrap_or(false))
             })
-            .collect()
+            .collect();
+        if let Some(preferred) = self.preferred_views.get(&id) {
+            active.sort_by_key(|view| view != preferred);
+        }
+        active
     }
 
     fn at_position(&self, url: &url::Url, position: ide_db::LineCol) -> std::borrow::Cow<'_, Self> {
@@ -3101,8 +3208,14 @@ mod tests {
             assert!(refs.iter().any(|r| r.references.contains_key(&main_id)));
             assert!(refs.iter().all(|r| !r.references.contains_key(&inactive_id)
                 && r.declarations.iter().all(|d| d.file_id != inactive_id)));
-            assert!(analysis.workspace_symbols(hidden).unwrap().is_empty());
-            assert!(!analysis.workspace_symbols(unique).unwrap().is_empty());
+            assert!(analysis
+                .workspace_symbols(&ide_db::symbol_index::Query::new(hidden.to_owned()), None)
+                .unwrap()
+                .is_empty());
+            assert!(!analysis
+                .workspace_symbols(&ide_db::symbol_index::Query::new(unique.to_owned()), None)
+                .unwrap()
+                .is_empty());
         }
     }
 
