@@ -12,3 +12,7 @@ __pycache__/
 # writes it. It was tracked, so every rebuild committed a new ~47 MB blob.
 editors/code/server/sail-lsp
 editors/code/server/sail-lsp.exe
+
+# Local execution reports and one-time architecture comparisons belong in target/.
+/docs/baselines/
+/surface.json

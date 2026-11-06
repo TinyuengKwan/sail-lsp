@@ -1,10 +1,27 @@
-# Typos configuration for sail-lsp.
+# Spelling policy for maintained source; vendored sources keep upstream bytes.
+[files]
+extend-exclude = [
+    "crates/syntax/src/ast/generated/",
+    "crates/*/src/tests/",
+    "crates/sail-lsp/data/sail-lib/",
+    "lib/",
+    "*.rast",
+]
+
+[default]
+extend-ignore-re = [
+    # Cursor fixtures and generated/truncated labels.
+    ".*\\$0.*",
+    "\\w*\\.{3,4}\\w*",
+    "(?s)(#|//)\\s*spellchecker:off.*?\\n\\s*(#|//)\\s*spellchecker:on",
+]
 
 [default.extend-words]
-# Sail language keywords and identifiers that look like typos
+# Sail keywords, builtin spellings and upstream diagnostic wording.
 iff = "iff"
 nexp = "nexp"
 typ = "typ"
+typs = "typs"
 inout = "inout"
 bitvec = "bitvec"
 bitv = "bitv"
@@ -13,13 +30,22 @@ shr = "shr"
 lsl = "lsl"
 lsr = "lsr"
 asr = "asr"
+preceed = "preceed"
+concatentation = "concatentation"
+# PowerShell's case-insensitive inequality operator (-ine).
+ine = "ine"
+# Literal collections and interval lower-bound identifiers.
+lits = "lits"
+alo = "alo"
+# Intentional partial identifiers and truncated labels in editor tests.
+hel = "hel"
+secon = "secon"
+unparseable = "unparseable"
+# Fixture vocabulary retained from the former _typos.toml.
+ba = "ba"
+fo = "fo"
+jod = "jod"
+pn = "pn"
 
-[files]
-extend-exclude = [
-    # Generated code
-    "crates/syntax/src/ast/generated/",
-    # Test fixtures with intentional misspellings
-    "crates/*/src/tests/",
-    # Third-party vendored code
-    "lib/",
-]
+[default.extend-identifiers]
+NTO = "NTO"

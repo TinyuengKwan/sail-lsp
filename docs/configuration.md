@@ -21,12 +21,12 @@ Settings are exposed as `sail-lsp.*` in VS Code's settings UI. Example
 }
 ```
 
-## Neovim (lspconfig)
+## Neovim
 
-Pass settings via the `settings` table:
+For the managed integration (Neovim 0.11+), configure its server name:
 
 ```lua
-lspconfig.sail_lsp.setup({
+vim.lsp.config("sail_lsp_managed", {
   settings = {
     ["sail-lsp"] = {
       diagnostics = { enable = true },
@@ -442,13 +442,33 @@ manifest move or an unrepresentable include path is refused atomically when it
 cannot be rewritten safely. Virtual-file aliases remain configuration entries;
 update `workspace.generatedFiles` when moving their physical source files.
 
-The companion compiler proposal now has a pure `Check_context` parser, schema
-and unit tests in its Sail patch. See its `doc/check-context.md` for the protocol
-contract and build commands. It is prepared for upstream review; it has not
-been pushed, merged or released upstream. Stock 0.20.2/0.20.3 continue to use
-the legacy CLI for representable contexts; extended contexts require a probe
-reply of exactly `1`. A different protocol version is skipped with a visible
-reason rather than checked under an approximate configuration.
+The optional [compiler patch](../patches/sail-check-context-v1.patch) defines the
+`Check_context` parser, schema and tests. Its `doc/check-context.md` describes the
+proposal's contract and build commands. Stock 0.20.2/0.20.3 use the legacy CLI for
+representable contexts; extended contexts require a capability reply of exactly
+`1`. A different protocol version is skipped with a visible reason.
+
+## Quick fixes
+
+Availability depends on the current source, visible declarations and client edit
+capabilities. Actions are checked again when resolved; stale actions must be
+requested again after editing.
+
+| Diagnostic | Offered action / limitation |
+| --- | --- |
+| Unused local binding | Remove or rename the unused binding |
+| Incomplete match | Add missing cases; generated bodies may contain `undefined` |
+| Missing record fields | Fill expressions or patterns; generated values may need implementation |
+| Unresolved name / missing include | Add an include for a visible declaration when a safe edit is available |
+| Missing closing delimiter | Insert the closing delimiter where supported |
+| Bitvector used as an integer | Offer `unsigned` / `signed` when a compatible callable is in scope; the user chooses signedness |
+| Unreachable code | Remove the selected unreachable statement |
+
+There is no general conversion for arbitrary type mismatches or automatic repair
+of argument counts and effect violations. Duplicate/shadowed declarations do not
+get a single-token rename fix; use semantic Rename to update their references.
+An include can affect preprocessing, order and scope, so unused-include removal
+is not offered through a text-only heuristic.
 
 ## Analysis cache policy
 
@@ -476,13 +496,10 @@ separately show Z3's process-wide allocation estimate, which is a subset of proc
 memory and must not be added to RSS. If RSS is unavailable, automatic pressure is
 not inferred from incomplete text-byte counts.
 
-A reproducible retention/recomputation probe is available as
-`cargo run --release -p sail-lsp --example query_cache_stats`. In the recorded
-64-file/512-function synthetic workload, a capacity of 32 retained 32 inference
-results instead of 512 but required 480 inference executions on revisit. This is
-why a smaller fixed default has not been imposed on ordinary editing sessions.
-The probe records actual weak ownership, query execution counts, heap estimates
-and revisit latency; heap numbers are not per-query byte attribution.
+Use the `query_cache_stats` tool listed in
+[contributor validation](../CONTRIBUTING.md#validation) to compare retention,
+recomputation and revisit latency. Weak ownership counts track query results;
+heap estimates are not per-query byte attribution.
 
 ## Exporting an analysis diagnostic report
 

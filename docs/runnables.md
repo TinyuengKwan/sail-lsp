@@ -98,8 +98,3 @@ process. The former supplies the scope for `sail-lsp/runFlycheck`, cancelled
 with `sail-lsp/cancelFlycheck`. Entries include stable IDs, fingerprints,
 related documents and optional disabled reasons; clients should revalidate
 and check unsaved inputs before execution.
-
-Acceptance covers actual VS Code process execution, exit failures, cancellation,
-stale/dirty-input rejection, multi-project protocol behavior, and a stock Sail
-C export using linked-project variable/root overrides. Pinned CI runs this
-export before applying the optional compiler check-context patch.

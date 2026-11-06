@@ -2,8 +2,10 @@
 
 `performance.yaml`, called by main CI, builds the PR base (or previous push
 revision) and candidate with the same Rust toolchain, release mode, and vendored
-Z3. It alternates baseline/candidate order between repetitions on the same
-runner and CPU affinity. The main conclusion job requires this comparison.
+Z3. Each source uses its own Cargo target directory, preventing a library from
+another worktree from being reused because of source timestamps. It alternates
+baseline/candidate order between repetitions on the same runner and CPU affinity.
+The main conclusion job requires this comparison.
 
 The fixed policy is `benchmarks/editor-performance.json`. It generates an isolated
 128-file, eight-functions-per-file Sail project, with 24 editing cycles per run
@@ -50,3 +52,24 @@ the CI build commands enforce that. Raw inputs/results, policy and comparison
 are uploaded on failures as well as successes. Real-model probes in the pinned
 corpus workflow complement this fixed synthetic regression gate; neither implies
 rust-analyzer performance parity or a cross-machine latency guarantee.
+
+## Request tracing and local investigations
+
+For an editor-style burst, enable the latency tracing target and summarize stderr:
+
+```sh
+SAIL_LOG=sail_lsp::latency=debug python3 scripts/editor_probe.py \
+  --server target/release/sail-lsp --workspace /path/to/sail-riscv \
+  --cycles 20 --burst --output target/editor-burst.json
+python3 scripts/latency_summary.py target/editor-burst.stderr.log
+```
+
+Worker samples include retries. Server request totals begin when the main loop
+receives the request; the stdio workload also includes transport and unread
+messages. Compare repeated runs on the same host. A pipelined burst is a stress
+workload, not ordinary typing latency.
+
+For query reuse, parsing and cache-retention investigations, use the tools in
+[contributor validation](../CONTRIBUTING.md#validation). `incremental_stats`
+accepts `--profile` for query timing and allocation observations. Execution
+instrumentation adds overhead; use ordinary runs for latency comparisons.

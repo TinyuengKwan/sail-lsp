@@ -24,11 +24,13 @@ Inspect these in the editor's language-server logs (including Zed's RPC log).
 Tracing output goes to stderr; its filter is controlled by `SAIL_LOG`:
 
 ```bash
-# Set log level via environment variable
 SAIL_LOG=info sail-lsp
+```
 
-# Or via VS Code settings
-"sail-lsp.server.extraEnv": { "SAIL_LOG": "info" }
+In VS Code settings:
+
+```json
+{ "sail-lsp.server.extraEnv": { "SAIL_LOG": "info" } }
 ```
 
 Use `SAIL_LOG=debug` for additional tracing. To inspect protocol messages,
@@ -122,8 +124,11 @@ code, please file an issue with a minimal reproduction.
 
 ## Crash isolation
 
-If sail-lsp crashes on a specific file, the crash is caught and reported as
-a diagnostic. Other files continue working. To investigate:
+Request panics are reported as LSP errors. A background analysis failure is shown
+in server status and logs, and obsolete diagnostics for the failed phase are
+cleared. Cancellation is tracked separately from an internal failure. Export a
+local [diagnostic report](configuration.md#exporting-an-analysis-diagnostic-report)
+from VS Code to capture the current runtime and failure metadata. To investigate:
 
 ```bash
 # Run with backtrace

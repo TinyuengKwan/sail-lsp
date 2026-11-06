@@ -1,74 +1,13 @@
 # CLAUDE.md
 
-A multi-crate Rust workspace implementing the **Sail** language server, structured to mirror rust-analyzer's crate layout with salsa-backed incremental queries, rowan lossless CST, and lsp-server async dispatch. Full RA architectural alignment completed.
+A multi-crate Rust workspace implementing the **Sail** language server, structured to mirror rust-analyzer's crate layout with salsa-backed incremental queries, rowan lossless CST, and lsp-server async dispatch.
 
-## Build & test
+## Development references
 
-```bash
-cargo build --workspace                                # debug build
-cargo test --workspace                                 # all tests
-cargo build --release                                  # release binary: target/release/sail-lsp
-scripts/install-server.sh                              # what editors run: vendored Z3, linkage
-                                                       # checked, ~/.local/bin + the extension's copy
-
-# Integrated benchmarks (requires sail-riscv checkout)
-RUN_SLOW_BENCHES=1 cargo test -p sail-lsp --lib -- benchmarks
-
-# Project semantics against a real compiler: every case in project-model's
-# recorded table, upstream's test/project and test/typecheck/project manifests
-# (file lists per root + requires graph), and riscv for RMEM=false/true.
-# Fails, never passes vacuously, when the compiler or a checkout is missing.
-SAIL_ORACLE_BIN=sail SAIL_ORACLE_SRC=../sail SAIL_ORACLE_RISCV=../sail-riscv \
-  cargo test -p project-model upstream_oracle -- --ignored --nocapture
-
-# Corpus validation (use the manifest for active-project measurements)
-cargo run --example corpus_check -- /path/to/sail-riscv
-cargo run --example corpus_check -- --workspace /path/to/sail-riscv
-
-# Performance benchmark (mirrors RA analysis-stats)
-cargo run --release --example analysis_stats -- /path/to/sail-riscv
-cargo run --release --example analysis_stats -- -v /path/to/sail-riscv
-
-# Completion recall over the corpus (the corpus is the oracle)
-cargo run --release --example completion_check -- /path/to/sail-riscv
-cargo run --release --example completion_check -- --list /path/to/sail-riscv
-cargo run --release --example completion_check -- --ranked /path/to/sail-riscv
-cargo run --release --example completion_check -- --prefix 1 /path/to/sail-riscv
-```
-
-## Corpus quality
-
-Use [the 2026-11-02 unified baseline](docs/baselines/2026-11-02-unified.json)
-for that snapshot's source/compiler hashes, commands and limitations. The
-[interactive follow-up](docs/baselines/2026-11-02-interactive-followup.json)
-tracks subsequent work and its separate verification. Do not combine project-mode and flat-scope
-denominators or relabel historical observations. Earlier dated reports preserve
-measurements not repeated in this baseline.
-
-| Scope | Mode and unified-snapshot result |
-| --- | --- |
-| upstream typecheck | Strict bitvector: 276/276 pass, 217/217 fail; 0 FP/FN |
-| extended corpus | Ordinary Sail: 372 files; 0 FP/FN, 17 scope-only cases excluded from those columns |
-| mutation oracle | Ordinary Sail, complete ordered-project run: 538 mutations; 274 upstream rejects, 274 detected, 0 misses; upstream oracle freshly regenerated |
-| active RISC-V manifest | Ordinary Sail: 156 project files + 40 active included/library files; 81,543 expressions, 0 unknown/partially unknown, 0 error diagnostics, 62 warnings and 6 hints |
-| numeric proof obligations | This run: 2,914 proved, 0 refuted, 0 unknown committed deferred obligations. Finite budgets change both counts and Unknown outcomes; do not generalize this zero-Unknown observation. Parallel exhaustion is reproduced in `2026-11-02-z3-contention.json`. |
-| protocol range probe | All 158 physical model files: 470,394 ranges, 0 mismatches |
-| formatter | 217 files at two indentation widths: 434 checks, no skipped files, token changes, parse failures or idempotence failures |
-| incremental probe | 160 synthetic files, 32 edits, modules/preprocessing enabled: one callable reinferred per body edit, three expected callables per signature edit; dependent diagnostics checked |
-| editor regression gates | Unified report records default/no-SMT tests and normal/burst/cancellation/reload stdio measurements; real Zed SSH and interactive VS Code acceptance remain deferred |
-
-Completion ranking and latency ablation measurements have their own scope and
-provenance in `docs/baselines/2026-10-29-editor-p0-p1.json`; they are not rerun or
-silently relabelled by the semantic baseline. The updated quick-fix audit is
-`docs/baselines/2026-10-25-quick-fix-coverage.md` (updated 2026-10-29).
-
-`mutation_check` exists because silence on accepted sources cannot prove error
-detection. Regenerate `docs/mutation-oracle.txt` against the same upstream build
-and library before measuring mutations. `scripts/regen_upstream_accepts.py`
-regenerates `docs/upstream-accepts.txt`; both generators now preflight an actual
-prelude-using program, so a broken Sail installation cannot masquerade as semantic
-rejection. For an uninstalled upstream build, set `SAIL_DIR` to the source root
-containing `lib/`, not to `lib/` itself. Rebuild examples after source changes.
+Use [CONTRIBUTING.md](CONTRIBUTING.md) for build/test commands, fixtures, corpus
+oracles and tool purposes. Use [installation](docs/installation.md) for managed
+installation and packaging, and [architecture](docs/architecture.md) for query
+flow and Sail semantics. Keep those instructions in their owning document.
 
 ## Invariants
 
@@ -142,15 +81,16 @@ Each is held by the named test; read the test before changing the rule.
   regardless of offset (exhaustive `PartialEq`).
   `the_same_items_at_a_different_offset_are_the_same_tree`,
   `typing_in_a_body_does_not_redo_name_resolution`.
-- **LRU** applies to `body_with_source_map` and `callable_body` (512 each)
-  only; salsa 0.25 fixes capacity at compile time, so `lru_capacity` is
-  intentionally ignored (as in RA).
+- **LRU capacity changes require exclusive database access.** Keep collection
+  at an idle boundary with no worker tasks or retained snapshots. Body caches
+  default to 512 entries; parse, environment and inference capacities are
+  configurable. See `cache_control.rs` and `docs/configuration.md#analysis-cache-policy`.
 
 ### Type checking
 
 - **A value position with an expectation is checked against it**
   (`infer_expr_hir_with`), except where checking is unsound — notably
-  `e : T` (318 false positives on sail-riscv).
+  `e : T`.
   `a_value_position_with_an_expectation_is_checked` lists the exceptions.
 - **A secondary location is a location**: related spans go in
   `relatedInformation`, not the message.
@@ -170,241 +110,14 @@ Each is held by the named test; read the test before changing the rule.
   function it calls.
 - **Group a miss by its ancestor chain, not its node** (`SAIL_DBG_HOVER=1`).
 - **Check that a new test can fail** — put the defect back and run it.
+- **Keep run-specific evidence in `target/` or CI artifacts.** Commit regression
+  tests, workloads and reproduction commands; document lasting limits in the
+  relevant guide rather than adding another dated execution report.
 
-## Testing
+## Documentation and artifacts
 
-Diagnostic and navigation behaviour is tested with rust-analyzer-style
-fixtures (`ide::fixture`). A fixture builds a
-real salsa database and the tests call the same `Analysis` entry points the
-server calls:
-
-```rust
-check_diagnostics(r#"
-//- prelude
-//- /main.sail
-default Order dec
-$include <prelude.sail>
-function main() -> unit = f(1)
-//                        ^ error: no matching overload for `f`
-"#);
-```
-
-`//- /name.sail` splits files, `//- prelude` loads `data/sail-lib`, and a
-fixture with no annotation asserts "no diagnostics". `crates/ide/src/regression_tests.rs`
-pins the defects found by differential testing against upstream Sail.
-
-## CI
-
-CI runs at `.github/workflows/ci.yaml`: Rust build+test (3 OS via nextest), rustfmt,
-clippy (`dbg_macro`, `todo`, `print_stdout`, `print_stderr` denied), VS Code extension
-(typecheck + build + package), typos, and a conclusion gate job.
-
-## VS Code extension
-
-A dedicated VS Code extension lives at `editors/code/` with TextMate grammar,
-language configuration, and a TypeScript LSP client.
-
-## Crate hierarchy (21 crates, resolver = "2")
-
-```
-crates/
-  stdx/             — format_to!, is_ci, assert (never!/always!),
-                      panic_context, diff, process, thread pool (5 modules)
-  paths/            — AbsPath, AbsPathBuf (camino-backed)
-  intern/           — interning infrastructure (gc, intern, intern_slice, symbol)
-  profile/          — StopWatch, MemoryUsage, google_cpu_profiler
-  vfs/              — VFS: VfsPath, FileSet, AnchoredPath, PathInterner, Loader trait
-  vfs-notify/       — notify-based file watcher implementing vfs::Loader
-  base-db/          — salsa 0.25.2 inputs: FileText, FileId, Durability,
-                      SourceDatabase, SourceRoot, VFS (Files + content-hash dedup),
-                      WorkspaceFiles (salsa input for workspace context query)
-  parser/           — hand-written Sail lexer (hand_lexer.rs), SyntaxKind enum,
-                      rowan Language trait, Event protocol, Token/Span types,
-                      full-fidelity lex pipeline (lex_full.rs), Literal enum,
-                      KW_CONFIG (config keyword), InfixOp/OP_IDENT (<_s, <=_u etc.)
-  syntax/           — event_parser (rowan CST), ast (typed AST wrappers),
-                      ptr (SyntaxNodePtr, AstPtr), cst_lower (CST->ParsedFile),
-                      parse_query (salsa tracked: parse_file, parsed_file),
-                      ted (tree editor: insert/remove/replace),
-                      preprocess (default_symbols, PreprocessOptions)
-  project-model/    — ALIGN(ra): .sail_project file parser (RA equivalent: Cargo.toml
-                      / rust-project.json). Standalone crate, no hir dependencies.
-  hir-expand/       — ALIGN(ra): mirrors RA's hir-expand crate. Handles $include
-                      graph resolution (RA handles macro expansion):
-                      IncludeGraph, AnalysisScope, InFile<T>, ExpandDatabase trait,
-                      include_paths/typed_include_paths salsa queries,
-                      WorkspaceIncludeGraph (salsa singleton)
-  hir-def/          — Body (embeds ExpressionStore), ExprCollector (CST->HIR lowering),
-                      ItemTree (typed arenas via DefItemId + per-kind Arena),
-                      nameres (DefMap holds one ItemScope — a Sail file has no
-                      Resolver (scope-chain: Local > Module > Workspace,
-                        methods: names_in_scope, item_scope, scopes),
-                      per_ns (PerNs + Namespace), item_scope (ItemScope),
-                      Name (SmolStr-interned), CallableBodies, EffectTag,
-                      scattered, workspace_def_map,
-                      expr_store (Arena<Expr> + Arena<Pat>),
-                      def_query (salsa: file_item_tree + callable_bodies +
-                        callgraph + DefWithBodyId + body_with_source_map),
-                      ast_id, bitfield, callable_info, diagnostics,
-                      effects, find_path, signatures
-                      Re-exports from hir-expand: include_graph, analysis_scope,
-                      in_file, project (backward compat)
-  hir/              — Semantics facade (s2d_cache, type/name/resolve via SourceAnalyzer),
-                      SourceAnalyzer (resolver + BodyOrSig + resolve_field/resolve_method_call),
-                      public HIR types, named as Sail names them: Def (its `def`),
-                        TypeDef (`type_def`) + TypeDefKind, File, TypeVar, Function,
-                        Register, Mapping, PathResolution, Local, DefKind,
-                      diagnostics (AnyDiagnostic), hir_query (workspace callgraph),
-                      classify_name_ref stub, db.rs, symbols.rs, display.rs, from_id.rs
-                      the one door for everything above it: ty, infer, z3_solver,
-                        def_query, ty_query, callgraph, scattered, effects,
-                        include_graph, bitfield are re-exported here so no crate
-                        above hir names hir-def, hir-ty or hir-expand
-                      NOTE: hir does NOT depend on ide-db (RA architecture)
-  hir-ty/           — typecheck (InferenceContext<'db> with db/owner/resolver/return_ty/diverges),
-                      InferenceResult (ArenaMap<ExprId,Ty> + TypeMismatch + InferenceDiagnostic,
-                        method_resolutions: (FunctionId,FileId)),
-                      TypeCheckResult = InferenceResult (type alias),
-                      Ty/TyKind (Arc-interned, pub kind()), Diverges enum,
-                      infer/ (multi-file inference engine), lower/ (type lowering),
-                      method_resolution (Candidate, Pick, MethodResolutionContext),
-                      match_check, effect system (is_pure_context + observed_effects),
-                      flow analysis, representability,
-                      Z3 solver, query.rs (salsa tracked: infer, infer_body,
-                        infer_for_body, top_level_env, workspace_context, transitive_effects)
-  ide-db/           — FileDb trait, RootDatabase + SalsaFile, line_index,
-                      defs (Definition with ALIGN/CUSTOM annotations, SymbolKind),
-                      text_edit (TextEdit), source_change (SourceChange),
-                      workspace_index (SymbolIndex — renamed from WorkspaceSymbolIndex),
-                      search (FindUsages, two-stage search),
-                      active_parameter (ActiveParameter),
-                      prime_caches (salsa cache pre-warming),
-                      ide_types (HoverResult, InlayHint, Diagnostic, etc.),
-                      symbol_index, helpers, keywords, pragmas,
-                      documentation, fixture, imports, rename,
-                      syntax_helpers, type_inference, span
-  ide/              — 39 modules: goto_*, references, rename, hover/,
-                      syntax_highlighting/, annotations/, inlay_hints/,
-                      formatting, completion, ssr, navigation, navigation_target,
-                      call_hierarchy, calls, signature_help, folding_ranges,
-                      file_structure, matching_brace, extend_selection,
-                      highlight_related, typing/, join_lines, move_item,
-                      analysis (Analysis/AnalysisHost), moniker, static_index,
-                      markup, doc_links/,
-                      view_hir, view_item_tree, view_syntax_tree,
-                      bitfield_layout, effect_annotations, expand_include,
-                      include_graph_view
-  ide-completion/   — context (CompletionContext), provider architecture:
-                      completions/ (keyword, expr, dot, pattern, item_list,
-                      flyimport, postfix, pragma, record, snippet, type_)
-  ide-diagnostics/  — 40 diagnostic handlers, parse/semantic/type_error checkers,
-                      effect mismatch diagnostics [LSP-FREE]
-  ide-assists/      — assist_context (Assist, AssistContext, Assists accumulator),
-                      handlers/ (51 registered handlers via all()),
-                      assists() entry point (RA pattern)
-  ide-ssr/          — structural search-replace with $name placeholders,
-                      parsing, matching, resolving, replacing, nesting,
-                      fragments, search, errors
-  sail-lsp/         — LSP server (lib + bin split):
-                      main.rs (binary entry), lib.rs (library entry),
-                      main_loop (GlobalState, event loop, on_request/on_task),
-                      global_state (GlobalStateSnapshot),
-                      handlers/ (dispatch, request, notification),
-                      lsp/ (capabilities, from_proto, to_proto, ext),
-                      mem_docs (MemDocs, DocumentData),
-                      task_pool (TaskPool, Task enum with Response variant),
-                      diagnostics, progress, config, reload, op_queue,
-                      cli (command-line interface),
-                      hover_ext, code_action_helpers,
-                      integrated_benchmarks, tests
-```
-
-## Architecture
-
-```
-sail-lsp (lib + bin, lsp-server async dispatch, lsp-types confined here)
-  |
-  +-- main.rs (binary entry: calls sail_lsp::main())
-  +-- lib.rs (library: GlobalState, main_loop, handlers, etc.)
-  +-- lsp/ (capabilities, to_proto, from_proto, ext)
-  +-- handlers/ (dispatch, request, notification)
-  +-- main_loop (GlobalState, event loop, on_request/on_task/on_notification)
-  +-- global_state (GlobalStateSnapshot for handler isolation)
-  +-- mem_docs (MemDocs — open document tracking)
-  +-- task_pool (TaskPool + Task::WorkspaceScan/Response)
-  +-- diagnostics, progress, config, reload, op_queue, cli
-  |
-  +-- ide  ide-assists  ide-completion  ide-diagnostics  ide-ssr
-  |     \      |            |              /               /
-  +------  ide-db  --------+-------------+--------------+
-  |          |
-  +-- hir (Semantics[s2d_cache], SourceAnalyzer[resolver], Def, TypeDef, TypeVar)
-  |     |        <- does NOT depend on ide-db (RA architecture)
-  +-- hir-ty (InferenceContext<'db>[db,owner,resolver], method_resolution, Z3)
-  |     |
-  +-- hir-def (Body+ExpressionStore, ItemTree, DefMap+ItemScope, Resolver, DefWithBodyId)
-  |     |
-  +-- hir-expand ($include graph, AnalysisScope, InFile<T>, ExpandDatabase)
-  |     |
-  +-- project-model (.sail_project parser, standalone)
-  |
-  +-- syntax (rowan CST + typed AST wrappers + ted tree editor)
-  |     |
-  +-- parser (SyntaxKind, SailLanguage, Event, hand_lexer)
-  |     |
-  +-- base-db (salsa inputs: FileText, FileId, Durability, SourceRoot, VFS)
-  |     |
-  +-- vfs / vfs-notify (filesystem abstraction + file watcher)
-  |     |
-  +-- intern, profile, stdx, paths (foundation)
-```
-
-DAG mirrors RA: `syntax → hir-expand → hir-def → hir-ty → hir → ide-db → ide`
-
-### Key design patterns
-
-- **lib + bin split** (sail-lsp): `main.rs` is a thin binary entry; `lib.rs` exposes `main()` and all server logic. Enables `integrated_benchmarks.rs` as `#[cfg(test)]` module.
-- **Async dispatch** (sail-lsp): `RequestDispatcher` with `on_sync` (main thread) / `on` (thread pool). RA pattern: handlers get `GlobalStateSnapshot`, main loop never blocks. A job says what it is *for* — `ThreadIntent::LatencySensitive` for the retryable requests and the diagnostics wave, `Worker` for scan, priming and flycheck — over RA's `stdx::thread::Pool`, which was vendored with one caller in the workspace. **The intent is a no-op off Apple platforms** (RA's QoS facade is stubbed there, with its own FIXME for Windows), and sizing the pool for the machine rather than a hard-coded 2 measured as *no change* on this workload: hovers through a cold sail-riscv load answered in 7 ms median / 844 ms worst, against 8 / 854. Both kept for the shape, neither for a number.
-- **process_changes**: VFS changes buffered, applied in batch after event handling (RA lazy pattern).
-- **op_queue**: Typed operation queue for deferred work (diagnostics, workspace reload).
-- **SymbolIndex** (ide-db): O(1) name->location lookup. GotoDefinition/Declaration/Implementation use index instead of O(n) file scan.
-- **prime_caches**: Pre-warm salsa queries (parse, item_tree, bodies) after workspace scan for instant first-request response. Parallel phase via rayon.
-- **Rowan CST** (parser + syntax): lossless concrete syntax tree, SyntaxKind (~200 variants), event-based Pratt parser.
-- **ted.rs** (syntax): tree mutations without re-parsing via rowan splice_children.
-- **Body + ExpressionStore** (hir-def): Body embeds ExpressionStore (Arena<Expr> + Arena<Pat>). ExprCollector lowers CST->HIR.
-- **Per-item inference** (hir-ty/query.rs): `#[salsa::interned] DefWithBodyId` + `#[salsa::tracked] infer` — edit one function -> only re-infer that function.
-- **InferenceContext<'db>** (hir-ty): holds db, owner, resolver, return_ty, diverges, table, is_pure_context. CUSTOM: env (TopLevelEnv), observed_effects.
-- **Method resolution** (hir-ty/method_resolution.rs): Candidate, Pick, MethodResolutionContext. CUSTOM: ad-hoc overloading (RA uses trait dispatch).
-- **Flow analysis** (hir-ty/flow.rs): control flow for divergence/reachability.
-- **SourceAnalyzer** (hir/source_analyzer.rs): bridges syntax<->semantic. Fields: resolver (Arc<DefMap>), BodyOrSig. Methods: resolve_path, resolve_field, resolve_method_call, type_of_expr.
-- **Semantics** (hir/semantics.rs): wraps SemanticsImpl with s2d_cache. Entry: analyze() -> SourceAnalyzer. Stub: classify_name_ref.
-- **ItemTree typed arenas**: DefItemId enum + per-kind Arena (Function, TypeDef, Register, etc.).
-- **DefMap + ItemScope**: one file, one scope. All name lookups go to that ItemScope (namespace-aware, no parallel HashMap). Sail's own modules are a `.sail_project` concept over whole files — see `project-model`.
-- **PerNs**: Two-namespace model (Types + Values) for name resolution.
-- **AnalysisHost/Analysis**: RA-style snapshot pattern for request isolation.
-- **VFS** (vfs crate): VfsPath abstraction, FileSet, content-hash dedup, pending change batching, durability levels.
-- **Salsa query chain**: FileText → parse_file → file_item_tree → callable_bodies → DefWithBodyId → infer. Separately: WorkspaceFiles → workspace_context → (reads top_level_env × N files). Include graph: FileText → include_paths → WorkspaceIncludeGraph → AnalysisScope.
-- **Workspace context** (hir-ty/query.rs): `workspace_context_query(db, WorkspaceFiles)` is a salsa tracked query (no global static). `WorkspaceFiles` is a salsa input in `base-db`.
-- **Effect system** (hir-ty + hir-def): 11 EffectTags, transitive propagation, pure function enforcement during inference.
-- **Completion providers** (ide-completion): context analysis -> 11 providers (keyword, expr, dot, pattern, item_list, flyimport, postfix, pragma, record, snippet, type_).
-- **Assist handlers** (ide-assists): AssistContext -> handlers::all() -> Assists accumulator (51 handlers, RA pattern).
-- **Diagnostic handlers** (ide-diagnostics): 40 handlers with `err_recover` pattern, `DiagnosticsContext` with `sema: Semantics`.
-- **Two-stage search** (ide-db/search.rs): index candidate files -> per-file occurrence scan.
-- **SSR** (ide-ssr): expression/type/item/binding-pattern rules, semantic namespace and binding checks, hygienic rendering, selections and versioned previews. VS Code offers guarded diff/apply/cancel through `sail-lsp/ssrPreview`. See `docs/architecture.md` for declaration-name and include-context restrictions.
-- **lsp-types confinement**: only sail-lsp depends on lsp-types; all IDE crates use internal types.
-- **Cancellation**: catch_cancelled in dispatch.rs; salsa::Cancelled -> ContentModified error.
-
-### Sail-specific features (no RA counterpart)
-
-- **Z3 SMT solver** (hir-ty): numeric constraint solving for dependent types.
-- **$include graph** (hir-def): IncludeGraph + AnalysisScope for cross-file scope enforcement.
-- **Scattered definitions**: workspace-level completeness checking + scattered clause navigation.
-- **Bitfield layout**: visualization in hover table + accessor generation assist.
-- **Effect annotations**: per-callable code lens + pure context enforcement during inference.
-- **Bitvector witness**: type-level bitvector size reasoning.
-- **Outcome effects**: effect tracking through function outcomes.
-- **Config truncation**: `config` expression type handling per Sail spec.
-- **Pragma completion**: `@name` / `$name` Sail directives.
-- **Project visibility**: build_for_project filters symbols by .sail_project boundaries.
-- **Bitfield alignment formatting**: align_bitfield_fields for sail-riscv code style.
-- **Overload resolution**: Sail's multi-dispatch overloading mechanism.
+Keep execution reports, logs, temporary probes and comparison snapshots under
+ignored `target/` or CI artifacts. Commit reusable tests, workloads, oracle inputs
+and reproduction commands. Put lasting behavior and limitations in the relevant
+user/developer guide; do not add dated completion reports or duplicate command
+inventories here.

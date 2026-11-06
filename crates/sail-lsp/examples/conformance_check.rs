@@ -431,7 +431,7 @@ fn run(
     let manifest = if typecheck_only {
         Vec::new()
     } else {
-        match read_accepts_manifest() {
+        match read_accepts_manifest(root) {
             Ok(manifest) => manifest,
             Err(error) => {
                 eprintln!("{error}");
@@ -595,21 +595,9 @@ fn run(
         }
     }
 
-    // ---- the rest of upstream's corpora, by `docs/upstream-accepts.txt` ----
-    //
-    // `typecheck/` is one directory out of two dozen, and it was the only one
-    // measured. The oracle for the others already existed — over
-    // `test/{c,mono,ocaml,lean,rocq,builtins,smt,float,pattern_completeness}`
-    // — and nothing read it. A raw diagnostic count on those corpora is not a
-    // false-positive count, which is exactly what the manifest is for: only a
-    // file upstream accepts is one sail-lsp has to be silent on.
-    //
-    // Nor is a silence count a false-negative count, which took a second
-    // verdict to say. The manifest was built by running upstream on each file
-    // *alone*, while `run_one` hands sail-lsp the whole bundled library
-    // whether or not the file `$include`s it — so the two sides were not
-    // given the same program, and every false negative outside `typecheck/`
-    // was that difference. `SCOPE` marks the files it accounts for.
+    // Extended corpora distinguish standalone acceptance, scope-only acceptance
+    // and rejection. Scope-only cases are reported separately because this
+    // harness supplies the bundled library to every source.
     let mut corpora: Vec<(String, usize, usize, usize, usize)> = Vec::new();
     let mut corpus_fp: Vec<Outcome> = Vec::new();
     let mut corpus_fneg: Vec<String> = Vec::new();
@@ -739,7 +727,7 @@ fn run(
     println!();
     if !corpora.is_empty() {
         println!();
-        println!("  The rest of upstream's corpora (oracle: docs/upstream-accepts.txt):");
+        println!("  The rest of upstream's corpora (oracle: crates/sail-lsp/test_data/upstream-accepts.txt):");
         for (name, ok, fp_n, fneg_n, scope_n) in &corpora {
             println!(
                 "    {name:<22} {ok:>4} agree   {fp_n:>3} false positive  \
@@ -782,22 +770,12 @@ fn run(
     }
 }
 
-/// `OK` / `SCOPE` / `REJECT` followed by an absolute path, grouped by the
-/// corpus directory each path sits in. Missing or malformed inputs are errors;
-/// relocating a checkout requires regenerating its oracle paths.
-/// Regenerate with `scripts/regen_upstream_accepts.py`.
-/// What upstream does with a file, in the manifest's own three verdicts.
+/// Upstream's three oracle verdicts. Missing or malformed sources fail the check.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Verdict {
     /// Upstream accepts it on its own; a diagnostic here is a false positive.
     Ok,
-    /// Upstream rejects it on its own and accepts it once the bundled prelude
-    /// is in scope — which is what this harness hands every file, because it
-    /// is what an editor has. Scope in a real Sail project does not come from
-    /// `$include` at all: sail-riscv's 158 model files contain no `$include`
-    /// between them, and `riscv.sail_project` lists them per module with
-    /// `requires` edges. Says nothing about the checker in either direction;
-    /// counted on its own line so it is not mistaken for evidence.
+    /// Accepts only with library scope; reported separately from verdict parity.
     Scope,
     /// Upstream rejects it either way; silence here is a false negative.
     Reject,
@@ -828,12 +806,12 @@ fn corpus_source_files(directory: &Path) -> Result<Vec<PathBuf>, String> {
 
 type CorpusManifest = Vec<(String, Vec<(PathBuf, Verdict)>)>;
 
-fn read_accepts_manifest() -> Result<CorpusManifest, String> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/upstream-accepts.txt");
-    read_accepts_manifest_at(&path)
+fn read_accepts_manifest(typecheck_root: &Path) -> Result<CorpusManifest, String> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("test_data/upstream-accepts.txt");
+    read_accepts_manifest_at(&path, typecheck_root.parent().unwrap_or(typecheck_root))
 }
 
-fn read_accepts_manifest_at(path: &Path) -> Result<CorpusManifest, String> {
+fn read_accepts_manifest_at(path: &Path, test_root: &Path) -> Result<CorpusManifest, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|error| format!("Could not read oracle {}: {error}", path.display()))?;
     let mut by_corpus: std::collections::BTreeMap<String, Vec<(PathBuf, Verdict)>> =
@@ -857,16 +835,16 @@ fn read_accepts_manifest_at(path: &Path) -> Result<CorpusManifest, String> {
             "REJECT" | "BAD" => Verdict::Reject,
             _ => return Err(invalid(format!("Unknown oracle verdict: {verdict}"))),
         };
-        let file = PathBuf::from(file.trim());
+        let file = test_root.join(file.trim());
         if !file.is_file() {
-            return Err(invalid(format!("Corpus source is missing or not a file: {}. Regenerate docs/upstream-accepts.txt for this checkout", file.display())));
+            return Err(invalid(format!("Corpus source is missing or not a file: {}. Check the selected upstream test root or regenerate test_data/upstream-accepts.txt", file.display())));
         }
-        // The corpus is the directory under `test/`.
         let corpus = file
-            .iter()
-            .skip_while(|c| *c != "test")
-            .nth(1)
-            .map(|c| c.to_string_lossy().to_string())
+            .strip_prefix(test_root)
+            .ok()
+            .and_then(|relative| relative.parent())
+            .and_then(|parent| parent.iter().next())
+            .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| "other".to_string());
         by_corpus.entry(corpus).or_default().push((file, accepted));
     }
@@ -914,7 +892,7 @@ mod oracle_input_tests {
             ),
         )
         .unwrap();
-        let parsed = read_accepts_manifest_at(&manifest).unwrap();
+        let parsed = read_accepts_manifest_at(&manifest, dir.path()).unwrap();
         let entries: Vec<_> = parsed.iter().flat_map(|(_, rows)| rows).collect();
         assert_eq!(entries.len(), 3);
         assert!(entries[0].1 == Verdict::Ok);
@@ -924,10 +902,32 @@ mod oracle_input_tests {
     }
 
     #[test]
+    fn relative_oracle_follows_a_relocated_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("original checkout");
+        let relocated = dir.path().join("relocated checkout");
+        std::fs::create_dir_all(original.join("test/builtins")).unwrap();
+        std::fs::write(
+            original.join("test/builtins/with spaces.sail"),
+            "function f() -> int = 1\n",
+        )
+        .unwrap();
+        let manifest = dir.path().join("oracle.txt");
+        std::fs::write(&manifest, "OK builtins/with spaces.sail\n").unwrap();
+        let first = read_accepts_manifest_at(&manifest, &original.join("test")).unwrap();
+        assert_eq!(first[0].0, "builtins");
+        std::fs::rename(&original, &relocated).unwrap();
+        let second = read_accepts_manifest_at(&manifest, &relocated.join("test")).unwrap();
+        assert_eq!(second[0].0, "builtins");
+        assert_eq!(second[0].1[0].0, relocated.join("test/builtins/with spaces.sail"));
+        assert!(read_accepts_manifest_at(&manifest, &original.join("test")).is_err());
+    }
+
+    #[test]
     fn incomplete_oracle_never_succeeds_with_a_smaller_scope() {
         let dir = tempfile::tempdir().unwrap();
         let manifest = dir.path().join("oracle.txt");
-        assert!(read_accepts_manifest_at(&manifest)
+        assert!(read_accepts_manifest_at(&manifest, dir.path())
             .err()
             .unwrap()
             .contains("Could not read oracle"));
@@ -942,7 +942,7 @@ mod oracle_input_tests {
             (format!("OK {}\n", dir.path().display()), ":1: Corpus source is missing"),
         ] {
             std::fs::write(&manifest, contents).unwrap();
-            let error = read_accepts_manifest_at(&manifest).err().unwrap();
+            let error = read_accepts_manifest_at(&manifest, dir.path()).err().unwrap();
             assert!(error.contains(message), "{error}");
         }
     }

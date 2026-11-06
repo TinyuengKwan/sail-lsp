@@ -94,14 +94,15 @@ jobs:
         run: target/release/examples/conformance_check --typecheck-only --list --fail-detail "$SAIL_ORACLE_SRC/test/typecheck" 2>&1 | tee target/corpus/typecheck.log
       - name: Refresh and check extended corpus oracle
         run: |
-          python3 scripts/regen_upstream_accepts.py "$SAIL_ORACLE_SRC/test" --sail "$SAIL_ORACLE_BIN" --out docs/upstream-accepts.txt
+          python3 scripts/regen_upstream_accepts.py "$SAIL_ORACLE_SRC/test" --sail "$SAIL_ORACLE_BIN" --out crates/sail-lsp/test_data/upstream-accepts.txt
           python3 - <<'PY'
+          import os
           from pathlib import Path
-          rows = [line.split(maxsplit=1) for line in Path("docs/upstream-accepts.txt").read_text().splitlines() if line and not line.startswith("#")]
+          rows = [line.split(maxsplit=1) for line in Path("crates/sail-lsp/test_data/upstream-accepts.txt").read_text().splitlines() if line and not line.startswith("#")]
           assert len(rows) == 372, f"Pinned extended corpus changed: {len(rows)}"
-          assert all(verdict in {"OK", "SCOPE", "REJECT"} and Path(path).is_file() for verdict, path in rows)
+          assert all(verdict in {"OK", "SCOPE", "REJECT"} and (Path(os.environ["SAIL_ORACLE_SRC"]) / "test" / path).is_file() for verdict, path in rows)
           PY
-          cp docs/upstream-accepts.txt target/corpus/upstream-accepts.txt
+          cp crates/sail-lsp/test_data/upstream-accepts.txt target/corpus/upstream-accepts.txt
           target/release/examples/conformance_check --list --fail-detail "$SAIL_ORACLE_SRC/test/typecheck" 2>&1 | tee target/corpus/conformance.log
       - name: Refresh and check mutation oracle
         run: |

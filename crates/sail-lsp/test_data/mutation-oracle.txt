@@ -1,9 +1,9 @@
-# Regenerated 2026-11-02; Sail 0.20.3 (sail2 @ ac09f8870b9d85e528e2a3436150b03b9d805d40); SAIL_DIR=/home/clair/tinyueng_workplace/sail; ordinary bitvector mode.
+# Upstream: Sail 0.20.3 (ac09f8870b9d85e528e2a3436150b03b9d805d40); ordinary bitvector mode.
 # Which mutants upstream Sail rejects — the oracle for `mutation_check`.
 #
 # Regenerate with:
 #   cargo run --release --example mutation_check -- \
-#       <corpus> --regen-oracle docs/mutation-oracle.txt
+#       <corpus> --regen-oracle crates/sail-lsp/test_data/mutation-oracle.txt
 #
 # ACCEPTED means the mutation left a valid program; those are excluded from
 # the score rather than counted as misses.

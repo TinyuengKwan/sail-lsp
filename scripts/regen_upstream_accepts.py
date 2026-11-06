@@ -1,30 +1,12 @@
 #!/usr/bin/env python3
-"""Regenerate `docs/upstream-accepts.txt`, the oracle for every corpus
-outside `sail/test/typecheck`.
+"""Refresh the extended-corpus verdicts used by conformance_check.
 
-Each file is classified three ways, because the first two are not enough to
-read the false-negative column honestly:
+Rows are OK (accepted standalone), SCOPE (accepted only with library scope), or
+REJECT (rejected with either scope). Paths are relative to the supplied upstream
+test directory. Verdicts use ordinary bitvector mode; scope-only inputs are not
+scored as checker agreement. The compiler preflight must succeed first.
 
-  OK      upstream accepts the file on its own
-  SCOPE   upstream rejects it on its own and accepts it with the bundled
-          `sail-lib` in scope
-  REJECT  upstream rejects it either way
-
-The distinction exists because the two sides are not given the same program.
-`conformance_check` hands sail-lsp the bundled `sail-lib` whether or not a
-file `$include`s it, which is what an editor has. Scope in a real Sail
-project does not come from `$include` at all: **sail-riscv's 158 model files
-contain no `$include` directive between them**, and `riscv.sail_project`
-lists the files per module with `requires` edges. So a file that names
-`print_endline` without including `<prelude.sail>` is ordinary, and
-upstream's per-file `--just-check` is not how that project is built. A
-`SCOPE` file says nothing about the checker; counting one as a false
-negative measures the harness.
-
-Usage:
-    python3 scripts/regen_upstream_accepts.py /path/to/sail/test [--sail sail]
-
-Takes a few minutes; `sail` must be on PATH (or named with --sail).
+Usage: python3 scripts/regen_upstream_accepts.py /path/to/sail/test --sail sail
 """
 
 import argparse
@@ -47,34 +29,13 @@ CORPORA = [
 ]
 
 HEADER = """\
-# Which files upstream Sail itself accepts
-#
-# Built by `scripts/regen_upstream_accepts.py` with `sail --no-memo-z3
-# --just-check` over every .sail file under
-# sail/test/{{{corpora}}}.
-#
-# Three verdicts, not two:
-#
-#   OK      upstream accepts the file on its own.
-#   SCOPE   upstream rejects it on its own and accepts it once the bundled
-#           `sail-lib` is in scope. Says nothing about sail-lsp: the harness
-#           hands every file that whole library, because that is what an
-#           editor has. Scope in a real Sail project does not come from `$include`
-#           at all — sail-riscv's 158 model files contain no `$include`
-#           directive between them, and `riscv.sail_project` lists the files
-#           per module with `requires` edges — so a file that names a prelude
-#           function without including it is ordinary. Counting these as
-#           false negatives measures the harness, not the checker.
-#   REJECT  upstream rejects it either way. Only these are false negatives
-#           when sail-lsp stays silent.
-#
-# A raw diagnostic count on these corpora is not a false-positive count
-# either: only an `OK` file is one sail-lsp must be silent on.
-#
-# {ok} OK, {scope} SCOPE, {reject} REJECT.
-#
-# Regenerate when the sail checkout moves. Paths are absolute on purpose —
-# they are the ones `corpus_check` reports against.
+# Extended-corpus oracle for conformance_check.
+# Paths are relative to the selected upstream test/ directory.
+# Corpora: {corpora}.
+# OK: accepts standalone. SCOPE: accepts with bundled-library scope only.
+# REJECT: rejects with either scope. SCOPE is reported separately, not scored.
+# {ok} OK, {scope} SCOPE, {reject} REJECT; ordinary bitvector mode.
+# Regenerate with scripts/regen_upstream_accepts.py when compiler/library changes.
 """
 
 
@@ -105,7 +66,9 @@ def main() -> int:
         "--out",
         default=os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "docs",
+            "crates",
+            "sail-lsp",
+            "test_data",
             "upstream-accepts.txt",
         ),
     )
@@ -204,13 +167,13 @@ def main() -> int:
                             else "REJECT"
                         )
                     counts[verdict] += 1
-                    rows.append((verdict, path))
+                    rows.append((verdict, os.path.relpath(path, args.test_root).replace(os.sep, "/")))
             print(f"  {corpus}: {len(rows)} files so far", file=sys.stderr)
 
     rows.sort(key=lambda r: r[1])
     version = subprocess.run([args.sail, "--version"], capture_output=True, text=True, check=True).stdout.strip()
     with open(args.out, "w") as fh:
-        fh.write(f"# Upstream: {version}; SAIL_DIR={os.environ.get('SAIL_DIR', '(installed default)')}\n")
+        fh.write(f"# Upstream: {version}\n")
         fh.write(
             HEADER.format(
                 corpora=",".join(CORPORA),

@@ -16,11 +16,11 @@
 //! ```sh
 //! # Measure against a recorded oracle (fast, no `sail` needed).
 //! cargo run --release --example mutation_check -- \
-//!     /path/to/sail/test/typecheck/pass --oracle docs/mutation-oracle.txt
+//!     /path/to/sail/test/typecheck/pass --oracle crates/sail-lsp/test_data/mutation-oracle.txt
 //!
 //! # Regenerate the oracle (slow; needs `sail` on PATH or in $SAIL).
 //! cargo run --release --example mutation_check -- \
-//!     /path/to/sail/test/typecheck/pass --regen-oracle docs/mutation-oracle.txt
+//!     /path/to/sail/test/typecheck/pass --regen-oracle crates/sail-lsp/test_data/mutation-oracle.txt
 //! ```
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
@@ -497,7 +497,7 @@ fn regen_oracle(
     // `config_bits_types`, the `enum_map` variants and the rest need flags
     // this invocation does not pass — and scoring their mutants counted 12
     // defects sail-lsp does not have. The same intersection
-    // `docs/upstream-accepts.txt` exists for.
+    // `crates/sail-lsp/test_data/upstream-accepts.txt` exists for.
     let mut unusable: std::collections::HashSet<usize> = Default::default();
     for (fi, (_, path, text)) in files.iter().enumerate() {
         let name = path.file_name().unwrap();
@@ -565,7 +565,7 @@ fn regen_oracle(
 #
 # Regenerate with:
 #   cargo run --release --example mutation_check -- \\
-#       <corpus> --regen-oracle docs/mutation-oracle.txt
+#       <corpus> --regen-oracle crates/sail-lsp/test_data/mutation-oracle.txt
 #
 # ACCEPTED means the mutation left a valid program; those are excluded from
 # the score rather than counted as misses.

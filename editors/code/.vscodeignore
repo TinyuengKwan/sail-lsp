@@ -6,7 +6,6 @@
 !syntaxes/*.json
 !out/main.js
 !out/taskRunner.js
-!server/**
 !server/sail-lsp
 !server/sail-lsp.exe
 !package.json
