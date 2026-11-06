@@ -102,7 +102,7 @@ sh install.sh --path "$PWD" --editor vscode
 # Windows: & .\install.ps1 --path (Get-Location).Path --editor vscode
 ```
 
-This requires Node.js/npm in addition to the Rust/CMake/C++ source build tools.
+This requires Node.js 22+/npm in addition to the Rust/CMake/C++ source build tools.
 For packaging without installation, see the verified standalone-payload example
 in [installation](../../docs/installation.md#release-and-ci-maintenance).
 `npm run package:local` builds a host-specific vendored binary and VSIX.

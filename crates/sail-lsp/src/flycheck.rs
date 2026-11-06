@@ -146,22 +146,6 @@ pub(crate) fn command_line_with_context(
     Ok((args, cwd))
 }
 
-/// Run `command` with these arguments and translate what it says.
-///
-/// `cwd` is where relative paths in the output are resolved from — upstream
-/// prints the path it was given.
-#[cfg(test)]
-pub(crate) fn run(command: &str, args: &[String], cwd: &Path) -> FlycheckResult {
-    worker::run(
-        command,
-        args,
-        cwd,
-        std::time::Duration::from_secs(30),
-        &std::sync::atomic::AtomicBool::new(false),
-    )
-    .0
-}
-
 /// Upstream's error format.
 ///
 /// ```text
@@ -504,6 +488,22 @@ mod tests {
 mod live {
     use super::*;
 
+    fn stock_check(args: &[String], cwd: &Path) -> FlycheckResult {
+        let compiler = std::env::var("SAIL_STOCK_BIN").expect("SAIL_STOCK_BIN is required");
+        let (found, status) = worker::run(
+            &compiler,
+            args,
+            cwd,
+            std::time::Duration::from_secs(30),
+            &std::sync::atomic::AtomicBool::new(false),
+        );
+        assert!(
+            matches!(status, Status::Passed | Status::Diagnostics { .. }),
+            "{compiler:?}: {status:?}"
+        );
+        found
+    }
+
     #[test]
     #[ignore = "requires SAIL_STOCK_BIN pointing to a compiler without check-context"]
     fn stock_upstream_reports_extended_configuration_as_skipped() {
@@ -610,9 +610,9 @@ mod live {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    /// Against the real binary. `#[ignore]` because it needs `sail` on PATH.
+    /// Against the explicitly selected stock compiler, independent of PATH.
     #[test]
-    #[ignore]
+    #[ignore = "requires SAIL_STOCK_BIN pointing to a stock Sail compiler"]
     fn upstream_says_what_we_read() {
         let dir = std::env::temp_dir().join("sail-lsp-flycheck-live");
         std::fs::create_dir_all(&dir).unwrap();
@@ -624,7 +624,7 @@ mod live {
         .unwrap();
         let (args, cwd) =
             command_line(&CheckTarget::File(file.clone()), &Default::default(), &[]).unwrap();
-        let found = run("sail", &args, &cwd);
+        let found = stock_check(&args, &cwd);
         assert_eq!(found.len(), 1, "{found:?}");
         assert_eq!(found[0].0, file);
         assert!(found[0].1.message.contains("not a subtype"), "{}", found[0].1.message);
@@ -635,7 +635,7 @@ mod live {
     /// the project, the variable choosing the branch that defines `x`; its
     /// error is reported at the file the project names.
     #[test]
-    #[ignore]
+    #[ignore = "requires SAIL_STOCK_BIN pointing to a stock Sail compiler"]
     fn a_project_is_checked_as_a_project() {
         let dir = std::env::temp_dir().join("sail-lsp-flycheck-project");
         std::fs::create_dir_all(dir.join("src")).unwrap();
@@ -652,19 +652,19 @@ mod live {
         let target = CheckTarget::Project(dir.join("p.sail_project"));
         let mut workspace = crate::config::WorkspaceConfig::default();
         let (args, cwd) = command_line(&target, &workspace, &[]).unwrap();
-        assert_eq!(run("sail", &args, &cwd), Vec::new());
+        assert_eq!(stock_check(&args, &cwd), Vec::new());
 
         workspace
             .project_variables
             .insert("WIDE".into(), crate::config::ProjectVariableValue::Bool(true));
         let (args, cwd) = command_line(&target, &workspace, &[]).unwrap();
-        let found = run("sail", &args, &cwd);
+        let found = stock_check(&args, &cwd);
         assert_eq!(found.len(), 1, "{found:?}");
         assert_eq!(found[0].0, dir.join("src/b.sail"));
         assert_eq!(found[0].1.range.start.line, 0);
 
         let (args, cwd) =
             command_line(&CheckTarget::File(dir.join("src/b.sail")), &workspace, &[]).unwrap();
-        assert!(!run("sail", &args, &cwd).is_empty(), "alone, b.sail does not know x");
+        assert!(!stock_check(&args, &cwd).is_empty(), "alone, b.sail does not know x");
     }
 }

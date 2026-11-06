@@ -1108,6 +1108,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "mach2"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0d28e293f2b8c9d2b2d1c0193bd3c1cbdc0d2cf396888dc01162f7cf9d6c3f3"
+
+[[package]]
 name = "matchers"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1444,6 +1450,7 @@ version = "0.1.0"
 dependencies = [
  "cfg-if",
  "libc",
+ "mach2",
  "perf-event",
  "tikv-jemalloc-ctl",
  "windows-sys 0.60.2",

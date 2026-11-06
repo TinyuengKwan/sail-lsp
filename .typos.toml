@@ -32,6 +32,7 @@ lsr = "lsr"
 asr = "asr"
 preceed = "preceed"
 concatentation = "concatentation"
+implicits = "implicits"
 # PowerShell's case-insensitive inequality operator (-ine).
 ine = "ine"
 # Literal collections and interval lower-bound identifiers.

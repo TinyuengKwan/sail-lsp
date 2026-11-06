@@ -257,6 +257,7 @@ const PATIENCE: Duration = Duration::from_secs(60);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Root {
     Real,
+    #[cfg(unix)]
     Symlinked,
     Detached,
     EmptyFolders,
@@ -371,6 +372,7 @@ impl ServerFixture {
         // client `<base>/link`, so every path it sends crosses the link.
         let (root, contents_at) = match kind {
             Root::Real | Root::Detached | Root::EmptyFolders => (base.clone(), base.clone()),
+            #[cfg(unix)]
             Root::Symlinked => (base.join("link"), base.join("real")),
         };
         std::fs::create_dir_all(&contents_at).expect("workspace dir");

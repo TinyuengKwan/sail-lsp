@@ -40,19 +40,23 @@ pub fn process_resident_bytes() -> Option<u64> {
     }
     #[cfg(target_os = "macos")]
     {
-        let mut info = std::mem::MaybeUninit::<libc::mach_task_basic_info>::uninit();
-        let mut count = libc::MACH_TASK_BASIC_INFO_COUNT;
+        use mach2::task_info::{
+            mach_task_basic_info, MACH_TASK_BASIC_INFO, MACH_TASK_BASIC_INFO_COUNT,
+        };
+
+        let mut info = std::mem::MaybeUninit::<mach_task_basic_info>::uninit();
+        let mut count = MACH_TASK_BASIC_INFO_COUNT;
         // SAFETY: task_info receives the matching flavor, size and writable
         // buffer for this process. The output is read only on success.
         let result = unsafe {
-            libc::task_info(
-                libc::mach_task_self(),
-                libc::MACH_TASK_BASIC_INFO,
+            mach2::task::task_info(
+                mach2::traps::mach_task_self(),
+                MACH_TASK_BASIC_INFO,
                 info.as_mut_ptr().cast(),
                 &mut count,
             )
         };
-        if result == libc::KERN_SUCCESS {
+        if result == mach2::kern_return::KERN_SUCCESS {
             Some(unsafe { info.assume_init() }.resident_size)
         } else {
             None

@@ -713,7 +713,7 @@
     "@types/mocha": "^10.0.10",
     "@types/node": "~22.13.4",
     "@types/vscode": "~1.93.0",
-    "@vscode/test-electron": "^2.5.2",
+    "@vscode/test-electron": "^3.1.0",
     "@vscode/vsce": "^3.2.0",
     "esbuild": "^0.25.0",
     "glob": "^11.0.3",

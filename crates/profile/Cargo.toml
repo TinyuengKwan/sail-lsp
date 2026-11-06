@@ -16,7 +16,7 @@ jemalloc-ctl = { version = "0.5.4", package = "tikv-jemalloc-ctl", optional = tr
 [target.'cfg(all(target_os = "linux", not(target_env = "ohos"), any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64")))'.dependencies]
 perf-event = "=0.4.8"
 
-[target.'cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))'.dependencies]
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
 libc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
@@ -24,6 +24,9 @@ windows-sys = { version = "0.60", features = [
     "Win32_System_Threading",
     "Win32_System_ProcessStatus",
 ] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+mach2 = "0.7.0"
 
 [features]
 cpu_profiler = []

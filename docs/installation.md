@@ -117,7 +117,7 @@ nonstandard layouts; it is a configuration root, not an editor executable.
   and registers the stable server path in `<integration registry>/vscode.json`.
   `--code-command PATH` selects another compatible CLI. `--vsix FILE` supplies an
   offline VSIX; its identity, version and bundled server hash must match the server.
-  Source installation builds the VSIX locally and additionally needs Node.js/npm.
+  Source installation builds the VSIX locally and additionally needs Node.js 22+/npm.
   Server selection is explicit `sail-lsp.server.path`, then the managed registration,
   then the bundled server, then PATH. A stale or malformed managed registration
   produces a visible startup error. An old installed extension must be upgraded
@@ -236,10 +236,14 @@ particular project's typechecking or remote editor integration.
 | --- | --- | --- |
 | Linux x86_64 GNU | primary | glibc >= 2.35, libgcc_s |
 | Windows x86_64 MSVC | primary | Windows 10+, static CRT |
-| macOS ARM64 | primary | macOS 11+ deployment target |
+| macOS ARM64 | primary | macOS 13.3+ deployment target |
 | Linux ARM64 GNU | preview | glibc >= 2.39, libgcc_s |
-| macOS x86_64 | preview | macOS 10.15+ deployment target |
+| macOS x86_64 | preview | macOS 13.3+ deployment target |
 | Windows ARM64 MSVC | preview | Windows 11+, static CRT |
+
+The vendored Z3 build uses C++20 formatting APIs that require macOS 13.3.
+Both release and locked-source CI builds use the deployment target declared in
+the matrix above.
 
 These are build requirements/targets, not claims that this change has already run
 on every OS version. New native CI results become evidence only after the changed

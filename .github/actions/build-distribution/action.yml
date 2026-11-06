@@ -25,6 +25,25 @@ runs:
     - uses: Swatinem/rust-cache@v2
       with:
         key: distribution-${{ inputs.target }}
+    - name: Preserve MSVC flags through Git Bash
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        # These slash-prefixed compiler flags are not Unix paths.
+        "MSYS2_ENV_CONV_EXCL=CFLAGS;CXXFLAGS" >> $env:GITHUB_ENV
+    - name: macOS deployment target
+      if: runner.os == 'macOS'
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+      run: |
+        python3 - <<'PY'
+        import json, os
+        targets = json.load(open('distribution/targets.json'))
+        target = next(t for t in targets if t['target'] == os.environ['TARGET'])
+        with open(os.environ['GITHUB_ENV'], 'a') as output:
+            output.write('MACOSX_DEPLOYMENT_TARGET=' + target['requirements']['minimumMacos'] + '\n')
+        PY
     - name: Linux C++20 toolchain and portable C++ runtime
       if: runner.os == 'Linux'
       shell: bash
@@ -48,7 +67,6 @@ runs:
         RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || env.SAIL_LSP_LINUX_RUSTFLAGS }}
         CFLAGS: ${{ runner.os == 'Windows' && '/utf-8' || '' }}
         CXXFLAGS: ${{ runner.os == 'Windows' && '/utf-8' || '' }}
-        MACOSX_DEPLOYMENT_TARGET: ${{ inputs.target == 'aarch64-apple-darwin' && '11.0' || '10.15' }}
       run: |
         export SAIL_LSP_BUILD_REVISION=$(git rev-parse HEAD)
         cargo build --release --locked -p sail-lsp --features vendored --target '${{ inputs.target }}' --target-dir target/distribution
