@@ -303,7 +303,7 @@ mod tests {
         assert_eq!(context["includePaths"], json!([project.workspace_root.join("includes")]));
         assert_eq!(
             context["generatedFiles"]["generated.sail"],
-            json!(project.workspace_root.join("out/generated.sail"))
+            json!(project.workspace_root.join("out").join("generated.sail"))
         );
         task.args.clear();
         task.environment.insert("SAIL_LSP_PROJECT_CONTEXT".into(), "${projectContext}".into());

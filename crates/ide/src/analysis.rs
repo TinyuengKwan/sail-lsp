@@ -489,7 +489,7 @@ impl Analysis {
                 }
                 let new_path =
                     paths::relative_path(after.parent().unwrap(), &normalize_path(&new_target))
-                        .and_then(|p| p.to_str().map(str::to_owned))
+                        .and_then(|p| paths::slash_path(&p))
                         .ok_or_else(|| {
                             format!("Cannot express include path to {}", new_target.display())
                         })?;

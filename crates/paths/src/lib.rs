@@ -466,6 +466,13 @@ pub fn relative_path(from_dir: &Path, to: &Path) -> Option<PathBuf> {
     Some(result)
 }
 
+/// A UTF-8 path for source text. Windows separators become forward slashes;
+/// Unix backslashes remain literal filename characters.
+pub fn slash_path(path: &Path) -> Option<String> {
+    let text = path.to_str()?;
+    Some(if cfg!(windows) { text.replace('\\', "/") } else { text.to_owned() })
+}
+
 #[cfg(test)]
 mod rename_tests {
     use super::*;

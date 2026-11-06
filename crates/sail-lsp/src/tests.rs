@@ -3892,12 +3892,7 @@ fn a_snapshot_knows_which_files_are_library() {
     let mut root = base_db::SourceRoot::new_library(base_db::FileSet::default());
     let lib = base_db::FileId::from_raw(7);
     let own = base_db::FileId::from_raw(8);
-    root.insert(
-        lib,
-        base_db::VfsPath::new(paths::AbsPathBuf::assert_utf8(std::path::PathBuf::from(
-            "/sail/lib/prelude.sail",
-        ))),
-    );
+    root.insert(lib, base_db::VfsPath::new_virtual_path("/sail/lib/prelude.sail".into()));
     assert!(root.contains(lib), "the library root should contain what was put in it");
     assert!(!root.contains(own), "and nothing else");
 }

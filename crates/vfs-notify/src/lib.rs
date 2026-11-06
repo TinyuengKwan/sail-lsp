@@ -61,6 +61,9 @@ struct NotifyActor {
     watched_file_entries: FxHashSet<AbsPathBuf>,
     watched_dir_entries: Vec<loader::Directories>,
     seen_paths: FxHashSet<AbsPathBuf>,
+    // Native backends may report canonical roots (e.g. /private/var for /var).
+    // Restore the subscribed spelling before matching or publishing VFS paths.
+    watch_aliases: Vec<(AbsPathBuf, AbsPathBuf)>,
     // Drop order is significant.
     watcher: Option<(RecommendedWatcher, Receiver<NotifyEvent>)>,
 }
@@ -78,6 +81,7 @@ impl NotifyActor {
             watched_dir_entries: Vec::new(),
             watched_file_entries: FxHashSet::default(),
             seen_paths: FxHashSet::default(),
+            watch_aliases: Vec::new(),
             watcher: None,
         }
     }
@@ -120,6 +124,7 @@ impl NotifyActor {
                         self.watched_dir_entries.clear();
                         self.watched_file_entries.clear();
                         self.seen_paths.clear();
+                        self.watch_aliases.clear();
 
                         self.send(loader::Message::Progress {
                             n_total,
@@ -214,6 +219,14 @@ impl NotifyActor {
                                     .expect("path is absolute");
                                     // Normalize paths from notify events (resolve `.` / `..`).
                                     Some(abs.normalize())
+                                })
+                                .flat_map(|path| {
+                                    let aliases = self.watch_aliases.iter().filter_map(
+                                        |(native, original)| {
+                                            Some(original.join(path.strip_prefix(native)?))
+                                        },
+                                    );
+                                    std::iter::once(path.clone()).chain(aliases).collect::<Vec<_>>()
                                 })
                                 .collect();
 
@@ -394,7 +407,24 @@ impl NotifyActor {
 
     fn watch(&mut self, path: &Path) {
         if let Some((watcher, _)) = &mut self.watcher {
-            log_notify_error(watcher.watch(path, RecursiveMode::Recursive));
+            if log_notify_error(watcher.watch(path, RecursiveMode::Recursive)).is_some() {
+                // Canonicalization is confined to the native event boundary.
+                // Keep both spellings: removing a file must still map events,
+                // and several editor paths can refer to the same native root.
+                let Ok(native) = fs::canonicalize(path) else { return };
+                if let (Ok(native), Ok(original)) = (
+                    Utf8PathBuf::from_path_buf(native),
+                    Utf8PathBuf::from_path_buf(path.to_path_buf()),
+                ) {
+                    let native = AbsPathBuf::assert(native).normalize();
+                    let original = AbsPathBuf::assert(original).normalize();
+                    if native != original
+                        && !self.watch_aliases.contains(&(native.clone(), original.clone()))
+                    {
+                        self.watch_aliases.push((native, original));
+                    }
+                }
+            }
         }
     }
 
@@ -485,6 +515,118 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Inject the canonical paths returned by FSEvents while retaining real
+    /// subscriptions and filesystem reads. This reproduces alias mismatches on
+    /// Unix hosts whose native backend normally preserves the subscribed path.
+    #[cfg(unix)]
+    struct CanonicalEvents {
+        backend: Sender<NotifyEvent>,
+        received: Receiver<loader::Message>,
+        control: Sender<Message>,
+        thread: std::thread::JoinHandle<()>,
+        paths: Vec<AbsPathBuf>,
+    }
+
+    #[cfg(unix)]
+    fn canonical_event_fixture(f: &Fixture, relative: &str, directories: bool) -> CanonicalEvents {
+        let real = f.0.join("real");
+        fs::create_dir_all(&real).unwrap();
+        let (output, received) = unbounded();
+        let (backend, events) = unbounded();
+        let mut actor = NotifyActor::new(output);
+        actor.watcher = Some((RecommendedWatcher::new(|_| {}, Config::default()).unwrap(), events));
+        let mut paths = Vec::new();
+        for name in ["first", "second"] {
+            let link = f.path(name);
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            actor.watch(link.as_ref());
+            let path = link.join(relative);
+            if directories {
+                actor.watched_dir_entries.push(loader::Directories {
+                    extensions: vec!["sail".into()],
+                    include: vec![link],
+                    exclude: vec![],
+                });
+            } else {
+                actor.watched_file_entries.insert(path.clone());
+            }
+            paths.push(path);
+        }
+        let (control, inbox) = unbounded();
+        let thread = std::thread::spawn(move || actor.run(inbox));
+        CanonicalEvents { backend, received, control, thread, paths }
+    }
+
+    #[cfg(unix)]
+    fn assert_alias_changes(
+        received: &Receiver<loader::Message>,
+        paths: &[AbsPathBuf],
+        expected: Option<&[u8]>,
+    ) {
+        let loader::Message::Changed { files } =
+            received.recv_timeout(Duration::from_secs(10)).unwrap()
+        else {
+            panic!("expected native change")
+        };
+        assert_eq!(files.len(), paths.len(), "{files:?}");
+        for path in paths {
+            assert!(
+                files.iter().any(|(p, bytes)| p == path && bytes.as_deref() == expected),
+                "{path}: {files:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_events_recover_missing_descendants_in_each_subscribed_spelling() {
+        let f = Fixture::new();
+        let CanonicalEvents { backend, received, control, thread, paths } =
+            canonical_event_fixture(&f, "missing/nested/lib.sail", false);
+        let native = fs::canonicalize(f.0.join("real")).unwrap();
+        for cycle in 0..3 {
+            fs::create_dir_all(native.join("missing/nested")).unwrap();
+            let text = format!("val recovered_{cycle} : int");
+            fs::write(native.join("missing/nested/lib.sail"), &text).unwrap();
+            backend
+                .send(Ok(notify::Event::new(EventKind::Create(notify::event::CreateKind::Folder))
+                    .add_path(native.join("missing"))))
+                .unwrap();
+            assert_alias_changes(&received, &paths, Some(text.as_bytes()));
+            fs::remove_dir_all(native.join("missing")).unwrap();
+            backend
+                .send(Ok(notify::Event::new(EventKind::Remove(notify::event::RemoveKind::Folder))
+                    .add_path(native.join("missing"))))
+                .unwrap();
+            assert_alias_changes(&received, &paths, None);
+        }
+        drop(control);
+        thread.join().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_events_discover_directory_files_without_changing_vfs_identity() {
+        let f = Fixture::new();
+        let CanonicalEvents { backend, received, control, thread, paths } =
+            canonical_event_fixture(&f, "new.sail", true);
+        let native = fs::canonicalize(f.0.join("real")).unwrap().join("new.sail");
+        fs::write(&native, b"val added : int").unwrap();
+        backend
+            .send(Ok(notify::Event::new(EventKind::Create(notify::event::CreateKind::File))
+                .add_path(native.clone())))
+            .unwrap();
+        assert_alias_changes(&received, &paths, Some(b"val added : int"));
+        fs::remove_file(&native).unwrap();
+        backend
+            .send(Ok(notify::Event::new(EventKind::Remove(notify::event::RemoveKind::File))
+                .add_path(native)))
+            .unwrap();
+        assert_alias_changes(&received, &paths, None);
+        drop(control);
+        thread.join().unwrap();
     }
 
     #[test]

@@ -436,11 +436,12 @@ mod tests {
     #[test]
     fn extended_context_keeps_typed_values_and_workspace_relative_paths() {
         use crate::config::{ProjectVariableValue, WorkspaceConfig};
-        let target = CheckTarget::Project("/workspace/model/p.sail_project".into());
+        let root = std::env::temp_dir().join("sail-flycheck-workspace");
+        let target = CheckTarget::Project(root.join("model").join("p.sail_project"));
         let ordinary = WorkspaceConfig::default();
         assert_eq!(
             command_line(&target, &ordinary, &[]),
-            command_line_with_context(&target, &ordinary, &[], Path::new("/workspace"), &[])
+            command_line_with_context(&target, &ordinary, &[], &root, &[])
         );
         let mut config = WorkspaceConfig {
             target: Some("c".into()),
@@ -455,15 +456,10 @@ mod tests {
         }
         config.project_variables.insert("BOOL".into(), ProjectVariableValue::Bool(true));
         config.generated_files.insert("gen.sail".into(), "generated/out.sail".into());
-        let (args, cwd) = command_line_with_context(
-            &target,
-            &config,
-            &[],
-            Path::new("/workspace"),
-            &["/workspace/includes".into()],
-        )
-        .unwrap();
-        assert_eq!(cwd, Path::new("/workspace/model"));
+        let (args, cwd) =
+            command_line_with_context(&target, &config, &[], &root, &[root.join("includes")])
+                .unwrap();
+        assert_eq!(cwd, root.join("model"));
         assert!(args.contains(&"Main".into()) && args.contains(&"--strict-bitvector".into()));
         assert!(!args.contains(&"--variable".into()) && !args.contains(&"--all-modules".into()));
         let at = args.iter().position(|arg| arg == "--check-context").unwrap();
@@ -473,8 +469,11 @@ mod tests {
         }
         assert_eq!(context["variables"]["BOOL"], true);
         assert_eq!(context["target"], "c");
-        assert_eq!(context["generatedFiles"]["gen.sail"], "/workspace/generated/out.sail");
-        assert_eq!(context["includePaths"][0], "/workspace/includes");
+        assert_eq!(
+            context["generatedFiles"]["gen.sail"],
+            serde_json::json!(root.join("generated").join("out.sail"))
+        );
+        assert_eq!(context["includePaths"][0], serde_json::json!(root.join("includes")));
     }
 
     #[test]

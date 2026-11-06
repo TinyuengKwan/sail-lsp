@@ -186,7 +186,8 @@ impl ProjectManifest {
                     paths::relative_path(self.new, &new_target)
                         .ok_or("Cannot express the moved manifest path")?
                 };
-                let new_text = quoted(replacement.to_str().ok_or("Non-UTF-8 manifest path")?);
+                let new_text =
+                    quoted(&paths::slash_path(&replacement).ok_or("Non-UTF-8 manifest path")?);
                 let new_text = if is_dynamic {
                     format!(
                         "if {} == {} then {} else {}",

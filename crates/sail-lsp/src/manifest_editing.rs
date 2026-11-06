@@ -393,7 +393,7 @@ pub(crate) fn add_to_project(
         let Some(text) = text(snap, &manifest_uri) else { continue };
         let Ok(manifest) = project_model::ProjectManifest::parse(&text) else { continue };
         let Some(written) = relative_path(manifest_dir, &path) else { continue };
-        let written = written.to_string_lossy().replace('\\', "/");
+        let Some(written) = paths::slash_path(&written) else { continue };
         let literal = editing::path_literal(&written);
         let Some((at, insert)) = manifest.file_insertion(&text, &module, &literal) else {
             continue;
@@ -586,7 +586,7 @@ mod tests {
     #[test]
     fn relative_paths_climb_where_they_must() {
         let rel = |a: &str, b: &str| {
-            relative_path(Path::new(a), Path::new(b)).map(|p| p.display().to_string())
+            relative_path(Path::new(a), Path::new(b)).and_then(|p| paths::slash_path(&p))
         };
         assert_eq!(rel("/w/model", "/w/model/core/x.sail").as_deref(), Some("core/x.sail"));
         assert_eq!(rel("/w/model", "/w/extra/x.sail").as_deref(), Some("../extra/x.sail"));

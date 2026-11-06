@@ -2370,7 +2370,7 @@ mod project_reload_tests {
         let (sender, _) = crossbeam_channel::unbounded();
         let (tasks, _) = crossbeam_channel::unbounded();
         let mut state = GlobalState::new(sender, tasks);
-        let url = Url::parse("file:///previous.sail").unwrap();
+        let url = Url::from_file_path(std::env::temp_dir().join("previous.sail")).unwrap();
         state.sync_disk_text(&url, "val previous : int\n");
         state.process_changes();
         let id = state.vfs.lookup_file_id_by_url(&url).unwrap();
@@ -2391,7 +2391,7 @@ mod project_reload_tests {
     #[test]
     fn loading_installs_module_edges_even_when_file_membership_is_unchanged() {
         let (mut state, a, a_id) = state_with_active_file();
-        let b = Url::parse("file:///consumer.sail").unwrap();
+        let b = a.join("consumer.sail").unwrap();
         state.sync_disk_text(&b, "val consumer : int\n");
         state.process_changes();
         let b_id = state.vfs.lookup_file_id_by_url(&b).unwrap();

@@ -113,6 +113,16 @@ pub fn project_analysis(fixture: &str) -> (Analysis, Vec<(FileId, String)>) {
     analysis_inner(fixture, true)
 }
 
+// Project preprocessing resolves actual paths. Give its in-memory files native
+// absolute paths while preserving the fixture's logical names in test results.
+fn project_path(path: &str) -> PathBuf {
+    if cfg!(windows) {
+        PathBuf::from("C:/").join(path.trim_start_matches('/'))
+    } else {
+        PathBuf::from(path)
+    }
+}
+
 fn analysis_inner(fixture: &str, project: bool) -> (Analysis, Vec<(FileId, String)>) {
     let (with_prelude, fixture_files) = split_fixture(fixture);
 
@@ -130,7 +140,11 @@ fn analysis_inner(fixture: &str, project: bool) -> (Analysis, Vec<(FileId, Strin
     let urls: Vec<Url> = all
         .iter()
         .map(|(path, _)| {
-            Url::parse(&format!("file://{path}")).expect("fixture path is a valid URL")
+            if project {
+                Url::from_file_path(project_path(path)).expect("fixture path is absolute")
+            } else {
+                Url::parse(&format!("file://{path}")).expect("fixture path is a valid URL")
+            }
         })
         .collect();
 
@@ -147,7 +161,7 @@ fn analysis_inner(fixture: &str, project: bool) -> (Analysis, Vec<(FileId, Strin
                 .iter()
                 .map(|u| (u.to_file_path().unwrap(), vfs.lookup_file_id_by_url(u).unwrap()))
                 .collect(),
-            library: with_prelude.then(|| PathBuf::from("/sail-lib")),
+            library: with_prelude.then(|| project_path("/sail-lib")),
             modules: base_db::module_graph::ModuleGraph {
                 modules: vec![base_db::module_graph::ModuleData { files: roots, requires: vec![] }],
                 globals: vec![],
@@ -538,6 +552,23 @@ mod tests {
             files.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(),
             ["/a.sail", "/b.sail"]
         );
+    }
+
+    #[test]
+    fn project_fixtures_resolve_encoded_native_paths() {
+        let (analysis, files) = super::project_analysis(
+            "//- /dir with space/lib#.sail\nfunction answer() -> int = 1\n//- /main.sail\nfunction use() -> int = answer()\n",
+        );
+        for (file, _) in files {
+            let url = analysis.url_for_file_id(file).unwrap();
+            assert!(url.to_file_path().unwrap().is_absolute());
+            assert!(url.fragment().is_none());
+            let diagnostics = analysis.file_diagnostics(file, &Default::default()).unwrap();
+            assert!(
+                !diagnostics.iter().any(|d| d.severity == ide_diagnostics::Severity::Error),
+                "{diagnostics:?}"
+            );
+        }
     }
 
     #[test]
