@@ -9,10 +9,13 @@ fn git(args: &[&str]) -> Option<String> {
 }
 
 fn main() {
+    println!("cargo:rustc-env=SAIL_LSP_BUILD_TARGET={}", std::env::var("TARGET").unwrap());
     // Git is optional for packaged source archives. Follow the actual git dir
     // and ref as well as HEAD, including linked worktrees and packed refs.
     println!("cargo:rerun-if-env-changed=SAIL_LSP_BUILD_REVISION");
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    // Cargo may reuse this build-script executable across worktrees sharing
+    // a target directory. Resolve the current package from the runtime env.
+    let root = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("../..");
     // An archive unpacked inside another repository must not claim that
     // unrelated repository's revision.
     let is_checkout = git(&["rev-parse", "--show-toplevel"])
@@ -37,7 +40,16 @@ fn main() {
     let revision = std::env::var("SAIL_LSP_BUILD_REVISION")
         .ok()
         .or_else(|| {
-            is_checkout.then(|| git(&["describe", "--always", "--abbrev=12", "--dirty"])).flatten()
+            if !is_checkout {
+                return None;
+            }
+            let mut revision = git(&["rev-parse", "HEAD"])?;
+            if git(&["status", "--porcelain", "--untracked-files=normal"])
+                .is_some_and(|status| !status.is_empty())
+            {
+                revision.push_str("-dirty");
+            }
+            Some(revision)
         })
         .unwrap_or_else(|| "unknown (source archive)".into());
     println!("cargo:rustc-env=SAIL_LSP_BUILD_REVISION={revision}");

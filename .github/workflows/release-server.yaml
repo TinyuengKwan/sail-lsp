@@ -1,0 +1,150 @@
+name: Release standalone Sail server
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Source ref to build
+        default: main
+        type: string
+      version:
+        description: Version tag matching Cargo.toml and package.json
+        required: true
+        type: string
+      publish:
+        description: Publish verified GitHub Release assets
+        default: true
+        type: boolean
+      publish_marketplace:
+        description: Also publish VSIX to Marketplace (optional)
+        default: false
+        type: boolean
+      prerelease:
+        description: Mark as a prerelease
+        default: false
+        type: boolean
+  workflow_call:
+    inputs:
+      ref:
+        default: main
+        type: string
+      version:
+        required: true
+        type: string
+      publish:
+        default: true
+        type: boolean
+      publish_marketplace:
+        default: false
+        type: boolean
+      prerelease:
+        default: false
+        type: boolean
+    secrets:
+      VSCE_PAT:
+        required: false
+permissions:
+  contents: read
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      tag: ${{ steps.plan.outputs.tag }}
+      sha: ${{ steps.plan.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - id: plan
+        shell: bash
+        env:
+          TAG: ${{ inputs.version || github.ref_name }}
+        run: |
+          matrix=$(python3 scripts/package-distribution.py plan --tag "$TAG")
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  build:
+    needs: plan
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+      - uses: ./.github/actions/build-distribution
+        with:
+          target: ${{ matrix.target }}
+          vsix: ${{ matrix.vsix }}
+          tag: ${{ needs.plan.outputs.tag }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: distribution-${{ matrix.target }}
+          path: target/distribution/dist/*
+  clean-linux:
+    needs: [plan, build]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: distribution-x86_64-unknown-linux-gnu
+          path: target/clean-install
+      - name: Offline minimal runtime gate
+        run: python3 scripts/test-install.py --clean-container target/clean-install --output target/clean-install/results.json
+  release:
+    needs: [plan, build, clean-linux]
+    if: github.event_name == 'push' || inputs.publish
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: distribution-*
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.plan.outputs.tag }}
+          target_commitish: ${{ needs.plan.outputs.sha }}
+          prerelease: ${{ inputs.prerelease || false }}
+          generate_release_notes: true
+          files: dist/*
+          fail_on_unmatched_files: true
+  marketplace:
+    needs: [plan, build, clean-linux]
+    if: inputs.publish_marketplace
+    runs-on: ubuntu-24.04
+    env:
+      VSCE_PAT: ${{ secrets.VSCE_PAT }}
+    steps:
+      - name: Require a token only for explicit Marketplace publishing
+        run: test -n "$VSCE_PAT" || { echo 'VSCE_PAT is required when publish_marketplace is enabled' >&2; exit 1; }
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: distribution-*
+          path: target/distribution/dist
+          merge-multiple: true
+      - run: npm ci
+        working-directory: editors/code
+      - name: Publish the already-built VSIX files
+        working-directory: editors/code
+        shell: bash
+        run: |
+          for package in ../../target/distribution/dist/*.vsix; do
+            npx --no-install vsce publish --packagePath "$package"
+          done

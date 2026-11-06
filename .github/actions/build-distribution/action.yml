@@ -1,0 +1,98 @@
+name: Build portable Sail distribution
+description: Build once, package the standalone archive, and reuse it for VSIX.
+inputs:
+  target:
+    description: Rust target triple
+    required: true
+  vsix:
+    description: VS Code target name
+    required: true
+  tag:
+    description: Version tag matching Cargo/package.json
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 24
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: ${{ inputs.target }}
+    - uses: Swatinem/rust-cache@v2
+      with:
+        key: distribution-${{ inputs.target }}
+    - name: Build with vendored Z3
+      shell: bash
+      env:
+        RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
+        CFLAGS: ${{ runner.os == 'Windows' && '/utf-8' || '' }}
+        CXXFLAGS: ${{ runner.os == 'Windows' && '/utf-8' || '' }}
+        MACOSX_DEPLOYMENT_TARGET: ${{ inputs.target == 'aarch64-apple-darwin' && '11.0' || '10.15' }}
+      run: |
+        export SAIL_LSP_BUILD_REVISION=$(git rev-parse HEAD)
+        cargo build --release --locked -p sail-lsp --features vendored --target '${{ inputs.target }}' --target-dir target/distribution
+    - name: Package standalone server and metadata
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+        TAG: ${{ inputs.tag }}
+      run: |
+        suffix=''
+        if [ "$RUNNER_OS" = Windows ]; then suffix=.exe; fi
+        python scripts/package-distribution.py pack --binary "target/distribution/$TARGET/release/sail-lsp$suffix" --tag "$TAG" --output target/distribution/dist
+        ext=tar.gz
+        if [ "$RUNNER_OS" = Windows ]; then ext=zip; fi
+        python scripts/package-distribution.py extract "target/distribution/dist/sail-lsp-$TARGET.$ext" target/distribution/payload
+    - name: Confirm runtime linkage
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        if [ "$RUNNER_OS" = Linux ]; then
+          ldd target/distribution/payload/sail-lsp | tee target/distribution/ldd.txt
+          ! grep -i libz3 target/distribution/ldd.txt
+        else
+          otool -L target/distribution/payload/sail-lsp | tee target/distribution/otool.txt
+          ! grep -i libz3 target/distribution/otool.txt
+        fi
+    - name: Reuse the verified payload for VSIX
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+        VSIX_TARGET: ${{ inputs.vsix }}
+      run: |
+        cd editors/code
+        npm ci
+        node scripts/package-server.mjs --distribution ../../target/distribution/payload
+        npx --no-install vsce package --target "$VSIX_TARGET" --out "../../target/distribution/dist/sail-lsp-$TARGET.vsix" --allow-missing-repository
+        cd ../..
+        python scripts/package-distribution.py checksum "target/distribution/dist/sail-lsp-$TARGET.vsix"
+    - name: Installation lifecycle and editor configuration gate
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+      run: |
+        suffix=''
+        ext=tar.gz
+        if [ "$RUNNER_OS" = Windows ]; then suffix=.exe; ext=zip; fi
+        python scripts/test-install.py --server "target/distribution/payload/sail-lsp$suffix" --archive "target/distribution/dist/sail-lsp-$TARGET.$ext" --vsix "target/distribution/dist/sail-lsp-$TARGET.vsix" --output target/distribution/install-results.json
+    - name: Extension Host uses the release server
+      if: inputs.vsix == 'linux-x64' || inputs.vsix == 'win32-x64' || inputs.vsix == 'darwin-arm64'
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+      run: |
+        suffix=''
+        if [ "$RUNNER_OS" = Windows ]; then suffix=.exe; fi
+        export SAIL_LSP_TEST_SERVER="$GITHUB_WORKSPACE/target/distribution/payload/sail-lsp$suffix"
+        cd editors/code
+        if [ "$RUNNER_OS" = Linux ]; then
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+          xvfb-run -a npm test
+        else
+          npm test
+        fi

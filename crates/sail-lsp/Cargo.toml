@@ -14,6 +14,15 @@ name = "sail_lsp"
 
 [dependencies]
 libc.workspace = true
+ctrlc = { version = "3.5", features = ["termination"] }
+sha2 = "0.10"
+flate2 = "1.1"
+tar = "0.4"
+zip = { version = "4.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+fs2 = "0.4"
+jsonc-parser = { version = "0.34", features = ["cst", "serde", "serde_json"] }
+toml_edit = "0.22"
+tempfile = "3.10"
 anyhow.workspace = true
 base-db.workspace = true
 salsa.workspace = true
@@ -48,6 +57,5 @@ tracing-subscriber.workspace = true
 tracing-tree.workspace = true
 
 [dev-dependencies]
-tempfile = "3.10"
 ide-db = { workspace = true, features = ["test-utils"] }
 ide = { workspace = true, features = ["test-utils"] }

@@ -648,18 +648,24 @@ impl GlobalState {
     }
 }
 
-#[allow(clippy::print_stderr)]
+#[allow(clippy::print_stdout, clippy::print_stderr)]
 pub fn main() {
     // CLI subcommand dispatch before starting the LSP server.
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).is_some_and(|arg| arg == "--version" || arg == "-V") {
-        crate::version::print_version();
+        if args.iter().any(|a| a == "--json") {
+            println!("{}", crate::version::metadata());
+        } else {
+            crate::version::print_version();
+        }
         return;
     }
     if args.len() >= 2 && !args[1].starts_with('-') {
         let cmd = args[1].as_str();
         let path_arg = args.get(2).map(|s| std::path::Path::new(s.as_str()));
         let result = match cmd {
+            "install" => crate::install::run(&args[2..]),
+            "doctor" => crate::doctor::run(&args[2..]),
             "parse" => path_arg
                 .ok_or_else(|| "Usage: sail-lsp parse <file>".to_string())
                 .and_then(crate::cli::cmd_parse),

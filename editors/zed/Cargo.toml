@@ -1,0 +1,17 @@
+[package]
+name = "zed_sail"
+version = "0.1.0"
+authors = ["Tinyueng Kwan <kwantinyueng@gmail.com>"]
+edition = "2021"
+publish = false
+license = "MIT"
+
+[lib]
+path = "src/sail.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+zed_extension_api = "0.7.0"
+
+# Build independently when installed as a Zed development extension.
+[workspace]

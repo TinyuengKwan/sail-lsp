@@ -19,7 +19,11 @@ This extension provides syntax highlighting, diagnostics, goto definition, refer
 
 ## Installation
 
-Install from the VS Code Marketplace when published, or install a platform-specific VSIX from a GitHub release.
+Use the repository installer with `--editor vscode` to install the matching VSIX
+and register the managed server, without a Marketplace dependency. See the
+[installation guide](../../docs/installation.md) for source builds and the first
+standalone release requirement. A platform-specific release VSIX can also be
+installed directly with `code --install-extension FILE`.
 
 If you build locally, use the VSIX that matches your platform so the extension can launch the bundled server binary.
 
@@ -30,8 +34,13 @@ The published extension is intended to ship as platform-specific packages, each 
 If you prefer a custom server build, set `sail-lsp.server.path` to an explicit binary path. If that setting is unset, the extension tries:
 
 1. `sail-lsp.server.path`
-2. A bundled binary inside the extension
-3. `sail-lsp` from `PATH`
+2. The installer's registration (`SAIL_LSP_CONFIG_HOME/vscode.json`, otherwise
+   `~/.config/sail-lsp/vscode.json` following XDG, or `%APPDATA%/sail-lsp/vscode.json`)
+3. A bundled binary inside the extension
+4. `sail-lsp` from `PATH`
+
+An invalid managed registration produces a visible error instead of silently
+launching another binary. Restart the server after installation or rollback.
 
 ## Configuration
 
@@ -77,43 +86,24 @@ npm run build
 npm run test
 ```
 
-To produce a platform-specific VSIX with a bundled server binary:
+To produce and install a local VSIX on the current platform:
 
-1. Build the Rust binary for that target.
-2. Copy it into `editors/code/server/` with the packaging helper.
-3. Run the matching `package:vsix:*` script.
-
-Examples:
-
-```bash
-# Linux x64
-cargo build --release -p sail-lsp --target x86_64-unknown-linux-gnu --target-dir target/vscode/linux-x64
-cd editors/code
-npm run package:server:linux-x64
-npm run package:vsix:linux-x64
-
-# macOS arm64
-cargo build --release -p sail-lsp --target aarch64-apple-darwin --target-dir target/vscode/darwin-arm64
-cd editors/code
-npm run package:server:darwin-arm64
-npm run package:vsix:darwin-arm64
+```sh
+# At repository root; add --no-modify-path to manage PATH yourself.
+sh install.sh --path "$PWD" --editor vscode
+# Windows: & .\install.ps1 --path (Get-Location).Path --editor vscode
 ```
 
-## Publishing Checklist
+This requires Node.js/npm in addition to the Rust/CMake/C++ source build tools.
+For packaging without installation, see the verified standalone-payload example
+in [installation](../../docs/installation.md#release-and-ci-maintenance).
+`npm run package:local` builds a host-specific vendored binary and VSIX.
 
-- Create or verify the `sail-lsp` publisher in the VS Code Marketplace
-- Authenticate with `npx @vscode/vsce login sail-lsp`
-- Build per-platform bundled binaries
-- Package platform-specific VSIX files with `--target`
-- Publish with `npx @vscode/vsce publish --packagePath <vsix>` or upload through the Marketplace portal
-
-GitHub Actions also provides `.github/workflows/release-vscode.yaml` to build bundled VSIX artifacts for the supported targets, attach them to a GitHub release, and optionally publish them to the VS Code Marketplace.
-
-Required repository secret for Marketplace publishing:
-
-- `VSCE_PAT`: Azure DevOps Marketplace personal access token with `Marketplace (Manage)` scope
-
-For tag builds, the release workflow will publish to Marketplace automatically when `VSCE_PAT` is configured. For manual runs, enable the `publish_marketplace` input.
+Release builds use `.github/workflows/release-server.yaml`. The VSIX reuses the
+verified standalone binary, including Windows `.exe` and static Z3. GitHub assets
+can be published independently of Marketplace. Marketplace publishing is an
+explicit opt-in and requires `VSCE_PAT`; tag builds do not publish there by default.
+The manual `release-vscode.yaml` entry point delegates to the same workflow.
 
 ## Support
 

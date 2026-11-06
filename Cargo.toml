@@ -1,6 +1,6 @@
 [workspace]
 members = ["lib/*", "crates/*"]
-exclude = ["lib/ungrammar/ungrammar2json"]
+exclude = ["lib/ungrammar/ungrammar2json", "editors/zed"]
 resolver = "2"
 
 [workspace.package]

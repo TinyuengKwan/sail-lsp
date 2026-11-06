@@ -64,7 +64,7 @@
     "build-base": "esbuild ./src/main.ts --bundle --outfile=out/main.js --external:vscode --format=cjs --platform=node --target=node20",
     "watch": "npm run build-base -- --sourcemap --watch",
     "package": "npx @vscode/vsce package -o sail-lsp.vsix",
-    "package:local": "cargo build --release -p sail-lsp --features vendored --target x86_64-unknown-linux-gnu --target-dir ../../target/vscode/linux-x64 && npm run package:server:linux-x64 && npm run package:vsix:linux-x64",
+    "package:local": "node ./scripts/package-local.mjs",
     "package:vsix:linux-x64": "npx @vscode/vsce package -o sail-lsp-linux-x64.vsix --target linux-x64",
     "package:vsix:linux-arm64": "npx @vscode/vsce package -o sail-lsp-linux-arm64.vsix --target linux-arm64",
     "package:vsix:win32-x64": "npx @vscode/vsce package -o sail-lsp-win32-x64.vsix --target win32-x64",
@@ -86,7 +86,7 @@
     "test": "npm run typecheck && npm run build && node ./out/src/test/runTest.js",
     "format": "prettier --write src/",
     "format:check": "prettier --check src/",
-    "test:graph": "npm run typecheck && node --test ./out/src/test/projectGraph.test.js ./out/src/test/analysisContext.test.js"
+    "test:graph": "npm run typecheck && node --test ./out/src/test/projectGraph.test.js ./out/src/test/analysisContext.test.js ./out/src/test/installation.test.js"
   },
   "contributes": {
     "languages": [

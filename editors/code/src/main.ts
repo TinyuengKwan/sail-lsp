@@ -9,6 +9,7 @@ import * as vscode from "vscode";
 import * as path from "path";
 import * as os from "os";
 import * as fs from "fs";
+import { managedServerPath } from "./installation";
 import { ProjectGraphEntry, GraphNode, graphChildren, isCycle } from "./projectGraph";
 import { registerStructuralReplace } from "./ssr";
 import { AnalysisContext, formatAnalysisContext } from "./analysisContext";
@@ -195,6 +196,16 @@ function getServerPath(context: vscode.ExtensionContext): string | undefined {
         if (resolved) {
             return resolved;
         }
+    }
+
+    try {
+        const managed = managedServerPath(process.env, os.platform(), os.homedir());
+        if (managed) return managed;
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        outputChannel.appendLine(`[sail-lsp] ${message}`);
+        void vscode.window.showErrorMessage(message);
+        return undefined;
     }
 
     // 2. Bundled binary in extension

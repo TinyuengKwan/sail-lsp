@@ -1,0 +1,12 @@
+;;; Managed Sail integration; Emacs 29+ includes Eglot.
+(require 'eglot)
+(unless (fboundp 'sail-mode)
+  (define-derived-mode sail-mode prog-mode "Sail" "Edit Sail source."))
+(unless (fboundp 'sail-project-mode)
+  (define-derived-mode sail-project-mode prog-mode "Sail Project" "Edit Sail project manifests."))
+(add-to-list 'auto-mode-alist '("\\.sail\\'" . sail-mode))
+(add-to-list 'auto-mode-alist '("\\.sail_project\\'" . sail-project-mode))
+(add-to-list 'auto-mode-alist '("/sail\\.proj\\'" . sail-project-mode))
+(add-to-list 'eglot-server-programs '((sail-mode sail-project-mode) . (@SERVER_JSON@)))
+(add-hook 'sail-mode-hook #'eglot-ensure)
+(add-hook 'sail-project-mode-hook #'eglot-ensure)

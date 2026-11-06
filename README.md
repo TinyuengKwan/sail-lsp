@@ -6,12 +6,30 @@ Built in Rust, modeled after [rust-analyzer](https://github.com/rust-lang/rust-a
 
 ## Install
 
-```bash
+The repository includes user-scoped installers, standalone release packaging and
+optional editor integration. **The first release with the new standalone assets
+must be published before the prebuilt quick-install command can work.**
+
+From a checkout today (Rust, CMake and a C++ compiler required):
+
+```sh
 git clone https://github.com/TinyuengKwan/sail-lsp.git
 cd sail-lsp
-cargo build --release
-# Binary: target/release/sail-lsp
+sh install.sh --from-source --editor vscode
+# Windows PowerShell: & .\install.ps1 --from-source --editor vscode
 ```
+
+Once standalone assets are published, Linux/macOS users can run:
+
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/TinyuengKwan/sail-lsp/main/install.sh | sh
+```
+
+Prebuilt installation embeds the Sail stdlib and Z3 and needs no Rust or Node.js.
+Use `--editor vscode|zed|neovim|helix|emacs` for optional integrations, or keep your
+existing LSP client configuration. See [installation](docs/installation.md) for
+Windows, pinned/source/offline installs, platform requirements, remote editors,
+upgrade/rollback/uninstall, and `sail-lsp doctor`.
 
 ## Setup
 
@@ -76,21 +94,14 @@ language-servers = ["sail-lsp"]
 
 ### VS Code
 
-A dedicated extension is available at `editors/code/`. Install from a `.vsix`:
-
-```bash
-cd editors/code
-npm install && npm run package
-code --install-extension sail-lsp.vsix
-```
-
-This provides Sail syntax highlighting (TextMate grammar), language configuration,
-and automatic `sail-lsp` server management. See `editors/code/README.md` for
-configuration options.
+Use `--editor vscode` to install a matching VSIX without Marketplace. See
+[the extension documentation](editors/code/README.md) for settings and commands.
 
 ### Zed
 
-Extension: [TinyuengKwan/sail-zed](https://github.com/TinyuengKwan/sail-zed)
+Use `--editor zed` to prepare the pinned development extension, then select
+**zed: install dev extension** in Zed. Details and remote setup are in
+[installation](docs/installation.md#editors).
 
 ## Features
 

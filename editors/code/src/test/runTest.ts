@@ -10,11 +10,13 @@ async function main(): Promise<void> {
         extensionDevelopmentPath,
         extensionTestsPath,
         extensionTestsEnv: {
-            SAIL_LSP_TEST_SERVER: path.resolve(
-                extensionDevelopmentPath,
-                "../../target/debug",
-                process.platform === "win32" ? "sail-lsp.exe" : "sail-lsp",
-            ),
+            SAIL_LSP_TEST_SERVER:
+                process.env.SAIL_LSP_TEST_SERVER ??
+                path.resolve(
+                    extensionDevelopmentPath,
+                    "../../target/debug",
+                    process.platform === "win32" ? "sail-lsp.exe" : "sail-lsp",
+                ),
         },
         launchArgs: [
             path.resolve(extensionDevelopmentPath, "test-fixture"),

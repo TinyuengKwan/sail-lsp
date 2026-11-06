@@ -1,0 +1,85 @@
+name: Standalone installation
+on:
+  workflow_call:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: install-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      tag: ${{ steps.plan.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: plan
+        shell: bash
+        run: |
+          matrix=$(python3 scripts/package-distribution.py plan)
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          python3 - <<'PY'
+          import os, tomllib
+          version=tomllib.load(open('crates/sail-lsp/Cargo.toml','rb'))['package']['version']
+          with open(os.environ['GITHUB_OUTPUT'],'a') as output: output.write(f'tag=v{version}\n')
+          PY
+  install:
+    name: Install (${{ matrix.target }}, ${{ matrix.tier }})
+    needs: plan
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/build-distribution
+        with:
+          target: ${{ matrix.target }}
+          vsix: ${{ matrix.vsix }}
+          tag: ${{ needs.plan.outputs.tag }}
+      - name: Locked source installation at the checkout revision
+        shell: bash
+        env:
+          SAIL_LSP_BUILD_REVISION: ${{ github.sha }}
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/distribution
+          CARGO_BUILD_TARGET: ${{ matrix.target }}
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
+          CFLAGS: ${{ runner.os == 'Windows' && '/utf-8' || '' }}
+          CXXFLAGS: ${{ runner.os == 'Windows' && '/utf-8' || '' }}
+        run: |
+          python scripts/test-install.py --source-checkout "$GITHUB_WORKSPACE" --revision "$GITHUB_SHA" --output target/distribution/source-results.json
+      - name: Zed development extension compiles
+        shell: bash
+        run: |
+          rustup target add wasm32-wasip2
+          cargo build --locked --manifest-path editors/zed/Cargo.toml --target wasm32-wasip2
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: install-${{ matrix.target }}
+          path: |
+            target/distribution/*results.json
+            target/distribution/*.txt
+            target/distribution/dist/*
+  clean-linux:
+    needs: install
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: install-x86_64-unknown-linux-gnu
+          path: target/clean-install
+      - name: Run without Rust, Node.js or system Z3
+        run: python3 scripts/test-install.py --clean-container target/clean-install --output target/clean-install/results.json
+  conclusion:
+    if: always()
+    needs: [install, clean-linux]
+    runs-on: ubuntu-24.04
+    steps:
+      - env:
+          RESULTS: ${{ toJSON(needs.*.result) }}
+        run: echo "$RESULTS" | jq -e 'all(. == "success")' >/dev/null

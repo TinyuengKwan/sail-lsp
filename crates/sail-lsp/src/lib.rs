@@ -87,4 +87,6 @@ pub fn from_json<T: serde::de::DeserializeOwned>(
         .map_err(|e| anyhow::anyhow!("Failed to deserialize {what}: {e}"))
 }
 
+mod doctor;
+mod install;
 mod version;
