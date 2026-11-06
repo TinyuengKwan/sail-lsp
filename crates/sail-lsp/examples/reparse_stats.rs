@@ -1,5 +1,7 @@
 //! Compare the normal parse query with and without its previous-tree seed.
 //! Same inputs, fixities, query and validation; only the optional cache differs.
+#![allow(clippy::print_stdout)]
+
 use base_db::{FileId, FileText};
 use ide_db::root_database::RootDatabase;
 use salsa::Setter;

@@ -83,8 +83,11 @@ pub fn completions_with_config(
     builtins: &[&str],
     config: &CompletionConfig,
 ) -> Vec<CompletionItem> {
+    let started = std::time::Instant::now();
     let (mut ctx, analysis) =
         context::CompletionContext::new(db, file, file_text, text, offset, prefix);
+    let context_us = started.elapsed().as_micros();
+    let providers_started = std::time::Instant::now();
     ctx.config = config.clone();
     let mut completions = Completions::default();
 
@@ -117,7 +120,10 @@ pub fn completions_with_config(
         }
     }
 
+    let providers_us = providers_started.elapsed().as_micros();
+    let origins_started = std::time::Instant::now();
     let mut items: Vec<CompletionItem> = completions.into();
+    let candidates = items.len();
     let suffix_len = text[offset..]
         .chars()
         .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '\'')
@@ -182,10 +188,15 @@ pub fn completions_with_config(
             }
         }
     }
+    let origins_us = origins_started.elapsed().as_micros();
+    let ranking_started = std::time::Instant::now();
     crate::item::deduplicate_and_sort(&mut items, prefix);
     if let Some(limit) = config.limit {
         items.truncate(limit);
     }
+    tracing::debug!(target: "sail_lsp::latency",
+        "completion_phases context_us={context_us} providers_us={providers_us} origins_us={origins_us} ranking_us={} candidates={candidates} returned={}",
+        ranking_started.elapsed().as_micros(), items.len());
     items
 }
 

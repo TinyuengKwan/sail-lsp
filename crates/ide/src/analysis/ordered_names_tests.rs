@@ -1947,7 +1947,7 @@ fn ordered_generated_enum_conversion_checks_the_finite_domain() {
             .unwrap();
         assert_eq!(
             diagnostics.iter().any(|d| d.severity == ide_diagnostics::Severity::Error),
-            value < 0 || value > 1,
+            !(0..=1).contains(&value),
             "{body}{diagnostics:?}"
         );
     }
@@ -3285,5 +3285,142 @@ fn record_undefined_eligibility_tracks_provider_constraints() {
                 "{errors:?}"
             );
         }
+    }
+}
+
+#[test]
+fn nested_alias_argument_kinds_match_upstream_with_cross_file_origins() {
+    // Sail 0.20.3 ac09f887: accepts the first row and rejects the other
+    // rows specifically for Bool/Int/Type argument kind mismatches.
+    let definitions = "type Wrap('p : Bool, 'n : Int, 'a : Type) = (bool('p), vector('n, dec, 'a))\ntype Outer('p : Bool, 'n : Int, 'a : Type) = list(Wrap('p, 'n, 'a))\n";
+    for (arguments, accepted) in [
+        ("true, 8, int", true),
+        ("8, true, int", false),
+        ("true, int, int", false),
+        ("true, 8, false", false),
+    ] {
+        for split in [false, true] {
+            let usage = format!("val use : Outer({arguments}) -> unit\n");
+            let combined = format!("{definitions}{usage}");
+            let (host, map, _) = if split {
+                setup(&[("defs.sail", definitions), ("main.sail", &usage)], &[0, 1], vec![])
+            } else {
+                setup(&[("main.sail", &combined)], &[0], vec![])
+            };
+            let diagnostics = snapshot(&host, &map)
+                .file_diagnostics(FileId::from_raw(if split { 1 } else { 0 }), &Default::default())
+                .unwrap();
+            assert_eq!(
+                diagnostics.iter().any(|d| d.severity == ide_diagnostics::Severity::Error),
+                !accepted,
+                "split={split} arguments={arguments}: {diagnostics:?}"
+            );
+            if !accepted {
+                assert!(
+                    diagnostics.iter().any(|d| matches!(
+                        &d.code,
+                        hir::diagnostics::DiagnosticCode::SailError("kind-mismatch")
+                    )),
+                    "wrong rejection reason: {diagnostics:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn mixed_explicit_and_inferred_alias_kinds_do_not_default_to_type() {
+    let definition = "type Mixed('p : Bool, 'n) = (bool('p), vector('n, dec, int))\n";
+    for (usage, accepted) in [
+        ("val use : Mixed(true, 8) -> unit\n", true),
+        ("val use : Mixed(8, 8) -> unit\n", false),
+        ("val use : Mixed(true, bool) -> unit\n", false),
+    ] {
+        let (host, map, _) =
+            setup(&[("defs.sail", definition), ("main.sail", usage)], &[0, 1], vec![]);
+        let diagnostics = snapshot(&host, &map)
+            .file_diagnostics(FileId::from_raw(1), &Default::default())
+            .unwrap();
+        assert_eq!(
+            diagnostics.iter().any(|d| d.severity == ide_diagnostics::Severity::Error),
+            !accepted,
+            "{usage}{diagnostics:?}"
+        );
+        if !accepted {
+            assert!(
+                diagnostics.iter().any(|d| matches!(
+                    &d.code,
+                    hir::diagnostics::DiagnosticCode::SailError("kind-mismatch")
+                )),
+                "{diagnostics:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn alias_kind_inference_keeps_outer_type_parameters_distinct_from_existentials() {
+    // Sail 0.20.3 accepts Shadow(bool), and rejects Shadow(8) because the
+    // outer tuple component gives the header parameter kind Type. The inner
+    // existential's same-spelled binder has kind Int and is unrelated.
+    let definition = "type Shadow('n) = ('n, {'n, 'n >= 0. vector('n, dec, int)})\n";
+    for (argument, accepted) in [("bool", true), ("8", false)] {
+        let usage = format!("val use : Shadow({argument}) -> unit\n");
+        let (host, map, _) =
+            setup(&[("defs.sail", definition), ("main.sail", &usage)], &[0, 1], vec![]);
+        let diagnostics = snapshot(&host, &map)
+            .file_diagnostics(FileId::from_raw(1), &Default::default())
+            .unwrap();
+        assert_eq!(
+            diagnostics.iter().any(|d| d.severity == ide_diagnostics::Severity::Error),
+            !accepted,
+            "{argument}: {diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn inferred_alias_kinds_update_after_cross_file_body_edits() {
+    let width = "type Parameter('a) = vector('a, dec, int)\n";
+    let element = "type Parameter('a) = ('a, int)\n";
+    let usage = "val first : Parameter(8) -> unit\nval second : Parameter(16) -> unit\n";
+    let (mut host, map, _) = setup(&[("defs.sail", width), ("main.sail", usage)], &[0, 1], vec![]);
+    for (definition, expected_errors) in [(width, 0), (element, 2), (width, 0)] {
+        let mut change = ide_db::apply_change::Change::new();
+        change.change_file(FileId::from_raw(0), definition);
+        host.apply_change(change);
+        let diagnostics = snapshot(&host, &map)
+            .file_diagnostics(FileId::from_raw(1), &Default::default())
+            .unwrap();
+        let errors: Vec<_> =
+            diagnostics.iter().filter(|d| d.severity == ide_diagnostics::Severity::Error).collect();
+        assert_eq!(errors.len(), expected_errors, "{definition}{diagnostics:?}");
+        assert!(
+            errors.iter().all(|d| matches!(
+                &d.code,
+                hir::diagnostics::DiagnosticCode::SailError("kind-mismatch")
+            )),
+            "{diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn unconstrained_alias_result_kind_requires_an_annotation() {
+    // Sail 0.20.3 rejects the unannotated identity alias at its body.
+    for (source, accepted) in [
+        ("type Id('a) = 'a\n", false),
+        ("type Id('a : Type) = 'a\n", true),
+        ("type Pair('a) = ('a, int)\n", true),
+    ] {
+        let (host, map, _) = setup(&[("main.sail", source)], &[0], vec![]);
+        let diagnostics = snapshot(&host, &map)
+            .file_diagnostics(FileId::from_raw(0), &Default::default())
+            .unwrap();
+        assert_eq!(
+            diagnostics.iter().any(|d| d.severity == ide_diagnostics::Severity::Error),
+            !accepted,
+            "{source}{diagnostics:?}"
+        );
     }
 }

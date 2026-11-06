@@ -33,6 +33,7 @@ pulldown-cmark.workspace = true
 test-utils = ["ide-db/test-utils"]
 
 [dev-dependencies]
+tempfile = "3.10"
 ide-db = { workspace = true, features = ["test-utils"] }
 expect-test.workspace = true
 rowan.workspace = true

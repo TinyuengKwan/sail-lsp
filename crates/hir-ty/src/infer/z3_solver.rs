@@ -26,6 +26,38 @@ pub static Z3_CACHE_MISSES: AtomicU64 = AtomicU64::new(0);
 
 const Z3_CACHE_CAPACITY: usize = 4096;
 
+static LIVE_SOLVER_THREADS: AtomicU64 = AtomicU64::new(0);
+static TOTAL_SOLVER_THREADS: AtomicU64 = AtomicU64::new(0);
+struct SolverThread;
+impl Drop for SolverThread {
+    fn drop(&mut self) {
+        LIVE_SOLVER_THREADS.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+thread_local! {
+    static SOLVER_THREAD: SolverThread = {
+        LIVE_SOLVER_THREADS.fetch_add(1, Ordering::Relaxed);
+        TOTAL_SOLVER_THREADS.fetch_add(1, Ordering::Relaxed);
+        SolverThread
+    };
+}
+
+fn new_solver() -> z3::Solver {
+    SOLVER_THREAD.with(|_| {});
+    z3::Solver::new()
+}
+
+/// Passive observations, without creating a solver/context on the caller.
+/// Thread counts identify possible native context owners, not their byte size.
+pub fn cache_ownership() -> (Option<usize>, usize, u64, u64) {
+    (
+        Z3_CACHE.get().and_then(|cache| cache.try_lock().ok().map(|cache| cache.map.len())),
+        Z3_CACHE_CAPACITY,
+        LIVE_SOLVER_THREADS.load(Ordering::Relaxed),
+        TOTAL_SOLVER_THREADS.load(Ordering::Relaxed),
+    )
+}
+
 #[derive(Hash, PartialEq, Eq, Clone)]
 struct Z3CacheKey {
     goal: ConstraintExpr,
@@ -120,7 +152,7 @@ pub(super) fn try_prove_quantified(
         return ConstraintStatus::Unknown;
     }
     let mut env = HashMap::new();
-    let solver = z3::Solver::new();
+    let solver = new_solver();
     for a in &assumptions {
         let Some(a) = translate_constraint(a, &Subst::default(), &mut env) else {
             return ConstraintStatus::Unknown;
@@ -304,7 +336,7 @@ fn solve_with_z3_bounded_exp(
     }
 
     // First query: assumptions + exp_bounds + !expr; if Unsat, expr is valid.
-    let solver = z3::Solver::new();
+    let solver = new_solver();
     for a in &z3_assumptions {
         solver.assert(a);
     }
@@ -317,7 +349,7 @@ fn solve_with_z3_bounded_exp(
         SatResult::Unknown => ConstraintStatus::Unknown,
         SatResult::Sat => {
             // Not always implied; check if ever satisfied.
-            let solver2 = z3::Solver::new();
+            let solver2 = new_solver();
             for a in &z3_assumptions {
                 solver2.assert(a);
             }
@@ -370,7 +402,7 @@ pub fn try_solve_unique(
     let var_z3 = intern_var(&format!("v:{}", var_name), &mut env);
 
     // Step 1: Find a satisfying assignment.
-    let solver = z3::Solver::new();
+    let solver = new_solver();
     for a in &z3_assumptions {
         solver.assert(a);
     }
@@ -385,7 +417,7 @@ pub fn try_solve_unique(
     let v = val_ast.as_i64()?;
 
     // Step 2: Assert var_name != v and check UNSAT (uniqueness).
-    let solver2 = z3::Solver::new();
+    let solver2 = new_solver();
     for a in &z3_assumptions {
         solver2.assert(a);
     }
@@ -421,7 +453,7 @@ fn solve_with_z3(
 
     // First query: is `expr` implied by assumptions?  Assert
     // assumptions + !expr; if Unsat, `expr` is valid.
-    let solver = z3::Solver::new();
+    let solver = new_solver();
     for a in &z3_assumptions {
         solver.assert(a);
     }
@@ -432,7 +464,7 @@ fn solve_with_z3(
         SatResult::Sat => {
             // `expr` is not always implied; check whether it is
             // ever satisfied given the assumptions.
-            let solver2 = z3::Solver::new();
+            let solver2 = new_solver();
             for a in &z3_assumptions {
                 solver2.assert(a);
             }
@@ -488,6 +520,7 @@ fn check_solver(solver: &z3::Solver) -> SatResult {
     });
     if result == SatResult::Unknown || permit.cancelled() || interrupted.load(Ordering::Relaxed) {
         let reason = solver.get_reason_unknown().unwrap_or_default();
+        tracing::debug!(?result, interrupted = interrupted.load(Ordering::Relaxed), cancelled = permit.cancelled(), %reason, timeout_ms = permit.timeout_ms, "SMT check incomplete");
         if interrupted.load(Ordering::Relaxed)
             || reason.contains("resource")
             || reason.contains("timeout")
@@ -615,7 +648,7 @@ fn translate_numeric(
             {
                 return (num_bigint::BigInt::from(1) << n).to_string().parse::<Int>().ok();
             }
-            let value = uninterpreted_numeric("pow2", &[exponent.clone()]);
+            let value = uninterpreted_numeric("pow2", std::slice::from_ref(&exponent));
             // AST text is after substitution, unlike source text. Equal
             // arguments share a function application; distinct ones do not.
             let key = exponent.to_string();
@@ -775,6 +808,90 @@ fn build_cache_key(
 mod cancellation_tests {
     use super::*;
     #[test]
+    fn exhausted_request_does_not_cache_unknown_or_poison_the_next_request() {
+        use crate::solver_budget::{SolverBudget, SolverLimits};
+        use std::time::Duration;
+        let var = NumericExpr::Var("budget_retry_square".into());
+        let goal = ConstraintExpr::Compare {
+            lhs: NumericExpr::Mul(Box::new(var.clone()), Box::new(var)),
+            op: CompareOp::Gte,
+            rhs: NumericExpr::Const(0),
+        };
+        let subst = Subst::default();
+        let key = build_cache_key(&goal, &subst, &[]);
+        {
+            let _budget = SolverBudget::enter(
+                crate::CancellationToken::never(),
+                SolverLimits { checks: 0, ..Default::default() },
+            );
+            assert_eq!(try_solve(&goal, &subst, &[]), ConstraintStatus::Unknown);
+            assert!(SolverBudget::budget_exhaustion_count() > 0);
+            assert!(cache_lookup(&key).is_none());
+        }
+        let _budget = SolverBudget::enter(
+            crate::CancellationToken::never(),
+            SolverLimits {
+                total: Duration::from_secs(10),
+                per_check: Duration::from_secs(5),
+                checks: 64,
+            },
+        );
+        assert_eq!(try_solve(&goal, &subst, &[]), ConstraintStatus::Satisfied);
+        assert_eq!(cache_lookup(&key), Some(ConstraintStatus::Satisfied));
+    }
+    #[test]
+    #[ignore = "explicit SMT contention probe; reports timing-dependent outcomes rather than asserting editor-budget proofs"]
+    fn parallel_editor_budget_probe() {
+        use crate::solver_budget::{SolverBudget, SolverLimits};
+        use std::time::Duration;
+        let workers = std::thread::available_parallelism().map_or(8, usize::from).clamp(8, 32);
+        for generous in [false, true] {
+            let gate = std::sync::Barrier::new(workers);
+            let unknown = AtomicU64::new(0);
+            let exhausted = AtomicU64::new(0);
+            std::thread::scope(|scope| {
+                for worker in 0..workers {
+                    let (gate, unknown, exhausted) = (&gate, &unknown, &exhausted);
+                    scope.spawn(move || {
+                        gate.wait();
+                        for round in 0..8 {
+                            let limits = if generous {
+                                SolverLimits {
+                                    total: Duration::from_secs(10),
+                                    per_check: Duration::from_secs(5),
+                                    checks: 64,
+                                }
+                            } else {
+                                SolverLimits::default()
+                            };
+                            let _budget =
+                                SolverBudget::enter(crate::CancellationToken::never(), limits);
+                            let var =
+                                NumericExpr::Var(format!("probe_{generous}_{worker}_{round}"));
+                            let expr = ConstraintExpr::Compare {
+                                lhs: NumericExpr::Mul(Box::new(var.clone()), Box::new(var)),
+                                op: CompareOp::Gte,
+                                rhs: NumericExpr::Const(0),
+                            };
+                            let result = try_solve(&expr, &Subst::default(), &[]);
+                            if result == ConstraintStatus::Unknown {
+                                unknown.fetch_add(1, Ordering::Relaxed);
+                                if SolverBudget::budget_exhaustion_count() > 0 {
+                                    exhausted.fetch_add(1, Ordering::Relaxed);
+                                }
+                            } else {
+                                assert_eq!(result, ConstraintStatus::Satisfied);
+                            }
+                        }
+                    });
+                }
+            });
+            if generous {
+                assert_eq!(unknown.load(Ordering::Relaxed), 0);
+            }
+        }
+    }
+    #[test]
     fn a_running_solver_observes_request_cancellation() {
         use crate::solver_budget::{SolverBudget, SolverLimits};
         use std::time::{Duration, Instant};
@@ -787,7 +904,7 @@ mod cancellation_tests {
                 checks: 1,
             },
         );
-        let solver = z3::Solver::new();
+        let solver = new_solver();
         // An unsatisfiable pigeonhole instance keeps the native solver busy
         // long enough to exercise the interrupt handle, without large numerals.
         let cells: Vec<Vec<Bool>> = (0..24)
@@ -796,10 +913,10 @@ mod cancellation_tests {
         for row in &cells {
             solver.assert(Bool::or(&row.iter().collect::<Vec<_>>()));
         }
-        for h in 0..23 {
-            for p in 0..24 {
-                for q in p + 1..24 {
-                    solver.assert(Bool::or(&[&cells[p][h].not(), &cells[q][h].not()]));
+        for (p, row) in cells.iter().enumerate() {
+            for other in cells.iter().skip(p + 1) {
+                for (left, right) in row.iter().zip(other) {
+                    solver.assert(Bool::or(&[&left.not(), &right.not()]));
                 }
             }
         }

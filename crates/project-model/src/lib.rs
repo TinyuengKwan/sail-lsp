@@ -160,6 +160,23 @@ const RESERVED: &[&str] = &[
     "versions",
 ];
 
+/// Editor queries may use the complete token prefix before a lexical error.
+/// Never repair string contents into invented paths. Loading always uses `lex`.
+fn lex_for_editor(source: &str) -> Vec<Token> {
+    let mut end = source.len();
+    loop {
+        match lex(&source[..end]) {
+            Ok(tokens) => return tokens,
+            Err(error) => match error.range {
+                Some(range) if range.start < end && source.is_char_boundary(range.start) => {
+                    end = range.start
+                }
+                _ => return Vec::new(),
+            },
+        }
+    }
+}
+
 fn lex(source: &str) -> Result<Vec<Token>, ProjectError> {
     let bytes = source.as_bytes();
     let mut out = Vec::new();

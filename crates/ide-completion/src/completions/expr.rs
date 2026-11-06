@@ -366,7 +366,7 @@ fn complete_unqualified(
                     .config
                     .callable
                     .filter(|_| !has_parens)
-                    .and_then(|_| sig_info)
+                    .and(sig_info)
                     .map(|sig| ide_db::function_snippet(&decl.name, &sig.params));
                 // Populate CompletionRelevanceFn for functions + type_match.
                 let type_match = (kind == CompletionItemKind::Function)

@@ -428,6 +428,17 @@ fn run(
     typecheck_only: bool,
     strict_bitvector: bool,
 ) -> i32 {
+    let manifest = if typecheck_only {
+        Vec::new()
+    } else {
+        match read_accepts_manifest() {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                eprintln!("{error}");
+                return 2;
+            }
+        }
+    };
     let lib_dir = match find_sail_lib() {
         Some(d) => d,
         None => {
@@ -441,22 +452,14 @@ fn run(
     println!("Typecheck mode: strict-bitvector={strict_bitvector}; extended corpora: default");
     let config = ide_diagnostics::DiagnosticsConfig::new();
 
-    let mut pass_files: Vec<_> = std::fs::read_dir(root.join("pass"))
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|e| e == "sail"))
-        .collect();
-    pass_files.sort();
-    let mut fail_files: Vec<_> = std::fs::read_dir(root.join("fail"))
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|e| e == "sail"))
-        .collect();
-    fail_files.sort();
+    let (pass_files, fail_files) =
+        match (corpus_source_files(&root.join("pass")), corpus_source_files(&root.join("fail"))) {
+            (Ok(pass), Ok(fail)) => (pass, fail),
+            (Err(error), _) | (_, Err(error)) => {
+                eprintln!("{error}");
+                return 2;
+            }
+        };
 
     let load = |p: &PathBuf| -> Option<(Url, PathBuf, String)> {
         let text = std::fs::read_to_string(p).ok()?;
@@ -476,7 +479,10 @@ fn run(
     let mut pass_ok = 0usize;
     let mut pass_n = 0usize;
     for p in pass_files.iter().filter(|p| keep(p)) {
-        let Some(t) = load(p) else { continue };
+        let Some(t) = load(p) else {
+            eprintln!("Could not read corpus source: {}", p.display());
+            return 2;
+        };
         pass_n += 1;
         let out = run_one(&lib_files, &t, &config, strict_bitvector);
         if out.crashed {
@@ -506,7 +512,10 @@ fn run(
     let mut disagreements: Vec<(String, String, String)> = Vec::new();
     let mut misplaced_at: Vec<(String, String, usize, usize)> = Vec::new();
     for p in fail_files.iter().filter(|p| keep(p)) {
-        let Some(t) = load(p) else { continue };
+        let Some(t) = load(p) else {
+            eprintln!("Could not read corpus source: {}", p.display());
+            return 2;
+        };
         fail_n += 1;
         let out = run_one(&lib_files, &t, &config, strict_bitvector);
         if out.crashed {
@@ -604,14 +613,16 @@ fn run(
     let mut corpora: Vec<(String, usize, usize, usize, usize)> = Vec::new();
     let mut corpus_fp: Vec<Outcome> = Vec::new();
     let mut corpus_fneg: Vec<String> = Vec::new();
-    let manifest = if typecheck_only { Vec::new() } else { read_accepts_manifest() };
     for (corpus, entries) in manifest {
         let (mut ok, mut fp_n, mut fneg_n, mut scope_n) = (0usize, 0usize, 0usize, 0usize);
         for (path, verdict) in entries {
             if !keep(&path) {
                 continue;
             }
-            let Some(t) = load(&path) else { continue };
+            let Some(t) = load(&path) else {
+                eprintln!("Could not read corpus source: {}", path.display());
+                return 2;
+            };
             let out = run_one(&lib_files, &t, &config, false);
             if out.crashed {
                 crashes.push(out.name.clone());
@@ -772,9 +783,8 @@ fn run(
 }
 
 /// `OK` / `SCOPE` / `REJECT` followed by an absolute path, grouped by the
-/// corpus directory each path sits in. Missing files are skipped: the manifest
-/// holds absolute paths for one checkout on purpose, and a moved checkout
-/// should measure less rather than fail.
+/// corpus directory each path sits in. Missing or malformed inputs are errors;
+/// relocating a checkout requires regenerating its oracle paths.
 /// Regenerate with `scripts/regen_upstream_accepts.py`.
 /// What upstream does with a file, in the manifest's own three verdicts.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -793,22 +803,50 @@ enum Verdict {
     Reject,
 }
 
-fn read_accepts_manifest() -> Vec<(String, Vec<(PathBuf, Verdict)>)> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .map(|root| root.join("docs/upstream-accepts.txt"));
-    let Some(text) = path.and_then(|p| std::fs::read_to_string(p).ok()) else {
-        return Vec::new();
-    };
+fn corpus_source_files(directory: &Path) -> Result<Vec<PathBuf>, String> {
+    let entries = std::fs::read_dir(directory).map_err(|error| {
+        format!("Could not read corpus directory {}: {error}", directory.display())
+    })?;
+    let mut files = Vec::new();
+    for entry in entries {
+        let entry = entry
+            .map_err(|error| format!("Could not enumerate {}: {error}", directory.display()))?;
+        let path = entry.path();
+        if path.extension().is_some_and(|extension| extension == "sail") {
+            if !path.is_file() {
+                return Err(format!("Corpus source is not a file: {}", path.display()));
+            }
+            files.push(path);
+        }
+    }
+    if files.is_empty() {
+        return Err(format!("No Sail sources in corpus directory {}", directory.display()));
+    }
+    files.sort();
+    Ok(files)
+}
+
+type CorpusManifest = Vec<(String, Vec<(PathBuf, Verdict)>)>;
+
+fn read_accepts_manifest() -> Result<CorpusManifest, String> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/upstream-accepts.txt");
+    read_accepts_manifest_at(&path)
+}
+
+fn read_accepts_manifest_at(path: &Path) -> Result<CorpusManifest, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|error| format!("Could not read oracle {}: {error}", path.display()))?;
     let mut by_corpus: std::collections::BTreeMap<String, Vec<(PathBuf, Verdict)>> =
         Default::default();
-    for line in text.lines() {
+    for (index, line) in text.lines().enumerate() {
+        let invalid = |message: String| format!("{}:{}: {message}", path.display(), index + 1);
         let line = line.trim();
         if line.starts_with('#') || line.is_empty() {
             continue;
         }
-        let Some((verdict, file)) = line.split_once(char::is_whitespace) else { continue };
+        let Some((verdict, file)) = line.split_once(char::is_whitespace) else {
+            return Err(invalid("Expected verdict and source path".into()));
+        };
         let accepted = match verdict {
             "OK" => Verdict::Ok,
             "SCOPE" => Verdict::Scope,
@@ -817,11 +855,11 @@ fn read_accepts_manifest() -> Vec<(String, Vec<(PathBuf, Verdict)>)> {
             // the files that carried it. Read as `Reject` so an un-regenerated
             // manifest still measures something, not as a silent `Scope`.
             "REJECT" | "BAD" => Verdict::Reject,
-            _ => continue,
+            _ => return Err(invalid(format!("Unknown oracle verdict: {verdict}"))),
         };
         let file = PathBuf::from(file.trim());
-        if !file.exists() {
-            continue;
+        if !file.is_file() {
+            return Err(invalid(format!("Corpus source is missing or not a file: {}. Regenerate docs/upstream-accepts.txt for this checkout", file.display())));
         }
         // The corpus is the directory under `test/`.
         let corpus = file
@@ -832,7 +870,10 @@ fn read_accepts_manifest() -> Vec<(String, Vec<(PathBuf, Verdict)>)> {
             .unwrap_or_else(|| "other".to_string());
         by_corpus.entry(corpus).or_default().push((file, accepted));
     }
-    by_corpus.into_iter().collect()
+    if by_corpus.is_empty() {
+        return Err(format!("{}: oracle contains no cases", path.display()));
+    }
+    Ok(by_corpus.into_iter().collect())
 }
 
 #[cfg(test)]
@@ -850,5 +891,79 @@ mod expectation_tests {
             "example"
         )
         .is_none());
+    }
+}
+
+#[cfg(test)]
+mod oracle_input_tests {
+    use super::*;
+
+    #[test]
+    fn oracle_validation_preserves_every_verdict_and_paths_with_spaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("with spaces.sail");
+        std::fs::write(&source, "function f() -> int = 1\n").unwrap();
+        let manifest = dir.path().join("oracle.txt");
+        std::fs::write(
+            &manifest,
+            format!(
+                "# provenance\nOK {}\nSCOPE {}\nREJECT {}\n",
+                source.display(),
+                source.display(),
+                source.display()
+            ),
+        )
+        .unwrap();
+        let parsed = read_accepts_manifest_at(&manifest).unwrap();
+        let entries: Vec<_> = parsed.iter().flat_map(|(_, rows)| rows).collect();
+        assert_eq!(entries.len(), 3);
+        assert!(entries[0].1 == Verdict::Ok);
+        assert!(entries[1].1 == Verdict::Scope);
+        assert!(entries[2].1 == Verdict::Reject);
+        assert!(entries.iter().all(|(path, _)| *path == source));
+    }
+
+    #[test]
+    fn incomplete_oracle_never_succeeds_with_a_smaller_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("oracle.txt");
+        assert!(read_accepts_manifest_at(&manifest)
+            .err()
+            .unwrap()
+            .contains("Could not read oracle"));
+        for (contents, message) in [
+            ("# no cases\n".into(), "oracle contains no cases"),
+            ("# provenance\nOK\n".into(), ":2: Expected verdict"),
+            ("# provenance\nUNKNOWN whatever.sail\n".into(), ":2: Unknown oracle verdict"),
+            (
+                format!("# provenance\nOK {}\n", dir.path().join("missing.sail").display()),
+                ":2: Corpus source is missing",
+            ),
+            (format!("OK {}\n", dir.path().display()), ":1: Corpus source is missing"),
+        ] {
+            std::fs::write(&manifest, contents).unwrap();
+            let error = read_accepts_manifest_at(&manifest).err().unwrap();
+            assert!(error.contains(message), "{error}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod corpus_directory_tests {
+    use super::*;
+    #[test]
+    fn corpus_directories_must_exist_and_contain_readable_source_candidates() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(corpus_source_files(&dir.path().join("missing")).is_err());
+        assert!(corpus_source_files(dir.path()).is_err());
+        std::fs::write(dir.path().join("notes.txt"), "not a source").unwrap();
+        assert!(corpus_source_files(dir.path()).is_err());
+        std::fs::create_dir(dir.path().join("invalid.sail")).unwrap();
+        assert!(corpus_source_files(dir.path()).is_err());
+        std::fs::remove_dir(dir.path().join("invalid.sail")).unwrap();
+        std::fs::write(dir.path().join("b.sail"), "").unwrap();
+        std::fs::write(dir.path().join("a.sail"), "").unwrap();
+        let paths = corpus_source_files(dir.path()).unwrap();
+        assert_eq!(paths, vec![dir.path().join("a.sail"), dir.path().join("b.sail")]);
     }
 }

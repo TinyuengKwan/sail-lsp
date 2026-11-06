@@ -3,6 +3,10 @@ use super::hierarchy::tests::{setup, snapshot};
 use super::*;
 use ide_db::text_edit::TextEdit;
 
+fn import_config() -> ide_completion::CompletionConfig {
+    ide_completion::CompletionConfig { enable_imports_on_the_fly: true, ..Default::default() }
+}
+
 fn fixes(a: &Analysis, url: &url::Url, text: &str, needle: &str) -> Vec<TextEdit> {
     let offset = text.find(needle).unwrap();
     a.assists(url, base_db::text_range(offset, offset), &Default::default())
@@ -74,9 +78,17 @@ fn completion_include_is_lazy_and_keeps_ambiguous_origins_separate() {
         .completions(
             FileId::from_raw(0),
             file.position_at(main.find("hel(").unwrap() + 3),
+            &import_config(),
+        )
+        .unwrap();
+    let disabled = a
+        .completions(
+            FileId::from_raw(0),
+            file.position_at(main.find("hel(").unwrap() + 3),
             &Default::default(),
         )
         .unwrap();
+    assert!(disabled.iter().all(|item| item.import.is_none()), "autoimport is disabled by default");
     let mut imports: Vec<_> = items.into_iter().filter(|i| i.import.is_some()).collect();
     assert_eq!(imports.len(), 2, "{imports:?}");
     for item in &mut imports {
@@ -167,7 +179,7 @@ fn include_completion_rejects_stale_source_and_target() {
             .completions(
                 FileId::from_raw(0),
                 f.position_at(main.find("hel(").unwrap() + 3),
-                &Default::default(),
+                &import_config(),
             )
             .unwrap()
             .into_iter()
@@ -250,7 +262,7 @@ fn include_completion_docs_follow_the_activated_branch() {
         .completions(
             FileId::from_raw(0),
             file.position_at(main.find("hel(").unwrap() + 3),
-            &Default::default(),
+            &import_config(),
         )
         .unwrap()
         .into_iter()
@@ -285,7 +297,7 @@ fn include_completion_revalidates_context_after_configuration_changes() {
         .completions(
             FileId::from_raw(0),
             file.position_at(main.find("hel(").unwrap() + 3),
-            &Default::default(),
+            &import_config(),
         )
         .unwrap()
         .into_iter()
@@ -332,7 +344,7 @@ fn include_resolve_rejects_out_of_bounds_client_offsets() {
         .completions(
             FileId::from_raw(0),
             file.position_at(main.find("hel(").unwrap() + 3),
-            &Default::default(),
+            &import_config(),
         )
         .unwrap()
         .into_iter()
@@ -475,7 +487,7 @@ fn include_preview_checks_duplicate_declarations_across_module_owners() {
             .completions(
                 FileId::from_raw(1),
                 file.position_at(main.find(name).unwrap() + name.len()),
-                &Default::default(),
+                &import_config(),
             )
             .unwrap()
             .into_iter()
@@ -523,7 +535,7 @@ fn include_outcome_target_uses_its_own_namespace() {
         assert_eq!(edits[0].new_text, "$include \"outcome.sail\"\n");
         let file = a.file(&urls[0]).unwrap();
         let mut imports: Vec<_> = a
-            .completions(FileId::from_raw(0), file.position_at(offset + 5), &Default::default())
+            .completions(FileId::from_raw(0), file.position_at(offset + 5), &import_config())
             .unwrap()
             .into_iter()
             .filter(|item| item.import.is_some())
@@ -915,7 +927,7 @@ fn instantiation_rhs_auto_include_preserves_the_replacement_namespace() {
         );
         let file = a.file(&urls[0]).unwrap();
         let mut items: Vec<_> = a
-            .completions(FileId::from_raw(0), file.position_at(offset + 5), &Default::default())
+            .completions(FileId::from_raw(0), file.position_at(offset + 5), &import_config())
             .unwrap()
             .into_iter()
             .filter(|item| item.import.is_some())
@@ -937,4 +949,43 @@ fn instantiation_rhs_auto_include_preserves_the_replacement_namespace() {
         assert_eq!(targets[0].file_id, Some(FileId::from_raw(if type_rhs { 1 } else { 2 })));
         assert!(fixes(&a, &urls[0], &updated, &updated[offset..]).is_empty());
     }
+}
+
+#[test]
+fn primed_import_catalog_keeps_inactive_candidates_fresh() {
+    let main = "function use(x : int) -> int = hel(x)\n";
+    let (mut host, map, urls) =
+        setup(&[("main.sail", main), ("helper.sail", "val helper : int -> int\n")], &[0], vec![]);
+    let imports = |analysis: &Analysis| {
+        let file = analysis.file(&urls[0]).unwrap();
+        analysis
+            .completions(
+                FileId::from_raw(0),
+                file.position_at(main.find("hel(").unwrap() + 3),
+                &import_config(),
+            )
+            .unwrap()
+            .into_iter()
+            .filter_map(|item| item.import)
+            .collect::<Vec<_>>()
+    };
+    let analysis = snapshot(&host, &map);
+    analysis.prime_import_catalog(&hir::CancellationToken::never()).unwrap();
+    let before = imports(&analysis);
+    assert_eq!(before.len(), 1);
+    assert_eq!(before[0].name, "helper");
+    let cancelled = hir::CancellationToken::new();
+    cancelled.cancel();
+    analysis.prime_import_catalog(&cancelled).unwrap();
+    assert_eq!(imports(&analysis), before);
+    drop(analysis);
+    let mut change = ide_db::apply_change::Change::new();
+    change.change_file(FileId::from_raw(1), "val help_new : int -> int\n");
+    host.apply_change(change);
+    let analysis = snapshot(&host, &map);
+    let after = imports(&analysis);
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].name, "help_new");
+    analysis.prime_import_catalog(&hir::CancellationToken::never()).unwrap();
+    assert_eq!(imports(&analysis), after);
 }

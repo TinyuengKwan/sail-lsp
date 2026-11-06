@@ -12,7 +12,10 @@ pub(crate) fn import_on_the_fly(
     _all_files: &[(&Url, &dyn FileDb)],
     _current_uri: &Url,
 ) {
-    if ctx.position == CompletionPosition::Pattern || ctx.prefix.len() < 2 {
+    if !ctx.config.enable_imports_on_the_fly
+        || ctx.position == CompletionPosition::Pattern
+        || ctx.prefix.len() < 2
+    {
         return;
     }
     let Some(file) = ctx.file_text else { return };

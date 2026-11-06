@@ -10,6 +10,10 @@ use std::collections::HashMap;
 pub(crate) struct DocumentData {
     pub version: i32,
     pub data: String,
+    /// LSP versions may restart after close/open. Clones retain the lifetime.
+    pub lifetime: u64,
+    /// Disk baseline for manifest buffers; ordinary source buffers leave it empty.
+    pub saved_manifest_text: Option<String>,
 }
 
 impl DocumentData {
@@ -60,7 +64,13 @@ impl DocumentData {
     }
 
     pub fn new(version: i32, data: String) -> Self {
-        Self { version, data }
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        Self {
+            version,
+            data,
+            lifetime: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            saved_manifest_text: None,
+        }
     }
 }
 

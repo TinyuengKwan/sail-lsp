@@ -59,9 +59,8 @@ fn arithmetic_premises(goal: &ConstraintExpr) -> Option<ConstraintExpr> {
                 .iter()
                 .map(|item| {
                     arithmetic_premises(item)
-                        .map(|premise| {
+                        .inspect(|_| {
                             changed = true;
-                            premise
                         })
                         .unwrap_or_else(|| item.clone())
                 })
@@ -419,7 +418,7 @@ pub(super) fn prove_quantified(
     }
     #[cfg(feature = "z3-solver")]
     {
-        return super::z3_solver::try_prove_quantified(goal, subst, assumptions);
+        super::z3_solver::try_prove_quantified(goal, subst, assumptions)
     }
     #[cfg(not(feature = "z3-solver"))]
     ConstraintStatus::Unknown
@@ -582,6 +581,7 @@ fn arithmetic_lower_bound(
     }
     let lower = |v: &N, n| arithmetic_lower_bound(v, n, subst, facts, depth + 1);
     match value {
+        N::Mul(a, b) if minimum == 0 && a == b && total_integer_polynomial(a, 0) => true,
         N::Exp(exponent) if minimum <= 1 => lower(exponent, 0),
         N::Mul(a, b) if minimum == 0 || minimum == 1 => lower(a, minimum) && lower(b, minimum),
         N::Add(a, b) if minimum == 0 => lower(a, 0) && lower(b, 0),
@@ -589,6 +589,24 @@ fn arithmetic_lower_bound(
             (lower(a, 1) && lower(b, 0)) || (lower(a, 0) && lower(b, 1))
         }
         N::Div(a, b) if minimum == 0 => lower(a, 0) && lower(b, 1),
+        _ => false,
+    }
+}
+
+/// Polynomial terms are total over integers. Partial arithmetic (division,
+/// powers, conditionals) must keep its domain obligations rather than gain a
+/// proof merely because the same syntax appears on both sides of a product.
+fn total_integer_polynomial(value: &crate::ty::NumericExpr, depth: usize) -> bool {
+    use crate::ty::NumericExpr as N;
+    if depth > 32 {
+        return false;
+    }
+    match value {
+        N::Const(_) | N::BigConst(_) | N::Var(_) | N::Symbol(_) => true,
+        N::Neg(a) => total_integer_polynomial(a, depth + 1),
+        N::Add(a, b) | N::Sub(a, b) | N::Mul(a, b) => {
+            total_integer_polynomial(a, depth + 1) && total_integer_polynomial(b, depth + 1)
+        }
         _ => false,
     }
 }

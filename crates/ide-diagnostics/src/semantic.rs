@@ -95,7 +95,7 @@ pub fn compute_semantic_diagnostics_with_names(
     }
     check_termination_measure_targets(&live_defs, workspace, scope.as_ref(), &mut diagnostics);
     check_duplicate_struct_update_fields(&live_defs, &mut diagnostics);
-    check_builtin_type_redefinition(&item_tree, &mut diagnostics);
+    check_builtin_type_redefinition(item_tree, &mut diagnostics);
     check_builtin_type_arity(&live_defs, &mut diagnostics);
     check_type_argument_kinds(&live_defs, scope.as_ref(), &mut diagnostics);
     check_assignments(file, &cst_root, &live_defs, workspace, scope.as_ref(), &mut diagnostics);
@@ -103,9 +103,9 @@ pub fn compute_semantic_diagnostics_with_names(
         check_local_binding_visibility(file, &mut diagnostics);
     }
     check_module_visibility(file, &cst_root, &live_defs, &mut diagnostics);
-    check_struct_literals(&live_defs, &item_tree, scope.as_ref(), &mut diagnostics);
+    check_struct_literals(&live_defs, item_tree, scope.as_ref(), &mut diagnostics);
     check_enum_mappings(&live_defs, &mut diagnostics);
-    check_instantiation_constraints(&live_defs, &item_tree, scope.as_ref(), &mut diagnostics);
+    check_instantiation_constraints(&live_defs, item_tree, scope.as_ref(), &mut diagnostics);
     check_misplaced_private(&live_defs, &mut diagnostics);
     check_extension_in_private(&live_defs, &mut diagnostics);
     check_type_level_names(&live_defs, workspace, scope.as_ref(), &mut diagnostics);
@@ -1156,6 +1156,7 @@ fn check_type_argument_kinds(
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     use parser::SyntaxKind as SK;
+    let mut alias_kinds = AliasKindCache::new();
 
     for def in defs {
         // Kinds this definition declares, from its own quantifiers and, for
@@ -1173,6 +1174,34 @@ fn check_type_argument_kinds(
                 }
             }
         }
+        // A bare result variable provides no kind evidence by itself. In a
+        // tuple/arrow it is Type, but an identity synonym also could denote
+        // an Int/Bool/Order synonym. Upstream requires a binder annotation.
+        if def.kind() == SK::TYPE_ALIAS_DEF {
+            let body: Vec<_> = def
+                .descendants_with_tokens()
+                .filter_map(|el| el.into_token())
+                .skip_while(|token| token.kind() != SK::EQ)
+                .skip(1)
+                .filter(|token| !token.kind().is_trivia())
+                .collect();
+            if let [variable] = body.as_slice() {
+                let bound =
+                    def.children().find(|n| n.kind() == SK::TYPE_PARAM_LIST).is_some_and(|list| {
+                        list.descendants_with_tokens().filter_map(|el| el.into_token()).any(
+                            |token| token.kind() == SK::TY_VAR && token.text() == variable.text(),
+                        )
+                    });
+                if variable.kind() == SK::TY_VAR && bound && !declared.contains_key(variable.text())
+                {
+                    diagnostics.push(module_diagnostic(
+                        "kind-mismatch",
+                        "Failed to infer kind for this type".into(),
+                        variable.text_range(),
+                    ));
+                }
+            }
+        }
         // What each type synonym in this file declares its parameters at.
         let (synonyms, type_names) = if let Some(scope) = scope {
             let selected = scope.referenced(def, Namespace::Type);
@@ -1180,7 +1209,8 @@ fn check_type_argument_kinds(
                 selected
                     .iter()
                     .filter_map(|(name, node)| {
-                        alias_parameter_kinds(node).map(|kinds| (name.clone(), kinds))
+                        cached_alias_parameter_kinds(&mut alias_kinds, node)
+                            .map(|kinds| (name.clone(), kinds))
                     })
                     .collect(),
                 selected
@@ -1191,7 +1221,7 @@ fn check_type_argument_kinds(
                     .collect(),
             )
         } else {
-            (synonym_parameter_kinds(def), declared_type_kinds(def))
+            (synonym_parameter_kinds(def, &mut alias_kinds), declared_type_kinds(def))
         };
 
         for node in def.descendants().filter(|n| n.kind() == SK::TYPE_APP) {
@@ -1212,6 +1242,7 @@ fn check_type_argument_kinds(
                 continue;
             };
             for (index, (arg, want)) in args.iter().zip(expected.iter()).enumerate() {
+                let Some(want) = want else { continue };
                 let Some(found) = argument_kind(arg, &declared, &type_names) else { continue };
                 // `vector('n, 'ord)` is missing its element type, and
                 // `check_builtin_type_arity` says so — in more useful words
@@ -1243,7 +1274,7 @@ fn expected_argument_kinds(
     name: &str,
     argc: usize,
     synonyms: &std::collections::HashMap<String, Vec<Option<hir::Kind>>>,
-) -> Option<Vec<hir::Kind>> {
+) -> Option<Vec<Option<hir::Kind>>> {
     // The legacy order forms carry an extra argument; `builtin_type_kinds`
     // holds both spellings.
     let builtin = match (name, argc) {
@@ -1255,15 +1286,15 @@ fn expected_argument_kinds(
         // checker's — `is_builtin_type_name` excludes it on purpose, because
         // treating it as built in would make a file that never included the
         // prelude typecheck. Its parameter's kind is not in doubt, though,
-        // and a parameterised synonym's body is still a token run, so there
-        // is nothing to infer it from.
+        // and its legacy kind remains available without prelude metadata.
         ("bits", 1) => hir::builtin_type_kinds("bitvector"),
         _ => hir::builtin_type_kinds(name),
     };
     if let Some(kinds) = builtin {
-        return (kinds.len() == argc).then(|| kinds.to_vec());
+        return (kinds.len() == argc).then(|| kinds.iter().copied().map(Some).collect());
     }
-    // A synonym constrains only the parameters whose kind it wrote down.
+    // A synonym constrains parameters whose kind is declared or inferred
+    // from supported constructor positions in its body.
     // `type bits('n) = bitvector('n)` writes none, and Sail infers `'n : Int`
     // from the body — so guessing `Type` reported `bits(xlen)` for an
     // `Int`-kinded `xlen`, which is the idiom the whole corpus is built on.
@@ -1271,7 +1302,9 @@ fn expected_argument_kinds(
     if declared.len() != argc || declared.iter().all(Option::is_none) {
         return None;
     }
-    Some(declared.iter().map(|k| k.unwrap_or(hir::Kind::Type)).collect())
+    // An omitted kind is inferred by semantic checking, not evidence of Type.
+    // Preserve known entries even when another parameter remains unspecified.
+    Some(declared.clone())
 }
 
 /// The kind of a type argument, when it can be told.
@@ -1317,13 +1350,14 @@ fn argument_kind(
 /// declares its parameters at, `None` where none was written.
 fn synonym_parameter_kinds(
     def: &syntax::SyntaxNode,
+    cache: &mut AliasKindCache,
 ) -> std::collections::HashMap<String, Vec<Option<hir::Kind>>> {
     use parser::SyntaxKind as SK;
     let mut out = std::collections::HashMap::new();
     let root = def.ancestors().last().unwrap_or_else(|| def.clone());
     for alias in root.descendants().filter(|n| n.kind() == SK::TYPE_ALIAS_DEF) {
         let Some(name) = alias.children().find(|n| n.kind() == SK::NAME) else { continue };
-        let Some(kinds) = alias_parameter_kinds(&alias) else { continue };
+        let Some(kinds) = cached_alias_parameter_kinds(cache, &alias) else { continue };
         if !kinds.is_empty() {
             out.insert(name.text().to_string().trim().to_string(), kinds);
         }
@@ -1331,16 +1365,97 @@ fn synonym_parameter_kinds(
     out
 }
 
+type AliasKindCache = std::collections::HashMap<syntax::SyntaxNode, Option<Vec<Option<hir::Kind>>>>;
+
+fn cached_alias_parameter_kinds(
+    cache: &mut AliasKindCache,
+    alias: &syntax::SyntaxNode,
+) -> Option<Vec<Option<hir::Kind>>> {
+    // This cache belongs to one diagnostic pass. Node identity includes its
+    // syntax tree, so same-spelled declarations remain distinct, and no entry
+    // can survive an edit or retain a tree between requests.
+    cache.entry(alias.clone()).or_insert_with(|| alias_parameter_kinds(alias)).clone()
+}
+
 fn alias_parameter_kinds(alias: &syntax::SyntaxNode) -> Option<Vec<Option<hir::Kind>>> {
     use parser::SyntaxKind as SK;
     let list = alias.children().find(|n| n.kind() == SK::TYPE_PARAM_LIST)?;
+    let mut inferred = std::collections::HashMap::<String, Option<hir::Kind>>::new();
+    // Parameterised aliases retain a token-only body. Parse that body in a
+    // signature type position to obtain the same type CST as ordinary uses.
+    let body_root = alias
+        .children_with_tokens()
+        .filter_map(|el| el.into_token())
+        .find(|token| token.kind() == SK::EQ)
+        .and_then(|eq| {
+            let text = alias.text().to_string();
+            let offset = usize::from(eq.text_range().end() - alias.text_range().start());
+            let (root, errors) =
+                syntax::parse_text(&format!("val __alias_kind : {}", &text[offset..]));
+            errors.is_empty().then_some(root)
+        });
+    let body = body_root.as_ref().unwrap_or(alias);
+    // Tuple components and function parameter/return types require Type.
+    // Do not infer across a binder boundary or from a constructor argument,
+    // whose expected kind is handled separately below.
+    for variable in body.descendants().filter(|n| n.kind() == SK::TYPE_VAR) {
+        if variable.ancestors().any(|n| matches!(n.kind(), SK::TYPE_EXISTENTIAL | SK::TYPE_FORALL))
+            || !variable
+                .parent()
+                .is_some_and(|n| matches!(n.kind(), SK::TYPE_TUPLE | SK::TYPE_ARROW))
+        {
+            continue;
+        }
+        let name = variable.text().to_string().trim().to_owned();
+        inferred.insert(name, Some(hir::Kind::Type));
+    }
+    for app in body.descendants().filter(|n| n.kind() == SK::TYPE_APP) {
+        // Nested existential binders have their own identity. This local
+        // projection must not infer a header parameter from a shadowed name.
+        if app.ancestors().any(|n| matches!(n.kind(), SK::TYPE_EXISTENTIAL | SK::TYPE_FORALL)) {
+            continue;
+        }
+        let mut children = app.children();
+        let Some(head) = children.next().filter(|n| n.kind() == SK::TYPE_NAMED) else { continue };
+        let arguments: Vec<_> = children.collect();
+        let Some(kinds) = expected_argument_kinds(
+            head.text().to_string().trim(),
+            arguments.len(),
+            &Default::default(),
+        ) else {
+            continue;
+        };
+        for (arg, kind) in arguments.iter().zip(kinds) {
+            let Some(kind) = kind else { continue };
+            let tokens: Vec<_> = arg
+                .descendants_with_tokens()
+                .filter_map(|el| el.into_token())
+                .filter(|t| !t.kind().is_trivia())
+                .collect();
+            let [token] = tokens.as_slice() else { continue };
+            if token.kind() != SK::TY_VAR {
+                continue;
+            }
+            inferred
+                .entry(token.text().to_owned())
+                .and_modify(|previous| {
+                    if *previous != Some(kind) {
+                        *previous = None;
+                    }
+                })
+                .or_insert(Some(kind));
+        }
+    }
     Some(
         list.children()
             .filter(|n| n.kind() == SK::TYPE_PARAM)
             .flat_map(|p| {
                 let kind = type_param_kind(&p).as_deref().and_then(hir::Kind::from_name);
-                let count = p.children_with_tokens().filter(|t| t.kind() == SK::TY_VAR).count();
-                std::iter::repeat_n(kind, count)
+                p.children_with_tokens()
+                    .filter_map(|t| t.into_token())
+                    .filter(|t| t.kind() == SK::TY_VAR)
+                    .map(|t| kind.or_else(|| inferred.get(t.text()).copied().flatten()))
+                    .collect::<Vec<_>>()
             })
             .collect(),
     )

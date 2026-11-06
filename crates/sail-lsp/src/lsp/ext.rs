@@ -509,8 +509,75 @@ pub struct SsrParams {
     pub selections: Vec<lsp_types::Range>,
 }
 pub enum Ssr {}
+/// Read-only expression search; query contains a pattern without `==>>`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SsrSearchParams {
+    pub query: String,
+    #[serde(flatten)]
+    pub position: lsp_types::TextDocumentPositionParams,
+    #[serde(default)]
+    pub selections: Vec<lsp_types::Range>,
+}
+pub enum SsrSearch {}
+impl lsp_types::request::Request for SsrSearch {
+    type Params = SsrSearchParams;
+    type Result = Vec<lsp_types::Location>;
+    const METHOD: &'static str = "sail-lsp/ssrSearch";
+}
 impl lsp_types::request::Request for Ssr {
     type Params = SsrParams;
     type Result = lsp_types::WorkspaceEdit;
     const METHOD: &'static str = "experimental/ssr";
+}
+
+/// Re-run checks for loaded projects and standalone open documents.
+pub enum Recheck {}
+impl lsp_types::notification::Notification for Recheck {
+    type Params = ();
+    const METHOD: &'static str = "sail-lsp/recheck";
+}
+
+/// Optional scope for Flycheck commands. With a document, only the loaded
+/// projects (or standalone file) that contain it are affected. Without one,
+/// the command applies to every check target.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FlycheckControlParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_document: Option<lsp_types::TextDocumentIdentifier>,
+}
+
+pub enum RunFlycheck {}
+impl lsp_types::notification::Notification for RunFlycheck {
+    type Params = FlycheckControlParams;
+    const METHOD: &'static str = "sail-lsp/runFlycheck";
+}
+
+pub enum CancelFlycheck {}
+impl lsp_types::notification::Notification for CancelFlycheck {
+    type Params = FlycheckControlParams;
+    const METHOD: &'static str = "sail-lsp/cancelFlycheck";
+}
+
+pub enum ClearFlycheck {}
+impl lsp_types::notification::Notification for ClearFlycheck {
+    type Params = FlycheckControlParams;
+    const METHOD: &'static str = "sail-lsp/clearFlycheck";
+}
+
+/// Resolved module graph and build configurations, also used to select the
+/// analysis context of source files shared by several loaded projects.
+pub enum ProjectGraph {}
+impl lsp_types::request::Request for ProjectGraph {
+    type Params = ();
+    type Result = serde_json::Value;
+    const METHOD: &'static str = "sail-lsp/projectGraph";
+}
+
+pub enum ExplainAnalysis {}
+impl lsp_types::request::Request for ExplainAnalysis {
+    type Params = lsp_types::TextDocumentPositionParams;
+    type Result = serde_json::Value;
+    const METHOD: &'static str = "sail-lsp/explainAnalysis";
 }

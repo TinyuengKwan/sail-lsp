@@ -1,5 +1,7 @@
 //! Actual Salsa execution counts for ordered-project edits. Run with --release.
 //! The output is JSON; assertions check semantic freshness and unrelated reuse.
+#![allow(clippy::print_stdout)]
+
 use base_db::{
     module_graph::{ModuleData, ModuleGraph},
     preprocess::SourceProject,

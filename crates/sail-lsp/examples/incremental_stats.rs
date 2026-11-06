@@ -1,5 +1,6 @@
 //! Reproducible query invalidation and latency probe, without an external corpus.
 //! cargo run --release --example incremental_stats -- [files=160] [edits=32] [body|signature] [--profile] [--modules] [--preprocess]
+#![allow(clippy::print_stdout)]
 
 use std::sync::Arc;
 use std::time::Instant;

@@ -27,6 +27,10 @@ pub(crate) struct TaskPool<T> {
 }
 
 impl<T: Send + 'static> TaskPool<T> {
+    pub(crate) fn sender(&self) -> Sender<T> {
+        self.sender.clone()
+    }
+
     /// Create a new task pool with the given sender and thread count.
     pub(crate) fn new_with_threads(sender: Sender<T>, threads: usize) -> Self {
         Self { sender, pool: Pool::new(threads.max(1)) }
@@ -34,19 +38,11 @@ impl<T: Send + 'static> TaskPool<T> {
 
     /// How many threads a machine should give this pool.
     ///
-    /// It was `2`, hardcoded, for every machine and every workload;
-    /// rust-analyzer defaults to the physical core count
-    /// (`config.main_loop_num_threads`).
-    ///
-    /// **Measured, and it bought nothing here**: hovers fired every 250 ms
-    /// through a cold load of sail-riscv answered in 7 ms at the median and
-    /// 844 ms at the worst on this machine, against 8 ms and 854 ms with
-    /// two threads. The guess was that a request waits behind the
-    /// diagnostics wave and the scan; on this workload it does not. Kept
-    /// because a pool sized for the machine is the right default and a
-    /// hard-coded 2 is not, not because it was shown to be faster.
+    /// Bound the automatic value because each solver-owning worker can retain
+    /// a native thread-local Z3 context. The eight-worker ceiling preserves
+    /// request parallelism without scaling context retention to every core.
     pub(crate) fn default_threads() -> usize {
-        std::thread::available_parallelism().map_or(2, usize::from).max(2)
+        std::thread::available_parallelism().map_or(2, usize::from).clamp(2, 8)
     }
 
     /// Spawn a background task, saying what it is for.
@@ -129,12 +125,9 @@ mod tests {
         assert!(pool.is_empty(), "a panicking task is still counted out");
     }
 
-    /// A machine with cores gets threads.
+    /// A machine with cores gets parallelism without unbounded native solver owners.
     #[test]
-    fn the_pool_is_sized_for_the_machine() {
-        assert!(
-            TaskPool::<u32>::default_threads() >= 2,
-            "the pool must have at least the two threads it used to be pinned at"
-        );
+    fn the_pool_bounds_automatic_parallelism() {
+        assert!((2..=8).contains(&TaskPool::<u32>::default_threads()));
     }
 }

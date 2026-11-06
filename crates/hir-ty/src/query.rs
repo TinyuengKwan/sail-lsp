@@ -639,7 +639,7 @@ mod tests {
         use crate::solver_budget::{SolverBudget, SolverLimits};
         use salsa::Setter;
         let mut db = TestDb::default();
-        let file=FileText::new(&db,Arc::from("val need : forall 'n, 'n * 'n + 987654321 >= 0. int('n) -> unit\nval caller : forall 'm. int('m) -> unit\nfunction caller(x) = need(x)"),base_db::FileId::from_raw(0));
+        let file=FileText::new(&db,Arc::from("val need : forall 'n, 'n * ('n + 1) + 987654321 >= 0. int('n) -> unit\nval caller : forall 'm. int('m) -> unit\nfunction caller(x) = need(x)"),base_db::FileId::from_raw(0));
         let other = FileText::new(
             &db,
             Arc::from("function unrelated() -> int = 1"),

@@ -101,7 +101,7 @@ impl Evaluator<'_> {
                 let result = expression
                     .as_ref()
                     .and_then(|e| self.number(e))
-                    .or_else(|| self.from_facts(name, self.assumptions));
+                    .or_else(|| self.infer_from_facts(name, self.assumptions));
                 self.visiting.remove(name);
                 return result;
             }
@@ -160,10 +160,10 @@ impl Evaluator<'_> {
         };
         (value.bits() <= MAX_BITS).then_some(value)
     }
-    fn from_facts(&mut self, name: &str, facts: &[C]) -> Option<BigInt> {
+    fn infer_from_facts(&mut self, name: &str, facts: &[C]) -> Option<BigInt> {
         for fact in facts {
             let value = match fact {
-                C::And(xs) => self.from_facts(name, xs),
+                C::And(xs) => self.infer_from_facts(name, xs),
                 C::Compare { lhs: N::Var(n) | N::Symbol(n), op: CompareOp::Eq, rhs }
                     if n == name =>
                 {

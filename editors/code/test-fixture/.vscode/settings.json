@@ -1,0 +1,3 @@
+{
+  "sail-lsp.server.path": "${env:SAIL_LSP_TEST_SERVER}"
+}

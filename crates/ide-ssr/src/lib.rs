@@ -23,6 +23,36 @@ pub struct MatchFinder<'db> {
 }
 
 impl<'db> MatchFinder<'db> {
+    /// Search uses the same binding identities as an identity replacement.
+    pub fn for_search(
+        db: &'db dyn salsa::Database,
+        origin: base_db::FileText,
+        offset: usize,
+        pattern: &str,
+    ) -> Result<Self, SsrError> {
+        Self::new(db, origin, offset, &format!("{pattern}\n ==>> {pattern}"))
+    }
+
+    /// Read-only matches, including nested occurrences. Replacement overlap
+    /// rules do not apply when reporting locations. The workspace caller owns
+    /// physical-location deduplication and final ordering across semantic views.
+    pub fn ranges_for_tree(
+        &self,
+        root: &syntax::SyntaxNode,
+        file: base_db::FileText,
+        ranges: &[base_db::TextRange],
+    ) -> Vec<base_db::TextRange> {
+        search::search_in_tree(self.db, &self.rule, root)
+            .into_iter()
+            .filter(|m| {
+                (ranges.is_empty()
+                    || ranges.iter().any(|r| r.contains_range(m.matched_node.text_range())))
+                    && self.bindings_match(file, m)
+            })
+            .map(|m| m.matched_node.text_range())
+            .collect()
+    }
+
     /// Parse and resolve an expression replacement in the invocation scope.
     pub fn new(
         db: &'db dyn salsa::Database,

@@ -974,7 +974,7 @@ fn classify_struct_field(file: &dyn crate::FileDb, name: &str, span: &hir::Span)
     let inferred = file.file_text().and_then(|(db, ft)| {
         hir::Semantics::new(db).type_of_expr(ft, usize::from(lit.text_range().start()))
     });
-    if let Some(field) = inferred.as_ref().and_then(|ty| ty.as_name()).and_then(|r| named(&r)) {
+    if let Some(field) = inferred.as_ref().and_then(|ty| ty.as_name()).and_then(named) {
         return Some(field);
     }
 
@@ -1033,9 +1033,7 @@ fn ordered_field(
 
 fn classify_field_access(file: &dyn crate::FileDb, name: &str, span: &hir::Span) -> Option<Field> {
     let (db, ft) = file.file_text()?;
-    if hir::source_order::declarations_for(db, ft).is_none() {
-        return None;
-    }
+    hir::source_order::declarations_for(db, ft)?;
     let root = syntax::parse_query::semantic_parse_file(db, ft).syntax_node()?;
     let token = root.token_at_offset((span.start as u32).into()).right_biased()?;
     if !token.parent_ancestors().any(|node| {

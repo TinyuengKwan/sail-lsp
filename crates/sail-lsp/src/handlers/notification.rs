@@ -21,7 +21,15 @@ pub(crate) fn handle_did_open_text_document(
     let uri = params.text_document.uri;
     let text = params.text_document.text;
     if crate::manifest_editing::is_manifest(&uri) {
-        std::sync::Arc::make_mut(&mut state.manifest_texts).insert(uri, text);
+        let saved = uri.to_file_path().ok().and_then(|path| std::fs::read_to_string(path).ok());
+        if saved.as_ref() != Some(&text) {
+            state.dirty_documents.insert(uri.clone());
+        } else {
+            state.dirty_documents.remove(&uri);
+        }
+        let mut doc = DocumentData::new(params.text_document.version, text);
+        doc.saved_manifest_text = saved;
+        std::sync::Arc::make_mut(&mut state.manifest_texts).insert(uri, doc);
         return Ok(());
     }
 
@@ -41,19 +49,31 @@ pub(crate) fn handle_did_change_text_document(
     let uri = params.text_document.uri;
     if crate::manifest_editing::is_manifest(&uri) {
         let texts = std::sync::Arc::make_mut(&mut state.manifest_texts);
-        if let Some(text) = texts.get_mut(&uri) {
-            let mut doc = DocumentData::new(params.text_document.version, std::mem::take(text));
-            doc.apply_changes(&params.content_changes);
-            *text = doc.data;
+        if let Some(doc) = texts.get_mut(&uri) {
+            if params.text_document.version > doc.version {
+                doc.apply_changes(&params.content_changes);
+                doc.version = params.text_document.version;
+                if doc.saved_manifest_text.as_ref() != Some(&doc.data) {
+                    state.dirty_documents.insert(uri.clone());
+                } else {
+                    state.dirty_documents.remove(&uri);
+                }
+            }
         }
         return Ok(());
     }
 
     if let Some(doc) = state.mem_docs.get_mut(&uri) {
+        if params.text_document.version <= doc.version {
+            return Ok(());
+        }
         doc.apply_changes(&params.content_changes);
         doc.version = params.text_document.version;
 
         let text = doc.data.clone();
+        if !params.content_changes.is_empty() {
+            state.dirty_documents.insert(uri.clone());
+        }
         state.sync_to_salsa(&uri, &text);
     }
     Ok(())
@@ -66,9 +86,11 @@ pub(crate) fn handle_did_close_text_document(
     let uri = params.text_document.uri;
     if crate::manifest_editing::is_manifest(&uri) {
         std::sync::Arc::make_mut(&mut state.manifest_texts).remove(&uri);
+        state.dirty_documents.remove(&uri);
         return Ok(());
     }
     state.mem_docs.remove(&uri);
+    state.dirty_documents.remove(&uri);
 
     // The buffer stops being authoritative here, so what salsa holds goes
     // back to the file's own text — rust-analyzer invalidates the path in
@@ -109,6 +131,12 @@ pub(crate) fn handle_did_save_text_document(
     state: &mut GlobalState,
     params: DidSaveTextDocumentParams,
 ) -> anyhow::Result<()> {
+    state.dirty_documents.remove(&params.text_document.uri);
+    if let Some(doc) =
+        std::sync::Arc::make_mut(&mut state.manifest_texts).get_mut(&params.text_document.uri)
+    {
+        doc.saved_manifest_text = Some(doc.data.clone());
+    }
     // On save, as rust-analyzer runs `cargo check` on save: upstream
     // re-reads whole files from disk, so running it against a buffer the
     // editor has not written would report the previous save.
@@ -122,7 +150,14 @@ pub(crate) fn handle_did_change_watched_files(
     state: &mut GlobalState,
     params: DidChangeWatchedFilesParams,
 ) -> anyhow::Result<()> {
-    let mut needs_reload = false;
+    let mut reload_scope: Option<crate::reload::ReloadScope> = None;
+    let merge_scope = |current: &mut Option<crate::reload::ReloadScope>, next| {
+        if let Some(current) = current {
+            current.merge(next);
+        } else {
+            *current = Some(next);
+        }
+    };
     for change in &params.changes {
         let uri = &change.uri;
         let path_str = uri.path();
@@ -132,8 +167,11 @@ pub(crate) fn handle_did_change_watched_files(
 
         match change.typ {
             FileChangeType::CREATED => {
-                if is_sail || is_project_file {
-                    needs_reload = true;
+                if is_sail {
+                    merge_scope(&mut reload_scope, crate::reload::ReloadScope::All);
+                } else if is_project_file {
+                    // A new manifest can change discovery precedence.
+                    merge_scope(&mut reload_scope, crate::reload::ReloadScope::All);
                 }
                 if !is_sail {
                     continue;
@@ -151,7 +189,11 @@ pub(crate) fn handle_did_change_watched_files(
             FileChangeType::CHANGED => {
                 // .sail_project changes always trigger reload.
                 if is_project_file {
-                    needs_reload = true;
+                    if let Ok(path) = uri.to_file_path() {
+                        merge_scope(&mut reload_scope, crate::reload::ReloadScope::project(path));
+                    } else {
+                        merge_scope(&mut reload_scope, crate::reload::ReloadScope::All);
+                    }
                     continue;
                 }
                 if !is_sail {
@@ -175,7 +217,15 @@ pub(crate) fn handle_did_change_watched_files(
                 }
             }
             FileChangeType::DELETED if (is_sail || is_project_file) => {
-                needs_reload = true;
+                if is_project_file {
+                    if let Ok(path) = uri.to_file_path() {
+                        merge_scope(&mut reload_scope, crate::reload::ReloadScope::project(path));
+                    } else {
+                        merge_scope(&mut reload_scope, crate::reload::ReloadScope::All);
+                    }
+                } else {
+                    merge_scope(&mut reload_scope, crate::reload::ReloadScope::All);
+                }
                 if is_sail {
                     state.sync_disk_text(uri, "");
                 }
@@ -183,8 +233,8 @@ pub(crate) fn handle_did_change_watched_files(
             _ => {}
         }
     }
-    if needs_reload {
-        state.fetch_workspaces_queue.request_op("file created/deleted/project changed".into(), ());
+    if let Some(scope) = reload_scope {
+        state.request_workspace_reload("file created/deleted/project changed", scope);
     }
     Ok(())
 }
@@ -200,7 +250,7 @@ pub(crate) fn handle_did_change_workspace_folders(
     for removed in &params.event.removed {
         state.workspace_folders.remove(&removed.uri);
     }
-    state.fetch_workspaces_queue.request_op("workspace folders changed".into(), ());
+    state.request_workspace_reload("workspace folders changed", crate::reload::ReloadScope::All);
     Ok(())
 }
 
@@ -275,7 +325,7 @@ pub(crate) fn handle_cancel(
 
 /// Handle `sail-lsp/reloadWorkspace` — trigger full workspace reload.
 pub(crate) fn handle_reload_workspace(state: &mut GlobalState, _params: ()) -> anyhow::Result<()> {
-    state.fetch_workspaces_queue.request_op("manual reload".into(), ());
+    state.request_workspace_reload("manual reload", crate::reload::ReloadScope::All);
     state.log_message(lsp_types::MessageType::INFO, "Workspace reload requested".to_string());
     Ok(())
 }
@@ -302,4 +352,115 @@ pub(crate) fn handle_work_done_progress_cancel(
     // clears the slot and requeues the work.
     state.prime_caches_cancel.cancel();
     Ok(())
+}
+
+/// Explicit check request, independent of a workspace reload.
+pub(crate) fn handle_recheck(state: &mut GlobalState, _: ()) -> anyhow::Result<()> {
+    state.recheck_flycheck();
+    Ok(())
+}
+
+pub(crate) fn handle_run_flycheck(
+    state: &mut GlobalState,
+    params: crate::lsp_ext::FlycheckControlParams,
+) -> anyhow::Result<()> {
+    state.run_flycheck(params.text_document.as_ref());
+    Ok(())
+}
+
+pub(crate) fn handle_cancel_flycheck(
+    state: &mut GlobalState,
+    params: crate::lsp_ext::FlycheckControlParams,
+) -> anyhow::Result<()> {
+    state.cancel_flycheck(params.text_document.as_ref());
+    Ok(())
+}
+
+pub(crate) fn handle_clear_flycheck(
+    state: &mut GlobalState,
+    params: crate::lsp_ext::FlycheckControlParams,
+) -> anyhow::Result<()> {
+    state.clear_flycheck(params.text_document.as_ref());
+    Ok(())
+}
+
+#[cfg(test)]
+mod manifest_status_tests {
+    use super::*;
+
+    #[test]
+    fn unsaved_manifest_status_tracks_open_edit_save_and_close() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sail.proj");
+        let saved = "A {}\n";
+        std::fs::write(&path, saved).unwrap();
+        let uri = Url::from_file_path(&path).unwrap();
+        let (sender, _messages) = crossbeam_channel::unbounded();
+        let (tasks, _receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender, tasks);
+        let pending = |state: &GlobalState| {
+            state.current_status().message.unwrap_or_default().contains("Unsaved project manifest")
+        };
+        let open = |state: &mut GlobalState, text: &str| {
+            handle_did_open_text_document(
+                state,
+                DidOpenTextDocumentParams {
+                    text_document: TextDocumentItem {
+                        uri: uri.clone(),
+                        language_id: "sail-project".into(),
+                        version: 1,
+                        text: text.into(),
+                    },
+                },
+            )
+            .unwrap();
+        };
+        open(&mut state, saved);
+        assert!(!pending(&state));
+        let change = |state: &mut GlobalState, version| {
+            handle_did_change_text_document(
+                state,
+                DidChangeTextDocumentParams {
+                    text_document: VersionedTextDocumentIdentifier { uri: uri.clone(), version },
+                    content_changes: vec![TextDocumentContentChangeEvent {
+                        range: None,
+                        range_length: None,
+                        text: "B {}\n".into(),
+                    }],
+                },
+            )
+            .unwrap();
+        };
+        change(&mut state, 1);
+        assert!(!pending(&state), "ignore stale edits");
+        change(&mut state, 2);
+        assert!(pending(&state));
+        assert!(state.projects.is_empty(), "editing alone must not change the loaded project");
+        std::fs::write(&path, "B {}\n").unwrap();
+        handle_did_save_text_document(
+            &mut state,
+            DidSaveTextDocumentParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                text: None,
+            },
+        )
+        .unwrap();
+        assert!(!pending(&state));
+        let close = |state: &mut GlobalState| {
+            handle_did_close_text_document(
+                state,
+                DidCloseTextDocumentParams {
+                    text_document: TextDocumentIdentifier { uri: uri.clone() },
+                },
+            )
+            .unwrap();
+        };
+        close(&mut state);
+        open(&mut state, "restored unsaved text");
+        assert!(pending(&state), "restored dirty buffers need a warning too");
+        state.project_error = Some("Invalid project".into());
+        assert_eq!(state.current_status().health, crate::lsp_ext::Health::Error);
+        close(&mut state);
+        assert!(!pending(&state));
+    }
 }

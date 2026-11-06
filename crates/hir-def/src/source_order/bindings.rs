@@ -241,8 +241,10 @@ fn file_events(db: &dyn salsa::Database, file: FileText) -> Vec<Vec<Event>> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Index {
     positions: HashMap<Declaration, usize>,
-    bindings: HashMap<(Name, Namespace), Vec<(usize, Declaration, Event)>>,
+    bindings: HashMap<(Name, Namespace), Vec<IndexedEvent>>,
 }
+
+type IndexedEvent = (usize, Declaration, Event);
 
 #[salsa::tracked(returns(ref))]
 fn index(db: &dyn salsa::Database, _files: WorkspaceFiles, program: Program) -> Index {

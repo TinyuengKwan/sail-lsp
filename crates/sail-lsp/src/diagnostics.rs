@@ -157,7 +157,14 @@ impl DiagnosticCollection {
             (syntax, None) => syntax,
         };
         let check = self.check.get(&file_id).into_iter().flat_map(|m| m.values().flatten());
-        native.into_iter().flat_map(|(_, d)| d).chain(check)
+        let mut seen = Vec::new();
+        native.into_iter().flat_map(|(_, d)| d).chain(check).filter(move |diagnostic| {
+            if seen.contains(diagnostic) {
+                return false;
+            }
+            seen.push(*diagnostic);
+            true
+        })
     }
 
     pub(crate) fn native_diagnostics_are_current(&self, file_id: FileId) -> bool {
@@ -181,6 +188,19 @@ impl DiagnosticCollection {
     pub(crate) fn next_generation(&mut self) -> DiagnosticsGeneration {
         self.generation += 1;
         self.generation
+    }
+}
+
+/// Deduplicate identical compiler findings from shared projects without
+/// guessing that different messages/codes or native fixes mean the same thing.
+pub(crate) fn extend_unique(
+    items: &mut Vec<lsp_types::Diagnostic>,
+    checks: &[lsp_types::Diagnostic],
+) {
+    for diagnostic in checks {
+        if !items.contains(diagnostic) {
+            items.push(diagnostic.clone());
+        }
     }
 }
 
@@ -250,6 +270,33 @@ mod tests {
 
     fn diagnostic(message: &str) -> lsp_types::Diagnostic {
         lsp_types::Diagnostic { message: message.into(), ..Default::default() }
+    }
+
+    #[test]
+    fn shared_project_duplicates_merge_but_sources_and_fix_metadata_survive() {
+        let file = FileId::from_raw(0);
+        let a = crate::flycheck::CheckTarget::Project("a.sail_project".into());
+        let b = crate::flycheck::CheckTarget::Project("b.sail_project".into());
+        let mut compiler = diagnostic("type mismatch");
+        compiler.source = Some("sail".into());
+        let mut native = compiler.clone();
+        native.source = Some("sail-lsp".into());
+        native.data = Some(serde_json::json!({"fix": "unsigned"}));
+        let mut collection = DiagnosticCollection::default();
+        collection.native_semantic.insert(file, (0, vec![native.clone()]));
+        collection.check.insert(
+            file,
+            std::collections::BTreeMap::from([
+                (a, vec![compiler.clone()]),
+                (b, vec![compiler.clone()]),
+            ]),
+        );
+        let pushed: Vec<_> = collection.diagnostics_for(file).cloned().collect();
+        let mut pulled = vec![native];
+        extend_unique(&mut pulled, &[compiler.clone(), compiler]);
+        assert_eq!(pushed, pulled);
+        assert_eq!(pushed.len(), 2);
+        assert_eq!(pushed[0].data.as_ref().unwrap()["fix"], "unsigned");
     }
 
     #[test]

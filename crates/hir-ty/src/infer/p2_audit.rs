@@ -180,7 +180,7 @@ fn opaque_boolean_predicates_obey_congruence_but_do_not_choose_arguments() {
     let a = c("pred(8, true)");
     let b = c("pred(16, true)");
     assert_eq!(
-        z3_solver::try_solve(&a, &Subst::default(), &[a.clone()]),
+        z3_solver::try_solve(&a, &Subst::default(), std::slice::from_ref(&a)),
         ConstraintStatus::Satisfied
     );
     assert_eq!(z3_solver::try_solve(&b, &Subst::default(), &[a]), ConstraintStatus::Unknown);
@@ -276,4 +276,47 @@ fn numeric_sets_and_exclusions_do_not_widen_to_inexact_intervals() {
         assert!(matches!(type_from_type_text(text).kind(), TyKind::Exist { .. }), "{text}");
     }
     assert_eq!(type_from_type_text("{0, 1, 2}"), type_from_type_text("range(0, 2)"));
+}
+
+#[test]
+fn integer_squares_need_no_smt_budget_but_partial_terms_keep_their_domain() {
+    for text in ["'n * 'n >= 0", "0 <= 'n * 'n", "('n - 'm) * ('n - 'm) >= 0"] {
+        assert_eq!(
+            solver::solve_without_smt(&c(text), &Subst::default(), &[]),
+            ConstraintStatus::Satisfied,
+            "{text}"
+        );
+    }
+    for text in ["'n * 'n >= 1", "'n * 'm >= 0", "('n / 0) * ('n / 0) >= 0"] {
+        assert_eq!(
+            solver::solve_without_smt(&c(text), &Subst::default(), &[]),
+            ConstraintStatus::Unknown,
+            "{text}"
+        );
+    }
+    for n in -10..=10 {
+        let text = format!("{n} * {n} >= 0");
+        assert_eq!(
+            solver::solve_without_smt(&c(&text), &Subst::default(), &[]),
+            ConstraintStatus::Satisfied,
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn square_proof_survives_an_exhausted_request_budget() {
+    let _budget = crate::solver_budget::SolverBudget::enter(
+        crate::CancellationToken::never(),
+        crate::solver_budget::SolverLimits {
+            total: std::time::Duration::ZERO,
+            per_check: std::time::Duration::ZERO,
+            checks: 0,
+        },
+    );
+    assert_eq!(
+        solver::solve(&c("'n * 'n >= 0"), &Subst::default(), &[]),
+        ConstraintStatus::Satisfied
+    );
+    assert_eq!(crate::solver_budget::SolverBudget::budget_exhaustion_count(), 0);
 }

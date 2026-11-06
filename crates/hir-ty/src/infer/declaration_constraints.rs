@@ -513,7 +513,7 @@ impl Checker<'_> {
     fn record_undefined(&mut self, at: Point, def: &Definition, depth: usize) -> Option<bool> {
         let facts: Vec<_> = def.constraint.clone().into_iter().collect();
         all_known(def.bodies.iter().map(|body| {
-            let allowed = self.undefined_allowed(at, body, &facts, depth + 1);
+            let allowed = self.undefined_allowed(at, body, depth + 1);
             if allowed != Some(true) {
                 return allowed;
             }
@@ -525,13 +525,7 @@ impl Checker<'_> {
     // declaration, before concrete type arguments are substituted. In
     // particular, a record with an unconstrained width does not acquire a
     // generator merely because a later use instantiates that width to 1.
-    fn undefined_allowed(
-        &mut self,
-        at: Point,
-        ty: &Ty,
-        facts: &[ConstraintExpr],
-        depth: usize,
-    ) -> Option<bool> {
+    fn undefined_allowed(&mut self, at: Point, ty: &Ty, depth: usize) -> Option<bool> {
         if depth > 64 {
             return None;
         }
@@ -541,7 +535,7 @@ impl Checker<'_> {
                 Some(false)
             }
             TyKind::Tuple(types) => {
-                all_known(types.iter().map(|t| self.undefined_allowed(at, t, facts, depth + 1)))
+                all_known(types.iter().map(|t| self.undefined_allowed(at, t, depth + 1)))
             }
             TyKind::App { name, args, .. } | TyKind::Named(name, args) => {
                 let mut parameter_kinds =
@@ -556,7 +550,7 @@ impl Checker<'_> {
                     if def.is_alias {
                         let ty =
                             substitution::apply_arguments(def.bodies.first()?, &def.params, args)?;
-                        return self.undefined_allowed(origin, &ty, facts, depth + 1);
+                        return self.undefined_allowed(origin, &ty, depth + 1);
                     }
                     let generated = match def.undefined_policy.as_deref() {
                         Some("skip") => Some(true),
@@ -592,7 +586,7 @@ impl Checker<'_> {
                     TyArg::Type(_) if parameter_kinds.get(i).is_some_and(|k| *k != Kind::Type) => {
                         None
                     }
-                    TyArg::Type(t) => Some(self.undefined_allowed(at, t, facts, depth + 1)),
+                    TyArg::Type(t) => Some(self.undefined_allowed(at, t, depth + 1)),
                     _ => None,
                 }))
             }
@@ -912,7 +906,7 @@ pub fn check(
         {
             node.children().find(|n| n.kind().is_type_node()).and_then(|syntax| {
                 let ty = type_from_cst_node(&syntax);
-                (checker.undefined_allowed(at, &ty, &global_facts, 0) == Some(false)
+                (checker.undefined_allowed(at, &ty, 0) == Some(false)
                     || checker.inhabited(at, &ty, &global_facts, 0, false) == Some(false))
                 .then(|| {
                     format!(
@@ -1092,7 +1086,7 @@ pub fn undefined_error(
         numbers: HashMap::new(),
         strict_bitvector: base_db::strict_bitvector(db),
     };
-    if checker.undefined_allowed(at, ty, facts, 0) == Some(false) {
+    if checker.undefined_allowed(at, ty, 0) == Some(false) {
         Some(format!("Type {} cannot be undefined", ty.display_text()))
     } else if checker.inhabited(at, ty, facts, 0, false) == Some(false) {
         Some(format!("Type {} could be empty", ty.display_text()))

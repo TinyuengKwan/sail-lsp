@@ -650,6 +650,7 @@ dependencies = [
  "salsa",
  "serde_json",
  "syntax",
+ "tempfile",
  "url",
  "vfs",
 ]
@@ -679,6 +680,7 @@ dependencies = [
  "parser",
  "salsa",
  "syntax",
+ "tracing",
  "url",
 ]
 
@@ -1569,6 +1571,7 @@ dependencies = [
  "ide-db",
  "ide-diagnostics",
  "include_dir",
+ "libc",
  "log",
  "lsp-server 0.7.9 (registry+https://github.com/rust-lang/crates.io-index)",
  "lsp-types 0.94.1",
@@ -1582,6 +1585,7 @@ dependencies = [
  "serde_json",
  "stdx",
  "syntax",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
  "tracing-tree",

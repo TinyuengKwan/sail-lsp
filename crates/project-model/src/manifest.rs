@@ -130,25 +130,68 @@ impl ProjectManifest {
     /// declaration must not disable navigation in already parsed entries.
     /// Dependency selection is irrelevant to navigation, so do not finish the graph.
     pub fn file_paths_at(source: &str, offset: usize, options: &ProjectOptions) -> Vec<PathBuf> {
-        let Ok(tokens) = lex(source) else { return Vec::new() };
+        let tokens = super::lex_for_editor(source);
         let mut parser = Parser { tokens, pos: 0, end: source.len(), recover: true };
         let Ok(declarations) = parser.declarations(None) else { return Vec::new() };
-        let mut evaluator = Evaluator {
-            variables: options.variables.clone(),
-            virtual_files: &options.virtual_files,
-            declared: BTreeSet::new(),
-            modules: Vec::new(),
-            names: BTreeMap::new(),
-            edges: Vec::new(),
-        };
-        let _ = evaluator.declarations(&declarations, None, &[]);
-        evaluator
-            .modules
-            .iter()
-            .flat_map(|m| m.files.iter().zip(&m.file_ranges))
-            .filter(|(_, range)| range.contains(&offset))
-            .map(|(path, _)| path.clone())
-            .collect()
+        fn focused<'a>(
+            expr: &'a Expr,
+            offset: usize,
+            vars: &BTreeMap<String, ProjectValue>,
+        ) -> Option<&'a Expr> {
+            if !expr.range.contains(&offset) {
+                return None;
+            }
+            match &expr.kind {
+                ExprKind::List(items) => items.iter().find_map(|item| focused(item, offset, vars)),
+                ExprKind::If(condition, yes, no) => match eval(condition, vars).ok()? {
+                    ProjectValue::Bool(true) => focused(yes, offset, vars),
+                    ProjectValue::Bool(false) => focused(no, offset, vars),
+                    _ => None,
+                },
+                _ => Some(expr),
+            }
+        }
+        fn visit(
+            decls: &[Decl],
+            offset: usize,
+            vars: &mut BTreeMap<String, ProjectValue>,
+            options: &ProjectOptions,
+        ) -> Option<Vec<PathBuf>> {
+            for decl in decls {
+                match decl {
+                    Decl::Variable((name, _), expr) => {
+                        if let Ok(value) = eval(expr, vars) {
+                            vars.entry(name.clone()).or_insert(value);
+                        }
+                    }
+                    Decl::Module(_, _, body) => {
+                        if let Some(paths) = visit(body, offset, vars, options) {
+                            return Some(paths);
+                        }
+                    }
+                    Decl::Files(exprs) => {
+                        if let Some(expr) = exprs.iter().find(|e| e.range.contains(&offset)) {
+                            let paths = focused(expr, offset, vars)
+                                .and_then(|e| eval(e, vars).ok())
+                                .into_iter()
+                                .flat_map(flatten)
+                                .filter_map(|value| match value {
+                                    ProjectValue::String(path) => Some(PathBuf::from(path)),
+                                    ProjectValue::Virtual(name) => {
+                                        options.virtual_files.get(&name).cloned()
+                                    }
+                                    _ => None,
+                                })
+                                .collect();
+                            return Some(paths);
+                        }
+                    }
+                    _ => (),
+                }
+            }
+            None
+        }
+        visit(&declarations, offset, &mut options.variables.clone(), options).unwrap_or_default()
     }
 
     pub fn resolve(&self, options: &ProjectOptions) -> Result<ResolvedProject> {
@@ -334,7 +377,29 @@ impl Parser {
             match parsed {
                 Ok(Some(decl)) => out.push(decl),
                 Ok(None) => (),
-                Err(_) if self.recover => return Ok(out),
+                Err(_) if self.recover => {
+                    // Resume at a declaration boundary. Malformed expressions
+                    // never contribute guessed file paths.
+                    while self.peek().is_some() {
+                        if matches!(
+                            self.peek(),
+                            Some(
+                                Tok::RCurly
+                                    | Tok::KwVariable
+                                    | Tok::KwFiles
+                                    | Tok::KwDirectory
+                                    | Tok::KwRequires
+                                    | Tok::KwAfter
+                                    | Tok::KwBefore
+                            )
+                        ) || (matches!(self.peek(), Some(Tok::Id(_)))
+                            && self.tokens.get(self.pos + 1).is_some_and(|t| t.tok == Tok::LCurly))
+                        {
+                            break;
+                        }
+                        self.take();
+                    }
+                }
                 Err(error) => return Err(error),
             }
         }
@@ -366,7 +431,11 @@ impl Parser {
             {
                 break;
             }
-            values.push(self.expr()?);
+            match self.expr() {
+                Ok(value) => values.push(value),
+                Err(_) if self.recover => break,
+                Err(error) => return Err(error),
+            }
         }
         if braced {
             self.expect(Tok::RCurly)?;
@@ -442,8 +511,15 @@ impl Parser {
             return Ok(out);
         }
         loop {
-            out.push(self.expr()?);
+            match self.expr() {
+                Ok(expr) => out.push(expr),
+                Err(_) if self.recover && end == Tok::RSquare => break,
+                Err(error) => return Err(error),
+            }
             if self.eat(&end) {
+                break;
+            }
+            if self.recover && end == Tok::RSquare && self.peek().is_none() {
                 break;
             }
             self.expect(Tok::Comma)?;
@@ -764,6 +840,37 @@ impl Evaluator<'_> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn file_navigation_selects_one_active_path_and_survives_incomplete_strings() {
+        use super::*;
+        let source = r#"variable BASE = "lib"
+variable ENABLED = true
+A { files [$BASE / "first.sail", "second.sail"], if $ENABLED then "yes.sail" else "no.sail" }
+B { files "unfinished"#;
+        let options = ProjectOptions::default();
+        let at = |name: &str, options: &ProjectOptions| {
+            ProjectManifest::file_paths_at(source, source.find(name).unwrap(), options)
+        };
+        assert_eq!(at("first.sail", &options), vec![PathBuf::from("lib/first.sail")]);
+        assert_eq!(at("second.sail", &options), vec![PathBuf::from("second.sail")]);
+        assert_eq!(at("yes.sail", &options), vec![PathBuf::from("yes.sail")]);
+        assert!(at("no.sail", &options).is_empty());
+        assert!(at("unfinished", &options).is_empty());
+        let mut options = options;
+        options.variables.insert("ENABLED".into(), ProjectValue::Bool(false));
+        assert_eq!(at("no.sail", &options), vec![PathBuf::from("no.sail")]);
+        assert!(at("yes.sail", &options).is_empty());
+        let broken = "A { files ) } B { files good.sail }";
+        assert_eq!(
+            ProjectManifest::file_paths_at(broken, broken.find("good").unwrap(), &options),
+            vec![PathBuf::from("good.sail")]
+        );
+        let list = "A { files [first.sail, \"unfinished";
+        assert_eq!(
+            ProjectManifest::file_paths_at(list, list.find("first").unwrap(), &options),
+            vec![PathBuf::from("first.sail")]
+        );
+    }
+    #[test]
     fn navigation_evaluates_file_expressions_before_incomplete_declarations() {
         let source = r#"variable BASE = "lib"
 variable PICK = true
@@ -777,7 +884,7 @@ B { requires "#;
         );
         assert_eq!(
             super::ProjectManifest::file_paths_at(source, source.find("y.sail").unwrap(), &options),
-            vec![std::path::PathBuf::from("y.sail"), std::path::PathBuf::from("z.sail")]
+            vec![std::path::PathBuf::from("y.sail")]
         );
         let mut options = options;
         options.variables.insert("BASE".into(), super::ProjectValue::String("override".into()));

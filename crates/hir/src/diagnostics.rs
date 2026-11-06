@@ -129,6 +129,7 @@ pub struct MissingFields {
 /// Sail-specific: numeric constraint unsolvable.
 pub struct UnsolvedConstraint {
     pub constraint: String,
+    pub reason: Option<&'static str>,
     /// Whether the constraint was *proved* unsatisfiable, as opposed to left
     /// undecided. `'m == 8 * 'n` with `'m` fixed at 65 has no integer
     /// solution — that is an error, where "the solver did not get there" is
@@ -478,9 +479,10 @@ impl AnyDiagnostic {
                     node: expr_syntax(*expr)?,
                 }))
             }
-            InferenceDiagnostic::UnsolvedConstraint { expr, constraint } => {
+            InferenceDiagnostic::UnsolvedConstraint { expr, constraint, reason } => {
                 Some(AnyDiagnostic::UnsolvedConstraint(UnsolvedConstraint {
                     constraint: constraint.clone(),
+                    reason: reason.map(|reason| reason.explanation()),
                     proved_false: false,
                     derived_from: Vec::new(),
                     node: expr_syntax(*expr)?,
@@ -525,6 +527,7 @@ impl AnyDiagnostic {
             InferenceDiagnostic::ConstraintViolation { expr, constraint, derived_from } => {
                 Some(AnyDiagnostic::UnsolvedConstraint(UnsolvedConstraint {
                     constraint: constraint.clone(),
+                    reason: None,
                     proved_false: true,
                     // Recorded against the revision this result was
                     // inferred in, which need not be the current one.
@@ -624,23 +627,16 @@ impl AnyDiagnostic {
                 constraint,
                 derived_from,
                 proved_false,
-            } => {
-                if std::env::var("CONSTRPROBE").is_ok() {
-                    eprintln!(
-                        "CONSTR3 cooking {constraint:?} node={:?}",
-                        expr_syntax(*call_expr).is_some()
-                    );
-                }
-                Some(AnyDiagnostic::UnsolvedConstraint(UnsolvedConstraint {
-                    constraint: constraint.clone(),
-                    proved_false: *proved_false,
-                    derived_from: derived_from
-                        .iter()
-                        .map(|s| source_map.rebase(*s, def_base, original_tokens))
-                        .collect(),
-                    node: expr_syntax(*call_expr)?,
-                }))
-            }
+            } => Some(AnyDiagnostic::UnsolvedConstraint(UnsolvedConstraint {
+                constraint: constraint.clone(),
+                proved_false: *proved_false,
+                reason: None,
+                derived_from: derived_from
+                    .iter()
+                    .map(|s| source_map.rebase(*s, def_base, original_tokens))
+                    .collect(),
+                node: expr_syntax(*call_expr)?,
+            })),
             // Deliberately dropped, and re-measured rather than inherited.
             //
             // 2026-08-04: 9 false positives on typecheck/pass and 1 on
@@ -717,7 +713,7 @@ impl AnyDiagnostic {
                         name: name.to_string(),
                         node: node_at(span_of(*second)?),
                         creating: creating_word(*kind),
-                        first: span_of(*first).map(&node_at),
+                        first: span_of(*first).map(node_at),
                     }))
                 }
                 // Reported by the workspace-level scattered check, which can

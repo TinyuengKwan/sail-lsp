@@ -2503,6 +2503,7 @@ fn single_numeric_value(ty: &Ty) -> Option<i128> {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod regression_tests {
     use super::*;
 
@@ -2555,7 +2556,7 @@ mod regression_tests {
         {
             let mut context =
                 crate::method_resolution::MethodResolutionContext { table: &mut table };
-            assert!(context.try_candidate(&[b.clone()], &[Ty::named("string")]));
+            assert!(context.try_candidate(std::slice::from_ref(&b), &[Ty::named("string")]));
         }
         assert_eq!(table.deep_resolve(&b), Ty::named("string"));
         table.rollback_to(outer);

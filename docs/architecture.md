@@ -394,9 +394,43 @@ equality requires both directions. Structural binding collection is explicitly
 non-proving. Constructor payloads share existential witness allocation and keep
 unresolved predicates. Scoped goals retain universe and rigid-variable metadata;
 quantified entailment uses bounded concrete counterexamples and, when enabled,
-exact supported SMT translations. Unknown remains unknown. General flow joins,
-complete kind checking, arbitrary integers and cancellation-aware SMT budgets
-remain outside this implementation.
+exact supported SMT translations. Unknown remains unknown.
+
+Representable flow joins include arbitrary-precision integer ranges, tuple
+components and existential numeric alternatives for invariant constructors.
+Conditional joins retain supported boolean predicates and numeric indices;
+an unrepresentable join still returns to the caller's recovery path. This is
+not a complete least-common-supertype algorithm for all Sail types.
+
+Type/Int/Bool/Order binder kinds survive lowering and alias substitution.
+Ordered metadata checks resolve user constructors in the declaration's scope,
+including cross-file kind mismatches, without borrowing future declarations.
+For alias headers with omitted kinds, diagnostics infer direct parameter uses
+from builtin constructor argument positions in the body. Conflicting evidence
+stays unspecified; nested existential scopes are excluded from this projection.
+Bare parameters used as tuple components or function parameter/return types
+infer Type. Existential and forall binders isolate same-spelled variables from
+the alias header's kind inference.
+A synonym whose entire result is an unannotated header variable cannot infer
+its result kind (`type Id('a) = 'a`). It reports a kind error at the result
+variable; an explicit binder kind supplies the missing evidence.
+Alias kind projections are memoized by syntax-node identity within one
+diagnostic pass, avoiding repeated body parsing for multiple references. The
+temporary map is discarded after that pass and cannot retain stale edit data.
+The shared cases in `analysis/kind_oracle_tests.rs` exercise IDE diagnostics in
+single-file and cross-file forms. To compare the same cases to a real compiler,
+run `SAIL_ORACLE_BIN=/path/to/sail cargo test -p ide upstream_kind_oracle -- --ignored --nocapture`.
+That explicit test fails without the compiler and reports its version. The
+pinned corpus workflow runs it and retains the output as `kind-oracle.log`.
+These checks and the kind regression tests establish specific supported cases;
+they do not establish complete upstream kind-checking equivalence.
+
+Numeric expressions use arbitrary-precision integer constants and bounded
+evaluation. Partial arithmetic and resource exhaustion retain Unknown rather
+than inventing a value. Cancellation-aware SMT budgets, retry behavior and their
+limits are described below under numeric inference. See
+`infer/p2_audit.rs`, `infer/boolean_audit.rs` and IDE
+`analysis/ordered_names_tests.rs` for the corresponding regression coverage.
 
 ### Completion provider architecture (ide-completion)
 
@@ -454,7 +488,22 @@ selection filtering precedes overlap removal. The client applies the preview.
 `MatchFinder::new` parses and resolves one replacement rule at an explicit
 invocation position. The IDE owns workspace traversal and passes each file and
 its active syntax tree to the finder, which returns a vector of edits. There is
-no separate workspace cache, search-only mode or comment-rule entry point.
+no separate workspace cache or comment-rule entry point.
+
+`sail-lsp/ssrSearch` is a read-only expression search, advertised as
+`experimental.ssrSearch`. It accepts `query` (a pattern without `==>>`), flattened
+`textDocument`/`position`, and optional `selections`, returning LSP `Location[]`.
+For example, `combine($a, $b)` finds calls to the same semantic binding as the
+invocation position. It includes nested matches, filters selections before
+reporting, excludes library sources, and deduplicates physical locations across
+semantic views. An ambiguous invocation include context is rejected. It returns
+locations without producing edits or requiring the surrounding file to parse
+without errors. Binding-introducing, item and type patterns retain the existing
+SSR restrictions. Queued obsolete searches are cancelled after edits.
+In VS Code, **Sail: Structural Search** prompts for a pattern and shows the
+result locations in the references view. The command offers cancellable
+progress and discards results if the invocation document changes or closes.
+It does not apply edits.
 
 Current limits are explicit: expression rules cannot introduce bindings; item,
 type and binding-pattern rules are rejected. Library sources are excluded.
@@ -548,6 +597,12 @@ limit. Timeout/cancellation yields Unknown. No detached solver task or watchdog
 outlives its context. Salsa cancellation is polled between expressions and goals.
 A query that encounters a resource-limited check records an untracked read, so it
 can retry next revision; normal inference retains precise dependency reuse.
+
+The native arithmetic solver proves nonnegativity of identical integer
+polynomial factors (`p * p >= 0`) before requesting SMT. This covers integer
+constants, variables, negation, sums, differences and products, with bounded
+structural traversal. Partial terms such as division and exponentiation do not
+gain a proof through this rule. A square is not assumed strictly positive.
 
 
 ### Include instances and physical sources

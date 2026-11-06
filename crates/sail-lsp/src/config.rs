@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase", default)]
 #[derive(Default)]
 pub struct SailLspConfig {
+    pub formatting: FormattingConfig,
     /// Diagnostics configuration.
     pub diagnostics: DiagnosticsConfig,
     /// Inlay hints configuration.
@@ -37,6 +38,18 @@ pub struct SailLspConfig {
     pub flycheck: FlycheckConfig,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct FormattingConfig {
+    /// Soft line width; indivisible expressions and aligned tables may exceed it.
+    pub line_width: u32,
+}
+impl Default for FormattingConfig {
+    fn default() -> Self {
+        Self { line_width: 100 }
+    }
+}
+
 /// `sail --just-check`, as rust-analyzer runs `cargo check`.
 ///
 /// Off by default: it shells out to a binary that may not be installed, and
@@ -44,6 +57,8 @@ pub struct SailLspConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct FlycheckConfig {
+    pub timeout_ms: u64,
+    pub debounce_ms: u64,
     /// Whether to run it at all.
     pub enable: bool,
     /// The binary. `sail` on `PATH` unless the user says otherwise.
@@ -54,7 +69,13 @@ pub struct FlycheckConfig {
 
 impl Default for FlycheckConfig {
     fn default() -> Self {
-        Self { enable: false, command: "sail".to_string(), extra_args: Vec::new() }
+        Self {
+            enable: false,
+            command: "sail".to_string(),
+            extra_args: Vec::new(),
+            timeout_ms: 30_000,
+            debounce_ms: 200,
+        }
     }
 }
 
@@ -160,10 +181,50 @@ pub enum ProjectVariableValue {
     String(String),
 }
 
+/// Explicit project entries. Paths are relative to the containing workspace
+/// folder; each detailed entry can override manifest variables and roots.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum LinkedProject {
+    Path(String),
+    Config(LinkedProjectConfig),
+}
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkedProjectConfig {
+    pub project_file: String,
+    #[serde(default)]
+    pub project_variables: std::collections::BTreeMap<String, ProjectVariableValue>,
+    pub project_modules: Option<Vec<String>>,
+}
+impl LinkedProject {
+    pub fn path(&self) -> &str {
+        match self {
+            Self::Path(path) => path,
+            Self::Config(c) => &c.project_file,
+        }
+    }
+    pub fn effective(&self, base: &WorkspaceConfig) -> WorkspaceConfig {
+        let mut config = base.clone();
+        config.linked_projects.clear();
+        config.project_file = Some(self.path().to_owned());
+        if let Self::Config(overrides) = self {
+            config.project_variables.extend(overrides.project_variables.clone());
+            if let Some(roots) = &overrides.project_modules {
+                config.project_modules = roots.clone();
+            }
+        }
+        config
+    }
+}
+
 /// Workspace settings.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct WorkspaceConfig {
+    pub linked_projects: Vec<LinkedProject>,
+    /// Preferred project for files shared by multiple projects.
+    pub active_project: Option<String>,
     /// Match Sail's --strict-bitvector mode (natural-number vector lengths).
     pub strict_bitvector: bool,
     /// Manifest relative to each workspace root; discovery is used when absent.

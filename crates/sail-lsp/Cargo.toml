@@ -13,6 +13,7 @@ vendored = ["z3/vendored"]
 name = "sail_lsp"
 
 [dependencies]
+libc.workspace = true
 anyhow.workspace = true
 base-db.workspace = true
 salsa.workspace = true
@@ -47,5 +48,6 @@ tracing-subscriber.workspace = true
 tracing-tree.workspace = true
 
 [dev-dependencies]
+tempfile = "3.10"
 ide-db = { workspace = true, features = ["test-utils"] }
 ide = { workspace = true, features = ["test-utils"] }

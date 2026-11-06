@@ -38,21 +38,24 @@ cargo run --release --example completion_check -- --prefix 1 /path/to/sail-riscv
 
 ## Corpus quality
 
-Use [the 2026-10-30 RA audit](docs/baselines/2026-10-30-ra-improvements.json)
-for current verification, gate results and known limitations. The
-[P2/P3 checkpoint](docs/baselines/2026-10-29-editor-p2-p3.json) retains older
-source/corpus hashes and probes not rerun in the follow-up. Do not combine
-project-mode and flat-scope denominators or relabel historical observations.
+Use [the 2026-11-02 unified baseline](docs/baselines/2026-11-02-unified.json)
+for that snapshot's source/compiler hashes, commands and limitations. The
+[interactive follow-up](docs/baselines/2026-11-02-interactive-followup.json)
+tracks subsequent work and its separate verification. Do not combine project-mode and flat-scope
+denominators or relabel historical observations. Earlier dated reports preserve
+measurements not repeated in this baseline.
 
-| Scope | Mode and current result |
+| Scope | Mode and unified-snapshot result |
 | --- | --- |
 | upstream typecheck | Strict bitvector: 276/276 pass, 217/217 fail; 0 FP/FN |
 | extended corpus | Ordinary Sail: 372 files; 0 FP/FN, 17 scope-only cases excluded from those columns |
-| mutation oracle | Ordinary Sail, complete ordered-project run: 538 mutations; 274 upstream rejects, 274 detected, 0 misses (October 30 follow-up) |
-| active RISC-V manifest | Ordinary Sail: 156 project files + 40 active included/library files; 81,543 expressions, 0 unknown/partially unknown, 0 error diagnostics |
-| numeric proof obligations | Final accepted run: 2,913 proved, 0 refuted, 4 budget-exhausted unknowns (abs bit widths/loop bounds). Repeats observed 0–4 unknowns. Original three divisibility sites are proved by an exact non-SMT rule; do not generalize a zero-unknown checkpoint. |
-| protocol range probe (P2/P3 checkpoint) | All 158 physical model files: 470,394 ranges, 0 mismatches |
-| editor regression gates | Follow-up records default/no-SMT gate status, actual invalidation counts, normal-edit reparsing and burst/cancellation stdio probes |
+| mutation oracle | Ordinary Sail, complete ordered-project run: 538 mutations; 274 upstream rejects, 274 detected, 0 misses; upstream oracle freshly regenerated |
+| active RISC-V manifest | Ordinary Sail: 156 project files + 40 active included/library files; 81,543 expressions, 0 unknown/partially unknown, 0 error diagnostics, 62 warnings and 6 hints |
+| numeric proof obligations | This run: 2,914 proved, 0 refuted, 0 unknown committed deferred obligations. Finite budgets change both counts and Unknown outcomes; do not generalize this zero-Unknown observation. Parallel exhaustion is reproduced in `2026-11-02-z3-contention.json`. |
+| protocol range probe | All 158 physical model files: 470,394 ranges, 0 mismatches |
+| formatter | 217 files at two indentation widths: 434 checks, no skipped files, token changes, parse failures or idempotence failures |
+| incremental probe | 160 synthetic files, 32 edits, modules/preprocessing enabled: one callable reinferred per body edit, three expected callables per signature edit; dependent diagnostics checked |
+| editor regression gates | Unified report records default/no-SMT tests and normal/burst/cancellation/reload stdio measurements; real Zed SSH and interactive VS Code acceptance remain deferred |
 
 Completion ranking and latency ablation measurements have their own scope and
 provenance in `docs/baselines/2026-10-29-editor-p0-p1.json`; they are not rerun or

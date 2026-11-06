@@ -21,9 +21,12 @@ import time
 
 
 class Client:
-    def __init__(self, server, stderr):
+    def __init__(self, server, stderr, cpu_affinity=None):
+        command = [str(server)]
+        if cpu_affinity:
+            command = ["taskset", "--cpu-list", cpu_affinity, *command]
         self.process = subprocess.Popen(
-            [str(server)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr
+            command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=stderr
         )
         self.incoming = queue.Queue()
         self.next_id = 0
@@ -189,6 +192,8 @@ def main():
     parser.add_argument("--cycles", type=int, default=30)
     parser.add_argument("--cancel-every", type=int, default=0)
     parser.add_argument("--burst", action="store_true", help="pipeline editing requests across revisions, cancelling references without waiting")
+    parser.add_argument("--autoimport", action="store_true", help="measure completion with optional autoimport candidate search enabled")
+    parser.add_argument("--cpu-affinity", help="Linux taskset CPU list for controlled worker-count experiments")
     parser.add_argument("--lifecycle-cycles", type=int, default=0)
     parser.add_argument("--settle", action="store_true", help="wait for actual cache-prime completion before warm/reload samples")
     parser.add_argument("--heap-status", action="store_true", help="record allocator estimate from analyzerStatus at settled checkpoints")
@@ -219,14 +224,17 @@ def main():
               "server_sha256": hashlib.sha256(args.server.read_bytes()).hexdigest(),
               "settle": args.settle, "lifecycle_cycles": args.lifecycle_cycles,
               "burst": args.burst, "cancel_every": args.cancel_every, "idle_seconds": args.idle_seconds,
+              "autoimport": args.autoimport,
+              "cpu_affinity": args.cpu_affinity,
               "sail_dir": os.environ.get("SAIL_DIR"),
               "scope": "stdio, unsaved edits only; cold means fresh process, not cold OS cache"}
     with args.output.with_suffix(".stderr.log").open("w") as stderr:
-        client = Client(args.server.resolve(), stderr)
+        client = Client(args.server.resolve(), stderr, args.cpu_affinity)
         try:
             client.ask("initialize", {
                 "processId": os.getpid(), "rootUri": root.as_uri(),
                 "workspaceFolders": [{"uri": root.as_uri(), "name": root.name}],
+                "initializationOptions": {"completion": {"autoimport": args.autoimport}},
                 "capabilities": {
                     "window": {"workDoneProgress": True},
                     "workspace": {"didChangeWatchedFiles": {"dynamicRegistration": True}},

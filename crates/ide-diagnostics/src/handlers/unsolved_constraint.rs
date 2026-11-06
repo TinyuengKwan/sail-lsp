@@ -15,7 +15,11 @@ pub(crate) fn unsolved_constraint(
     let message = if d.proved_false {
         format!("constraint cannot hold: {}", d.constraint)
     } else {
-        format!("unsolved constraint: {}", d.constraint)
+        format!(
+            "unsolved constraint: {} ({})",
+            d.constraint,
+            d.reason.unwrap_or("the analyzer could not establish this constraint")
+        )
     };
     // Where the constraint came from. The resolver records the argument spans
     // that produced it, and knowing which argument is at fault is most of the
@@ -53,13 +57,17 @@ mod tests {
     fn smoke() {
         let diag = AnyDiagnostic::UnsolvedConstraint(UnsolvedConstraint {
             constraint: "'n >= 0".to_string(),
+            reason: Some("the analyzer's constraint solving budget was exhausted"),
             proved_false: false,
             derived_from: Vec::new(),
             node: test_node(0, 5),
         });
         let d = check_dispatch(&diag);
         assert!(d.is_some());
-        assert!(d.unwrap().message.contains("unsolved constraint"));
+        let d = d.unwrap();
+        assert!(d.message.contains("unsolved constraint"));
+        assert!(d.message.contains("budget was exhausted"));
+        assert_eq!(d.severity, hir::diagnostics::Severity::Warning);
     }
 
     /// A constraint shown to have no solution is an error, and says so.
@@ -67,6 +75,7 @@ mod tests {
     fn proved_false_is_an_error() {
         let diag = AnyDiagnostic::UnsolvedConstraint(UnsolvedConstraint {
             constraint: "'m == 8 * 'n".to_string(),
+            reason: None,
             proved_false: true,
             derived_from: Vec::new(),
             node: test_node(0, 5),

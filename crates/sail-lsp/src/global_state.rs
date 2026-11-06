@@ -21,6 +21,8 @@ type ReqQueue = lsp_server::ReqQueue<(String, std::time::Instant), ReqHandler>;
 pub(crate) struct GlobalState {
     /// MemDocs tracks open documents (text + version).
     pub mem_docs: crate::mem_docs::MemDocs,
+    /// Buffers edited since the last save. External Sail reads disk, not these.
+    pub(crate) dirty_documents: std::collections::HashSet<Url>,
 
     /// AnalysisHost { db } — sole owner of salsa database.
     pub analysis_host: ide::analysis::AnalysisHost,
@@ -63,6 +65,8 @@ pub(crate) struct GlobalState {
     /// registered cannot be cancelled: `$/cancelRequest` had nothing to
     /// look up.
     pub(crate) req_queue: ReqQueue,
+    pub(crate) request_states:
+        std::collections::HashMap<lsp_server::RequestId, crate::request_batch::RequestState>,
     /// Whether the client has been asked to watch the workspace's files.
     pub(crate) registered_file_watchers: bool,
     /// Paths consulted by discovery, including absent include candidates.
@@ -104,15 +108,21 @@ pub(crate) struct GlobalState {
     /// The project each workspace folder loaded, or kept after its manifest
     /// broke. Flycheck checks these, and a failed reload falls back to them.
     pub(crate) projects: Arc<std::collections::BTreeMap<Url, crate::reload::FolderProject>>,
+    /// Labels/configuration in the exact module order of the loaded model.
+    pub(crate) module_contexts: Arc<Vec<serde_json::Value>>,
     /// Open manifests' text. A manifest is not Sail and never enters the
     /// analysis; its editor features read this.
-    pub(crate) manifest_texts: Arc<std::collections::HashMap<Url, String>>,
+    pub(crate) manifest_texts: Arc<std::collections::HashMap<Url, crate::mem_docs::DocumentData>>,
     /// What was last published on each manifest, so a fixed one is cleared.
     pub(crate) manifest_diagnostics:
         std::collections::BTreeMap<std::path::PathBuf, Vec<lsp_types::Diagnostic>>,
     /// The latest run started for each check target; older answers are dropped.
     pub(crate) flycheck_latest: std::collections::HashMap<crate::flycheck::CheckTarget, u64>,
     pub(crate) flycheck_generation: u64,
+    pub(crate) flycheck_workers:
+        std::collections::HashMap<crate::flycheck::CheckTarget, crate::flycheck::Worker>,
+    pub(crate) flycheck_status:
+        std::collections::BTreeMap<crate::flycheck::CheckTarget, crate::flycheck::Status>,
     pub(crate) loading_module_graph: Option<base_db::module_graph::ModuleGraph>,
     pub(crate) loading_source_project: Option<base_db::preprocess::SourceProject>,
 
@@ -133,6 +143,9 @@ pub(crate) struct GlobalState {
 
     /// Workspace scan/reload queue. Serializes workspace discovery operations.
     pub(crate) fetch_workspaces_queue: crate::op_queue::OpQueue,
+    /// Scope coalesced for the next workspace scan. A full reload dominates
+    /// project-local manifest reloads.
+    pub(crate) pending_reload_scope: Option<crate::reload::ReloadScope>,
     /// Prime caches queue. Serializes cache pre-warming operations.
     pub(crate) prime_caches_queue: crate::op_queue::OpQueue,
     // tracked query. salsa handles caching/invalidation automatically.
@@ -191,6 +204,7 @@ impl GlobalState {
         Self {
             pending_change: ide_db::apply_change::Change::new(),
             mem_docs: crate::mem_docs::MemDocs::default(),
+            dirty_documents: Default::default(),
             analysis_host: ide::analysis::AnalysisHost::new(),
             vfs: vfs::Vfs::default(),
             include_graph: hir::include_graph::IncludeGraph::new(),
@@ -201,6 +215,7 @@ impl GlobalState {
             supports_progress: false,
             client_caps: crate::lsp::capabilities::ClientCapabilities::default(),
             req_queue: ReqQueue::default(),
+            request_states: Default::default(),
             registered_file_watchers: false,
             discovery_watch_files: Vec::new(),
             loader: None,
@@ -216,6 +231,9 @@ impl GlobalState {
             manifest_texts: Default::default(),
             flycheck_latest: Default::default(),
             flycheck_generation: 0,
+            flycheck_workers: Default::default(),
+            flycheck_status: Default::default(),
+            module_contexts: Default::default(),
             loading_module_graph: None,
             loading_source_project: None,
             task_pool: crate::task_pool::TaskPool::new_with_threads(
@@ -227,6 +245,7 @@ impl GlobalState {
             diagnostics: crate::diagnostics::DiagnosticCollection::default(),
             semantic_tokens_cache: crate::lsp::semantic_tokens::SemanticTokensCache::new(),
             fetch_workspaces_queue: crate::op_queue::OpQueue::default(),
+            pending_reload_scope: None,
             prime_caches_queue: crate::op_queue::OpQueue::default(),
             last_gc_revision: 0,
             prime_caches_progress: None,
@@ -271,6 +290,7 @@ impl GlobalState {
 
     /// Send a response back to the client.
     pub(crate) fn respond(&mut self, response: Response) {
+        self.request_states.remove(&response.id);
         if let Some((method, started)) = self.req_queue.incoming.complete(&response.id) {
             let took = started.elapsed();
             tracing::debug!(target: "sail_lsp::latency",
@@ -325,9 +345,49 @@ impl GlobalState {
 
     /// Note that the client asked us for something.
     pub(crate) fn register_request(&mut self, request: &lsp_server::Request) {
+        let document = crate::request_batch::document_uri(request)
+            .and_then(|uri| self.document_stamp(&uri).map(|stamp| (uri, stamp)));
+        self.request_states.insert(
+            request.id.clone(),
+            crate::request_batch::RequestState { document, retries: 0 },
+        );
         self.req_queue
             .incoming
             .register(request.id.clone(), (request.method.clone(), std::time::Instant::now()));
+    }
+
+    pub(crate) fn document_version(&self, uri: &Url) -> Option<i32> {
+        self.mem_docs.get(uri).or_else(|| self.manifest_texts.get(uri)).map(|doc| doc.version)
+    }
+
+    fn document_stamp(&self, uri: &Url) -> Option<(i32, u64)> {
+        self.mem_docs
+            .get(uri)
+            .or_else(|| self.manifest_texts.get(uri))
+            .map(|doc| (doc.version, doc.lifetime))
+    }
+
+    /// Retrying a position after its document changed can return a different
+    /// symbol. Only retry unchanged documents, and bound unrelated cancellations.
+    pub(crate) fn can_retry(&mut self, id: &lsp_server::RequestId) -> bool {
+        let Some(request) = self.request_states.get(id) else { return false };
+        if request.retries >= 2
+            || request
+                .document
+                .as_ref()
+                .is_some_and(|(uri, stamp)| self.document_stamp(uri) != Some(*stamp))
+        {
+            return false;
+        }
+        self.request_states.get_mut(id).unwrap().retries += 1;
+        true
+    }
+
+    pub(crate) fn request_document_changed(&self, id: &lsp_server::RequestId) -> bool {
+        self.request_states
+            .get(id)
+            .and_then(|r| r.document.as_ref())
+            .is_some_and(|(uri, stamp)| self.document_stamp(uri) != Some(*stamp))
     }
 
     /// The client no longer wants an answer to `id`.
@@ -377,7 +437,9 @@ impl GlobalState {
     pub(crate) fn sync_to_salsa(&mut self, uri: &Url, text: &str) {
         let file_id = self.vfs.file_id_for_url(uri);
         let path = self.vfs.file_path(file_id).clone();
-        self.vfs.set_file_contents(path, Some(text.as_bytes().to_vec()));
+        if self.vfs.set_file_contents(path, Some(text.as_bytes().to_vec())) {
+            self.invalidate_flycheck_for_source(uri);
+        }
     }
 
     /// Move everything the VFS has been told into the pending change.
@@ -409,7 +471,10 @@ impl GlobalState {
                             .collect::<Vec<_>>()
                     };
                     if includes(old.text(db)) != includes(&text) {
-                        self.fetch_workspaces_queue.request_op("include paths changed".into(), ());
+                        self.request_workspace_reload(
+                            "include paths changed",
+                            crate::reload::ReloadScope::All,
+                        );
                     }
                 }
             }
@@ -567,11 +632,21 @@ impl GlobalState {
             library_files: Arc::new(self.library_root.clone()),
             project_error: self.project_error.as_deref().map(Arc::from),
             projects: self.projects.clone(),
+            module_contexts: self.module_contexts.clone(),
             manifest_texts: self.manifest_texts.clone(),
+            flycheck_status: self.flycheck_status.clone(),
+            check_diagnostics: Arc::new(
+                self.diagnostics
+                    .check
+                    .iter()
+                    .map(|(&file, projects)| (file, projects.values().flatten().cloned().collect()))
+                    .collect(),
+            ),
             document_versions: self
                 .mem_docs
                 .iter()
                 .filter_map(|uri| self.mem_docs.get(uri).map(|doc| (uri.clone(), doc.version)))
+                .chain(self.manifest_texts.iter().map(|(uri, doc)| (uri.clone(), doc.version)))
                 .collect(),
         }
     }
@@ -608,11 +683,16 @@ impl GlobalState {
 /// mutating shared state. Clone is cheap (salsa Arc + index Arc).
 #[derive(Clone)]
 pub(crate) struct GlobalStateSnapshot {
+    pub(crate) module_contexts: Arc<Vec<serde_json::Value>>,
+    pub(crate) check_diagnostics:
+        Arc<std::collections::HashMap<base_db::FileId, Vec<lsp_types::Diagnostic>>>,
+    pub(crate) flycheck_status:
+        std::collections::BTreeMap<crate::flycheck::CheckTarget, crate::flycheck::Status>,
     pub(crate) workspace_status: WorkspaceStatus,
     pub(crate) document_versions: std::collections::HashMap<Url, i32>,
     pub(crate) project_error: Option<Arc<str>>,
     /// Open manifests' text.
-    pub(crate) manifest_texts: Arc<std::collections::HashMap<Url, String>>,
+    pub(crate) manifest_texts: Arc<std::collections::HashMap<Url, crate::mem_docs::DocumentData>>,
     /// The loaded projects, for project navigation.
     pub(crate) projects: Arc<std::collections::BTreeMap<Url, crate::reload::FolderProject>>,
     /// Immutable Analysis snapshot (salsa db + Files).

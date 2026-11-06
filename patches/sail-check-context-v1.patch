@@ -1,0 +1,158 @@
+diff --git a/src/bin/sail.ml b/src/bin/sail.ml
+index 7ca4a5e76..5c06df0af 100644
+--- a/src/bin/sail.ml
++++ b/src/bin/sail.ml
+@@ -67,6 +67,45 @@ let opt_all_modules = ref false
+ let opt_show_sail_dir = ref false
+ let opt_project_files : string list ref = ref []
+ let opt_variable_assignments : string list ref = ref []
++let check_variables = ref Util.StringMap.empty
++
++(* Versioned, typed check context. Paths are absolute so project-directory
++   changes cannot alter include search or generated-source identity. *)
++let parse_check_context text =
++  let bad message = raise (Arg.Bad ("--check-context: " ^ message)) in
++  let absolute = function
++    | `String path when not (Filename.is_relative path) -> path
++    | _ -> bad "expected an absolute path"
++  in
++  let fields =
++    try match Yojson.Safe.from_string text with `Assoc fields -> fields | _ -> bad "expected an object"
++    with Yojson.Json_error message -> bad message
++  in
++  let get name = match List.assoc_opt name fields with Some value -> value | None -> bad ("missing " ^ name) in
++  List.iter (fun (name, _) ->
++    if not (List.mem name ["version"; "target"; "includePaths"; "variables"; "generatedFiles"]) then
++      bad ("unknown field " ^ name)) fields;
++  if get "version" <> `Int 1 then bad "unsupported version";
++  let target = match get "target" with `Null -> None | `String name -> Some name | _ -> bad "invalid target" in
++  let includes = match get "includePaths" with `List paths -> List.map absolute paths | _ -> bad "invalid includePaths" in
++  let variables = match get "variables" with
++    | `Assoc vars -> List.fold_left (fun map (name, value) ->
++        let value = match value with
++          | `Bool b -> Project.bool_value b
++          | `String s -> Project.string_value s
++          | _ -> bad ("variable " ^ name ^ " must be a boolean or string")
++        in Util.StringMap.add name value map) Util.StringMap.empty vars
++    | _ -> bad "invalid variables"
++  in
++  let generated = match get "generatedFiles" with
++    | `Assoc files -> List.fold_left (fun map (name, path) -> Util.StringMap.add name (absolute path) map) Util.StringMap.empty files
++    | _ -> bad "invalid generatedFiles"
++  in
++  Preprocess.check_target := target;
++  Preprocess.include_paths := includes;
++  Project.virtual_file_paths := generated;
++  check_variables := variables;
++  opt_just_check := true
+ let opt_model_config_file : string option ref = ref None
+ let opt_sail_config_file : string option ref = ref None
+ let opt_slice_instantiation_types : bool ref = ref false
+@@ -239,6 +278,8 @@ let rec options =
+         Arg.String (fun assignment -> opt_variable_assignments := assignment :: !opt_variable_assignments),
+         "<variable=value> assign a module variable to a value"
+       );
++      ("-check_context_version", Arg.Unit (fun () -> print_endline "1"; exit 0), " print supported check-context protocol version");
++      ("-check_context", Arg.String parse_check_context, "<json> typed check-only context (protocol version 1)");
+       ( "-instantiate",
+         Arg.String (fun inst -> parse_instantiation inst),
+         " <type variable=value> instantiate an abstract type variable"
+@@ -496,6 +537,7 @@ let run_sail (config : Yojson.Safe.t option) tgt =
+               raise (Reporting.err_general Parse_ast.Unknown ("Could not parse assignment " ^ assignment))
+           )
+           !opt_variable_assignments;
++        variables := Util.StringMap.union (fun _ _ context -> Some context) !variables !check_variables;
+         let modules = if !opt_all_modules then None else Some frees in
+         Frontend.load_project ~no_core:!opt_no_core ~target:tgt ?modules ~options:!options ~variables
+           ~just_parse:!opt_just_parse_project ~default_sail_dir:Locations.sail_dir project_files
+diff --git a/src/lib/preprocess.ml b/src/lib/preprocess.ml
+index 4c7ed0885..9226f230c 100644
+--- a/src/lib/preprocess.ml
++++ b/src/lib/preprocess.ml
+@@ -174,7 +174,11 @@ let rec find_warnings_off = function
+   | def :: defs -> find_warnings_off defs
+   | [] -> None
+ 
++let check_target = ref None
++let include_paths = ref []
++
+ let preprocess ~default_sail_dir ~target_name ~options ~symbols defs =
++  let target_name = match !check_target with Some name -> Some name | None -> target_name in
+   let module P = Parse_ast in
+   let symbols = ref symbols in
+   let rec aux includes acc = function
+@@ -253,9 +257,17 @@ let preprocess ~default_sail_dir ~target_name ~options ~symbols defs =
+                   "Couldn't figure out relative path for $include. This really shouldn't ever happen."
+           in
+           let file = String.sub file 1 (len - 2) in
+-          let include_file = Filename.concat relative file in
++          let include_file = if Filename.is_relative file then Filename.concat relative file else file in
++          let is_file path = Sys.file_exists path && not (Sys.is_directory path) in
++          let include_file =
++            if is_file include_file || not (Filename.is_relative file) then include_file
++            else
++              match List.find_opt is_file (List.map (fun dir -> Filename.concat dir file) !include_paths) with
++              | Some path -> path
++              | None -> include_file
++          in
+           let include_defs =
+-            Initial_check.parse_file ~loc:l (Sail_file.Path.actual (Filename.concat relative file))
++            Initial_check.parse_file ~loc:l (Sail_file.Path.actual include_file)
+             |> snd
+             |> aux ((file, pragma_loc l) :: includes) []
+           in
+diff --git a/src/lib/preprocess.mli b/src/lib/preprocess.mli
+index 600c3571a..2b0a8f282 100644
+--- a/src/lib/preprocess.mli
++++ b/src/lib/preprocess.mli
+@@ -46,6 +46,10 @@
+ 
+ type symbol_set
+ 
++(** Explicit context for check-only clients; does not select a code generator. *)
++val check_target : string option ref
++val include_paths : string list ref
++
+ val add_default_symbol : string -> unit
+ 
+ val get_default_symbols : unit -> symbol_set
+diff --git a/src/lib/project.ml b/src/lib/project.ml
+index e5e8b53ef..ba1a35915 100644
+--- a/src/lib/project.ml
++++ b/src/lib/project.ml
+@@ -229,12 +229,18 @@ let visit_def vis outer_def =
+ 
+ let visit_defs vis defs = map_no_copy (visit_def vis) defs
+ 
++let virtual_file_paths = ref Util.StringMap.empty
++
+ let rec value_to_paths l = function
+   | V_string s -> [(Sail_file.Path.actual s, l)]
+   | V_virtual s -> (
+-      match Sail_file.get_virtual_file s with
+-      | Some h -> [(Sail_file.to_path h, l)]
+-      | None -> raise (Reporting.err_general (to_loc l) (Printf.sprintf "Virtual file %s does not exist in project" s))
++      match Util.StringMap.find_opt s !virtual_file_paths with
++      | Some path -> [(Sail_file.Path.actual path, l)]
++      | None -> (
++          match Sail_file.get_virtual_file s with
++          | Some h -> [(Sail_file.to_path h, l)]
++          | None -> raise (Reporting.err_general (to_loc l) (Printf.sprintf "Virtual file %s does not exist in project" s))
++        )
+     )
+   | V_list vs -> List.concat_map (value_to_paths l) vs
+   | _ -> raise (Reporting.err_typ (to_loc l) "Expected strings")
+diff --git a/src/lib/project.mli b/src/lib/project.mli
+index 223d48ce2..3ea49db08 100644
+--- a/src/lib/project.mli
++++ b/src/lib/project.mli
+@@ -74,6 +74,9 @@ type value
+ val bool_value : bool -> value
+ val string_value : string -> value
+ 
++(** Physical generated sources supplied by a check-only client. *)
++val virtual_file_paths : string Util.StringMap.t ref
++
+ val parse_assignment : variables:value Util.StringMap.t ref -> string -> bool
+ 
+ type exp =

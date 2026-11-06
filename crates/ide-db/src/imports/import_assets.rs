@@ -72,21 +72,47 @@ fn outline(db: &dyn salsa::Database, file: FileText) -> Vec<Decl> {
         .unwrap_or_default()
 }
 
+/// Warm the same per-file catalog used by search, including inactive sources.
+/// Salsa keeps these entries fresh when candidate files change.
+pub fn prime_catalog(db: &dyn salsa::Database, cancel: &hir::CancellationToken) {
+    let Some(input) = WorkspaceSourceProject::try_get(db) else { return };
+    for (_, id) in &input.project(db).paths {
+        if cancel.is_cancelled() {
+            return;
+        }
+        db.unwind_if_revision_cancelled();
+        if let Some(&file) = input.files(db).get(id) {
+            let _ = outline(db, file);
+        }
+    }
+}
+
 fn describe(root: &SyntaxNode) -> Vec<Decl> {
     // Raw lowering retains both conditional branches. The preview, not the
     // catalog, decides which branch a new include actually activates.
     let tree = hir::ItemTree::build_from_cst(root);
+    // Associate declarations once. Rescanning the entire item tree for each
+    // syntax node made the first autoimport catalog quadratic in file size.
+    // Push in item-tree order to preserve generated declaration precedence.
+    let nodes: Vec<_> = root.children().collect();
+    let mut items_by_node = vec![Vec::new(); nodes.len()];
+    for &item in tree.top_level_items() {
+        let at = item.name_span(&tree).start;
+        let index = nodes.partition_point(|node| usize::from(node.text_range().end()) <= at);
+        if nodes.get(index).is_some_and(|node| usize::from(node.text_range().start()) <= at) {
+            items_by_node[index].push(item);
+        }
+    }
     let mut region = 0;
-    root.children()
-        .map(|node| {
+    nodes
+        .into_iter()
+        .enumerate()
+        .map(|(index, node)| {
             let start = usize::from(node.text_range().start());
             let end = usize::from(node.text_range().end());
             let mut symbols = Vec::new();
             let mut unique = false;
-            for &item in tree.top_level_items().iter().filter(|item| {
-                let at = item.name_span(&tree).start;
-                start <= at && at < end
-            }) {
+            for &item in &items_by_node[index] {
                 unique |= !item.is_clause(&tree)
                     && matches!(
                         item.def_kind(&tree),

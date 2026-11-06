@@ -31,6 +31,19 @@ pub enum UnknownConstraintReason {
     NotEstablished,
 }
 impl UnknownConstraintReason {
+    pub fn explanation(self) -> &'static str {
+        match self {
+            Self::Recovery => "type inference recovered from incomplete or invalid input",
+            Self::UnsupportedGoal => "this constraint form is not supported by the analyzer",
+            Self::ErasedNumeric => "a numeric value was lost during type recovery",
+            Self::FlexibleWitness => {
+                "an existential witness is not fixed by the available constraints"
+            }
+            Self::BudgetExhausted => "the analyzer's constraint solving budget was exhausted",
+            Self::SolverIncomplete => "the solver could not decide this constraint",
+            Self::NotEstablished => "the available assumptions did not establish this constraint",
+        }
+    }
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Recovery => "type_recovery",

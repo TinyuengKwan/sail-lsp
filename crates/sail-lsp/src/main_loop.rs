@@ -12,6 +12,7 @@ use crate::global_state::GlobalState;
 
 /// A unit of background work that has completed.
 /// unified enum for ALL background results (responses + tasks).
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum Task {
     /// Workspace scan discovered files on disk — which ones, in the order
     /// the project declares them. Not what they say: the loader reads them.
@@ -26,11 +27,13 @@ pub(crate) enum Task {
     /// DiagnosticsTaskKind carries `(generation, Vec<(FileId, diags)>)`.
     Diagnostics(DiagnosticsTaskKind),
     /// What `sail --just-check` said, by the path it named.
+    FlycheckStarted { target: crate::flycheck::CheckTarget, generation: u64 },
     Flycheck {
         target: crate::flycheck::CheckTarget,
         /// Only the latest run of a target is believed.
         generation: u64,
         found: crate::flycheck::FlycheckResult,
+        status: crate::flycheck::Status,
     },
 }
 
@@ -181,7 +184,10 @@ impl GlobalState {
         let source_project = self.loading_source_project.take();
         let inputs = std::mem::take(&mut self.loading_project_inputs);
         if !inputs.matches_disk() {
-            self.fetch_workspaces_queue.request_op("manifest changed during loading".into(), ());
+            self.request_workspace_reload(
+                "manifest changed during loading",
+                crate::reload::ReloadScope::All,
+            );
         }
         if let Some((config, folders, revision)) = self.loading_project_config.take() {
             if revision != self.fetch_workspaces_queue.revision()
@@ -209,7 +215,18 @@ impl GlobalState {
         }
         self.report_project_error((!problems.is_empty()).then(|| problems.join("\n")));
         self.publish_manifest_diagnostics(inputs.manifest_diagnostics);
+        self.log_message(
+            MessageType::INFO,
+            format!(
+                "project reload: {} scanned, {} reused",
+                inputs.scanned_projects, inputs.reused_projects
+            ),
+        );
         self.projects = std::sync::Arc::new(inputs.projects);
+        self.module_contexts = std::sync::Arc::new(crate::reload::loaded_module_contexts(
+            &self.projects,
+            &self.config.workspace,
+        ));
         // An unloaded project's last check no longer describes anything.
         let manifests: std::collections::HashSet<_> =
             self.projects.values().map(|p| p.manifest.clone()).collect();
@@ -339,9 +356,15 @@ impl GlobalState {
         if self.fetch_workspaces_queue.op_in_progress() {
             self.fetch_workspaces_queue.op_completed(());
         }
+        self.recheck_flycheck();
     }
     /// Forget published results and tickets; generations remain monotonic.
     pub(crate) fn invalidate_flycheck(&mut self) {
+        for worker in self.flycheck_workers.values() {
+            worker.cancel();
+        }
+        self.flycheck_workers.clear();
+        self.flycheck_status.clear();
         self.flycheck_latest.clear();
         self.diagnostics.retain_check_targets(|_| false);
     }
@@ -356,7 +379,6 @@ impl GlobalState {
     /// file, with that project's manifest, variables and roots; a file no
     /// project knows is checked alone.
     pub(crate) fn request_flycheck(&mut self, saved: &std::path::Path) {
-        use crate::flycheck::CheckTarget;
         if !self.config.flycheck.enable
             || self.fetch_workspaces_queue.op_requested()
             || self.fetch_workspaces_queue.op_in_progress()
@@ -364,7 +386,22 @@ impl GlobalState {
         {
             return;
         }
+        self.request_flycheck_targets(self.flycheck_targets_for_file(saved));
+    }
+
+    fn flycheck_targets_for_file(
+        &self,
+        saved: &std::path::Path,
+    ) -> Vec<crate::flycheck::CheckTarget> {
+        use crate::flycheck::CheckTarget;
         let saved = syntax::preprocess::normalize_path(saved);
+        if let Some(project) = self
+            .projects
+            .values()
+            .find(|project| syntax::preprocess::normalize_path(&project.manifest) == saved)
+        {
+            return vec![CheckTarget::Project(project.manifest.clone())];
+        }
         let lists = |p: &crate::reload::FolderProject| {
             p.files.iter().any(|(_, f)| syntax::preprocess::normalize_path(f) == saved)
         };
@@ -394,18 +431,186 @@ impl GlobalState {
                 Vec::new()
             };
         }
+        targets
+    }
+
+    pub(crate) fn recheck_flycheck(&mut self) {
+        let mut targets: Vec<_> = self
+            .projects
+            .values()
+            .map(|p| crate::flycheck::CheckTarget::Project(p.manifest.clone()))
+            .collect();
+        for path in self.mem_docs.iter().filter_map(|uri| uri.to_file_path().ok()) {
+            for target in self.flycheck_targets_for_file(&path) {
+                if !targets.contains(&target) {
+                    targets.push(target);
+                }
+            }
+        }
+        self.request_flycheck_targets(targets);
+    }
+
+    fn flycheck_control_targets(
+        &self,
+        document: Option<&lsp_types::TextDocumentIdentifier>,
+    ) -> Vec<crate::flycheck::CheckTarget> {
+        let Some(document) = document else {
+            let mut targets: Vec<_> = self
+                .projects
+                .values()
+                .map(|project| crate::flycheck::CheckTarget::Project(project.manifest.clone()))
+                .collect();
+            for target in self
+                .flycheck_workers
+                .keys()
+                .chain(self.flycheck_status.keys())
+                .chain(self.flycheck_latest.keys())
+            {
+                if !targets.contains(target) {
+                    targets.push(target.clone());
+                }
+            }
+            return targets;
+        };
+        document
+            .uri
+            .to_file_path()
+            .map(|path| self.flycheck_targets_for_file(&path))
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn run_flycheck(&mut self, document: Option<&lsp_types::TextDocumentIdentifier>) {
+        if document.is_none() {
+            self.recheck_flycheck();
+        } else {
+            let targets = self.flycheck_control_targets(document);
+            self.request_flycheck_targets(targets);
+        }
+    }
+
+    pub(crate) fn cancel_flycheck(&mut self, document: Option<&lsp_types::TextDocumentIdentifier>) {
+        let targets = self.flycheck_control_targets(document);
         for target in targets {
+            if let Some(worker) = self.flycheck_workers.get(&target) {
+                worker.cancel();
+            }
+            // A cancelled process can still finish and enqueue its answer.
+            // Removing the ticket makes that answer unobservable.
+            if self.flycheck_latest.remove(&target).is_some()
+                || self.flycheck_status.contains_key(&target)
+            {
+                self.flycheck_status.insert(target, crate::flycheck::Status::Cancelled);
+            }
+        }
+    }
+
+    pub(crate) fn clear_flycheck(&mut self, document: Option<&lsp_types::TextDocumentIdentifier>) {
+        if document.is_none() {
+            self.invalidate_flycheck();
+            return;
+        }
+        let targets = self.flycheck_control_targets(document);
+        for target in &targets {
+            if let Some(worker) = self.flycheck_workers.remove(target) {
+                worker.cancel();
+            }
+            self.flycheck_latest.remove(target);
+            self.flycheck_status.remove(target);
+        }
+        self.diagnostics.retain_check_targets(|target| !targets.contains(target));
+    }
+
+    /// Compiler findings describe disk contents at the last check. Once an
+    /// input changes, neither those findings nor an in-flight result describe
+    /// the current buffer. Invalidate affected projects, preserving other runs.
+    pub(crate) fn invalidate_flycheck_for_source(&mut self, uri: &Url) {
+        if self.flycheck_latest.is_empty() && self.diagnostics.check.is_empty() {
+            return;
+        }
+        let Ok(path) = uri.to_file_path() else { return };
+        let targets = self.flycheck_targets_for_file(&path);
+        for target in &targets {
+            if let Some(worker) = self.flycheck_workers.get(target) {
+                worker.cancel();
+            }
+            if self.flycheck_latest.remove(target).is_some()
+                || self.flycheck_status.contains_key(target)
+            {
+                self.flycheck_status.insert(target.clone(), crate::flycheck::Status::Stale);
+            }
+        }
+        self.diagnostics.retain_check_targets(|target| !targets.contains(target));
+    }
+
+    fn request_flycheck_targets(&mut self, targets: Vec<crate::flycheck::CheckTarget>) {
+        if !self.config.flycheck.enable
+            || self.fetch_workspaces_queue.op_requested()
+            || self.fetch_workspaces_queue.op_in_progress()
+            || self.loading_project_config.is_some()
+        {
+            return;
+        }
+        // Editors can restore unsaved buffers directly in didOpen, without a
+        // didChange. A disk compiler must not report those contents as checked.
+        // Only inspect disk when a compiler run is actually being requested.
+        for uri in self.mem_docs.iter() {
+            if !self.dirty_documents.contains(uri)
+                && self.mem_docs.get(uri).is_some_and(|document| {
+                    uri.to_file_path()
+                        .ok()
+                        .and_then(|path| std::fs::read_to_string(path).ok())
+                        .is_none_or(|disk| disk != document.data)
+                })
+            {
+                self.dirty_documents.insert(uri.clone());
+            }
+        }
+        for target in targets {
+            if self.dirty_documents.iter().any(|uri| {
+                uri.to_file_path()
+                    .ok()
+                    .is_some_and(|path| self.flycheck_targets_for_file(&path).contains(&target))
+            }) {
+                self.flycheck_status.insert(target, crate::flycheck::Status::Stale);
+                continue;
+            }
             self.flycheck_generation += 1;
             let generation = self.flycheck_generation;
             self.flycheck_latest.insert(target.clone(), generation);
-            let invocation = crate::flycheck::command_line(
+            let workspace = match &target {
+                crate::flycheck::CheckTarget::Project(manifest) => self
+                    .projects
+                    .values()
+                    .find(|p| &p.manifest == manifest)
+                    .map(|p| &p.config)
+                    .unwrap_or(&self.config.workspace),
+                crate::flycheck::CheckTarget::File(_) => &self.config.workspace,
+            };
+            let root = match &target {
+                crate::flycheck::CheckTarget::Project(manifest) => self
+                    .projects
+                    .values()
+                    .find(|p| &p.manifest == manifest)
+                    .map(|p| p.workspace_root.clone())
+                    .unwrap_or_else(|| manifest.parent().unwrap().to_path_buf()),
+                crate::flycheck::CheckTarget::File(file) => file.parent().unwrap().to_path_buf(),
+            };
+            let includes = crate::reload::include_search_paths(&self.workspace_folders, workspace);
+            let invocation = crate::flycheck::command_line_with_context(
                 &target,
-                &self.config.workspace,
+                workspace,
                 &self.config.flycheck.extra_args,
+                &root,
+                &includes,
             );
             let (args, cwd) = match invocation {
                 Ok(invocation) => invocation,
                 Err(reason) => {
+                    self.flycheck_workers.remove(&target);
+                    self.flycheck_status.insert(
+                        target.clone(),
+                        crate::flycheck::Status::Skipped { message: reason.clone() },
+                    );
                     self.flycheck_latest.remove(&target);
                     self.diagnostics.retain_check_targets(|t| t != &target);
                     self.log_message(
@@ -415,11 +620,29 @@ impl GlobalState {
                     continue;
                 }
             };
-            let command = self.config.flycheck.command.clone();
-            self.task_pool.spawn_with_sender(stdx::thread::ThreadIntent::Worker, move |sender| {
-                let found = crate::flycheck::run(&command, &args, &cwd);
-                let _ = sender.send(Task::Flycheck { target, generation, found });
-            });
+            if !self.flycheck_workers.contains_key(&target) {
+                match crate::flycheck::Worker::new(target.clone(), self.task_pool.sender()) {
+                    Ok(worker) => {
+                        self.flycheck_workers.insert(target.clone(), worker);
+                    }
+                    Err(error) => {
+                        self.flycheck_status.insert(
+                            target.clone(),
+                            crate::flycheck::Status::Failed { message: error.to_string() },
+                        );
+                        self.flycheck_latest.remove(&target);
+                        self.diagnostics.retain_check_targets(|t| t != &target);
+                        continue;
+                    }
+                }
+            }
+            self.flycheck_status.insert(target.clone(), crate::flycheck::Status::Queued);
+            self.flycheck_workers.get_mut(&target).unwrap().submit(
+                generation,
+                &self.config.flycheck,
+                args,
+                cwd,
+            );
         }
     }
 }
@@ -591,10 +814,11 @@ pub fn run_server(connection: Connection) {
         }
         state.workspace_folders = disk_folders;
         // Request initial workspace scan via OpQueue.
-        state.fetch_workspaces_queue.request_op("startup".into(), ());
+        state.request_workspace_reload("startup", crate::reload::ReloadScope::All);
         // Force start immediately — on first iteration, should_start_op() will fire.
         let _ = state.fetch_workspaces_queue.should_start_op();
-        state.fetch_workspaces("startup".into());
+        let scope = state.take_reload_scope();
+        state.fetch_workspaces("startup".into(), scope);
     } else {
         state.finish_workspace_load(&[], 0);
     }
@@ -602,6 +826,63 @@ pub fn run_server(connection: Connection) {
     // Async responses now flow through Task::Response,
     // no separate response channel needed.
     main_loop(&connection, &mut state, &task_receiver);
+}
+
+/// Preserve notification/command order while coalescing edits separated by
+/// reads that a later edit in this bounded batch has already superseded.
+fn on_lsp_batch(state: &mut GlobalState, messages: Vec<Message>) -> (bool, bool) {
+    let started = std::time::Instant::now();
+    let count = messages.len();
+    let mut changed = false;
+    let mut skipped = 0;
+    let mut messages = messages.into_iter();
+    while let Some(message) = messages.next() {
+        match message {
+            Message::Request(request) => {
+                state.register_request(&request);
+                let version = crate::request_batch::document_uri(&request)
+                    .and_then(|uri| state.document_version(&uri));
+                let obsolete = (!state.shutdown_requested)
+                    .then(|| {
+                        crate::request_batch::superseded(&request, version, messages.as_slice())
+                    })
+                    .flatten();
+                if let Some(code) = obsolete {
+                    skipped += 1;
+                    state.respond(lsp_server::Response::new_err(
+                        request.id,
+                        code as i32,
+                        "Request superseded by a queued edit or cancellation".into(),
+                    ));
+                } else {
+                    if !state.fetch_workspaces_queue.op_in_progress() {
+                        changed |= state.process_changes();
+                    }
+                    on_request(state, request);
+                }
+            }
+            Message::Notification(notification) if notification.method == "exit" => {
+                if !state.shutdown_requested {
+                    log::warn!("exit without a preceding shutdown");
+                }
+                return (false, changed);
+            }
+            Message::Notification(notification) => {
+                if !matches!(
+                    notification.method.as_str(),
+                    "textDocument/didChange" | "$/cancelRequest"
+                ) && !state.fetch_workspaces_queue.op_in_progress()
+                {
+                    changed |= state.process_changes();
+                }
+                on_notification(state, notification);
+            }
+            Message::Response(response) => state.complete_request(response),
+        }
+    }
+    tracing::debug!(target: "sail_lsp::latency",
+        "request_batch count={count} skipped={skipped} duration_us={}", started.elapsed().as_micros());
+    (true, changed)
 }
 
 /// Event-driven main loop using `crossbeam_channel::select!`.
@@ -613,6 +894,7 @@ fn main_loop(
     state: &mut GlobalState,
     task_receiver: &crossbeam_channel::Receiver<Task>,
 ) {
+    let input = crate::request_batch::BufferedMessages::new(connection.receiver.clone());
     loop {
         let was_quiescent = state.is_quiescent();
         let loop_start = std::time::Instant::now();
@@ -624,38 +906,19 @@ fn main_loop(
             }
         });
 
+        let mut batch_changed = false;
         crossbeam_channel::select! {
-            recv(connection.receiver) -> msg => {
+            recv(input.receiver) -> msg => {
                 let msg = match msg {
                     Ok(msg) => msg,
                     Err(crossbeam_channel::RecvError) => return,
                 };
-                match msg {
-                    // `shutdown` does not end the loop. The protocol says
-                    // the server keeps running until `exit`, answering
-                    // anything that still arrives with `InvalidRequest` —
-                    // which is what `shutdown_requested` is for, and it had
-                    // no reader: `Connection::handle_shutdown` was called
-                    // instead and the loop returned on the spot, so between
-                    // the two messages a client got no answer at all, to
-                    // anything. `on_sync_mut` — rust-analyzer's dispatcher
-                    // method for a request that mutates state, and the one
-                    // RA uses for exactly this — had no caller for the same
-                    // reason.
-                    Message::Request(req) => {
-                        state.register_request(&req);
-                        on_request(state, req);
-                    }
-                    Message::Notification(notif) if notif.method == "exit" => {
-                        if !state.shutdown_requested {
-                            log::warn!("exit without a preceding shutdown");
-                        }
-                        return;
-                    }
-                    Message::Notification(notif) => {
-                        on_notification(state, notif);
-                    }
-                    Message::Response(resp) => state.complete_request(resp),
+                let mut batch = vec![msg];
+                batch.extend(input.receiver.try_iter().take(crate::request_batch::LIMIT - 1));
+                let (keep_running, changed) = on_lsp_batch(state, batch);
+                batch_changed = changed;
+                if !keep_running {
+                    return;
                 }
             }
             recv(task_receiver) -> task => {
@@ -675,7 +938,7 @@ fn main_loop(
 
         let drain_started = std::time::Instant::now();
         let mut drained = 0usize;
-        while let Ok(task) = task_receiver.try_recv() {
+        for task in task_receiver.try_iter().take(crate::request_batch::LIMIT) {
             on_task(state, task);
             drained += 1;
         }
@@ -692,6 +955,7 @@ fn main_loop(
                 (false, false)
             };
 
+        let state_changed = state_changed || batch_changed;
         if state.is_quiescent() {
             let became_quiescent = !was_quiescent;
 
@@ -772,13 +1036,15 @@ fn main_loop(
         }
 
         if let Some((cause, ())) = state.fetch_workspaces_queue.should_start_op() {
-            state.fetch_workspaces(cause);
+            let scope = state.take_reload_scope();
+            state.fetch_workspaces(cause, scope);
         }
 
         if let Some((_cause, ())) = state.prime_caches_queue.should_start_op() {
             let analysis = state.analysis_snapshot();
             let cancel = state.prime_caches_cancel.clone();
             let num_worker_threads = state.config.prime_caches_num_threads();
+            let prime_imports = state.config.completion.autoimport;
             state.task_pool.spawn_with_sender(stdx::thread::ThreadIntent::Worker, move |sender| {
                 let _ = sender.send(Task::PrimeCaches(PrimeCachesProgress::Begin));
                 // Through `Analysis`, with the worker count the client set
@@ -787,6 +1053,9 @@ fn main_loop(
                 // dominates startup reported nothing while it ran.
                 let report = sender.clone();
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if prime_imports {
+                        analysis.prime_import_catalog(&cancel)?;
+                    }
                     analysis.parallel_prime_caches(num_worker_threads, &cancel, move |p| {
                         let _ = report.send(Task::PrimeCaches(PrimeCachesProgress::Report(p)));
                     })
@@ -847,9 +1116,10 @@ fn on_task(state: &mut GlobalState, task: Task) {
     match task {
         Task::WorkspaceScan(scan) => {
             if !scan.inputs.matches_disk() {
-                state
-                    .fetch_workspaces_queue
-                    .request_op("manifest changed during discovery".into(), ());
+                state.request_workspace_reload(
+                    "manifest changed during discovery",
+                    crate::reload::ReloadScope::All,
+                );
             }
             if scan.revision != state.fetch_workspaces_queue.revision()
                 || scan.config != state.config.workspace
@@ -976,17 +1246,38 @@ fn on_task(state: &mut GlobalState, task: Task) {
             // Client cancellation may have completed this request while its
             // worker was running. Every request gets exactly one response.
             if !state.is_completed(&response.id) {
-                state.respond(response);
+                if response.error.is_none() && state.request_document_changed(&response.id) {
+                    state.respond(lsp_server::Response::new_err(
+                        response.id,
+                        lsp_server::ErrorCode::ServerCancelled as i32,
+                        "Document changed while this request was running; request again".into(),
+                    ));
+                } else {
+                    state.respond(response);
+                }
             }
         }
         Task::Retry(req) => {
             // Retry with the current snapshot only while the client still
             // wants the request. A queued retry must not revive cancellation.
             if !state.is_completed(&req.id) {
-                on_request(state, req);
+                if state.can_retry(&req.id) {
+                    on_request(state, req);
+                } else {
+                    state.respond(lsp_server::Response::new_err(
+                        req.id,
+                        lsp_server::ErrorCode::ServerCancelled as i32,
+                        "Document changed or analysis retry limit reached; request again".into(),
+                    ));
+                }
             }
         }
-        Task::Flycheck { target, generation, found } => {
+        Task::FlycheckStarted { target, generation } => {
+            if state.flycheck_latest.get(&target) == Some(&generation) {
+                state.flycheck_status.insert(target, crate::flycheck::Status::Running);
+            }
+        }
+        Task::Flycheck { target, generation, found, status } => {
             if state.flycheck_latest.get(&target) != Some(&generation)
                 || state.fetch_workspaces_queue.op_requested()
                 || state.fetch_workspaces_queue.op_in_progress()
@@ -994,6 +1285,10 @@ fn on_task(state: &mut GlobalState, task: Task) {
             {
                 return;
             }
+            if status.problem() {
+                state.log_message(MessageType::WARNING, format!("Flycheck {target:?}: {status:?}"));
+            }
+            state.flycheck_status.insert(target.clone(), status);
             // Group by file. A path the workspace does not know is dropped
             // rather than guessed at — upstream may name a prelude file.
             let mut by_file: HashMap<base_db::FileId, Vec<lsp_types::Diagnostic>> = HashMap::new();
@@ -1080,6 +1375,7 @@ fn on_request(state: &mut GlobalState, req: Request) {
     let mut dispatcher = RequestDispatcher { req: Some(req), global_state: state };
     dispatcher.on_sync_mut::<request::Shutdown>(|state, ()| {
         state.shutdown_requested = true;
+        state.invalidate_flycheck();
         Ok(())
     });
     // Anything that arrives after `shutdown` is answered, and answered
@@ -1097,6 +1393,10 @@ fn on_request(state: &mut GlobalState, req: Request) {
     }
 
     dispatcher
+        // This only serializes loaded project metadata. Reading it directly
+        // avoids constructing an analysis snapshot while cache priming owns
+        // Salsa state during startup.
+        .on_sync_mut::<crate::lsp_ext::ProjectGraph>(handlers::handle_project_graph_sync)
         // On the main thread, and only these: rust-analyzer keeps
         // `SelectionRange` and `OnTypeFormatting` sync too, because both are
         // pure syntax, both are wanted within a keystroke, and neither can
@@ -1114,7 +1414,9 @@ fn on_request(state: &mut GlobalState, req: Request) {
             handlers::handle_resolve_completion_item,
         )
         .on_latency_sensitive::<true, request::InlayHintRequest>(handlers::handle_inlay_hint)
+        .on::<false, crate::lsp_ext::ExplainAnalysis>(handlers::handle_explain_analysis)
         .on::<false, crate::lsp_ext::Ssr>(handlers::handle_ssr)
+        .on::<false, crate::lsp_ext::SsrSearch>(handlers::handle_ssr_search)
         .on_latency_sensitive::<true, request::SignatureHelpRequest>(
             handlers::handle_signature_help,
         )
@@ -1206,6 +1508,10 @@ fn on_notification(state: &mut GlobalState, notif: Notification) {
         .on_sync_mut::<lsp_types::notification::WorkDoneProgressCancel>(
             handlers::handle_work_done_progress_cancel,
         )
+        .on_sync_mut::<crate::lsp_ext::Recheck>(handlers::handle_recheck)
+        .on_sync_mut::<crate::lsp_ext::RunFlycheck>(handlers::handle_run_flycheck)
+        .on_sync_mut::<crate::lsp_ext::CancelFlycheck>(handlers::handle_cancel_flycheck)
+        .on_sync_mut::<crate::lsp_ext::ClearFlycheck>(handlers::handle_clear_flycheck)
         .on_sync_mut::<crate::lsp_ext::ReloadWorkspace>(handlers::handle_reload_workspace)
         .finish();
 }
@@ -1220,6 +1526,233 @@ fn noop_response(_state: &mut GlobalState, response: lsp_server::Response) {
 #[cfg(test)]
 mod project_reload_tests {
     use super::*;
+
+    #[test]
+    fn shutdown_batch_answers_requests_until_exit() {
+        let (sender, messages) = crossbeam_channel::unbounded();
+        let (task_sender, _tasks) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender, task_sender);
+        let request =
+            |id: i32, method: &str| Message::Request(Request::new(id.into(), method.into(), ()));
+        assert!(on_lsp_batch(&mut state, vec![request(1, "shutdown")]).0);
+        assert!(state.shutdown_requested);
+        assert!(
+            !on_lsp_batch(
+                &mut state,
+                vec![
+                    request(2, "textDocument/hover"),
+                    Message::Notification(Notification::new("exit".into(), ()))
+                ]
+            )
+            .0
+        );
+        let responses: Vec<_> = messages
+            .try_iter()
+            .filter_map(|m| match m {
+                Message::Response(r) => Some(r),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(responses.len(), 2);
+        assert!(responses[0].error.is_none());
+        assert_eq!(
+            responses[1].error.as_ref().unwrap().code,
+            lsp_server::ErrorCode::InvalidRequest as i32
+        );
+    }
+
+    #[test]
+    fn queued_edits_skip_obsolete_reads_and_apply_once_before_the_final_request() {
+        use serde_json::json;
+        let (sender, messages) = crossbeam_channel::unbounded();
+        let (task_sender, tasks) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender, task_sender);
+        let uri = "file:///sail-batch/main.sail";
+        let notification =
+            |method: &str, params| Message::Notification(Notification::new(method.into(), params));
+        let request = |id: i32, method: &str| {
+            Message::Request(Request::new(
+                id.into(),
+                method.into(),
+                json!({"textDocument":{"uri":uri},"position":{"line":0,"character":9}}),
+            ))
+        };
+        let change = |version: i32, text: &str| {
+            notification(
+                "textDocument/didChange",
+                json!({
+            "textDocument":{"uri":uri,"version":version},"contentChanges":[{"text":text}]}),
+            )
+        };
+        let batch = vec![
+            notification(
+                "textDocument/didOpen",
+                json!({"textDocument":{
+                "uri":uri,"languageId":"sail","version":1,"text":"function old() = 0\n"}}),
+            ),
+            request(1, "textDocument/hover"),
+            change(2, "function middle() = 0\n"),
+            request(2, "textDocument/hover"),
+            notification("$/cancelRequest", json!({"id":2})),
+            change(3, "function newest() = 0\n"),
+            change(2, "function stale() = 0\n"),
+            request(3, "textDocument/documentSymbol"),
+        ];
+        let before = state.analysis_host.raw_database().nonce();
+        assert_eq!(on_lsp_batch(&mut state, batch), (true, true));
+        assert_eq!(state.analysis_host.raw_database().nonce(), before + 1);
+        assert_eq!(state.document_version(&Url::parse(uri).unwrap()), Some(3));
+        let responses: Vec<_> = messages
+            .try_iter()
+            .filter_map(|m| match m {
+                Message::Response(r) => Some(r),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(responses.len(), 2);
+        assert_eq!(
+            responses[0].error.as_ref().unwrap().code,
+            lsp_server::ErrorCode::ServerCancelled as i32
+        );
+        assert_eq!(
+            responses[1].error.as_ref().unwrap().code,
+            lsp_server::ErrorCode::RequestCanceled as i32
+        );
+        let Task::Response(response) =
+            tasks.recv_timeout(std::time::Duration::from_secs(5)).unwrap()
+        else {
+            panic!("expected final symbol response");
+        };
+        assert!(response.error.is_none(), "{response:?}");
+        let result = response.result.unwrap().to_string();
+        assert!(result.contains("newest") && !result.contains("middle"), "{result}");
+    }
+
+    #[test]
+    fn retries_are_bounded_and_never_reuse_positions_after_document_changes() {
+        let (sender, messages) = crossbeam_channel::unbounded();
+        let (task_sender, _tasks) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender, task_sender);
+        let uri = Url::parse("file:///sail-retry/main.sail").unwrap();
+        state.mem_docs.insert(uri.clone(), crate::mem_docs::DocumentData::new(1, String::new()));
+        let request = Request::new(
+            1.into(),
+            "textDocument/hover".into(),
+            serde_json::json!({"textDocument":{"uri":uri},"position":{"line":0,"character":0}}),
+        );
+        state.register_request(&request);
+        assert!(state.can_retry(&request.id));
+        assert!(state.can_retry(&request.id));
+        assert!(!state.can_retry(&request.id));
+        state.register_request(&request);
+        state.mem_docs.get_mut(&uri).unwrap().version = 2;
+        assert!(!state.can_retry(&request.id));
+        state.mem_docs.get_mut(&uri).unwrap().version = 1;
+        state.register_request(&request);
+        state.mem_docs.remove(&uri);
+        state.mem_docs.insert(uri, crate::mem_docs::DocumentData::new(1, "different text".into()));
+        assert!(!state.can_retry(&request.id), "reopening can reset the version to one");
+        on_task(&mut state, Task::Response(lsp_server::Response::new_ok(request.id, "old symbol")));
+        let Message::Response(response) = messages.try_recv().unwrap() else { panic!("response") };
+        assert_eq!(response.error.unwrap().code, lsp_server::ErrorCode::ServerCancelled as i32);
+    }
+
+    #[test]
+    fn recheck_includes_open_standalone_files_and_deduplicates_projects() {
+        use crate::flycheck::CheckTarget;
+        let (sender, _messages) = crossbeam_channel::unbounded();
+        let (task_sender, _tasks) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender, task_sender);
+        state.config.flycheck.enable = true;
+        // Keep workers pending so this test exercises scheduling without an installed compiler.
+        state.config.flycheck.debounce_ms = 60_000;
+        let root =
+            std::env::temp_dir().join(format!("flycheck-mixed-workspace-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let manifest = root.join("p.sail_project");
+        let linked = root.join("linked.sail");
+        let standalone = root.join("standalone.sail");
+        let linked_uri = Url::from_file_path(&linked).unwrap();
+        std::sync::Arc::make_mut(&mut state.projects).insert(
+            Url::from_directory_path(&root).unwrap(),
+            crate::reload::FolderProject {
+                manifest: manifest.clone(),
+                files: vec![(linked_uri.clone(), linked)],
+                ..Default::default()
+            },
+        );
+        for uri in [linked_uri, Url::from_file_path(&standalone).unwrap()] {
+            std::fs::write(uri.to_file_path().unwrap(), "").unwrap();
+            state.mem_docs.insert(uri, crate::mem_docs::DocumentData::new(1, String::new()));
+        }
+        state.recheck_flycheck();
+        assert_eq!(state.flycheck_generation, 2, "each target must be submitted exactly once");
+        assert_eq!(state.flycheck_latest.len(), 2);
+        assert!(state.flycheck_latest.contains_key(&CheckTarget::Project(manifest)));
+        assert!(state.flycheck_latest.contains_key(&CheckTarget::File(standalone)));
+        state.invalidate_flycheck();
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn flycheck_controls_are_scoped_to_the_document_project() {
+        use crate::flycheck::CheckTarget;
+        let (sender, _messages) = crossbeam_channel::unbounded();
+        let (task_sender, _tasks) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender, task_sender);
+        let root =
+            std::env::temp_dir().join(format!("flycheck-control-workspace-{}", std::process::id()));
+        let a = root.join("a.sail");
+        let b = root.join("b.sail");
+        let a_uri = Url::from_file_path(&a).unwrap();
+        let b_uri = Url::from_file_path(&b).unwrap();
+        let a_target = CheckTarget::Project(root.join("a.sail_project"));
+        let b_target = CheckTarget::Project(root.join("b.sail_project"));
+        let projects = std::sync::Arc::make_mut(&mut state.projects);
+        projects.insert(
+            Url::parse("file:///workspace-a").unwrap(),
+            crate::reload::FolderProject {
+                manifest: root.join("a.sail_project"),
+                files: vec![(a_uri.clone(), a.clone())],
+                ..Default::default()
+            },
+        );
+        projects.insert(
+            Url::parse("file:///workspace-b").unwrap(),
+            crate::reload::FolderProject {
+                manifest: root.join("b.sail_project"),
+                files: vec![(b_uri, b)],
+                ..Default::default()
+            },
+        );
+        for target in [&a_target, &b_target] {
+            state.flycheck_latest.insert(target.clone(), 1);
+            state.flycheck_status.insert(target.clone(), crate::flycheck::Status::Running);
+        }
+        let file_id = state.vfs.file_id_for_url(&a_uri);
+        state.diagnostics.set_check_diagnostics(
+            &a_target,
+            vec![(
+                file_id,
+                vec![lsp_types::Diagnostic {
+                    message: "from compiler".into(),
+                    ..Default::default()
+                }],
+            )],
+        );
+        let document = lsp_types::TextDocumentIdentifier { uri: a_uri };
+
+        state.cancel_flycheck(Some(&document));
+        assert_eq!(state.flycheck_status.get(&a_target), Some(&crate::flycheck::Status::Cancelled));
+        assert_eq!(state.flycheck_status.get(&b_target), Some(&crate::flycheck::Status::Running));
+        assert_eq!(state.diagnostics.diagnostics_for(file_id).count(), 1);
+
+        state.clear_flycheck(Some(&document));
+        assert!(!state.flycheck_status.contains_key(&a_target));
+        assert!(state.flycheck_status.contains_key(&b_target));
+        assert_eq!(state.diagnostics.diagnostics_for(file_id).count(), 0);
+    }
 
     #[test]
     fn late_worker_results_and_retries_do_not_revive_completed_requests() {
@@ -1275,6 +1808,7 @@ mod project_reload_tests {
         };
         state.flycheck_latest.insert(target.clone(), 2);
         let result = |generation, message| Task::Flycheck {
+            status: crate::flycheck::Status::Diagnostics { count: 1 },
             target: target.clone(),
             generation,
             found: finding(message),
@@ -1304,8 +1838,21 @@ mod project_reload_tests {
                 vec![lsp_types::Diagnostic { message: "obsolete".into(), ..Default::default() }],
             )],
         );
-        state.request_flycheck(&path);
-        assert!(state.flycheck_latest.is_empty());
+        on_task(
+            &mut state,
+            Task::Flycheck {
+                target: target.clone(),
+                generation: 1,
+                found: vec![],
+                status: crate::flycheck::Status::Skipped {
+                    message: "includePaths requires check-context v1".into(),
+                },
+            },
+        );
+        assert!(matches!(
+            state.flycheck_status.get(&target),
+            Some(crate::flycheck::Status::Skipped { .. })
+        ));
         assert_eq!(state.diagnostics.diagnostics_for(file_id).count(), 0);
         let messages: Vec<_> =
             messages.try_iter().map(|m| serde_json::to_value(m).unwrap()).collect();
@@ -1313,7 +1860,7 @@ mod project_reload_tests {
             messages.iter().any(|m| m["method"] == "window/logMessage"
                 && m["params"]["message"]
                     .as_str()
-                    .is_some_and(|s| s.contains("Flycheck skipped") && s.contains("includePaths"))),
+                    .is_some_and(|s| s.contains("Skipped") && s.contains("includePaths"))),
             "{messages:?}"
         );
     }
@@ -1330,6 +1877,7 @@ mod project_reload_tests {
             let file_id = state.vfs.file_id_for_url(&url);
             let target = crate::flycheck::CheckTarget::Project(path.with_file_name("sail.proj"));
             let result = || Task::Flycheck {
+                status: crate::flycheck::Status::Diagnostics { count: 1 },
                 target: target.clone(),
                 generation: 1,
                 found: vec![(
@@ -1353,7 +1901,10 @@ mod project_reload_tests {
                         .insert("RMEM".into(), crate::config::ProjectVariableValue::Bool(true));
                 }
                 "roots" => config.workspace.project_modules.push("Main".into()),
-                "reload" => state.fetch_workspaces("manifest changed at same path".into()),
+                "reload" => state.fetch_workspaces(
+                    "manifest changed at same path".into(),
+                    crate::reload::ReloadScope::All,
+                ),
                 _ => unreachable!(),
             }
             state.update_configuration(config);
@@ -1409,7 +1960,8 @@ mod project_reload_tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         loop {
             if let Some((cause, ())) = state.fetch_workspaces_queue.should_start_op() {
-                state.fetch_workspaces(cause);
+                let scope = state.take_reload_scope();
+                state.fetch_workspaces(cause, scope);
             }
             while let Ok(task) = tasks.try_recv() {
                 on_task(state, task);

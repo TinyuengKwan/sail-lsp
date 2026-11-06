@@ -130,6 +130,37 @@ impl Default for Files {
 }
 
 impl Files {
+    /// Passive accounting: inputs and existing seeds only, never execute a
+    /// parse, inference or index query to measure its cache. Text allocations
+    /// shared by physical files, semantic views and seeds are counted once.
+    pub fn memory_stats(&self, db: &dyn salsa::Database) -> FileMemoryStats {
+        let mut result = FileMemoryStats::default();
+        let mut texts = std::collections::HashSet::new();
+        for entry in self.map.iter().chain(self.instances.iter()) {
+            let ft = *entry.value();
+            if entry.key().is_instance() {
+                result.semantic_views += 1;
+            } else {
+                result.physical_files += 1;
+            }
+            let text = ft.text(db);
+            if texts.insert((text.as_ptr() as usize, text.len())) {
+                result.text_bytes += text.len();
+            }
+        }
+        for entry in self.map.iter().chain(self.instances.iter()) {
+            let ft = *entry.value();
+            if let Some(seed) = ft.parse_cache(db).get() {
+                result.parse_seeds += 1;
+                result.live_seed_trees += usize::from(seed.green.strong_count() > 0);
+                if texts.insert((seed.text.as_ptr() as usize, seed.text.len())) {
+                    result.text_bytes += seed.text.len();
+                    result.seed_only_text_bytes += seed.text.len();
+                }
+            }
+        }
+        result
+    }
     /// Whether this text differs from what was last written for the file.
     ///
     /// The dedup that used to live in a `set_file_contents` buffer, moved to
@@ -242,6 +273,16 @@ impl Files {
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
     }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct FileMemoryStats {
+    pub physical_files: usize,
+    pub semantic_views: usize,
+    pub text_bytes: usize,
+    pub seed_only_text_bytes: usize,
+    pub parse_seeds: usize,
+    pub live_seed_trees: usize,
 }
 
 // the workspace is a flat list of files.

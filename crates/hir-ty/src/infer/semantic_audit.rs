@@ -257,7 +257,7 @@ fn solver_cache_distinguishes_nested_application_shapes() {
     let b = app("audit_f", vec![app("audit_g", vec![n("1"), n("2")])]);
     let assumption = ConstraintExpr::Compare { lhs: a.clone(), op: CompareOp::Eq, rhs: n("0") };
     assert_eq!(
-        z3_solver::try_solve(&assumption, &Subst::default(), &[assumption.clone()]),
+        z3_solver::try_solve(&assumption, &Subst::default(), std::slice::from_ref(&assumption),),
         ConstraintStatus::Satisfied
     );
     let goal = ConstraintExpr::Compare { lhs: b, op: CompareOp::Eq, rhs: n("0") };
@@ -833,7 +833,8 @@ fn obligation_budget_reason_is_local_to_the_attempt_and_retryable() {
         SolverLimits { checks: 0, ..Default::default() },
     );
     let mut ctx = obligation_context();
-    let goal = parse_constraint_text("'coverage_budget_unique * 'coverage_budget_unique >= 0");
+    let goal =
+        parse_constraint_text("'coverage_budget_unique * ('coverage_budget_unique + 1) >= 0");
     ctx.table.push_obligation(Obligation::NumericConstraint(goal.clone()));
     ctx.table.push_obligation(Obligation::NumericConstraint(ConstraintExpr::Unsupported));
     ctx.table.push_obligation(Obligation::NumericConstraint(ConstraintExpr::Bool(true)));
@@ -1372,8 +1373,11 @@ fn finite_arithmetic_entailment_agrees_with_exact_signed_evaluation() {
                 let facts = parse_constraint_text(&format!("'n in {{{left},{right}}}"));
                 for bound in -3..=3 {
                     let goal = parse_constraint_text(&format!("'n * {factor} <= {bound}"));
-                    if solver::solve_without_smt(&goal, &Subst::default(), &[facts.clone()])
-                        == ConstraintStatus::Satisfied
+                    if solver::solve_without_smt(
+                        &goal,
+                        &Subst::default(),
+                        std::slice::from_ref(&facts),
+                    ) == ConstraintStatus::Satisfied
                     {
                         assert!(left * factor <= bound && right * factor <= bound);
                     }

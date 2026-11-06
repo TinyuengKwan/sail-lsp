@@ -120,8 +120,12 @@ jobs:
             -D clippy::print_stderr
 
   vscode:
-    name: VS Code Extension
-    runs-on: ubuntu-latest
+    name: VS Code Extension (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
     defaults:
       run:
         working-directory: editors/code
@@ -134,11 +138,37 @@ jobs:
         with:
           node-version: 24
 
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Z3 (macOS)
+        if: runner.os == 'macOS'
+        run: brew install z3
+
+      - name: Build extension-host test server
+        if: runner.os != 'Windows'
+        run: cargo build -p sail-lsp
+        working-directory: ${{ github.workspace }}
+
+      - name: Build extension-host test server (Windows)
+        if: runner.os == 'Windows'
+        env:
+          CFLAGS: /utf-8
+          CXXFLAGS: /utf-8
+        run: cargo build -p sail-lsp --features vendored
+        working-directory: ${{ github.workspace }}
+
       - name: Install dependencies
         run: npm ci
 
       - name: Typecheck
         run: npm run typecheck
+
+      - name: Project graph and analysis explanation tests
+        run: npm run test:graph
 
       - name: Format check
         run: npm run format:check
@@ -147,10 +177,16 @@ jobs:
         run: npm run vscode:prepublish
 
       - name: Install xvfb
+        if: runner.os == 'Linux'
         run: sudo apt-get install -y xvfb
 
       - name: Run extension smoke tests
-        run: xvfb-run npm test || [ $? -eq 5 ]
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm test
+
+      - name: Run extension smoke tests (native desktop)
+        if: runner.os != 'Linux'
+        run: npm test
 
       - name: Package extension
         run: npx @vscode/vsce package -o sail-lsp.vsix --allow-missing-repository

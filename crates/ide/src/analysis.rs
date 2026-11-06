@@ -16,9 +16,12 @@ use hir::DefKind;
 use ide_db::root_database::{RootDatabase, SalsaFile};
 use ide_db::FileDb;
 
+mod context;
 mod hierarchy;
 #[cfg(test)]
 mod imports_tests;
+#[cfg(test)]
+mod kind_oracle_tests;
 mod ordered_names;
 #[cfg(test)]
 mod ordered_names_tests;
@@ -345,9 +348,8 @@ pub fn build_include_graph(
 /// The counts `sail-lsp/analyzerStatus` reports.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ServerStatus {
-    pub files: usize,
-    pub symbols: usize,
-    pub include_nodes: usize,
+    pub memory: base_db::FileMemoryStats,
+    pub live_snapshots: usize,
 }
 
 /// The sites a code lens counts, which clicking it shows.
@@ -1295,6 +1297,49 @@ impl Analysis {
         })?
     }
 
+    /// Search expression structure using bindings from the invocation scope.
+    pub fn structural_search(
+        &self,
+        file_id: FileId,
+        position: ide_db::LineCol,
+        pattern: &str,
+        selections: &[base_db::TextRange],
+        excluded: &std::collections::HashSet<FileId>,
+    ) -> crate::Cancellable<Result<Vec<crate::FileRange>, String>> {
+        self.with_db(|a| {
+            let instances = a.position_instances(file_id, position);
+            if instances.len() > 1 {
+                return Err("SSR context is active in multiple include instances".into());
+            }
+            let origin = instances.first().copied().unwrap_or(file_id);
+            let ft = a.file_text(origin).ok_or("SSR file is unavailable")?;
+            let file = a.file_by_id(origin).ok_or("SSR file is unavailable")?;
+            let finder =
+                ide_ssr::MatchFinder::for_search(&a.db, ft, file.offset_at(&position), pattern)
+                    .map_err(|e| e.to_string())?;
+            let mut found = std::collections::HashSet::new();
+            for (_, file) in a.all_salsa_files() {
+                let Some((_, input)) = file.file_text() else { continue };
+                let physical = base_db::preprocess::physical_file(&a.db, input.file_id(&a.db));
+                if excluded.contains(&physical) || (!selections.is_empty() && physical != file_id) {
+                    continue;
+                }
+                let Some(tree) =
+                    syntax::parse_query::semantic_parse_file(&a.db, input).syntax_node()
+                else {
+                    continue;
+                };
+                for range in finder.ranges_for_tree(&tree, input, selections) {
+                    let range = crate::FileRange { file_id: physical, range };
+                    found.insert(range);
+                }
+            }
+            let mut found: Vec<_> = found.into_iter().collect();
+            found.sort_by_key(|r| (r.file_id, r.range.start(), r.range.end()));
+            Ok(found)
+        })
+    }
+
     /// Resolve an SSR rule in the selected scope and return preview edits.
     /// No files are modified by this query.
     pub fn structural_search_replace(
@@ -1742,9 +1787,8 @@ impl Analysis {
     /// handler to one `ide` feature.
     pub fn status(&self) -> crate::Cancellable<ServerStatus> {
         self.with_db(|a| ServerStatus {
-            files: a.all_salsa_files().len(),
-            symbols: a.symbol_index().map(|i| i.all_entries().count()).unwrap_or(0),
-            include_nodes: a.include_graph().map(|g| g.all_files().len()).unwrap_or(0),
+            memory: a.db.files().memory_stats(&a.db),
+            live_snapshots: a.db.live_snapshots(),
         })
     }
 
@@ -2115,6 +2159,10 @@ impl Analysis {
                 cancel,
             )
         })
+    }
+
+    pub fn prime_import_catalog(&self, cancel: &hir::CancellationToken) -> crate::Cancellable<()> {
+        self.with_db(|analysis| ide_db::imports::import_assets::prime_catalog(&analysis.db, cancel))
     }
 
     pub fn db(&self) -> &RootDatabase {

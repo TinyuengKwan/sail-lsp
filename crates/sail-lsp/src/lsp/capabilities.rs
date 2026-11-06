@@ -30,6 +30,14 @@ use lsp_types::*;
 pub(crate) struct ClientCapabilities(pub(crate) lsp_types::ClientCapabilities);
 
 impl ClientCapabilities {
+    pub(crate) fn versioned_edit_support(&self) -> bool {
+        self.0
+            .workspace
+            .as_ref()
+            .and_then(|w| w.workspace_edit.as_ref())
+            .is_some_and(|e| e.document_changes == Some(true))
+    }
+
     pub(crate) fn file_creation_support(&self) -> bool {
         self.0
             .workspace
@@ -306,13 +314,13 @@ pub(crate) fn server_capabilities(client: &ClientCapabilities) -> ServerCapabili
                 }),
                 ..Default::default()
             }),
-            ..Default::default()
         }),
         // The requests that are not in the protocol. A client discovers
         // them here — rust-analyzer advertises its own the same way, and a
         // client that does not see the flag will not send the request.
         experimental: Some(serde_json::json!({
             "ssr": true,
+            "ssrSearch": true,
             "matchingBrace": true,
             "joinLines": true,
             "onEnter": true,

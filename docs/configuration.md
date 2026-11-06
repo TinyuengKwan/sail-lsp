@@ -73,6 +73,13 @@ lspconfig.sail_lsp.setup({
 | `limit` | `number` | `200` | Maximum number of completion items |
 | `fullFunctionSignatures` | `bool` | `false` | Show full signatures in completions |
 
+With `autoimport` enabled, background cache priming also prepares the import
+catalog, including inactive candidate files. Enabling the setting schedules
+priming without reloading the project. Candidate changes invalidate the same
+per-file queries used by completion; importing still requires resolving and
+validating the selected edit. Requests arriving before priming finishes can
+still pay the initial catalog cost.
+
 ### `codeLens`
 
 | Key | Type | Default | Description |
@@ -98,13 +105,16 @@ lspconfig.sail_lsp.setup({
 
 ### `flycheck`
 
-Runs the upstream Sail compiler on save, beside the server's own analysis.
+Runs the upstream Sail compiler on save and after a successful project reload,
+beside the server's own analysis. `Sail: Recheck Projects` requests another run without a save.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `enable` | `bool` | `false` | Run `sail --just-check` on save |
 | `command` | `string` | `"sail"` | The compiler binary |
 | `extraArgs` | `string[]` | `[]` | Extra compiler arguments (`--config`, `--strict-bitvector`, ...) |
+| `timeoutMs` | `integer` | `30000` | Maximum elapsed time per compiler invocation |
+| `debounceMs` | `integer` | `200` | Coalesce repeated saves before starting the compiler |
 
 A save checks the project that lists the saved file (every loaded project,
 for a file only reached through `$include`), one compiler run per project:
@@ -114,17 +124,73 @@ empty), run from the manifest's directory. A file no loaded project knows is
 checked alone. A run's findings replace only that project's previous findings,
 and a run overtaken by a later save of the same project is discarded.
 Changing workspace or Flycheck configuration, disabling Flycheck, or reloading
-projects clears old findings and invalidates pending runs. The next source save
-starts a fresh check after loading completes. `workspace.strictBitvector` is
+projects clears old findings and cancels pending runs. Once loading completes,
+enabled checks restart automatically. Changing Flycheck settings also starts a
+fresh check. A project has at most one running compiler; a newer save replaces
+its pending check and terminates an obsolete run. Disabling Flycheck or shutting
+down the server cancels its workers and reaps running compiler processes.
+Editing a source invalidates that source's affected project checks immediately,
+including results still in flight. Compiler checks use saved files: while an
+affected source has unsaved changes, checking that project is deferred and its
+status says to save the affected files. Other projects retain their results.
+Push and pull diagnostic reports both include compiler findings. Exact duplicate
+findings from shared projects are merged; different diagnostic sources and fix
+metadata are preserved. An undecided native constraint remains a warning and
+reports the recorded blocker when available; it is not treated as a proof of a
+type error.
+`workspace.strictBitvector` is
 forwarded as `--strict-bitvector`.
 
-Flycheck logs a warning and skips a run when it cannot preserve the IDE's
-configuration: `workspace.target` (`--just-check` forces Sail's default target),
-`workspace.includePaths` (no equivalent compiler search-path option), and, for
-project runs, `generatedFiles` or CLI-inexpressible project variables. These
-include string values `"true"`/`"false"`, leading/trailing whitespace, and variable
-names containing `=`. Such a skipped run clears that target's previous findings;
-it is not reported as a successful check.
+Stock Sail 0.20.2/0.20.3 cannot express `workspace.target`, `includePaths`, project
+`generatedFiles`, or some typed project variables through its check CLI. For these
+configurations Flycheck probes `--check-context-version`. A compiler reporting
+protocol `1` receives `--check-context <json>`; older compilers report a visible
+skipped check and clear that target's previous findings. They never silently
+check a different configuration. Ordinary configurations continue to use the
+stock CLI and do not require this extension.
+
+The optional [Sail companion patch](../patches/sail-check-context-v1.patch)
+implements protocol v1 against Sail commit
+`ac09f8870b9d85e528e2a3436150b03b9d805d40` (0.20.3). **This is a local compiler
+extension, not an interface supplied by released upstream Sail.** Apply it in a
+separate Sail checkout, build `dune build --release src/bin/sail.exe`, and point
+`flycheck.command` at that executable. For example, from the sail-lsp checkout:
+
+```sh
+git -C /path/to/separate/sail apply --check "$PWD/patches/sail-check-context-v1.patch"
+git -C /path/to/separate/sail apply "$PWD/patches/sail-check-context-v1.patch"
+```
+
+After applying the patch to the chosen checkout, the resulting compiler must
+print `1` for `--check-context-version`. The server does not patch or install a
+compiler automatically.
+
+The JSON object contains `version: 1`, `target` (string or null), `includePaths`
+(absolute paths, in search order), `variables` (JSON booleans or strings), and
+`generatedFiles` (virtual names mapped to absolute physical source paths).
+Strings such as `"true"`, `"false"`, and values with surrounding spaces retain
+their exact types and contents. File-relative includes still win over fallback
+paths. Generated files retain their physical diagnostic locations and resolve
+relative includes from their own directory. The target selects preprocessing
+branches while retaining the check-only backend; no code generator is run.
+The capability probe and check share the configured timeout and cancellation.
+
+Root selection retains upstream semantics: in Sail 0.20.3, selected roots affect
+`--list-files` and the final AST, but `Frontend.load_modules` typechecks other
+declared modules as well. An error in such a module can therefore legitimately
+appear in Flycheck even when it is outside the selected output closure.
+
+The server status reports queued/running, passed, diagnostics, failed, skipped,
+cancelled, and timed-out checks separately. Spawn errors and nonzero exits without
+parseable diagnostics remain visible as failures. The VS Code status tooltip
+includes the reason and a retry action; other clients can inspect
+`sail-lsp/analyzerStatus`. `sail-lsp/recheck` reruns every loaded project and
+open standalone file. The scoped `sail-lsp/runFlycheck`,
+`sail-lsp/cancelFlycheck`, and `sail-lsp/clearFlycheck` notifications accept an
+optional `textDocument`; with one they affect only the containing project, and
+without one they affect all targets. Cancel preserves the last published
+compiler diagnostics, while clear removes them. The VS Code extension exposes
+these operations from the command palette.
 
 A setting of the wrong type keeps its default and is named in a warning;
 the other settings still apply.
@@ -140,6 +206,8 @@ the other settings still apply.
 | `projectFile` | `string?` | `null` | Manifest path relative to each workspace folder, or absolute. Auto-detection prefers root `sail.proj`, then a single root `*.sail_project`; otherwise checks immediate child directories for a unique project. |
 | `projectVariables` | `object` | `{}` | Overrides for manifest variables. A JSON boolean is a boolean and a JSON string is always a string: `"true"` stays a string, unlike `sail --variable X=true`, which reads bare `true`/`false` as booleans. |
 | `projectModules` | `string[]` | `[]` | Select root modules and what they transitively `requires` (a child module requires its parents; a parent does not bring its children), as `sail --project P.sail_project A B` does. Empty means all modules, as `--all-modules`. |
+| `linkedProjects` | `array` | `[]` | Explicit manifests, including several in one folder. Entries are paths or objects with `projectFile`, `projectVariables`, and optional `projectModules`. Variables override the common settings; an explicit modules array replaces the common roots. Empty uses normal discovery. |
+| `activeProject` | `string?` | `null` | Preferred manifest for semantic queries on shared files. Absolute or workspace-relative. Defaults to the first loaded manifest in path order; an invalid selection reports the fallback. |
 | `generatedFiles` | `object` | `{}` | Map manifest `__virtual` filenames to generated Sail source paths, absolute or relative to each workspace root. |
 
 For example, VS Code can select the RMEM configuration with:
@@ -160,6 +228,20 @@ silently index every file in the directory. In a workspace
 with several folders, a folder whose manifest fails keeps the project it last
 loaded (or none) while the other folders load normally. An explicitly empty
 project stays empty.
+
+An absolute `linkedProjects` entry belongs to its deepest containing workspace
+folder (or the first folder in path order if it is outside every folder).
+Relative generated-source paths use that folder; duplicate absolute entries
+load once.
+
+In VS Code, **Sail: Select Analysis Project** chooses the shared-file context.
+**Sail: Show Module Dependencies** opens the **Sail Module Dependencies** tree in the
+Explorer. Expand a project to see active and inactive modules, and a module to
+follow its `requires` edges and files. Shared dependencies appear under every
+requiring module; cycles are marked and stop expanding. Project and file entries
+open the manifest or source. Run the command again (or use the view's refresh
+action) to fetch the current graph. Other clients can request
+`sail-lsp/projectGraph` for the same project/module data.
 
 Opening a repository root also discovers a nested manifest such as
 `model/riscv.sail_project`. Only one level of child directories is searched;
@@ -191,6 +273,12 @@ In them the server answers go to definition (a module name to its header, a
 where a module is expected and variable names after `$`. These features read the
 unsaved buffer; the loaded project follows the manifest on disk and reloads when
 it is saved.
+
+Open manifests with unsaved changes produce a `serverStatus` warning naming the
+manifest and explaining that analysis still uses the last loaded project. VS Code
+shows this in the Sail status bar tooltip. Saving, closing or reverting the buffer clears
+the reminder; project-loading errors remain errors. Buffers restored with text
+different from disk are also reported, even before the first edit notification.
 
 Source preprocessing follows the selected root order and active includes.
 Only reached library files and the compiler's implicit `core/corelib.sail`
@@ -229,3 +317,45 @@ can use its own module and the public declarations of its direct `requires`,
 plus the global scope. Requirements select dependencies transitively but do
 not re-export their names. `before`/`after` only affect ordering; `private`
 declarations are shared by files of the same module.
+
+**Sail: Explain Analysis at Cursor** shows the saved project configuration that
+produced the current model, the owning module and its direct requirements,
+whether the cursor is in an active preprocessing region, and the current name
+resolution. For an unresolved name it lists matching loaded declarations and
+known visibility blockers, such as a private declaration or a missing direct
+requirement. It does not guess which combination of edits would make a name
+resolve. Local bindings, multiple include contexts, pending reloads and project
+load failures are shown separately. Other clients can request
+`sail-lsp/explainAnalysis` with `TextDocumentPositionParams`.
+
+**Sail: Show Server Status** includes passive cache accounting: physical and
+semantic-view inputs, unique retained source/parse-seed text bytes, parse seeds,
+live weak tree references, and live analysis snapshots (including the status
+request). Reading status does not build the symbol index or include graph.
+With SMT enabled it also reports the bounded solver-result cache and the number
+of live/previous threads that have created solvers. Each such worker can retain
+a native thread-local solver context; the count is not an estimate of its size.
+The automatic interactive worker pool uses at least two and at most eight
+threads. Unlike rust-analyzer's ordinary query workers, Sail workers can own a
+native Z3 context; bounding the pool prevents high core counts from multiplying
+that retained cost without limit. `workspace.primeCachesNumThreads` continues
+to control the separate, temporary cache-priming pool.
+These counters do not measure the sizes of inference results, trees, indexes or
+allocator overhead. The allocator heap estimate and operating-system RSS are
+different measurements; neither alone proves a leak or successful reclamation.
+
+### `formatting`
+
+`lineWidth` (default `100`) is a soft line width. A long single-line function
+body moves after the definition `=` before short parameters are split. Existing
+multiline parameter and expression layouts, aligned mapping tables, and
+instruction mapping clauses are preserved. Long single-line `@` and `^` chains
+wrap before an operator with one additional indentation level, keeping complete
+operands together. Parentheses, comments, and string contents remain intact;
+indivisible operands may exceed the width. Whole-document formatting removes leading/repeated blank lines and
+inserts one final newline unless the client explicitly overrides the newline
+options; comment and string contents are preserved.
+
+Indentation follows the client's `tabSize` and `insertSpaces`. The VS Code
+extension defaults Sail documents to two spaces; other editors should configure
+these options explicitly when editing sail-riscv.

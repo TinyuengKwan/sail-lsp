@@ -8,7 +8,7 @@
 //!   cargo run --release --example analysis_stats -- /path/to/sail-riscv
 //!   cargo run --release --example analysis_stats -- -v /path/to/sail-riscv
 
-#![allow(clippy::print_stdout, clippy::print_stderr)]
+#![allow(clippy::collapsible_if, clippy::print_stdout, clippy::print_stderr)]
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

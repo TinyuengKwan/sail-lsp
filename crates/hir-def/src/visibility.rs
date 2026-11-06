@@ -115,9 +115,12 @@ fn module_private_names(
         if candidate == file
             || scope.as_ref().is_some_and(|s| s.own.contains(&candidate.file_id(db)))
         {
-            names.extend(file_visibility(db, candidate).iter().filter_map(|(name, visibility)| {
-                (*visibility == RawVisibility::Private).then(|| name.clone())
-            }));
+            names.extend(
+                file_visibility(db, candidate)
+                    .iter()
+                    .filter(|(_, visibility)| **visibility == RawVisibility::Private)
+                    .map(|(name, _)| name.clone()),
+            );
         }
     }
     names

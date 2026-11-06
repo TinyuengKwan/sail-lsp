@@ -77,7 +77,7 @@ fn file_contributions(db: &dyn salsa::Database, file: FileText) -> Vec<Contribut
         let enum_parent = (clause && node.children_with_tokens().any(|t| t.kind() == SK::KW_ENUM))
             .then(|| syntax::definition_name(node).map(|name| Name::new(&name))).flatten();
         if head || clause {
-            if let Some(name) = syntax::definition_name(&node) {
+            if let Some(name) = syntax::definition_name(node) {
                 if node.children_with_tokens().any(|t| t.kind() == SK::KW_UNION) {
                     env.unions.entry(name.clone()).or_default();
                     env.scattered_open_types.insert(name);
@@ -146,8 +146,7 @@ fn file_contributions(db: &dyn salsa::Database, file: FileText) -> Vec<Contribut
             }
         }
         if node.kind() == SK::DEFAULT_DEF {
-            let mut data = TopLevelEnv::default();
-            data.vector_order = order;
+            let data = TopLevelEnv { vector_order: order, ..TopLevelEnv::default() };
             output.entry(Name::new("")).or_default().push(Piece {
                 kind: Kind::Order, private: false, fallback: false,
                 enum_parent: None, global: false,

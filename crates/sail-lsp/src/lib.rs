@@ -53,6 +53,7 @@ mod mem_docs;
 mod op_queue;
 mod progress;
 mod reload;
+mod request_batch;
 mod sail_stdlib;
 mod task_pool;
 pub mod tracing_setup;

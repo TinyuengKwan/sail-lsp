@@ -141,6 +141,9 @@ pub(crate) struct DiscoveryInputs {
     /// What is wrong in each manifest, placed in its text. A manifest with
     /// nothing wrong is absent.
     pub manifest_diagnostics: std::collections::BTreeMap<PathBuf, Vec<lsp_types::Diagnostic>>,
+    /// Evidence for scoped reloads and status reporting.
+    pub scanned_projects: usize,
+    pub reused_projects: usize,
 }
 
 /// A manifest problem where the manifest says it: the token that does not
@@ -194,12 +197,66 @@ pub(crate) struct ModuleDeclaration {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct FolderProject {
     pub manifest: PathBuf,
+    pub workspace_root: PathBuf,
+    pub config: crate::config::WorkspaceConfig,
+    pub resolved: Option<project_model::ResolvedProject>,
     /// Every module the manifest declares, in declaration order.
     pub declarations: Vec<ModuleDeclaration>,
     /// Project source files that exist, each once.
     pub files: Vec<(Url, PathBuf)>,
     pub modules: Vec<(Vec<Url>, Vec<usize>)>,
     pub source_roots: Vec<(Url, Option<usize>)>,
+    /// Physical files in this project's transitive `$include` closure, in
+    /// preprocessing order. Scoped manifest reloads reuse this for projects
+    /// whose manifest and configuration did not change.
+    pub discovered_files: Vec<(Url, PathBuf)>,
+    /// Discovery state owned by this project, retained when another linked
+    /// project reloads. This makes a scoped reload observationally identical
+    /// to a full scan without reparsing the unaffected manifest.
+    pub watch_files: Vec<PathBuf>,
+    pub source_errors: Vec<String>,
+    pub manifest_text: Option<String>,
+    pub manifest_diagnostics: Vec<lsp_types::Diagnostic>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ReloadScope {
+    /// Folder/configuration/discovery changes can add or remove projects.
+    #[default]
+    All,
+    /// Only these already-known manifests changed.
+    Projects(std::collections::BTreeSet<PathBuf>),
+}
+
+impl ReloadScope {
+    pub(crate) fn project(path: PathBuf) -> Self {
+        Self::Projects([syntax::preprocess::normalize_path(&path)].into_iter().collect())
+    }
+
+    pub(crate) fn merge(&mut self, other: Self) {
+        match (&mut *self, other) {
+            (Self::All, _) | (_, Self::All) => *self = Self::All,
+            (Self::Projects(current), Self::Projects(other)) => current.extend(other),
+        }
+    }
+
+    fn includes(&self, manifest: &std::path::Path) -> bool {
+        match self {
+            Self::All => true,
+            Self::Projects(paths) => paths.contains(&syntax::preprocess::normalize_path(manifest)),
+        }
+    }
+}
+
+fn reuse_project_inputs(project: &FolderProject, inputs: &mut DiscoveryInputs) {
+    inputs.watch_files.extend(project.watch_files.iter().cloned());
+    inputs.source_errors.extend(project.source_errors.iter().cloned());
+    inputs.manifests.insert(project.manifest.clone(), project.manifest_text.clone());
+    if !project.manifest_diagnostics.is_empty() {
+        inputs
+            .manifest_diagnostics
+            .insert(project.manifest.clone(), project.manifest_diagnostics.clone());
+    }
 }
 
 impl DiscoveryInputs {
@@ -220,6 +277,23 @@ pub(crate) struct WorkspaceScan {
 }
 
 impl GlobalState {
+    pub(crate) fn request_workspace_reload(
+        &mut self,
+        cause: impl Into<String>,
+        scope: ReloadScope,
+    ) {
+        if let Some(pending) = &mut self.pending_reload_scope {
+            pending.merge(scope);
+        } else {
+            self.pending_reload_scope = Some(scope);
+        }
+        self.fetch_workspaces_queue.request_op(cause.into(), ());
+    }
+
+    pub(crate) fn take_reload_scope(&mut self) -> ReloadScope {
+        self.pending_reload_scope.take().unwrap_or_default()
+    }
+
     /// Is the server quiescent?
     /// Returns true when workspace has been fully loaded and no
     /// background tasks are pending.
@@ -278,6 +352,30 @@ impl GlobalState {
             message.push_str("Circular $include dependency detected.\n");
         }
 
+        let mut unsaved_manifests: Vec<_> = self
+            .dirty_documents
+            .iter()
+            .filter(|uri| crate::manifest_editing::is_manifest(uri))
+            .collect();
+        unsaved_manifests.sort();
+        for uri in unsaved_manifests {
+            status.health = crate::lsp_ext::Health::Warning;
+            message.push_str(&format!(
+                "Unsaved project manifest: {uri}. Save to apply project changes; analysis uses the last loaded project.\n"
+            ));
+        }
+
+        for (target, check) in &self.flycheck_status {
+            status.quiescent &= !check.busy();
+            if check.problem() && status.health != crate::lsp_ext::Health::Error {
+                status.health = crate::lsp_ext::Health::Warning;
+            }
+            let path = match target {
+                crate::flycheck::CheckTarget::Project(path)
+                | crate::flycheck::CheckTarget::File(path) => path,
+            };
+            message.push_str(&format!("Flycheck {}: {check}\n", path.display()));
+        }
         if let Some(error) = &self.project_error {
             status.health = crate::lsp_ext::Health::Error;
             message.push_str(error);
@@ -357,6 +455,9 @@ impl GlobalState {
 
     pub(crate) fn update_configuration(&mut self, new_config: SailLspConfig) {
         let old_config = std::mem::replace(&mut self.config, new_config);
+        if self.config.completion.autoimport && !old_config.completion.autoimport {
+            self.prime_caches_queue.request_op("autoimport enabled".into(), ());
+        }
 
         if self.config.workspace != old_config.workspace
             || self.config.flycheck != old_config.flycheck
@@ -372,7 +473,11 @@ impl GlobalState {
         // If workspace-level config changed, trigger reload
         if self.config.workspace != old_config.workspace {
             log::info!("workspace config changed, triggering reload");
-            self.fetch_workspaces_queue.request_op("configuration changed".to_string(), ());
+            self.request_workspace_reload("configuration changed", ReloadScope::All);
+        }
+
+        if self.config.flycheck != old_config.flycheck {
+            self.recheck_flycheck();
         }
 
         // Diagnostics are re-computed lazily on next request;
@@ -383,7 +488,7 @@ impl GlobalState {
     /// Called from the main loop when `fetch_workspaces_queue.should_start_op()`
     /// returns `Some`. Scans workspace folders for `.sail` files and sends
     /// results back via `Task::WorkspaceScan`.
-    pub(crate) fn fetch_workspaces(&mut self, cause: String) {
+    pub(crate) fn fetch_workspaces(&mut self, cause: String, scope: ReloadScope) {
         log::info!("fetching workspaces: {cause}");
         self.invalidate_flycheck();
 
@@ -442,6 +547,7 @@ impl GlobalState {
                 &mut source_roots,
                 &overlays,
                 &previous,
+                &scope,
                 &mut inputs,
             );
             if let Some(p) = progress {
@@ -480,6 +586,7 @@ fn scan_workspace_folders(
         &mut Vec::new(),
         &Default::default(),
         &Default::default(),
+        &ReloadScope::All,
         &mut DiscoveryInputs::default(),
     )
 }
@@ -494,6 +601,8 @@ fn scan_folder(
     overlays: &std::collections::HashMap<PathBuf, String>,
     inputs: &mut DiscoveryInputs,
 ) -> Result<Option<FolderProject>, String> {
+    let watch_start = inputs.watch_files.len();
+    let source_error_start = inputs.source_errors.len();
     if let Some(configured) = &config.project_file {
         let path = syntax::preprocess::normalize_path(&folder_path.join(configured));
         inputs.manifests.insert(path.clone(), std::fs::read_to_string(&path).ok());
@@ -548,8 +657,12 @@ fn scan_folder(
                 format!("{place}: {error}")
             })?;
         let project_dir = project_file_path.parent().unwrap_or(folder_path);
-        let mut project =
-            FolderProject { manifest: project_file_path.clone(), ..Default::default() };
+        let mut project = FolderProject {
+            manifest: project_file_path.clone(),
+            workspace_root: folder_path.to_owned(),
+            config: config.clone(),
+            ..Default::default()
+        };
         let index = ide_db::line_index::LineIndex::new(&source);
         let range = |r: &std::ops::Range<usize>| {
             let at = |o: usize| crate::lsp::to_proto::position_in(&index, o);
@@ -590,8 +703,8 @@ fn scan_folder(
                 project.source_roots.push((url, Some(id)));
             }
         }
-        for relative_path in resolved.files {
-            let path = project_dir.join(&relative_path);
+        for relative_path in &resolved.files {
+            let path = project_dir.join(relative_path);
             let normalized = syntax::preprocess::normalize_path(&path);
             inputs.watch_files.push(normalized.clone());
             // A bad path is a local project problem, like RA's unresolved
@@ -610,7 +723,7 @@ fn scan_folder(
                         path.display(),
                     ));
                     let written = resolved.modules.iter().find_map(|m| {
-                        let k = m.files.iter().position(|f| *f == relative_path)?;
+                        let k = m.files.iter().position(|f| f == relative_path)?;
                         m.file_ranges.get(k).cloned()
                     });
                     inputs.manifest_diagnostics.entry(project_file_path.clone()).or_default().push(
@@ -630,6 +743,12 @@ fn scan_folder(
                 project.files.push((uri, path));
             }
         }
+        project.resolved = Some(resolved);
+        project.watch_files = inputs.watch_files[watch_start..].to_vec();
+        project.source_errors = inputs.source_errors[source_error_start..].to_vec();
+        project.manifest_text = inputs.manifests.get(&project_file_path).cloned().flatten();
+        project.manifest_diagnostics =
+            inputs.manifest_diagnostics.get(&project_file_path).cloned().unwrap_or_default();
         // An explicitly empty configuration is still a project. Directory
         // fallback would reintroduce every inactive file.
         Ok(Some(project))
@@ -645,39 +764,101 @@ fn scan_workspace_project(
     source_roots: &mut Vec<(Url, Option<usize>)>,
     overlays: &std::collections::HashMap<PathBuf, String>,
     previous: &std::collections::BTreeMap<Url, FolderProject>,
+    scope: &ReloadScope,
     inputs: &mut DiscoveryInputs,
 ) -> Result<Vec<(Url, PathBuf)>, String> {
     let search = include_search_paths(folders, config);
     let mut folders: Vec<_> = folders.iter().collect();
     folders.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-    let mut local_files = Vec::new();
+    let folder_paths: Vec<_> = folders.iter().filter_map(|url| url.to_file_path().ok()).collect();
     let mut failures = Vec::new();
+    let mut reuse_discovery = std::collections::BTreeSet::new();
+    // Scan each project independently. A failed entry retains only its own
+    // last usable model; it never unloads the other entries in this folder.
     for folder_url in folders {
-        let Ok(folder_path) = folder_url.to_file_path() else {
-            continue;
-        };
-        // One folder's broken manifest is that project's problem, as one
-        // failed Cargo workspace is in rust-analyzer: the others still load,
-        // and the broken one keeps the model it last loaded, if any.
-        let project = match scan_folder(&folder_path, sail_dir, config, overlays, inputs) {
-            Ok(project) => project,
-            Err(error) => {
-                let previous = previous.get(folder_url).cloned();
-                let context = match &previous {
-                    Some(kept) => {
-                        inputs.watch_files.extend(kept.files.iter().map(|(_, p)| p.clone()));
-                        "Keeping the previous project model; project configuration may be out of date."
+        let Ok(folder_path) = folder_url.to_file_path() else { continue };
+        let entries: Vec<_> = if config.linked_projects.is_empty() {
+            vec![(folder_url.clone(), config.clone())]
+        } else {
+            config
+                .linked_projects
+                .iter()
+                .filter_map(|entry| {
+                    let path = syntax::preprocess::normalize_path(&folder_path.join(entry.path()));
+                    if std::path::Path::new(entry.path()).is_absolute() {
+                        // Resolve workspace-relative generated sources against the
+                        // containing folder, not whichever folder sorts first.
+                        let owner = folder_paths
+                            .iter()
+                            .filter(|root| path.starts_with(root))
+                            .max_by_key(|root| root.components().count())
+                            .or_else(|| folder_paths.first());
+                        if owner.is_some_and(|owner| owner != &folder_path) {
+                            return None;
+                        }
                     }
-                    None => "No project model is available for this folder; its files receive syntax diagnostics only.",
-                };
-                failures.push((error, context));
-                previous
-            }
+                    Some((Url::from_file_path(path).ok()?, entry.effective(config)))
+                })
+                .collect()
         };
-        // No manifest means no semantic project. Opening a buffer still
-        // supplies its text through the VFS, but directory order cannot supply
-        // Sail declaration order or module membership.
-        let Some(project) = project else { continue };
+        for (key, effective) in entries {
+            if inputs.projects.contains_key(&key) {
+                continue;
+            }
+            if let Some(project) =
+                previous.get(&key).filter(|project| !scope.includes(&project.manifest))
+            {
+                let project = project.clone();
+                reuse_project_inputs(&project, inputs);
+                reuse_discovery.insert(key.clone());
+                inputs.projects.insert(key, project);
+                inputs.reused_projects += 1;
+                continue;
+            }
+            inputs.scanned_projects += 1;
+            let project = match scan_folder(&folder_path, sail_dir, &effective, overlays, inputs) {
+                Ok(project) => project,
+                Err(error) => {
+                    let previous = previous.get(&key).cloned();
+                    let context = match &previous {
+                        Some(kept) => {
+                            inputs.watch_files.extend(kept.watch_files.iter().cloned());
+                            reuse_discovery.insert(key.clone());
+                            "Keeping the previous project model; project configuration may be out of date."
+                        }
+                        None => "No project model is available for this project; its files receive syntax diagnostics only.",
+                    };
+                    failures.push((error, context));
+                    previous
+                }
+            };
+            if let Some(project) = project {
+                inputs.projects.insert(key, project);
+            }
+        }
+    }
+    if let Some(active) = &config.active_project {
+        if !inputs.projects.values().any(|project| {
+            syntax::preprocess::normalize_path(&project.workspace_root.join(active))
+                == project.manifest
+        }) {
+            failures.push((format!("workspace.activeProject {active:?} does not name a loaded project."),
+                "Using the first loaded manifest in path order for shared files. Select a loaded project to choose its context."));
+        }
+    }
+    // Module numbering and source discovery must share the same project order.
+    // Keep one key sequence so these phases cannot acquire different tie breaks.
+    let mut ordered_keys: Vec<_> = inputs.projects.keys().cloned().collect();
+    ordered_keys.sort_by_key(|key| {
+        let project = &inputs.projects[key];
+        let active = config.active_project.as_ref().is_some_and(|active| {
+            syntax::preprocess::normalize_path(&project.workspace_root.join(active))
+                == project.manifest
+        });
+        (!active, project.manifest.clone())
+    });
+    for key in &ordered_keys {
+        let project = &inputs.projects[key];
         let offset = modules.len();
         modules.extend(project.modules.iter().map(|(files, requires)| {
             (files.clone(), requires.iter().map(|id| offset + id).collect())
@@ -688,8 +869,6 @@ fn scan_workspace_project(
                 .iter()
                 .map(|(url, owner)| (url.clone(), owner.map(|id| offset + id))),
         );
-        local_files.extend(project.files.iter().cloned());
-        inputs.projects.insert(folder_url.clone(), project);
     }
     if inputs.projects.is_empty() && !failures.is_empty() {
         return Err(failures.into_iter().map(|(error, _)| error).collect::<Vec<_>>().join("\n"));
@@ -700,20 +879,73 @@ fn scan_workspace_project(
     if inputs.manifests.is_empty() {
         return Ok(Vec::new());
     }
-    let roots: Vec<_> = local_files.iter().map(|(_, p)| p.clone()).collect();
     let library = sail_dir.map(|p| p.join("lib"));
-    let candidates =
-        hir::preprocess::discover_candidates(&roots, library.as_deref(), &search, |path| {
-            inputs.watch_files.push(path.to_path_buf());
-            overlays.get(path).cloned().or_else(|| std::fs::read_to_string(path).ok())
-        });
+    let mut candidates = Vec::new();
+    for key in ordered_keys {
+        if reuse_discovery.contains(&key) {
+            candidates
+                .extend(inputs.projects[&key].discovered_files.iter().map(|(_, p)| p.clone()));
+            continue;
+        }
+        let roots: Vec<_> =
+            inputs.projects[&key].files.iter().map(|(_, path)| path.clone()).collect();
+        let mut watched = Vec::new();
+        let discovered =
+            hir::preprocess::discover_candidates(&roots, library.as_deref(), &search, |path| {
+                watched.push(path.to_path_buf());
+                overlays.get(path).cloned().or_else(|| std::fs::read_to_string(path).ok())
+            });
+        let project = inputs.projects.get_mut(&key).unwrap();
+        project.watch_files.extend(watched.iter().cloned());
+        project.watch_files.sort();
+        project.watch_files.dedup();
+        project.discovered_files = discovered
+            .iter()
+            .filter_map(|path| Url::from_file_path(path).ok().map(|url| (url, path.clone())))
+            .collect();
+        inputs.watch_files.extend(watched);
+        candidates.extend(discovered);
+    }
     inputs.watch_files.sort();
     inputs.watch_files.dedup();
+    let mut seen = std::collections::HashSet::new();
     let result = candidates
         .into_iter()
+        .filter(|path| seen.insert(syntax::preprocess::normalize_path(path)))
         .filter_map(|path| Url::from_file_path(&path).ok().map(|url| (url, path)))
         .collect();
     Ok(result)
+}
+
+/// Freeze presentation metadata alongside the model; a pending/failed config
+/// reload must not describe the old database using newly requested settings.
+pub(crate) fn loaded_module_contexts(
+    projects: &std::collections::BTreeMap<Url, FolderProject>,
+    config: &crate::config::WorkspaceConfig,
+) -> Vec<serde_json::Value> {
+    let mut projects: Vec<_> = projects.values().collect();
+    projects.sort_by_key(|project| {
+        let preferred = config.active_project.as_ref().is_some_and(|active| {
+            syntax::preprocess::normalize_path(&project.workspace_root.join(active))
+                == project.manifest
+        });
+        (!preferred, project.manifest.clone())
+    });
+    projects.into_iter().flat_map(|project| {
+        (0..project.modules.len()).map(move |index| {
+            let module = project.resolved.as_ref().and_then(|p| p.modules.get(index));
+            serde_json::json!({
+                "manifest": Url::from_file_path(&project.manifest).ok(),
+                "module": module.map(|m| &m.name),
+                "requires": module.into_iter().flat_map(|m| &m.requires)
+                    .filter_map(|&i| project.resolved.as_ref()?.modules.get(i).map(|m| &m.name)).collect::<Vec<_>>(),
+                "variables": project.config.project_variables,
+                "roots": project.config.project_modules,
+                "target": project.config.target,
+                "includePaths": project.config.include_paths,
+            })
+        })
+    }).collect()
 }
 
 impl GlobalState {
@@ -922,7 +1154,10 @@ impl GlobalState {
         for (path, contents) in files {
             if is_project_file(path.as_ref() as &std::path::Path) {
                 if changed {
-                    self.fetch_workspaces_queue.request_op("project file changed".into(), ());
+                    self.request_workspace_reload(
+                        "project file changed",
+                        ReloadScope::project((path.as_ref() as &std::path::Path).to_path_buf()),
+                    );
                 }
                 continue;
             }
@@ -940,9 +1175,9 @@ impl GlobalState {
                     },
                 );
                 if contents.is_none() || !known {
-                    self.fetch_workspaces_queue.request_op(
-                        "source created, removed, or include candidate changed".into(),
-                        (),
+                    self.request_workspace_reload(
+                        "source created, removed, or include candidate changed",
+                        ReloadScope::All,
                     );
                 }
             }
@@ -959,6 +1194,18 @@ impl GlobalState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn enabling_autoimport_schedules_priming_without_project_reload() {
+        let (sender, _messages) = crossbeam_channel::unbounded();
+        let (tasks, _receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender, tasks);
+        let mut config = state.config.clone();
+        config.completion.autoimport = true;
+        state.update_configuration(config);
+        assert!(state.prime_caches_queue.op_requested());
+        assert!(!state.fetch_workspaces_queue.op_requested());
+    }
 
     struct Fixture(PathBuf);
     impl Fixture {
@@ -991,6 +1238,44 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn absolute_linked_project_uses_its_containing_workspace_for_generated_files() {
+        let fixture = Fixture::new();
+        fixture.write("a/placeholder", "");
+        fixture.write("z/sail.proj", "Main { files __virtual generated.sail }");
+        fixture.write("z/generated.sail", "function f() = 0\n");
+        let manifest = fixture.0.join("z/sail.proj");
+        let config: crate::config::WorkspaceConfig = serde_json::from_value(serde_json::json!({
+            "linkedProjects": [manifest, manifest],
+            "generatedFiles": {"generated.sail": "generated.sail"},
+        }))
+        .unwrap();
+        let folders = HashSet::from(
+            ["a", "z"].map(|name| Url::from_directory_path(fixture.0.join(name)).unwrap()),
+        );
+        let mut inputs = DiscoveryInputs::default();
+        let files = scan_workspace_project(
+            &folders,
+            None,
+            &config,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &Default::default(),
+            &Default::default(),
+            &ReloadScope::All,
+            &mut inputs,
+        )
+        .unwrap();
+        assert_eq!(inputs.projects.len(), 1, "absolute entries must not be loaded once per folder");
+        let project = inputs.projects.values().next().unwrap();
+        assert_eq!(project.workspace_root, fixture.0.join("z"));
+        assert_eq!(
+            files.iter().map(|(_, path)| path.clone()).collect::<Vec<_>>(),
+            [fixture.0.join("z/generated.sail")]
+        );
+        assert!(inputs.project_errors.is_empty(), "{:?}", inputs.project_errors);
     }
 
     #[test]
@@ -1075,6 +1360,7 @@ mod tests {
                 &mut Vec::new(),
                 &Default::default(),
                 &Default::default(),
+                &ReloadScope::All,
                 &mut DiscoveryInputs::default(),
             )
             .unwrap();
@@ -1152,6 +1438,7 @@ mod tests {
                 &mut Vec::new(),
                 &Default::default(),
                 previous,
+                &ReloadScope::All,
                 &mut inputs,
             );
             let mut names: Vec<_> = files
@@ -1196,11 +1483,70 @@ mod tests {
                 &mut Vec::new(),
                 &Default::default(),
                 &Default::default(),
+                &ReloadScope::All,
                 &mut inputs
             )
             .is_err(),
             "with nothing loaded and nothing kept, the scan fails as before"
         );
+    }
+
+    #[test]
+    fn a_manifest_reload_reuses_other_linked_projects() {
+        let fixture = Fixture::new();
+        fixture.write("a.sail_project", "A { files a1.sail }");
+        fixture.write("b.sail_project", "B { files b.sail }");
+        for file in ["a1.sail", "a2.sail", "b_dep.sail"] {
+            fixture.write(file, "");
+        }
+        fixture.write("b.sail", "$include \"b_dep.sail\"\n");
+        let folders = HashSet::from([Url::from_directory_path(&fixture.0).unwrap()]);
+        let config: crate::config::WorkspaceConfig = serde_json::from_value(serde_json::json!({
+            "linkedProjects": ["a.sail_project", "b.sail_project"]
+        }))
+        .unwrap();
+        let scan = |previous: &std::collections::BTreeMap<Url, FolderProject>,
+                    scope: &ReloadScope| {
+            let mut inputs = DiscoveryInputs::default();
+            let files = scan_workspace_project(
+                &folders,
+                None,
+                &config,
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &Default::default(),
+                previous,
+                scope,
+                &mut inputs,
+            )
+            .unwrap();
+            (files, inputs)
+        };
+        let (_, initial) = scan(&Default::default(), &ReloadScope::All);
+        assert_eq!((initial.scanned_projects, initial.reused_projects), (2, 0));
+        let b = Url::from_file_path(fixture.0.join("b.sail_project")).unwrap();
+        assert!(initial.projects[&b]
+            .discovered_files
+            .iter()
+            .any(|(_, path)| path.ends_with("b_dep.sail")));
+
+        fixture.write("a.sail_project", "A { files a2.sail }");
+        // A scoped manifest event must not read B's source/include closure.
+        // A real deletion also sends its own watcher event; removing it here
+        // isolates the manifest scan and makes an accidental global traversal
+        // observable because b_dep.sail would disappear from the result.
+        std::fs::remove_file(fixture.0.join("b.sail")).unwrap();
+        let (files, scoped) =
+            scan(&initial.projects, &ReloadScope::project(fixture.0.join("a.sail_project")));
+        assert_eq!((scoped.scanned_projects, scoped.reused_projects), (1, 1));
+        let mut names: Vec<_> = files
+            .iter()
+            .map(|(_, path)| path.file_name().unwrap().to_string_lossy().into_owned())
+            .filter(|name| matches!(name.as_str(), "a1.sail" | "a2.sail" | "b.sail" | "b_dep.sail"))
+            .collect();
+        names.sort();
+        assert_eq!(names, ["a2.sail", "b.sail", "b_dep.sail"]);
+        assert_eq!(scoped.projects[&b].manifest_text.as_deref(), Some("B { files b.sail }"));
     }
 
     #[test]

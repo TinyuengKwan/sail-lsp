@@ -79,6 +79,17 @@ pub(crate) fn handle_document_symbol(
     params: DocumentSymbolParams,
 ) -> anyhow::Result<Option<DocumentSymbolResponse>> {
     let uri = &params.text_document.uri;
+    if crate::manifest_editing::is_manifest(uri) {
+        let response = crate::manifest_editing::document_symbols(&snap, uri);
+        return Ok(match response {
+            Some(DocumentSymbolResponse::Nested(tree))
+                if !snap.client_caps.hierarchical_symbols_support() =>
+            {
+                Some(DocumentSymbolResponse::Flat(flatten_symbols(&tree, uri)))
+            }
+            response => response,
+        });
+    }
     let Some(file_id) = snap.analysis.file_id(uri) else {
         return Ok(None);
     };
@@ -263,10 +274,14 @@ pub(crate) fn handle_formatting(
     params: DocumentFormattingParams,
 ) -> anyhow::Result<Option<Vec<TextEdit>>> {
     let uri = &params.text_document.uri;
+    if crate::manifest_editing::is_manifest(uri) {
+        return Ok(crate::manifest_editing::formatting(&snap, uri));
+    }
     let Some(file_id) = snap.analysis.file_id(uri) else {
         return Ok(None);
     };
-    let opts = crate::from_proto::format_options(&params.options);
+    let mut opts = crate::from_proto::format_options(&params.options);
+    opts.max_line_width = Some(snap.config.formatting.line_width.max(1));
     // Cache the client's format options so code actions can reuse them.
     if let Ok(mut cached) = snap.last_format_options.lock() {
         *cached = opts.clone();
@@ -407,6 +422,10 @@ pub(crate) fn handle_document_diagnostic(
         .map(|d| crate::to_proto::diagnostic_with_analysis(&snap.analysis, &line_index, uri, d))
         .collect();
     crate::diagnostics::explain_unlinked_file(&mut items, snap.project_error.as_deref());
+    crate::diagnostics::extend_unique(
+        &mut items,
+        snap.check_diagnostics.get(&file_id).map(Vec::as_slice).unwrap_or_default(),
+    );
 
     // Related documents — files that $include this file.
     // When this file's types change, dependent files may get new errors.
@@ -434,6 +453,10 @@ pub(crate) fn handle_document_diagnostic(
                     crate::diagnostics::explain_unlinked_file(
                         &mut dep_items,
                         snap.project_error.as_deref(),
+                    );
+                    crate::diagnostics::extend_unique(
+                        &mut dep_items,
+                        snap.check_diagnostics.get(&dep_fid).map(Vec::as_slice).unwrap_or_default(),
                     );
                     related_documents.insert(
                         dep_url.clone(),
@@ -485,7 +508,8 @@ pub(crate) fn handle_range_formatting(
     };
     let range =
         crate::from_proto::text_range(&ide_db::line_index::LineIndex::new(sf.text()), params.range);
-    let opts = crate::from_proto::format_options(&params.options);
+    let mut opts = crate::from_proto::format_options(&params.options);
+    opts.max_line_width = Some(snap.config.formatting.line_width.max(1));
     match snap.analysis.range_format(uri, range, &opts)? {
         Some(edits) => Ok(Some(ide_edits_to_lsp(edits, &sf))),
         None => Ok(None),
@@ -546,6 +570,14 @@ pub(crate) fn handle_prepare_rename(
     params: TextDocumentPositionParams,
 ) -> anyhow::Result<Option<PrepareRenameResponse>> {
     let uri = &params.text_document.uri;
+    if crate::manifest_editing::is_manifest(uri) {
+        return Ok(crate::manifest_editing::prepare_rename(&snap, uri, params.position).map(
+            |(range, placeholder)| PrepareRenameResponse::RangeWithPlaceholder {
+                range,
+                placeholder,
+            },
+        ));
+    }
     let index = line_index_for(&snap, uri);
     let lc = crate::from_proto::line_col(&index, params.position);
     let Some((placeholder, start, end)) = snap.analysis.prepare_rename(uri, lc)? else {
@@ -679,6 +711,15 @@ pub(crate) fn handle_code_action(
     params: CodeActionParams,
 ) -> anyhow::Result<Option<Vec<crate::lsp::ext::CodeAction>>> {
     let uri = &params.text_document.uri;
+    if crate::manifest_editing::is_manifest(uri) {
+        let quickfix = lsp_types::CodeActionKind::QUICKFIX;
+        if !crate::code_action_helpers::code_action_kind_allowed(&params.context.only, &quickfix) {
+            return Ok(None);
+        }
+        let actions =
+            crate::manifest_editing::diagnostic_fixes(&snap, uri, &params.context.diagnostics);
+        return Ok((!actions.is_empty()).then_some(actions));
+    }
     let Some(sf) = snap.analysis.file(uri) else {
         return Ok(None);
     };
@@ -1108,6 +1149,15 @@ pub(crate) fn handle_references(
 ) -> anyhow::Result<Option<Vec<Location>>> {
     let uri = &params.text_document_position.text_document.uri;
     let position = params.text_document_position.position;
+    if crate::manifest_editing::is_manifest(uri) {
+        return Ok(crate::manifest_editing::references(
+            &snap,
+            uri,
+            position,
+            params.context.include_declaration,
+        )
+        .filter(|locations| !locations.is_empty()));
+    }
     let lc = crate::from_proto::line_col(&line_index_for(&snap, uri), position);
 
     let results = snap.analysis.find_all_refs(uri, lc, None)?;
@@ -1183,6 +1233,9 @@ pub(crate) fn handle_rename(
 ) -> anyhow::Result<Option<WorkspaceEdit>> {
     let uri = &params.text_document_position.text_document.uri;
     let position = params.text_document_position.position;
+    if crate::manifest_editing::is_manifest(uri) {
+        return crate::manifest_editing::rename(&snap, uri, position, &params.new_name);
+    }
     let lc = crate::from_proto::line_col(&line_index_for(&snap, uri), position);
 
     let source_change =
@@ -1359,6 +1412,14 @@ pub(crate) fn handle_hover(
 ) -> anyhow::Result<Option<Hover>> {
     let uri = &params.text_document_position_params.text_document.uri;
     let position = params.text_document_position_params.position;
+    if crate::manifest_editing::is_manifest(uri) {
+        return Ok(crate::manifest_editing::hover(
+            &snap,
+            uri,
+            position,
+            snap.client_caps.hover_markdown_support(),
+        ));
+    }
     let Some(file_id) = snap.analysis.file_id(uri) else {
         return Ok(None);
     };
@@ -1686,9 +1747,47 @@ pub(crate) fn handle_sail_lsp_status(
         serde_json::to_string_pretty(&snap.config)?
     );
 
-    stdx::format_to!(status, "  files loaded:     {}\n", counts.files);
-    stdx::format_to!(status, "  index symbols:    {}\n", counts.symbols);
-    stdx::format_to!(status, "  include graph:    {} nodes\n", counts.include_nodes);
+    stdx::format_to!(status, "  compiler checks:\n");
+    for (target, check) in snap.flycheck_status {
+        stdx::format_to!(status, "    {target:?}: {check:?}\n");
+    }
+    let memory = counts.memory;
+    stdx::format_to!(status, "  retained physical file inputs: {}\n", memory.physical_files);
+    stdx::format_to!(status, "  retained semantic view inputs: {}\n", memory.semantic_views);
+    stdx::format_to!(status, "  unique retained text bytes: {}\n", memory.text_bytes);
+    stdx::format_to!(
+        status,
+        "  additional parse seed text bytes: {}\n",
+        memory.seed_only_text_bytes
+    );
+    stdx::format_to!(
+        status,
+        "  parse seeds: {} ({} live weak tree references)\n",
+        memory.parse_seeds,
+        memory.live_seed_trees
+    );
+    stdx::format_to!(
+        status,
+        "  live analysis snapshots (including this request): {}\n",
+        counts.live_snapshots
+    );
+    stdx::format_to!(status, "  Cache accounting is passive; text bytes exclude trees, inference, indexes and allocator overhead.\n");
+    #[cfg(feature = "z3-solver")]
+    {
+        let (entries, capacity, live, total) = hir::z3_solver::cache_ownership();
+        stdx::format_to!(
+            status,
+            "  solver result cache entries: {:?} / {} (None = uninitialized or busy)\n",
+            entries,
+            capacity
+        );
+        stdx::format_to!(
+            status,
+            "  solver threads: {} live / {} ever initialized (native context owners, not bytes)\n",
+            live,
+            total
+        );
+    }
     stdx::format_to!(
         status,
         "  allocator heap:   {} MiB (estimate)\n",
@@ -1712,6 +1811,49 @@ pub(crate) fn handle_view_include_graph(
         .clone()
         .with_include_graph_arc(snap.include_graph.clone())
         .render_include_graph()?)
+}
+
+/// Return semantic structural matches as read-only source locations.
+pub(crate) fn handle_ssr_search(
+    snap: GlobalStateSnapshot,
+    params: crate::lsp_ext::SsrSearchParams,
+) -> anyhow::Result<Vec<lsp_types::Location>> {
+    let uri = &params.position.text_document.uri;
+    let id = snap
+        .analysis
+        .file_id(uri)
+        .ok_or_else(|| anyhow::anyhow!("SSR context file is unavailable"))?;
+    let index = line_index_for(&snap, uri);
+    let position = crate::from_proto::line_col(&index, params.position.position);
+    let selections: Vec<_> = params
+        .selections
+        .into_iter()
+        .map(|range| crate::from_proto::text_range(&index, range))
+        .collect();
+    let excluded = snap
+        .analysis
+        .all_salsa_files()
+        .into_iter()
+        .filter_map(|(uri, _)| {
+            let id = snap.analysis.file_id(&uri)?;
+            snap.is_library(id).then_some(id)
+        })
+        .collect();
+    let matches = snap
+        .analysis
+        .structural_search(id, position, &params.query, &selections, &excluded)?
+        .map_err(|message| super::dispatch::RequestError {
+            code: lsp_server::ErrorCode::InvalidParams,
+            message,
+        })?;
+    Ok(matches
+        .into_iter()
+        .filter_map(|found| {
+            let uri = snap.analysis.url_for_file_id(found.file_id)?.clone();
+            let index = line_index_for(&snap, &uri);
+            Some(lsp_types::Location::new(uri, crate::to_proto::range(&index, found.range)))
+        })
+        .collect())
 }
 
 /// SSR returns versioned preview edits. The client decides whether to apply them.
@@ -1776,4 +1918,61 @@ pub(crate) fn handle_ssr(
         document_changes: Some(lsp_types::DocumentChanges::Edits(changes)),
         ..Default::default()
     })
+}
+
+pub(crate) fn handle_project_graph_sync(
+    state: &mut crate::global_state::GlobalState,
+    _: (),
+) -> anyhow::Result<serde_json::Value> {
+    project_graph(&state.projects, &state.config.workspace)
+}
+
+fn project_graph(
+    loaded: &std::collections::BTreeMap<lsp_types::Url, crate::reload::FolderProject>,
+    workspace: &crate::config::WorkspaceConfig,
+) -> anyhow::Result<serde_json::Value> {
+    let mut projects: Vec<_> = loaded.values().collect();
+    projects.sort_by_key(|p| {
+        let selected = workspace.active_project.as_ref().is_some_and(|a| {
+            syntax::preprocess::normalize_path(&p.workspace_root.join(a)) == p.manifest
+        });
+        (!selected, p.manifest.clone())
+    });
+    Ok(serde_json::Value::Array(projects.into_iter().enumerate().map(|(index, project)| {
+        let modules: Vec<_> = project.resolved.as_ref().into_iter().flat_map(|r| r.modules.iter().enumerate().map(move |(id, m)| {
+            serde_json::json!({"name": m.name, "active": r.module_order.contains(&id),
+                "requires": m.requires.iter().map(|&id| &r.modules[id].name).collect::<Vec<_>>(),
+                "files": m.files.iter().filter_map(|f| lsp_types::Url::from_file_path(project.manifest.parent().unwrap().join(f)).ok()).collect::<Vec<_>>()})
+        })).collect();
+        serde_json::json!({"manifest": lsp_types::Url::from_file_path(&project.manifest).ok(), "path": project.manifest,
+            "preferred": index == 0, "variables": project.config.project_variables, "roots": project.config.project_modules, "modules": modules})
+    }).collect()))
+}
+
+pub(crate) fn handle_explain_analysis(
+    snap: GlobalStateSnapshot,
+    params: lsp_types::TextDocumentPositionParams,
+) -> anyhow::Result<serde_json::Value> {
+    let uri = params.text_document.uri;
+    let Some(file) = snap.analysis.file_id(&uri) else { return Ok(serde_json::Value::Null) };
+    let position = crate::from_proto::line_col(&line_index_for(&snap, &uri), params.position);
+    let mut result = snap.analysis.explain_position(file, position)?;
+    if result.is_null() {
+        return Ok(result);
+    }
+    if let Some(contexts) = result["contexts"].as_array_mut() {
+        for context in contexts {
+            context["project"] = context["moduleIndex"]
+                .as_u64()
+                .and_then(|index| snap.module_contexts.get(index as usize))
+                .cloned()
+                .unwrap_or_default();
+        }
+    }
+    result["projectLoadError"] = serde_json::to_value(snap.project_error.as_deref())?;
+    result["reloadPending"] = serde_json::json!(snap.workspace_status.loading);
+    result["unsavedManifestPolicy"] = serde_json::json!(
+        "Project configuration takes effect after saving and a successful reload"
+    );
+    Ok(result)
 }

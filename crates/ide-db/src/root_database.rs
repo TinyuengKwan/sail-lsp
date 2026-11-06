@@ -53,6 +53,7 @@ pub struct RootDatabase {
     /// File text inputs + content-hash dedup.
     files: Files,
     pub(crate) include_instances: Arc<HashMap<base_db::preprocess::InstanceKey, base_db::FileId>>,
+    snapshot_owners: Arc<()>,
 }
 
 impl Drop for RootDatabase {
@@ -75,6 +76,7 @@ impl Clone for RootDatabase {
             nonce: self.nonce.clone(),
             files: self.files.clone(),
             include_instances: self.include_instances.clone(),
+            snapshot_owners: self.snapshot_owners.clone(),
         }
     }
 }
@@ -95,6 +97,7 @@ impl RootDatabase {
             nonce: Nonce::default(),
             files: Files::default(),
             include_instances: Arc::default(),
+            snapshot_owners: Arc::new(()),
         };
         base_db::LanguageOptions::new(&db, false);
         base_db::preprocess::WorkspacePreprocessing::new(
@@ -120,6 +123,11 @@ impl RootDatabase {
     /// Access the Files collection (read-only).
     pub fn files(&self) -> &Files {
         &self.files
+    }
+
+    /// Includes the observing snapshot; excludes the host database.
+    pub fn live_snapshots(&self) -> usize {
+        Arc::strong_count(&self.snapshot_owners).saturating_sub(1)
     }
 
     pub(crate) fn include_instance(
@@ -387,6 +395,36 @@ mod tests {
     use super::*;
     use base_db::FileId;
     use hir::callgraph::SourceFileInfo;
+
+    #[test]
+    fn passive_memory_accounting_does_not_build_queries_and_tracks_snapshot_release() {
+        use base_db::SourceDatabase;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let executions = Arc::new(AtomicUsize::new(0));
+        let observed = executions.clone();
+        let mut db = RootDatabase::with_event_callback(Some(Box::new(move |event| {
+            if matches!(event.kind, salsa::EventKind::WillExecute { .. }) {
+                observed.fetch_add(1, Ordering::Relaxed);
+            }
+        })));
+        let id = FileId::from_raw(0);
+        db.set_file_text(id, "val f : int -> int\n");
+        let count = executions.load(Ordering::Relaxed);
+        let snapshot = db.clone();
+        assert_eq!(db.live_snapshots(), 1);
+        let stats = snapshot.files().memory_stats(&snapshot);
+        assert_eq!(stats.physical_files, 1);
+        assert_eq!(stats.text_bytes, "val f : int -> int\n".len());
+        assert_eq!(stats.parse_seeds, 0);
+        assert_eq!(executions.load(Ordering::Relaxed), count);
+        drop(snapshot);
+        assert_eq!(db.live_snapshots(), 0);
+        let input = db.files().file_text(id).unwrap();
+        syntax::parse_query::parse_file(&db, input);
+        assert_eq!(db.files().memory_stats(&db).parse_seeds, 1);
+        db.set_file_text(id, "");
+        assert_eq!(db.files().memory_stats(&db).parse_seeds, 0);
+    }
 
     #[test]
     fn salsa_file_implements_file_db() {

@@ -1441,7 +1441,7 @@ impl ExprCollector {
                     // updates as a flat `idx, value, idx, value, ..` list.
                     n if n >= 3 && n % 2 == 1 => {
                         let mut acc = base;
-                        for pair in children[1..].chunks_exact(2) {
+                        for pair in children[1..].as_chunks::<2>().0 {
                             let idx = self.lower_cst_expr(&pair[0]);
                             let value = self.lower_cst_expr(&pair[1]);
                             let callee =

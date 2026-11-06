@@ -83,9 +83,10 @@
     "package:server:darwin-arm64": "node ./scripts/package-server.mjs darwin arm64 aarch64-apple-darwin",
     "typecheck": "tsc",
     "lint": "tsc --noEmit",
-    "test": "npm run typecheck && node ./out/src/test/runTest.js",
+    "test": "npm run typecheck && npm run build && node ./out/src/test/runTest.js",
     "format": "prettier --write src/",
-    "format:check": "prettier --check src/"
+    "format:check": "prettier --check src/",
+    "test:graph": "npm run typecheck && node --test ./out/src/test/projectGraph.test.js ./out/src/test/analysisContext.test.js"
   },
   "contributes": {
     "languages": [
@@ -102,9 +103,16 @@
       },
       {
         "id": "sail-project",
-        "aliases": ["Sail Project", "sail-project"],
-        "extensions": [".sail_project"],
-        "filenames": ["sail.proj"],
+        "aliases": [
+          "Sail Project",
+          "sail-project"
+        ],
+        "extensions": [
+          ".sail_project"
+        ],
+        "filenames": [
+          "sail.proj"
+        ],
         "configuration": "./language-configuration-project.json"
       }
     ],
@@ -120,9 +128,79 @@
         "path": "./syntaxes/sail-project.tmLanguage.json"
       }
     ],
+    "configurationDefaults": {
+      "[sail]": {
+        "editor.tabSize": 2,
+        "editor.insertSpaces": true
+      }
+    },
     "configuration": {
       "title": "Sail Language Server",
       "properties": {
+        "sail-lsp.workspace.linkedProjects": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "projectFile"
+                ],
+                "properties": {
+                  "projectFile": {
+                    "type": "string"
+                  },
+                  "projectVariables": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": [
+                        "boolean",
+                        "string"
+                      ]
+                    }
+                  },
+                  "projectModules": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            ]
+          },
+          "description": "Explicit projects, relative to each workspace root or absolute. Entries can override variables and root modules. Replaces automatic discovery when nonempty."
+        },
+        "sail-lsp.workspace.activeProject": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "description": "Preferred manifest for analysis of files shared by multiple projects. Other projects remain loaded and checked separately."
+        },
+        "sail-lsp.flycheck.timeoutMs": {
+          "type": "integer",
+          "default": 30000,
+          "minimum": 1,
+          "description": "Maximum time for one compiler check before terminating it."
+        },
+        "sail-lsp.flycheck.debounceMs": {
+          "type": "integer",
+          "default": 200,
+          "minimum": 0,
+          "description": "Coalesce consecutive saves before starting a compiler check."
+        },
+        "sail-lsp.formatting.lineWidth": {
+          "type": "integer",
+          "default": 100,
+          "minimum": 1,
+          "description": "Soft line width for Sail formatting. Existing multiline layouts and aligned instruction tables are preserved."
+        },
         "sail-lsp.server.path": {
           "type": [
             "null",
@@ -174,13 +252,17 @@
         },
         "sail-lsp.diagnostics.warningsAsHint": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "description": "Diagnostic codes to show as hints instead of warnings."
         },
         "sail-lsp.diagnostics.warningsAsInfo": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "description": "Diagnostic codes to show as info instead of warnings."
         },
@@ -282,19 +364,28 @@
           "description": "Show documentation in hover."
         },
         "sail-lsp.hover.maxFieldsCount": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 0,
           "default": 10,
           "description": "Maximum struct or union members in hover; null shows all."
         },
         "sail-lsp.hover.maxEnumVariantsCount": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 0,
           "default": 10,
           "description": "Maximum enum variants in hover; null shows all."
         },
         "sail-lsp.hover.maxOverloadsCount": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 0,
           "default": 10,
           "description": "Maximum overload alternatives in hover; null shows all."
@@ -305,25 +396,37 @@
           "description": "Enable semantic syntax highlighting."
         },
         "sail-lsp.workspace.projectFile": {
-          "type": ["null", "string"],
+          "type": [
+            "null",
+            "string"
+          ],
           "default": null,
           "description": "Project manifest path, relative to each workspace folder or absolute. Auto-detection prefers root sail.proj, then a single root *.sail_project; otherwise checks immediate child directories for a unique project (excluding hidden directories). Files outside a loaded project receive syntax diagnostics and an unlinked-file warning."
         },
         "sail-lsp.workspace.projectVariables": {
           "type": "object",
           "default": {},
-          "additionalProperties": { "type": ["boolean", "string"] },
+          "additionalProperties": {
+            "type": [
+              "boolean",
+              "string"
+            ]
+          },
           "description": "Override variables in the Sail project manifest (for example RMEM: true)."
         },
         "sail-lsp.workspace.projectModules": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": {
+            "type": "string"
+          },
           "default": [],
           "description": "Root modules to load with the modules they transitively require (a child requires its parent; a parent does not bring its children), as `sail --project P A` does. Empty selects all modules."
         },
         "sail-lsp.workspace.generatedFiles": {
           "type": "object",
-          "additionalProperties": { "type": "string" },
+          "additionalProperties": {
+            "type": "string"
+          },
           "default": {},
           "description": "Map manifest __virtual filenames to generated Sail files. Paths are absolute or relative to the workspace root. The producer owns the contents."
         },
@@ -357,7 +460,7 @@
         "sail-lsp.flycheck.enable": {
           "type": "boolean",
           "default": false,
-          "description": "Run the upstream Sail compiler (--just-check) on save and show its errors beside the server's own. The saved file's project is checked with its manifest, projectVariables and projectModules; a file outside every project is checked alone."
+          "description": "Run the upstream Sail compiler on save and after project/configuration reload. Projects use their manifest, variables and selected roots; standalone files are checked individually."
         },
         "sail-lsp.flycheck.command": {
           "type": "string",
@@ -376,6 +479,36 @@
     },
     "commands": [
       {
+        "command": "sail-lsp.selectProject",
+        "title": "Select Analysis Project",
+        "category": "Sail"
+      },
+      {
+        "command": "sail-lsp.showProjectGraph",
+        "title": "Show Module Dependencies",
+        "category": "Sail"
+      },
+      {
+        "command": "sail-lsp.recheck",
+        "title": "Recheck Projects",
+        "category": "Sail"
+      },
+      {
+        "command": "sail-lsp.recheckProject",
+        "title": "Recheck Current Project",
+        "category": "Sail"
+      },
+      {
+        "command": "sail-lsp.cancelFlycheck",
+        "title": "Cancel Flycheck for Current Project",
+        "category": "Sail"
+      },
+      {
+        "command": "sail-lsp.clearFlycheck",
+        "title": "Clear Flycheck Diagnostics for Current Project",
+        "category": "Sail"
+      },
+      {
         "command": "sail-lsp.reload",
         "title": "Reload Workspace",
         "category": "Sail"
@@ -391,8 +524,18 @@
         "category": "Sail"
       },
       {
+        "command": "sail-lsp.explainAnalysis",
+        "title": "Explain Analysis at Cursor",
+        "category": "Sail"
+      },
+      {
         "command": "sail-lsp.openProjectManifest",
         "title": "Open Project Manifest",
+        "category": "Sail"
+      },
+      {
+        "command": "sail-lsp.structuralSearch",
+        "title": "Structural Search",
         "category": "Sail"
       },
       {
@@ -425,7 +568,30 @@
         "title": "Toggle Inlay Hints",
         "category": "Sail"
       }
-    ]
+    ],
+    "views": {
+      "explorer": [
+        {
+          "id": "sail-lsp.projectGraph",
+          "name": "Sail Module Dependencies"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "sail-lsp.projectGraph",
+        "contents": "[Load module dependencies](command:sail-lsp.showProjectGraph)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "sail-lsp.showProjectGraph",
+          "when": "view == sail-lsp.projectGraph",
+          "group": "navigation"
+        }
+      ]
+    }
   },
   "dependencies": {
     "vscode-languageclient": "^9.0.1"

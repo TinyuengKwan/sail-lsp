@@ -166,9 +166,10 @@ pub(super) fn empty_mappings() -> Arc<HashMap<String, Vec<Arc<MappingScheme>>>> 
         std::sync::OnceLock::new();
     EMPTY.get_or_init(Default::default).clone()
 }
+type ArityMap = HashMap<String, Vec<(usize, usize)>>;
+
 pub(super) fn empty_arities() -> Arc<HashMap<String, Vec<(usize, usize)>>> {
-    static EMPTY: std::sync::OnceLock<Arc<HashMap<String, Vec<(usize, usize)>>>> =
-        std::sync::OnceLock::new();
+    static EMPTY: std::sync::OnceLock<Arc<ArityMap>> = std::sync::OnceLock::new();
     EMPTY.get_or_init(Default::default).clone()
 }
 pub(super) fn empty_index() -> Arc<WorkspaceSymbolIndex> {

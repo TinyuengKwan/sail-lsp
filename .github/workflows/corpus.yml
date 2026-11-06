@@ -1,0 +1,139 @@
+name: Pinned corpus and editor regression
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: corpus-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  corpus:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: sail-lsp
+        shell: bash
+    env:
+      CARGO_INCREMENTAL: 0
+      SAIL_DIR: ${{ github.workspace }}/sail
+      SAIL_ORACLE_SRC: ${{ github.workspace }}/sail
+      SAIL_ORACLE_RISCV: ${{ github.workspace }}/sail-riscv
+      SAIL_ORACLE_BIN: ${{ github.workspace }}/sail/_build/default/src/bin/sail.exe
+      SAIL: ${{ github.workspace }}/sail/_build/default/src/bin/sail.exe
+      SAIL_FORMAT_AUDIT_DIR: ${{ github.workspace }}/sail-lsp/target/corpus/formatter
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: sail-lsp
+      - uses: actions/checkout@v4
+        with:
+          repository: rems-project/sail
+          ref: ac09f8870b9d85e528e2a3436150b03b9d805d40
+          path: sail
+      - uses: actions/checkout@v4
+        with:
+          repository: riscv/sail-riscv
+          ref: 20690c8a8d6ccbb0e6adea8e2977efd3adaf8391
+          path: sail-riscv
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - name: Install solver
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y z3 libz3-dev
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: 5.2.1
+          opam-local-packages: sail/*.opam
+      - name: Compiler dependencies
+        working-directory: sail
+        run: opam install . --deps-only --yes
+      - name: Build pinned stock compiler
+        working-directory: sail
+        run: opam exec -- dune build --release src/bin/sail.exe
+      - name: Build server and measurement tools
+        run: cargo build --release -p sail-lsp --bin sail-lsp --examples
+      - name: Record provenance
+        run: |
+          mkdir -p target/corpus
+          git rev-parse HEAD > target/corpus/lsp-revision.txt
+          git -C ../sail rev-parse HEAD > target/corpus/sail-revision.txt
+          git -C ../sail-riscv rev-parse HEAD > target/corpus/riscv-revision.txt
+          rustc --version > target/corpus/rustc.txt
+          z3 --version > target/corpus/z3-version.txt
+          "$SAIL_ORACLE_BIN" --version > target/corpus/sail-version.txt
+          sha256sum target/release/sail-lsp "$SAIL_ORACLE_BIN" > target/corpus/binaries.sha256
+      - name: Manifest oracle (missing inputs fail)
+        run: cargo test -p project-model upstream_oracle -- --ignored --nocapture 2>&1 | tee target/corpus/project-oracle.log
+      - name: Alias kind oracle (missing compiler fails)
+        run: cargo test -p ide upstream_kind_oracle -- --ignored --nocapture 2>&1 | tee target/corpus/kind-oracle.log
+      - name: Formatter corpus safety and idempotence
+        run: |
+          cargo test -p ide formatting:: -- --include-ignored 2>&1 | tee target/corpus/formatter.log
+      - name: Typecheck acceptance and rejection
+        run: target/release/examples/conformance_check --typecheck-only --list --fail-detail "$SAIL_ORACLE_SRC/test/typecheck" 2>&1 | tee target/corpus/typecheck.log
+      - name: Refresh and check extended corpus oracle
+        run: |
+          python3 scripts/regen_upstream_accepts.py "$SAIL_ORACLE_SRC/test" --sail "$SAIL_ORACLE_BIN" --out docs/upstream-accepts.txt
+          python3 - <<'PY'
+          from pathlib import Path
+          rows = [line.split(maxsplit=1) for line in Path("docs/upstream-accepts.txt").read_text().splitlines() if line and not line.startswith("#")]
+          assert len(rows) == 372, f"Pinned extended corpus changed: {len(rows)}"
+          assert all(verdict in {"OK", "SCOPE", "REJECT"} and Path(path).is_file() for verdict, path in rows)
+          PY
+          cp docs/upstream-accepts.txt target/corpus/upstream-accepts.txt
+          target/release/examples/conformance_check --list --fail-detail "$SAIL_ORACLE_SRC/test/typecheck" 2>&1 | tee target/corpus/conformance.log
+      - name: Refresh and check mutation oracle
+        run: |
+          target/release/examples/mutation_check "$SAIL_ORACLE_SRC/test/typecheck/pass" --regen-oracle target/corpus/mutation-oracle.txt 2>&1 | tee target/corpus/mutation-oracle.log
+          python3 - <<'PY'
+          from pathlib import Path
+          rows = [line for line in Path("target/corpus/mutation-oracle.txt").read_text().splitlines() if line and not line.startswith("#")]
+          assert len(rows) == 538, f"Pinned mutation corpus changed: {len(rows)}"
+          assert sum(row.startswith("REJECTED ") for row in rows) == 274, "Upstream mutation verdicts changed"
+          assert sum(row.startswith("SKIPPED ") for row in rows) == 172, "Unmutated-input exclusions changed"
+          PY
+          target/release/examples/mutation_check "$SAIL_ORACLE_SRC/test/typecheck/pass" --oracle target/corpus/mutation-oracle.txt 2>&1 | tee target/corpus/mutation.log
+      - name: Incomplete editing correctness
+        run: python3 scripts/editing_replay.py --server target/release/sail-lsp --output target/corpus/editing-replay.json
+      - name: Repeated stdio measurements
+        env:
+          SAIL_LOG: sail_lsp::latency=debug
+        run: |
+          for repeat in 1 2 3; do
+            python3 scripts/editor_probe.py --server target/release/sail-lsp --workspace ../sail-riscv --cycles 40 --burst --cancel-every 4 --settle --heap-status --output "target/corpus/editor-$repeat.json"
+          done
+          python3 scripts/editor_probe.py --server target/release/sail-lsp --workspace ../sail-riscv --cycles 10 --autoimport --settle --output target/corpus/editor-autoimport.json
+      - name: Cache lifecycle observations
+        run: |
+          python3 scripts/editor_probe.py --server target/release/sail-lsp --workspace ../sail-riscv --cycles 30 --settle --heap-status --sweep-files 48 --sweep-rounds 3 --lifecycle-cycles 3 --output target/corpus/memory-lifecycle.json
+      - name: Extended compiler protocol
+        working-directory: sail
+        run: |
+          cp _build/default/src/bin/sail.exe ../sail-lsp/target/corpus/stock-sail
+          git apply ../sail-lsp/patches/sail-check-context-v1.patch
+          opam exec -- dune build --release src/bin/sail.exe
+      - name: Live compiler protocol tests
+        env:
+          SAIL_STOCK_BIN: ${{ github.workspace }}/sail-lsp/target/corpus/stock-sail
+          SAIL_CHECK_CONTEXT_BIN: ${{ github.workspace }}/sail/_build/default/src/bin/sail.exe
+        run: |
+          cargo test -p sail-lsp flycheck::live -- --ignored --nocapture 2>&1 | tee target/corpus/check-context.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: corpus-and-editor-results
+          path: |
+            sail-lsp/target/corpus/*.json
+            sail-lsp/target/corpus/*.log
+            sail-lsp/target/corpus/*.txt
+            sail-lsp/target/corpus/*.sha256
+            sail-lsp/target/corpus/formatter/report.json
+          if-no-files-found: error

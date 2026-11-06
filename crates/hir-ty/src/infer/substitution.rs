@@ -477,7 +477,7 @@ pub(super) fn ty_names(ty: &Ty, out: &mut HashSet<String>, include_bound: bool) 
 
 #[cfg(test)]
 mod tests {
-    use crate::infer::{constraint::*, env::AliasScheme, *};
+    use crate::infer::{env::AliasScheme, *};
     fn num(s: &str) -> NumericExpr {
         NumericExpr::parse(s).unwrap()
     }

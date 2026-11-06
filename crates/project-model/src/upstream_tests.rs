@@ -10,6 +10,8 @@
 //! and both upstream directories against a real compiler, comparing the file
 //! list and each module's `requires` set. It fails, rather than passing
 //! vacuously, when the compiler or a corpus is missing.
+#![allow(clippy::print_stderr)]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 

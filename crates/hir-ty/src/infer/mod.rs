@@ -573,6 +573,7 @@ pub enum InferenceDiagnostic {
     UnsolvedConstraint {
         expr: hir_def::ExprId,
         constraint: String,
+        reason: Option<UnknownConstraintReason>,
     },
     IncompleteMatch {
         expr: hir_def::ExprId,

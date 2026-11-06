@@ -17,7 +17,8 @@
 //! a language server that spawns processes nobody asked for is a surprise.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+mod worker;
+pub(crate) use worker::{Status, Worker};
 
 use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 
@@ -112,18 +113,53 @@ pub(crate) fn command_line(
     Ok((args, cwd))
 }
 
+/// Preserve configurations the legacy CLI cannot represent using check-context
+/// v1. The worker negotiates support before invoking the actual check.
+pub(crate) fn command_line_with_context(
+    target: &CheckTarget,
+    workspace: &crate::config::WorkspaceConfig,
+    extra_args: &[String],
+    workspace_root: &Path,
+    include_paths: &[PathBuf],
+) -> Result<(Vec<String>, PathBuf), String> {
+    if let Ok(command) = command_line(target, workspace, extra_args) {
+        return Ok(command);
+    }
+    // The legacy CLI cannot preserve this context. Build its ordinary project
+    // selection first, then send typed values through the negotiated interface.
+    let mut legacy = workspace.clone();
+    legacy.target = None;
+    legacy.include_paths.clear();
+    legacy.generated_files.clear();
+    legacy.project_variables.clear();
+    let (mut args, cwd) = command_line(target, &legacy, extra_args)?;
+    let generated: std::collections::BTreeMap<_, _> = workspace
+        .generated_files
+        .iter()
+        .map(|(name, path)| (name, syntax::preprocess::normalize_path(&workspace_root.join(path))))
+        .collect();
+    let context = serde_json::json!({
+        "version": 1, "target": workspace.target, "includePaths": include_paths,
+        "variables": workspace.project_variables, "generatedFiles": generated,
+    });
+    args.extend(["--check-context".into(), context.to_string()]);
+    Ok((args, cwd))
+}
+
 /// Run `command` with these arguments and translate what it says.
 ///
 /// `cwd` is where relative paths in the output are resolved from — upstream
 /// prints the path it was given.
+#[cfg(test)]
 pub(crate) fn run(command: &str, args: &[String], cwd: &Path) -> FlycheckResult {
-    let Ok(output) = Command::new(command).args(args).current_dir(cwd).output() else {
-        // No `sail` on PATH is not an error to report in the editor; the
-        // feature is opt-in and the user chose the command.
-        return Vec::new();
-    };
-    let text = String::from_utf8_lossy(&output.stderr);
-    parse(&text, cwd)
+    worker::run(
+        command,
+        args,
+        cwd,
+        std::time::Duration::from_secs(30),
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+    .0
 }
 
 /// Upstream's error format.
@@ -414,6 +450,50 @@ mod tests {
     /// at 0:0 — a checker that cannot place a finding must not invent a
     /// place for it.
     #[test]
+    fn extended_context_keeps_typed_values_and_workspace_relative_paths() {
+        use crate::config::{ProjectVariableValue, WorkspaceConfig};
+        let target = CheckTarget::Project("/workspace/model/p.sail_project".into());
+        let ordinary = WorkspaceConfig::default();
+        assert_eq!(
+            command_line(&target, &ordinary, &[]),
+            command_line_with_context(&target, &ordinary, &[], Path::new("/workspace"), &[])
+        );
+        let mut config = WorkspaceConfig {
+            target: Some("c".into()),
+            strict_bitvector: true,
+            project_modules: vec!["Main".into()],
+            ..Default::default()
+        };
+        for value in ["true", "false", " padded ", "a=b"] {
+            config
+                .project_variables
+                .insert(value.into(), ProjectVariableValue::String(value.into()));
+        }
+        config.project_variables.insert("BOOL".into(), ProjectVariableValue::Bool(true));
+        config.generated_files.insert("gen.sail".into(), "generated/out.sail".into());
+        let (args, cwd) = command_line_with_context(
+            &target,
+            &config,
+            &[],
+            Path::new("/workspace"),
+            &["/workspace/includes".into()],
+        )
+        .unwrap();
+        assert_eq!(cwd, Path::new("/workspace/model"));
+        assert!(args.contains(&"Main".into()) && args.contains(&"--strict-bitvector".into()));
+        assert!(!args.contains(&"--variable".into()) && !args.contains(&"--all-modules".into()));
+        let at = args.iter().position(|arg| arg == "--check-context").unwrap();
+        let context: serde_json::Value = serde_json::from_str(&args[at + 1]).unwrap();
+        for value in ["true", "false", " padded ", "a=b"] {
+            assert_eq!(context["variables"][value], value);
+        }
+        assert_eq!(context["variables"]["BOOL"], true);
+        assert_eq!(context["target"], "c");
+        assert_eq!(context["generatedFiles"]["gen.sail"], "/workspace/generated/out.sail");
+        assert_eq!(context["includePaths"][0], "/workspace/includes");
+    }
+
+    #[test]
     fn output_without_a_location_is_not_a_diagnostic() {
         assert!(parse("sail: command not found\n", Path::new("/w")).is_empty());
         assert!(parse("", Path::new("/w")).is_empty());
@@ -423,6 +503,112 @@ mod tests {
 #[cfg(test)]
 mod live {
     use super::*;
+
+    #[test]
+    #[ignore = "requires SAIL_STOCK_BIN pointing to a compiler without check-context"]
+    fn stock_upstream_reports_extended_configuration_as_skipped() {
+        let compiler = std::env::var("SAIL_STOCK_BIN").expect("SAIL_STOCK_BIN is required");
+        let (_, status) = worker::run(
+            &compiler,
+            &["--check-context".into(), "{}".into()],
+            &std::env::temp_dir(),
+            std::time::Duration::from_secs(10),
+            &std::sync::atomic::AtomicBool::new(false),
+        );
+        assert!(
+            matches!(status, Status::Skipped { message } if message.contains("check-context protocol v1"))
+        );
+    }
+
+    #[test]
+    #[ignore = "requires SAIL_CHECK_CONTEXT_BIN pointing to a compiler with check-context v1"]
+    fn upstream_check_context_preserves_all_extended_settings() {
+        use crate::config::{ProjectVariableValue, WorkspaceConfig};
+        let compiler =
+            std::env::var("SAIL_CHECK_CONTEXT_BIN").expect("SAIL_CHECK_CONTEXT_BIN is required");
+        let dir =
+            std::env::temp_dir().join(format!("sail-lsp-check-context-{}", std::process::id()));
+        for sub in ["model", "includes", "generated"] {
+            std::fs::create_dir_all(dir.join(sub)).unwrap();
+        }
+        let write = |name: &str, source: &str| std::fs::write(dir.join(name), source).unwrap();
+        write("model/p.sail_project", "variable MODE = \"wrong\"\nvariable PAD = \"wrong\"\nGenerated { files __virtual generated.sail } Main { requires Generated files if $MODE == \"true\" then (if $PAD == \" padded \" then main.sail else wrong.sail) else wrong.sail } Unused { files unused.sail }\n");
+        write("generated/out.sail", "$include \"neighbor.sail\"\n");
+        write("generated/neighbor.sail", "function generated_value() -> int = 1\n");
+        write("includes/defs.sail", "function fallback_value() -> int = 2\n");
+        write("model/wrong.sail", "function wrong() -> int = true\n");
+        write("model/unused.sail", "function unused() -> int = 0\n");
+        write("model/main.sail", "$iftarget c\n$include \"defs.sail\"\nfunction f() -> int = generated_value()\nfunction g() -> int = fallback_value()\n$else\nfunction wrong_target() -> int = true\n$endif\n");
+        let mut config = WorkspaceConfig {
+            target: Some("c".into()),
+            include_paths: vec!["includes".into()],
+            project_modules: vec!["Main".into()],
+            ..Default::default()
+        };
+        config.project_variables.insert("MODE".into(), ProjectVariableValue::String("true".into()));
+        config
+            .project_variables
+            .insert("PAD".into(), ProjectVariableValue::String(" padded ".into()));
+        config.generated_files.insert("generated.sail".into(), "generated/out.sail".into());
+        let target = CheckTarget::Project(dir.join("model/p.sail_project"));
+        let check = |config: &WorkspaceConfig| {
+            let includes = config.include_paths.iter().map(|p| dir.join(p)).collect::<Vec<_>>();
+            let (args, cwd) =
+                command_line_with_context(&target, config, &[], &dir, &includes).unwrap();
+            worker::run(
+                &compiler,
+                &args,
+                &cwd,
+                std::time::Duration::from_secs(30),
+                &std::sync::atomic::AtomicBool::new(false),
+            )
+        };
+        let (found, status) = check(&config);
+        assert_eq!(status, Status::Passed, "{found:?}");
+        config.target = Some("other".into());
+        let (found, status) = check(&config);
+        assert!(matches!(status, Status::Diagnostics { .. }), "{status:?}: {found:?}");
+        assert!(found.iter().any(|(p, _)| p == &dir.join("model/main.sail")), "{found:?}");
+        config.target = Some("c".into());
+        config.project_variables.insert("MODE".into(), ProjectVariableValue::Bool(true));
+        assert_ne!(check(&config).1, Status::Passed, "boolean true must not become string true");
+        config.project_variables.insert("MODE".into(), ProjectVariableValue::String("true".into()));
+        config.include_paths.clear();
+        assert_ne!(check(&config).1, Status::Passed, "fallback includes must matter");
+        config.include_paths.push("includes".into());
+        write("model/defs.sail", "function fallback_value() -> int = true\n");
+        assert!(
+            matches!(check(&config).1, Status::Diagnostics { .. }),
+            "relative includes must take precedence over fallback paths"
+        );
+        std::fs::remove_file(dir.join("model/defs.sail")).unwrap();
+        let generated = config.generated_files.remove("generated.sail").unwrap();
+        assert_ne!(
+            check(&config).1,
+            Status::Passed,
+            "unregistered generated sources must not be silently omitted"
+        );
+        config.generated_files.insert("generated.sail".into(), generated);
+        let manifest = std::fs::read_to_string(dir.join("model/p.sail_project")).unwrap();
+        write("model/p.sail_project", &manifest.replace("\"true\"", "\"false\""));
+        config
+            .project_variables
+            .insert("MODE".into(), ProjectVariableValue::String("false".into()));
+        assert_eq!(check(&config).1, Status::Passed, "false must also retain its string type");
+        config.project_variables.insert("MODE".into(), ProjectVariableValue::Bool(false));
+        assert_ne!(check(&config).1, Status::Passed);
+        config
+            .project_variables
+            .insert("MODE".into(), ProjectVariableValue::String("false".into()));
+        write("generated/neighbor.sail", "function generated_value() -> int = true\n");
+        let (found, status) = check(&config);
+        assert!(matches!(status, Status::Diagnostics { .. }), "{status:?}: {found:?}");
+        assert!(
+            found.iter().any(|(p, _)| p == &dir.join("generated/neighbor.sail")),
+            "generated diagnostics must retain physical identity: {found:?}"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     /// Against the real binary. `#[ignore]` because it needs `sail` on PATH.
     #[test]

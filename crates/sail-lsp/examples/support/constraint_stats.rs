@@ -1,5 +1,7 @@
 //! JSON inventory of final deferred obligations. Formatting is opt-in and stays
 //! outside the inference query/cache; proved goals cost only a counter there.
+#![allow(clippy::too_many_arguments)]
+
 use hir::infer::{InferenceResult, ObligationStats};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;

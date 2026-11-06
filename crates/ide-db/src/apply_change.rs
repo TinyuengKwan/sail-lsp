@@ -254,7 +254,7 @@ mod tests {
             .iter()
             .map(|&(id, region)| (base_db::preprocess::physical_file(&db, id), region))
             .collect();
-        let once = vec![(ids[0], 0), (ids[1], 0), (ids[2], 0), (ids[1], 1), (ids[0], 1)];
+        let once = [(ids[0], 0), (ids[1], 0), (ids[2], 0), (ids[1], 1), (ids[0], 1)];
         assert_eq!(physical, once.repeat(2));
         for (first, second) in order[..5].iter().zip(&order[5..]) {
             assert_ne!(first.0, second.0, "each expansion has its own semantic identity");

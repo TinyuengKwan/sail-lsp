@@ -17,6 +17,7 @@ syntax.workspace = true
 hir = { workspace = true, default-features = false }
 ide-db.workspace = true
 salsa.workspace = true
+tracing.workspace = true
 url.workspace = true
 
 [dev-dependencies]

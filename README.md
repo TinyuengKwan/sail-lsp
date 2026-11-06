@@ -2,7 +2,7 @@
 
 A language server for [Sail](https://github.com/rems-project/sail), the ISA specification language. Works with any LSP-capable editor (VS Code, Neovim, Emacs, Helix, Zed, etc.).
 
-Built in Rust, modeled after [rust-analyzer](https://github.com/rust-lang/rust-analyzer). Self-contained — does not call the upstream OCaml `sail` binary.
+Built in Rust, modeled after [rust-analyzer](https://github.com/rust-lang/rust-analyzer). Native analysis is self-contained. Optional Flycheck runs the upstream OCaml `sail` compiler for additional checks.
 
 ## Install
 
@@ -102,37 +102,47 @@ Extension: [TinyuengKwan/sail-zed](https://github.com/TinyuengKwan/sail-zed)
 - **Formatting**: document + range + on-type + bitfield alignment
 - **Highlights**: semantic tokens, document highlights, matching brace
 - **Outline**: document symbols, folding ranges, selection range
-- **Structural search/replace**: expression previews via `experimental/ssr`; see [scope and limits](docs/architecture.md#ssr-engine-ide-ssr)
+- **Structural search/replace**: read-only expression matches via `sail-lsp/ssrSearch` and replacement previews via `experimental/ssr`; see [scope and limits](docs/architecture.md#ssr-engine-ide-ssr)
 
 ## Corpus quality
 
-The [2026-10-30 RA audit](docs/baselines/2026-10-30-ra-improvements.json)
-records commands, source provenance, measurements and limitations. Strict upstream
-typecheck is **276/276 accepted, 217/217 rejected**. The separate 372-file extended
-corpus has **0 false positives and 0 false negatives**; 17 scope-only cases are
-counted separately. Ordered-project mutation checking detects **274/274** upstream
-rejects, including both existential constructor argument-order mutations.
+The [2026-11-02 unified baseline](docs/baselines/2026-11-02-unified.json)
+records source/compiler provenance, commands, corpus scopes and limitations for
+the earlier same-day worktree snapshot. Subsequent interaction changes and their
+validation are tracked in the [interactive follow-up](docs/baselines/2026-11-02-interactive-followup.json).
+In the unified snapshot, strict upstream typecheck is **276/276 accepted,
+217/217 rejected**. The separate 372-file extended corpus has **0 false positives
+and 0 false negatives**; 17 scope-only cases are counted separately. Fresh upstream
+oracles retain the same verdicts. Ordered-project mutation checking detects
+**274/274** upstream rejects.
+
+The conformance tool fails if corpus directories or oracle sources are missing,
+or the oracle is empty or malformed. Regenerate `docs/upstream-accepts.txt` when
+moving the upstream checkout; missing inputs cannot silently reduce coverage.
 
 The active RISC-V manifest contains 156 source files (29,968 lines), plus 40 active
 included/library files. Its 81,543 expressions have no unknown or partially unknown
-types, and diagnostics contain no errors (62 warnings, 6 hints). Deferred numeric
-proof obligations are a separate measure: the final accepted run has **2,913 proved,
-0 refuted and 4 budget-exhausted unknowns**. Earlier runs observed zero or one
-unknown; a zero-unknown checkpoint is not a guarantee under finite solver budgets.
-The three originally reported divisibility obligations are handled by an exact
-non-SMT rule. The remaining budget-sensitive sites concern absolute-value bit widths
-and loop-index bounds. Goals discharged earlier do not enter the deferred count.
+types, and diagnostics contain no errors (62 warnings, 6 hints). This run recorded
+**2,914 proved, 0 refuted and 0 unknown** committed deferred numeric obligations.
+This is a separate measure from expression types: finite solver budgets can change
+both the deferred count and Unknown count. A zero-Unknown run is not a guarantee.
+The [solver contention experiment](docs/baselines/2026-11-02-z3-contention.json)
+reproduces budget exhaustion under parallel load; production budgets are unchanged.
 
 Diagnostic starts match 205/216 upstream carets. The remaining 11 differences are
-intentional, more precise ranges or related locations; the
-[diagnostic audit](docs/baselines/2026-10-30-diagnostic-audit.json) records each case.
-Acceptance/rejection agreement does not imply identical diagnostic wording.
+explained in the [diagnostic audit](docs/baselines/2026-10-30-diagnostic-audit.json);
+acceptance/rejection agreement does not imply identical diagnostic wording.
+That snapshot's protocol range probe covers all 158 physical model files and finds
+0 mismatches in 470,394 ranges. This differs from the active manifest's 156-file
+scope. Formatter checks cover 217 model/library files at two indentation widths:
+434 checks, no skipped files, token changes, parse failures or idempotence failures.
 
-The [2026-10-29 RA follow-up](docs/baselines/2026-10-29-ra-followup.json) and
-[P2/P3 report](docs/baselines/2026-10-29-editor-p2-p3.json) preserve earlier checks.
-For example, the historical protocol range probe covered 158 physical model files
-and found 0 mismatches in 470,394 ranges; this differs from the active manifest's
-156-file scope. Older dated reports remain snapshots, not current totals.
+The unified report also records stdio editing/reload measurements and synthetic
+incremental checks. For 160 files and 32 edits, body changes reinfer one callable;
+signature changes reinfer three expected callables and update dependent diagnostics.
+These are observations on this host, not a speedup claim or real editor UI acceptance.
+The [October 30 audit](docs/baselines/2026-10-30-ra-improvements.json) and earlier
+dated reports remain historical snapshots, not current totals.
 
 The server defaults to ordinary Sail mode. Set `workspace.strictBitvector` for
 projects built with `--strict-bitvector`. Undefined-value and register-default

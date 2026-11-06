@@ -666,6 +666,7 @@ impl<'db> InferenceContext<'db> {
                 .map(|ob| InferenceDiagnostic::UnsolvedConstraint {
                     expr: ob.origin.unwrap_or(body_root),
                     constraint: format!("{:?}", ob.goal),
+                    reason: ob.unknown_reason,
                 })
                 .collect();
             for d in diags {
@@ -904,7 +905,7 @@ impl<'db> InferenceContext<'db> {
         let mut bindings: Vec<_> =
             locals.bindings.iter().filter(|(name, _)| !name.starts_with('$')).collect();
         // Proof budgets must not depend on HashMap iteration order.
-        bindings.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+        bindings.sort_unstable_by_key(|(name, _)| *name);
         let witnesses: Vec<_> = bindings.into_iter().map(|(_, ty)| ty.clone()).collect();
         for (ty, implicit) in scheme.params.iter().zip(&scheme.implicit_params) {
             if *implicit {
@@ -1344,7 +1345,7 @@ impl<'db> InferenceContext<'db> {
                 self.source[start..end].trim().to_owned()
             })
             .unwrap_or_default();
-        eprintln!("UNTYPED_IDENT\t{name}\t{why}\t{line}\t{text}");
+        tracing::debug!(target: "sail_lsp::infer", "UNTYPED_IDENT\t{name}\t{why}\t{line}\t{text}");
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2211,7 +2212,7 @@ impl<'db> InferenceContext<'db> {
                 _ => "<none>".to_string(),
             };
             let known = !self.env.lookup_functions(&name).is_empty();
-            eprintln!("[call] {name} expected={exp} signature_known={known}");
+            tracing::debug!(target: "sail_lsp::infer", "[call] {name} expected={exp} signature_known={known}");
         }
         out
     }
@@ -2591,7 +2592,7 @@ impl<'db> InferenceContext<'db> {
                     || matches!(resolved_arg.kind(), TyKind::Infer(_) | TyKind::Param(_))
                 {
                     if std::env::var("SAIL_UNTYPED_CALL").is_ok() {
-                        eprintln!(
+                        tracing::debug!(target: "sail_lsp::infer",
                             "[mapcall] {callee_name} arg={} (unusable)",
                             resolved_arg.display_text()
                         );
@@ -3358,7 +3359,7 @@ impl<'db> InferenceContext<'db> {
                 if required >= 1 && all_explicit_params_are_unit { 0 } else { required };
 
             if std::env::var_os("SAIL_DBG_Q").is_some() {
-                eprintln!(
+                tracing::debug!(target: "sail_lsp::infer",
                     "CAND {} params={:?} ret={:?} args={:?}",
                     callee_name,
                     candidate.params.iter().map(|p| format!("{:?}", p.kind())).collect::<Vec<_>>(),
@@ -3634,7 +3635,7 @@ impl<'db> InferenceContext<'db> {
             self.table.rollback_to(snap);
             if let Some(error) = constraint_error {
                 if std::env::var("SAIL_DBG_R").is_ok() {
-                    eprintln!("REJECT {callee_name} {error:?}");
+                    tracing::debug!(target: "sail_lsp::infer", "REJECT {callee_name} {error:?}");
                 }
                 // Only when the return type is fully known — no variable, no
                 // quantifier left in it. A return that *does* mention the
@@ -3663,7 +3664,7 @@ impl<'db> InferenceContext<'db> {
         }
 
         if std::env::var("SAIL_DBG_R").is_ok() {
-            eprintln!(
+            tracing::debug!(target: "sail_lsp::infer",
                 "VIABLE {callee_name} n={} rets={:?}",
                 viable.len(),
                 viable.iter().map(|(_, r, _, _, _)| r.display_text()).collect::<Vec<_>>()
@@ -4401,7 +4402,7 @@ impl<'db> InferenceContext<'db> {
                 }
                 // Use InferenceTable::unify for type checking
                 if std::env::var_os("SAIL_DBG_UNIFY").is_some() {
-                    eprintln!(
+                    tracing::debug!(target: "sail_lsp::infer",
                         "CHK exp={} act={} known={}",
                         expected_ty.display_text(),
                         ty.display_text(),
@@ -4630,7 +4631,7 @@ impl<'db> InferenceContext<'db> {
         if self.inference_fuel == 0 {
             return Ty::error();
         }
-        if self.inference_fuel % 256 == 0 {
+        if self.inference_fuel.is_multiple_of(256) {
             if let Some(db) = self.db {
                 db.unwind_if_revision_cancelled();
             }
@@ -6711,7 +6712,7 @@ impl<'db> InferenceContext<'db> {
                     if matches!(self.table.resolve(&base_ty).kind(), TyKind::Infer(_))
                         && std::env::var("SAIL_UNTYPED_CALL").is_ok()
                     {
-                        eprintln!("[index] base is unresolved, field={field}");
+                        tracing::debug!(target: "sail_lsp::infer", "[index] base is unresolved, field={field}");
                     }
                 }
                 if self.in_assign_target {
@@ -7254,7 +7255,7 @@ impl<'db> InferenceContext<'db> {
         };
 
         if std::env::var_os("SAIL_DBG_M").is_some() {
-            eprintln!("MAPARMS {} n={}", name, body.mapping_arms.len());
+            tracing::debug!(target: "sail_lsp::infer", "MAPARMS {} n={}", name, body.mapping_arms.len());
         }
         for arm in &body.mapping_arms {
             let mut locals = LocalEnv::new();
@@ -7900,6 +7901,7 @@ fn operand_kind(body: &hir_def::Body, t: &Ty, e: hir_def::ExprId) -> Option<u8> 
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod check_positions {
     /// A value position with an expectation checks against it.
     ///

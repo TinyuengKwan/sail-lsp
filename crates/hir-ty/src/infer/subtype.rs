@@ -255,7 +255,7 @@ fn check(table: &mut InferenceTable, sub: &Ty, sup: &Ty, depth: usize) -> Subtyp
                 match super::solver::solve_without_smt(
                     &goal_expr,
                     &Subst::default(),
-                    &[opened.constraint.clone()],
+                    std::slice::from_ref(&opened.constraint),
                 ) {
                     ConstraintStatus::Satisfied => SubtypeResult::Ok,
                     ConstraintStatus::Failed => SubtypeResult::Fail,

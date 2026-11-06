@@ -134,17 +134,15 @@ pub fn enum_bindings(node: &SyntaxNode, name: &str, members: usize) -> Vec<Bindi
             });
         }
     }
-    if let Some(payload) = attribute(&attrs, "enum_vector") {
-        if let [value] = payload {
-            if let Some(vector) = identifier(value) {
-                result.push(Binding {
-                    name: vector,
-                    type_text: format!("vector({members}, {name})"),
-                    kind: Kind::EnumVector,
-                    derived_name: false,
-                    overload_members: Vec::new(),
-                });
-            }
+    if let Some([value]) = attribute(&attrs, "enum_vector") {
+        if let Some(vector) = identifier(value) {
+            result.push(Binding {
+                name: vector,
+                type_text: format!("vector({members}, {name})"),
+                kind: Kind::EnumVector,
+                derived_name: false,
+                overload_members: Vec::new(),
+            });
         }
     }
     // Keep return-type nesting when splitting the `with f -> T, ...` list.
@@ -155,8 +153,9 @@ pub fn enum_bindings(node: &SyntaxNode, name: &str, members: usize) -> Vec<Bindi
         .collect();
     if let Some(start) = tokens.iter().position(|t| t.kind() == SK::KW_WITH) {
         let mut depth = 0usize;
-        let mut begin = start + 1;
-        for i in begin..tokens.len() {
+        let scan_start = start + 1;
+        let mut begin = scan_start;
+        for i in scan_start..tokens.len() {
             let kind = tokens[i].kind();
             if depth == 0 && matches!(kind, SK::COMMA | SK::EQ) {
                 let clause = &tokens[begin..i];
@@ -306,11 +305,11 @@ pub(super) fn expand(root: &SyntaxNode, tree: &mut ItemTree, suppress_explicit: 
                 })
                 .collect()
         } else if kind == DefKind::Enum {
-            enum_bindings(&node, &name, owner.fields(tree).len())
+            enum_bindings(node, &name, owner.fields(tree).len())
         } else if kind == DefKind::Bitfield {
-            bitfield_bindings(&node, &name)
+            bitfield_bindings(node, &name)
         } else {
-            mapping_bindings(&node, &name)
+            mapping_bindings(node, &name)
         };
         for binding in bindings {
             if suppress_explicit

@@ -3,7 +3,7 @@
 //! working while the manifest is half-written and does not evaluate.
 use std::ops::Range;
 
-use super::{lex, Tok, Token, RESERVED};
+use super::{lex, lex_for_editor, Tok, Token, RESERVED};
 
 /// What a position in a manifest refers to.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -19,13 +19,33 @@ pub enum ManifestSymbol {
 /// What may be typed at a position, and the text it replaces.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ManifestCompletion {
-    Modules { replace: Range<usize>, names: Vec<String> },
-    Variables { replace: Range<usize>, names: Vec<String> },
+    Modules {
+        replace: Range<usize>,
+        names: Vec<String>,
+    },
+    Variables {
+        replace: Range<usize>,
+        names: Vec<String>,
+    },
+    /// A path in a `files` expression. Filesystem enumeration stays in the
+    /// server because this crate deliberately does no I/O.
+    Files {
+        replace: Range<usize>,
+        prefix: String,
+    },
+}
+
+/// A renameable manifest name and all occurrences of that name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ManifestReferences {
+    pub symbol: ManifestSymbol,
+    pub declaration: Range<usize>,
+    pub occurrences: Vec<Range<usize>>,
 }
 
 /// Module headers (`Name {`), in declaration order.
 pub fn module_declarations(source: &str) -> Vec<(String, Range<usize>)> {
-    let Ok(tokens) = lex(source) else { return Vec::new() };
+    let tokens = lex_for_editor(source);
     tokens
         .windows(2)
         .filter_map(|w| match (&w[0].tok, &w[1].tok) {
@@ -37,11 +57,39 @@ pub fn module_declarations(source: &str) -> Vec<(String, Range<usize>)> {
 
 /// `variable NAME` declarations, in order.
 pub fn variable_declarations(source: &str) -> Vec<(String, Range<usize>)> {
-    let Ok(tokens) = lex(source) else { return Vec::new() };
+    let tokens = lex_for_editor(source);
     tokens
         .windows(2)
         .filter_map(|w| match (&w[0].tok, &w[1].tok) {
             (Tok::KwVariable, Tok::Id(name)) => Some((name.clone(), w[1].range.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+fn variable_references(source: &str, name: &str) -> Vec<Range<usize>> {
+    lex_for_editor(source)
+        .into_iter()
+        .filter_map(|token| match token.tok {
+            Tok::Var(found) if found == name => Some(token.range.start + 1..token.range.end),
+            _ => None,
+        })
+        .collect()
+}
+
+fn module_references(source: &str, name: &str) -> Vec<Range<usize>> {
+    let tokens = lex_for_editor(source);
+    tokens
+        .iter()
+        .enumerate()
+        .filter_map(|(i, token)| match &token.tok {
+            Tok::Id(found)
+                if found == name
+                    && tokens.get(i + 1).is_none_or(|next| next.tok != Tok::LCurly)
+                    && expects_module(&tokens, i) =>
+            {
+                Some(token.range.clone())
+            }
             _ => None,
         })
         .collect()
@@ -72,7 +120,7 @@ fn expects_module(tokens: &[Token], end: usize) -> bool {
 
 /// What the cursor at `offset` is on.
 pub fn symbol_at(source: &str, offset: usize) -> Option<ManifestSymbol> {
-    let tokens = lex(source).ok()?;
+    let tokens = lex_for_editor(source);
     let i = tokens.iter().position(|t| t.range.start <= offset && offset <= t.range.end)?;
     let token = &tokens[i];
     match &token.tok {
@@ -112,6 +160,91 @@ pub fn symbol_at(source: &str, offset: usize) -> Option<ManifestSymbol> {
     }
 }
 
+/// Resolve a module/variable at either its declaration or a reference and
+/// return ranges suitable for references and rename. Variable references do
+/// not include their `$`, so replacing a name never deletes the sigil.
+pub fn references_at(source: &str, offset: usize) -> Option<ManifestReferences> {
+    let declared_module = module_declarations(source)
+        .into_iter()
+        .find(|(_, range)| range.start <= offset && offset <= range.end);
+    let declared_variable = variable_declarations(source)
+        .into_iter()
+        .find(|(_, range)| range.start <= offset && offset <= range.end);
+    let symbol = if let Some((name, range)) = declared_module {
+        ManifestSymbol::Module { name, range }
+    } else if let Some((name, range)) = declared_variable {
+        ManifestSymbol::Variable { name, range }
+    } else {
+        symbol_at(source, offset)?
+    };
+    match symbol {
+        ManifestSymbol::Module { ref name, .. } => {
+            let declaration = module_declarations(source)
+                .into_iter()
+                .find_map(|(found, range)| (found == *name).then_some(range))?;
+            let mut occurrences = vec![declaration.clone()];
+            occurrences.extend(module_references(source, name));
+            Some(ManifestReferences { symbol, declaration, occurrences })
+        }
+        ManifestSymbol::Variable { ref name, .. } => {
+            let declaration = variable_declarations(source)
+                .into_iter()
+                .find_map(|(found, range)| (found == *name).then_some(range))?;
+            let mut occurrences = vec![declaration.clone()];
+            occurrences.extend(variable_references(source, name));
+            Some(ManifestReferences { symbol, declaration, occurrences })
+        }
+        ManifestSymbol::File { .. } => None,
+    }
+}
+
+/// The byte range and text of a path being typed in a `files` expression.
+fn file_completion(
+    source: &str,
+    offset: usize,
+    tokens: &[Token],
+) -> Option<(Range<usize>, String)> {
+    let mut structural = None;
+    for (i, token) in tokens.iter().enumerate().rev() {
+        structural = match &token.tok {
+            Tok::KwFiles => Some(true),
+            Tok::KwRequires | Tok::KwAfter | Tok::KwBefore | Tok::KwDirectory | Tok::KwVariable => {
+                Some(false)
+            }
+            Tok::Id(_) if tokens.get(i + 1).is_some_and(|next| next.tok == Tok::LCurly) => {
+                Some(false)
+            }
+            _ => None,
+        };
+        if structural.is_some() {
+            break;
+        }
+    }
+    if structural != Some(true) {
+        return None;
+    }
+
+    let before = &source[..offset];
+    // An unterminated string is intentionally absent from `tokens`; retain
+    // its literal prefix so paths containing spaces can still be completed.
+    let line_start = before.rfind('\n').map_or(0, |at| at + 1);
+    if let Some(quote) = before[line_start..].rfind('"').map(|at| line_start + at) {
+        let tail = &before[quote + 1..];
+        if !tail.contains('"') {
+            return Some((quote + 1..offset, tail.to_owned()));
+        }
+    }
+    let start = before
+        .char_indices()
+        .rev()
+        .find_map(|(at, ch)| {
+            (ch.is_whitespace() || matches!(ch, ',' | '[' | ']' | '(' | ')' | '{' | '}' | '='))
+                .then_some(at + ch.len_utf8())
+        })
+        .unwrap_or(0);
+    Some((start..offset, source[start..offset].to_owned()))
+}
+
 /// What may be typed at `offset`.
 pub fn completions_at(source: &str, offset: usize) -> Option<ManifestCompletion> {
     let before = source.get(..offset)?;
@@ -131,7 +264,7 @@ pub fn completions_at(source: &str, offset: usize) -> Option<ManifestCompletion>
     }
     // Only the text before the cursor decides the context, so a broken
     // remainder of the manifest does not stop completion.
-    let tokens = lex(before).ok()?;
+    let tokens = lex(before).unwrap_or_else(|_| lex_for_editor(before));
     let (end, replace) = match tokens.last() {
         Some(t) if t.range.end == offset => match &t.tok {
             Tok::Var(_) => {
@@ -144,7 +277,8 @@ pub fn completions_at(source: &str, offset: usize) -> Option<ManifestCompletion>
         _ => (tokens.len(), offset..offset),
     };
     if !expects_module(&tokens, end) {
-        return None;
+        let (replace, prefix) = file_completion(source, offset, &tokens)?;
+        return Some(ManifestCompletion::Files { replace, prefix });
     }
     let mut names: Vec<_> = module_declarations(source).into_iter().map(|(name, _)| name).collect();
     if names.is_empty() {
@@ -155,6 +289,58 @@ pub fn completions_at(source: &str, offset: usize) -> Option<ManifestCompletion>
     let inside = enclosing_modules(&tokens[..end]);
     names.retain(|name| !inside.contains(name));
     Some(ManifestCompletion::Modules { replace, names })
+}
+
+/// Conservative manifest formatting: normalize indentation and trailing
+/// whitespace while retaining comments, expressions and spelling verbatim.
+/// This is intentionally token-light; formatting must never rewrite project
+/// semantics merely because an editor opened a half-written manifest.
+pub fn format(source: &str) -> String {
+    let mut depth = 0usize;
+    let mut out = String::with_capacity(source.len() + 1);
+    for raw in source.lines() {
+        let content = raw.trim();
+        if content.is_empty() {
+            out.push('\n');
+            continue;
+        }
+        let closes = content.chars().take_while(|&ch| ch == '}').count();
+        depth = depth.saturating_sub(closes);
+        out.push_str(&"  ".repeat(depth));
+        out.push_str(content);
+        out.push('\n');
+
+        let mut in_string = false;
+        let mut escaped = false;
+        let mut delta = 0isize;
+        let mut chars = content.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if !in_string && ch == '/' && chars.peek() == Some(&'/') {
+                break;
+            }
+            if ch == '"' && !escaped {
+                in_string = !in_string;
+            }
+            if !in_string {
+                delta += match ch {
+                    '{' => 1,
+                    '}' => -1,
+                    _ => 0,
+                };
+            }
+            escaped = ch == '\\' && !escaped;
+            if ch != '\\' {
+                escaped = false;
+            }
+        }
+        // Leading closing braces were already applied before indentation.
+        delta += closes as isize;
+        depth = depth.saturating_add_signed(delta);
+    }
+    if !source.ends_with('\n') {
+        out.pop();
+    }
+    out
 }
 
 /// The modules whose bodies are open at the end of `tokens`.
@@ -259,6 +445,9 @@ mod tests {
                 ManifestCompletion::Variables { replace, names } => {
                     (format!("${}", &text[replace]), names.join(" "))
                 }
+                ManifestCompletion::Files { replace, prefix } => {
+                    (text[replace].to_owned(), format!("path:{prefix}"))
+                }
             })
         };
         let modules = "Lib { files lib.sail }\nCore { files core.sail }\n";
@@ -270,7 +459,12 @@ mod tests {
             Some(("L".into(), "Lib Core".into())),
             "a broken rest is fine"
         );
-        assert_eq!(c("Main { files a$0"), None);
+        assert_eq!(c("Main { files a$0"), Some(("a".into(), "path:a".into())));
+        assert_eq!(c("Main { files core/su$0"), Some(("core/su".into(), "path:core/su".into())));
+        assert_eq!(
+            c("Main { files if $FLAG then \"dir with/sp$0"),
+            Some(("dir with/sp".into(), "path:dir with/sp".into()))
+        );
         let vars = "variable RMEM = false\nvariable ARCH = A64\n";
         assert_eq!(
             complete(&format!("{vars}M {{ files if $$0")),
@@ -279,6 +473,32 @@ mod tests {
         assert_eq!(
             complete(&format!("{vars}M {{ files if $RM$0 then")),
             Some(("$RM".into(), "RMEM ARCH".into()))
+        );
+    }
+
+    #[test]
+    fn references_and_rename_ranges_exclude_the_variable_sigil() {
+        let text = "variable MODE = true\nBase { files base.sail }\nMain { requires Base files if $MODE then a.sail else b.sail }\n";
+        let base = references_at(text, text.find("Base {").unwrap() + 1).unwrap();
+        assert!(matches!(&base.symbol, ManifestSymbol::Module { name, .. } if name == "Base"));
+        assert_eq!(
+            base.occurrences.iter().map(|range| &text[range.clone()]).collect::<Vec<_>>(),
+            ["Base", "Base"]
+        );
+        let mode = references_at(text, text.find("$MODE").unwrap() + 2).unwrap();
+        assert!(matches!(&mode.symbol, ManifestSymbol::Variable { name, .. } if name == "MODE"));
+        assert_eq!(
+            mode.occurrences.iter().map(|range| &text[range.clone()]).collect::<Vec<_>>(),
+            ["MODE", "MODE"]
+        );
+    }
+
+    #[test]
+    fn formatter_only_normalizes_layout() {
+        let source = "A {\n files a.sail\n  B { // nested\nfiles \"x } y.sail\"   \n }\n}\n";
+        assert_eq!(
+            format(source),
+            "A {\n  files a.sail\n  B { // nested\n    files \"x } y.sail\"\n  }\n}\n"
         );
     }
 
