@@ -47,7 +47,7 @@ pub(crate) fn rewrite_with_alignment<T: AlignedItem>(
     }
 
     // Each group is aligned independently.
-    let groups = group_aligned_items(items);
+    let groups = group_aligned_items(items, context);
     let mut all_results = Vec::new();
 
     for group in &groups {
@@ -126,7 +126,10 @@ fn rewrite_aligned_group<T: AlignedItem>(
 
 /// Split aligned items into groups separated by blank lines.
 /// Each group is aligned independently.
-pub(crate) fn group_aligned_items<T: AlignedItem>(items: &[T]) -> Vec<&[T]> {
+pub(crate) fn group_aligned_items<'a, T: AlignedItem>(
+    items: &'a [T],
+    context: &RewriteContext<'_>,
+) -> Vec<&'a [T]> {
     if items.is_empty() {
         return Vec::new();
     }
@@ -135,11 +138,17 @@ pub(crate) fn group_aligned_items<T: AlignedItem>(items: &[T]) -> Vec<&[T]> {
     let mut start = 0;
 
     for i in 1..items.len() {
-        // Detect group boundary: gap of 2+ lines between items
-        // (byte distance > 2 suggests a blank line separator).
+        // Indentation is not a blank line. Inspect the source gap itself.
         let prev_end: usize = items[i - 1].get_range().end().into();
         let curr_start: usize = items[i].get_range().start().into();
-        if curr_start.saturating_sub(prev_end) > 2 {
+        if curr_start >= prev_end
+            && context
+                .snippet(base_db::text_range(prev_end, curr_start))
+                .bytes()
+                .filter(|&b| b == b'\n')
+                .count()
+                >= 2
+        {
             groups.push(&items[start..i]);
             start = i;
         }

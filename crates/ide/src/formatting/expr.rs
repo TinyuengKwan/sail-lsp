@@ -12,6 +12,86 @@ use super::snippet::SnippetProvider;
 use super::vertical::{rewrite_with_alignment, AlignedItem};
 use ide_db::line_index::TextRange;
 
+/// Wrap only at operators belonging to the same CST chain. Parenthesized
+/// operands, strings and comments are opaque; no expression is reassociated.
+/// Existing multiline chains retain the author's grouping.
+pub(crate) fn wrap_operator_chains(source: &str, options: &super::FormatOptions) -> String {
+    fn operator(node: &SyntaxNode) -> Option<SK> {
+        if !matches!(node.kind(), SK::BIN_EXPR | SK::BIN_PAT) {
+            return None;
+        }
+        node.children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find_map(|t| matches!(t.kind(), SK::AT | SK::CARET).then_some(t.kind()))
+    }
+    fn operators(node: &SyntaxNode, kind: SK, out: &mut Vec<syntax::SyntaxToken>) {
+        for child in node.children_with_tokens() {
+            match child {
+                rowan::NodeOrToken::Node(n) if operator(&n) == Some(kind) => {
+                    operators(&n, kind, out)
+                }
+                rowan::NodeOrToken::Token(t) if t.kind() == kind => out.push(t),
+                _ => {}
+            }
+        }
+    }
+    let width = |s: &str| {
+        s.chars().map(|c| if c == '\t' { options.tab_spaces() } else { 1 }).sum::<usize>()
+    };
+    if !source.contains(['@', '^']) || !source.lines().any(|line| width(line) > options.max_width())
+    {
+        return source.to_owned();
+    }
+    let (root, errors) = syntax::parse_text(source);
+    if !errors.is_empty() {
+        return source.to_owned();
+    }
+    let mut edits = Vec::new();
+    for node in root.descendants() {
+        let Some(kind) = operator(&node) else { continue };
+        // A containing chain owns its layout, including intentionally multiline
+        // layouts. Do not split a single-line child on the next format pass.
+        if node.ancestors().skip(1).any(|n| operator(&n).is_some()) {
+            continue;
+        }
+        let start = usize::from(node.text_range().start());
+        let end = usize::from(node.text_range().end());
+        if source[start..end].contains(['\n', '\r']) {
+            continue;
+        }
+        let line_start = source[..start].rfind('\n').map_or(0, |i| i + 1);
+        if width(&source[line_start..end]) <= options.max_width() {
+            continue;
+        }
+        let leading: String =
+            source[line_start..].chars().take_while(|c| matches!(c, ' ' | '\t')).collect();
+        let indent = format!(
+            "{leading}{}",
+            if options.hard_tabs() { "\t".to_owned() } else { " ".repeat(options.tab_spaces()) }
+        );
+        let mut ops = Vec::new();
+        operators(&node, kind, &mut ops);
+        let mut column_start = line_start;
+        let mut prefix_width = 0;
+        for (i, op) in ops.iter().enumerate() {
+            let at = usize::from(op.text_range().start());
+            let next = ops.get(i + 1).map_or(end, |t| usize::from(t.text_range().start()));
+            let whitespace_start = source[..at].trim_end_matches([' ', '\t']).len();
+            if prefix_width + width(source[column_start..next].trim_end()) > options.max_width() {
+                edits.push((whitespace_start, at, format!("\n{indent}")));
+                column_start = at;
+                prefix_width = width(&indent);
+            }
+        }
+    }
+    let mut result = source.to_owned();
+    edits.sort_by_key(|e| e.0);
+    for (start, end, text) in edits.into_iter().rev() {
+        result.replace_range(start..end, &text);
+    }
+    result
+}
+
 /// A match arm parsed from CST or text: `pattern => body`.
 #[allow(dead_code)] // Activated when visitor computes inner shape for nested match.
 pub(crate) struct MatchArmItem {
@@ -286,6 +366,11 @@ pub(crate) fn normalize_binexpr_spacing(
     node: &SyntaxNode,
     snippet: &SnippetProvider,
 ) -> Option<String> {
+    // Existing line breaks can encode instruction fields or readable boolean
+    // clauses. Never flatten them while normalizing operator spaces.
+    if snippet.span_to_snippet(node.text_range()).contains('\n') {
+        return None;
+    }
     // Walk children_with_tokens to find the operator token
     let mut parts = Vec::new();
     let mut found_op = false;

@@ -91,8 +91,8 @@ pub fn format_document_cst(text: &str, options: &FormatOptions) -> String {
     // Phase 3: format_lines.
     format_lines(&mut vis.buffer, options, &mut vis.report);
 
-    // Phase 4: Post-process.
-    let mut result = vis.buffer;
+    // Phase 4: Normalize only whitespace tokens, never string/comment contents.
+    let mut result = normalize_blank_lines(&vis.buffer);
     post_process_text(&mut result, text, options);
 
     // Phase 5: Report.
@@ -206,6 +206,37 @@ pub fn format_document_cst_range(
     result
 }
 
+/// Whole-document blank-line policy. Range formatting deliberately leaves
+/// whitespace outside its selected definitions untouched.
+fn normalize_blank_lines(source: &str) -> String {
+    let tokens = parser::LexedStr::new(source);
+    let mut edits = Vec::new();
+    let mut offset = 0;
+    for i in 0..tokens.len() {
+        let text = tokens.text(i);
+        let start = offset;
+        let end = start + text.len();
+        offset = end;
+        if tokens.kind(i) != syntax::SyntaxKind::WHITESPACE {
+            continue;
+        }
+        let newlines = text.bytes().filter(|&b| b == b'\n').count();
+        if newlines == 0 {
+            continue;
+        }
+        let indentation = text.rsplit_once('\n').unwrap().1;
+        let keep = if start == 0 { 0 } else { newlines.min(2) };
+        if keep != newlines {
+            edits.push((start, end, format!("{}{indentation}", "\n".repeat(keep))));
+        }
+    }
+    let mut result = source.to_owned();
+    for (start, end, text) in edits.into_iter().rev() {
+        result.replace_range(start..end, &text);
+    }
+    result
+}
+
 /// Post-process formatted output (trailing whitespace, final newlines).
 fn post_process_text(result: &mut String, original: &str, options: &FormatOptions) {
     // Trim trailing whitespace per line
@@ -220,11 +251,11 @@ fn post_process_text(result: &mut String, original: &str, options: &FormatOption
         result.push('\n');
     }
 
-    if options.insert_final_newline == Some(true) && !result.ends_with('\n') {
+    if options.insert_final_newline.unwrap_or(true) && !result.ends_with('\n') {
         result.push('\n');
     }
 
-    if options.trim_final_newlines == Some(true) {
+    if options.trim_final_newlines.unwrap_or(true) {
         while result.ends_with("\n\n") {
             result.pop();
         }
@@ -974,7 +1005,7 @@ function bar(b) = b == 0x00000000
 
         let without_nl = "val foo : int";
         let result2 = format_document_cst(without_nl, &FormatOptions::default());
-        assert!(!result2.ends_with('\n'), "no final newline should be added when absent");
+        assert!(result2.ends_with('\n'), "Sail files end in a newline by default");
     }
 
     #[test]

@@ -243,6 +243,7 @@ impl<'a> FmtVisitor<'a> {
                 // nothing else changed — and on a file where it did change
                 // one, formatting again produced different text.
                 let formatted = self.rewrite_exprs_of(&formatted);
+                let formatted = super::expr::wrap_operator_chains(&formatted, self.config);
                 self.push_str(&formatted);
                 if !matches!(node.kind(), SK::CALLABLE_DEF | SK::CALLABLE_SPEC) {
                     self.emit_trailing_content(node);
@@ -253,6 +254,7 @@ impl<'a> FmtVisitor<'a> {
                 // expression-level formatting within the body.
                 let source = self.snippet_provider.span_to_snippet(range);
                 let formatted = self.apply_expr_rewrites(node, source);
+                let formatted = super::expr::wrap_operator_chains(&formatted, self.config);
                 self.push_str(&formatted);
             }
         }
@@ -346,6 +348,27 @@ fn apply_expr_rewrites_with(node: &SyntaxNode, source: &str, snippet: &SnippetPr
         }
     }
 
+    // Add missing spaces without collapsing intentional column alignment or
+    // moving line breaks. Token ranges exclude comments and string contents.
+    for token in node.descendants_with_tokens().filter_map(|e| e.into_token()) {
+        if token.kind() != SK::EQ {
+            continue;
+        }
+        let start = usize::from(token.text_range().start()) - node_start;
+        let end = usize::from(token.text_range().end()) - node_start;
+        if end > source.len() {
+            continue;
+        }
+        let before = source[..start].chars().next_back().is_some_and(|c| !c.is_whitespace());
+        let after = source[end..].chars().next().is_some_and(|c| !c.is_whitespace());
+        if before || after {
+            replacements.push((
+                start,
+                end - start,
+                format!("{}={}", if before { " " } else { "" }, if after { " " } else { "" }),
+            ));
+        }
+    }
     if replacements.is_empty() {
         return source.to_string();
     }

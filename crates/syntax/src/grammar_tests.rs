@@ -35,6 +35,20 @@ mod tests {
     fn empty() {
         assert_lossless("");
     }
+
+    #[test]
+    fn library_register_extern_and_bidirectional_rhs_guards_parse() {
+        for source in [
+            "val deref : forall 'a. register('a) -> 'a = impure \"reg_deref\"\nval next : int\n",
+            "mapping hex : bits(1) <-> string = { hex_bits(1, s) <-> s if matches((1, s)) }\n",
+            "mapping hex : bits(1) <-> string = { hex_bits(1, s) if enabled() <-> s if matches((1, s)) when enabled() }\n",
+        ] {
+            let (root, errors) = parse_text(source);
+            assert!(errors.is_empty(), "{source}: {errors:?}");
+            assert_eq!(root.text().to_string(), source);
+            assert_eq!(root.children().filter(|n| n.kind() == SK::CALLABLE_SPEC).count(), if source.starts_with("val") { 2 } else { 0 });
+        }
+    }
     #[test]
     fn val_spec() {
         assert_lossless("val x : int\n");

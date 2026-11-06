@@ -688,6 +688,12 @@ impl<'t> Parser<'t> {
                 // Bidirectional: both sides are patterns *and* expressions.
                 self.bump_any();
                 self.parse_mapping_pattern(recovery);
+                // Upstream mpexp permits a guard on either side of `<->`.
+                // This is distinct from the whole-clause `when` guard below.
+                if self.at(T![if]) {
+                    self.bump_any();
+                    self.parse_expr();
+                }
             } else {
                 if self.at(T![=>]) {
                     self.bump_any();

@@ -496,7 +496,12 @@ impl<'t> Parser<'t> {
             // keyword: `function get_X() -> register(bits(4))`. Treating the
             // one in the return type as the start of the next definition cut
             // the function in two.
-            T![register] => matches!(prev, T![,] | T!['('] | T![:] | T![->] | T![<->]),
+            T![register] => {
+                // Also follows a forall's dot (and other type prefixes).
+                // Register declarations have a name, whereas this form has `(`.
+                self.nth(pos + 1 - self.pos()) == T!['(']
+                    || matches!(prev, T![,] | T!['('] | T![:] | T![->] | T![<->])
+            }
             _ => false,
         }
     }

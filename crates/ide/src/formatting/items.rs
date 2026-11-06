@@ -585,8 +585,8 @@ fn parse_function_params(params_str: &str, base_offset: usize) -> (Vec<FunctionP
     (params, has_named)
 }
 
-/// Rewrite only the CST parameter list. The body, return type and trailing
-/// documentation are outside this edit, even when the body is an expression.
+/// Format a function head, preferring a break after its definition `=` to
+/// splitting short parameters. Existing multiline layouts remain intact.
 pub(crate) fn rewrite_function_def(
     node: &SyntaxNode,
     context: &RewriteContext<'_>,
@@ -603,14 +603,17 @@ pub(crate) fn rewrite_function_def(
     let open_pos = usize::from(open.text_range().start()) - start;
     let close_pos = usize::from(close.text_range().start()) - start;
     let raw = &source[open_pos + 1..close_pos];
-    let prefix = source[..open_pos].trim_end();
+    let head = source[..open_pos].trim_end();
+    // A quantified signature separates the scheme from the arguments with
+    // `. `; this is not whitespace between a function name and its `(`.
+    let prefix = if head.ends_with('.') { format!("{head} ") } else { head.to_owned() };
     let suffix = &source[close_pos + 1..];
     // Newlines terminate line comments. Never collapse them into the next
     // parameter or move a comma across a comment.
     let has_comments = params
         .descendants_with_tokens()
         .any(|e| matches!(e.kind(), SK::LINE_COMMENT | SK::BLOCK_COMMENT));
-    if has_comments {
+    if has_comments || raw.contains('\n') {
         let result = format!("{prefix}({raw}){suffix}");
         return (result != source).then_some(result);
     }
@@ -643,7 +646,34 @@ pub(crate) fn rewrite_function_def(
         parts.push(last);
     }
     let joined = parts.join(", ");
-    let suffix_width = suffix.lines().next().unwrap_or_default().len();
+    // Only the signature consumes the parameter budget. A long body gets
+    // its own line before we consider splitting otherwise short arguments.
+    let eq = node
+        .children_with_tokens()
+        .find(|e| e.kind() == SK::EQ)
+        .map(|e| usize::from(e.text_range().end()) - start)
+        .filter(|&end| end > close_pos);
+    let mut suffix = suffix.to_owned();
+    let suffix_width = if let Some(eq) = eq {
+        let signature_tail = &source[close_pos + 1..eq];
+        let body = &source[eq..];
+        let first_line = body.lines().next().unwrap_or_default();
+        let signature_width =
+            shape.indent.width() + prefix.len() + joined.len() + 2 + signature_tail.len();
+        // Do not move comments, or shift a multi-line block's indentation.
+        if signature_width + first_line.len() > context.config.max_width()
+            && !first_line.trim().is_empty()
+            && !first_line.trim_start().starts_with("//")
+            && !first_line.trim_start().starts_with("/*")
+            && !first_line.trim_end().ends_with('{')
+        {
+            let indent = shape.block_indent(context.config).indent.to_string_inner(context.config);
+            suffix = format!("{signature_tail}\n{indent}{}", body.trim_start_matches([' ', '\t']));
+        }
+        signature_tail.len()
+    } else {
+        suffix.lines().next().unwrap_or_default().len()
+    };
     use super::lists::{self, DefinitiveListTactic, ListItem};
     let budget = shape
         .offset_left(prefix.len() + 2 + suffix_width)
@@ -651,7 +681,7 @@ pub(crate) fn rewrite_function_def(
     let list_items: Vec<_> = parts.iter().map(ListItem::from_str).collect();
     let tactic = lists::definitive_tactic(&list_items, budget, 2);
     let result = if (tactic != DefinitiveListTactic::Vertical && joined.len() <= budget)
-        || parts.is_empty()
+        || parts.len() <= 1
     {
         format!("{prefix}({joined}){suffix}")
     } else {
@@ -820,6 +850,26 @@ pub(crate) fn rewrite_mapping_def(
     }
 
     let body_shape = shape.block_indent(context.config);
+    let indent = body_shape.indent.to_string_inner(context.config);
+    // Keep deliberate table padding and comment-separated groups. Width is
+    // a soft target for these tables, not a reason to destroy their layout.
+    let already_aligned =
+        super::vertical::group_aligned_items(&arms, context).iter().all(|group| {
+            let mut column = None;
+            group.iter().filter(|arm| !arm.is_comment).all(|arm| {
+                let line = context.snippet(arm.range);
+                let Some(at) = line.find("<->") else { return false };
+                let correctly_indented = line.starts_with(&*indent)
+                    && line[indent.len()..].chars().next().is_some_and(|c| !c.is_whitespace());
+                let spaced = line[..at].ends_with(' ') && line[at + 3..].starts_with(' ');
+                let aligned = column.is_none_or(|previous| previous == at);
+                column = Some(at);
+                correctly_indented && spaced && aligned
+            })
+        });
+    if already_aligned {
+        return None;
+    }
     let aligned_body = rewrite_with_alignment(&arms, context, body_shape)?;
 
     rewrite_braced_body(node, context, shape, &aligned_body)
@@ -1161,10 +1211,8 @@ mod tests {
     }
 
     #[test]
-    fn function_def_legacy_wrap_cleaned_up() {
-        // A signature broken by legacy wrap should be reconstructed as single-line
-        // if it fits, or as clean vertical if it doesn't.
-        // Here it fits at width 100 so should be cleaned up to single-line.
+    fn function_def_existing_parameter_breaks_are_preserved() {
+        // Existing parameter breaks are deliberate, even when a flat layout fits.
         let source = "function foo(x : int,\n  y : bool) -> int = {\n";
         let (snippet, config) = make_context(source);
         let (root, _errors) = syntax::parse_text(source);
@@ -1178,13 +1226,7 @@ mod tests {
         let shape = Shape::with_max_width(&config);
         let result = rewrite_function_def(&callable_def, &ctx, shape);
 
-        let formatted = result.expect("legacy-wrapped function should be rewritten to single line");
-        // Should be a single line with no newline in the signature part.
-        assert!(!formatted.contains('\n'), "expected single-line output, got:\n{formatted}");
-        assert!(
-            formatted.contains("function foo(x : int, y : bool)"),
-            "expected reconstructed single-line params, got:\n{formatted}"
-        );
+        assert!(result.is_none(), "existing parameter layout should be preserved");
     }
 
     #[test]
