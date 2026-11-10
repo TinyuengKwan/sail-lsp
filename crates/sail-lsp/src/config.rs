@@ -578,6 +578,7 @@ impl InlayHintsConfig {
             effect_hints: self.effect_hints,
             chaining_hints: self.chaining_hints,
             discriminant_hints: self.enum_value_hints,
+            implicit_argument_hints: true,
         }
     }
 }

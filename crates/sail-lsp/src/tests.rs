@@ -3888,6 +3888,7 @@ fn a_config_setting_changes_the_answer() {
         caller_count_hints: false,
         chaining_hints: false,
         discriminant_hints: false,
+        implicit_argument_hints: false,
     };
 
     let on = analysis.inlay_hints(file_id, whole, &all_on).expect("not cancelled");

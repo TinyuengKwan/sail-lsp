@@ -10,6 +10,7 @@ mod chaining;
 mod closing_brace;
 mod discriminant;
 mod effect;
+mod implicit_argument;
 mod param_name;
 
 use base_db::TextRange;
@@ -39,6 +40,10 @@ pub struct InlayHintsConfig {
     pub chaining_hints: bool,
     /// Show discriminant value hints for enum variants.
     pub discriminant_hints: bool,
+    /// Show the inferred value of an implicit argument at a call site:
+    /// `widen(x)` against `(implicit('m), bits('n)) -> bits('m)` shows
+    /// `widen(8, x)`, the explicit form Sail also accepts.
+    pub implicit_argument_hints: bool,
 }
 
 impl Default for InlayHintsConfig {
@@ -52,6 +57,7 @@ impl Default for InlayHintsConfig {
             effect_hints: true,
             chaining_hints: true,
             discriminant_hints: false,
+            implicit_argument_hints: true,
         }
     }
 }
@@ -143,6 +149,9 @@ pub fn inlay_hints_ide(
     // hints off in the editor did nothing.
     if config.parameter_hints {
         param_name::collect_hir_parameter_hints(current_file, begin, end, &mut hints);
+    }
+    if config.implicit_argument_hints {
+        implicit_argument::collect_implicit_argument_hints(current_file, begin, end, &mut hints);
     }
     if config.caller_count_hints {
         caller_count::collect_callgraph_caller_hints(
@@ -311,6 +320,7 @@ mod tests {
             closing_brace_hints_min_lines: None,
             chaining_hints: false,
             discriminant_hints: false,
+            implicit_argument_hints: false,
             max_length: None,
         };
         let start = source.find("shown =").unwrap();
