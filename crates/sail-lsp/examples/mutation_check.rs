@@ -1,27 +1,12 @@
-//! Mutation check: how many *real* type errors does sail-lsp actually catch?
+//! Measure detection of type errors introduced into upstream-accepted programs.
 //!
-//! `corpus_check` and `conformance_check` both measure one direction — they
-//! count diagnostics on programs that are correct, so they can only ever go
-//! down. Nothing stops a change from buying silence by checking less, and a
-//! checker that reported nothing at all would score perfectly on both.
+//! Mechanical mutations count as errors only when the upstream compiler rejects
+//! them. Oracle regeneration records these verdicts; accepted mutations and
+//! originally rejected sources do not count as missed errors. This complements
+//! the fixed accepted/rejected fixtures in `conformance_check`.
 //!
-//! This measures the other direction. It takes programs upstream accepts,
-//! breaks each one in a small, mechanical way, and asks whether sail-lsp
-//! notices. Upstream Sail is the oracle: a mutant only counts if `sail
-//! --just-check` rejects it, so a mutation that happens to stay valid is
-//! discarded rather than scored as a miss.
-//!
-//! ## Usage
-//!
-//! ```sh
-//! # Measure against a recorded oracle (fast, no `sail` needed).
-//! cargo run --release --example mutation_check -- \
-//!     /path/to/sail/test/typecheck/pass --oracle crates/sail-lsp/test_data/mutation-oracle.txt
-//!
-//! # Regenerate the oracle (slow; needs `sail` on PATH or in $SAIL).
-//! cargo run --release --example mutation_check -- \
-//!     /path/to/sail/test/typecheck/pass --regen-oracle crates/sail-lsp/test_data/mutation-oracle.txt
-//! ```
+//! Usage: `cargo run --release --example mutation_check -- /path/to/pass
+//! --oracle crates/sail-lsp/test_data/mutation-oracle.txt`
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 

@@ -177,6 +177,7 @@ fn complete_unqualified(
     all_files: &[(&Url, &dyn FileDb)],
     builtins: &[&str],
 ) {
+    let started = std::time::Instant::now();
     let prefix_lower = ctx.prefix_lower();
 
     // 投産-3: Use Resolver::names_in_scope() to collect scope-aware names.
@@ -234,9 +235,13 @@ fn complete_unqualified(
     }
 
     // Workspace symbols from all files
+    let locals_us = started.elapsed().as_micros();
     let mut seen = std::collections::HashSet::new();
     for (_candidate_uri, candidate_file) in all_files {
+        let tree_started = std::time::Instant::now();
         if let Some(tree) = candidate_file.item_tree() {
+            let tree_us = tree_started.elapsed().as_micros();
+            let symbols_started = std::time::Instant::now();
             // An enum's members and a union's constructors are written
             // unqualified in Sail — `Red`, not `Color::Red` — so they belong
             // in this list beside the top-level names. They were only
@@ -343,9 +348,9 @@ fn complete_unqualified(
                     continue;
                 }
                 // Function snippet + relevance from signature index
-                let selected_sigs = ctx.file_text.and_then(|ft| {
-                    ide_db::signatures::callable_signatures_at(ctx.db, ft, ctx.offset, &decl.name)
-                });
+                let selected_sigs = ctx
+                    .file_text
+                    .and_then(|ft| ctx.sema.callable_signatures_at(ft, ctx.offset, &decl.name));
                 let signature_index = (matches!(kind, CompletionItemKind::Function)
                     && selected_sigs.is_none())
                 .then(|| ide_db::signatures::signature_index(*candidate_file));
@@ -407,8 +412,12 @@ fn complete_unqualified(
 
             // Local bindings from current file handled via symbol_occurrences
             // (skipped here — would need current_uri comparison)
+            if tree_started.elapsed().as_millis() >= 1 {
+                tracing::debug!(target: "sail_lsp::latency", "completion_scope_file file={:?} tree_us={tree_us} symbols_us={}", candidate_file.file_text().map(|(db, ft)| ft.file_id(db)), symbols_started.elapsed().as_micros());
+            }
         }
     }
+    tracing::debug!(target: "sail_lsp::latency", "completion_scope locals_us={locals_us} total_us={}", started.elapsed().as_micros());
 }
 
 /// A name from the item tree, in the shape the loop below already used.

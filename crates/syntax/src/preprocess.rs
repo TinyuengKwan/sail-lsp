@@ -222,7 +222,14 @@ impl Event {
             return None;
         }
         let raw = node.text().to_string();
-        let text = strip_pragma_comment(&raw);
+        Self::from_directive(&raw)
+    }
+
+    /// Interpret one lexically recognized directive. Discovery can collect
+    /// include candidates without parsing every function in a generated file;
+    /// semantic preprocessing still uses top-level CST events.
+    pub fn from_directive(raw: &str) -> Option<Self> {
+        let text = strip_pragma_comment(raw);
         for (name, negative) in [("ifdef", false), ("ifndef", true)] {
             if let Some(arg) = strip_directive(text, name) {
                 return Some(Self::Ifdef(arg.to_owned(), negative));

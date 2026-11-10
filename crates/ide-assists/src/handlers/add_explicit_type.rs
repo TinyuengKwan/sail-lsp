@@ -49,9 +49,10 @@ pub(crate) fn add_explicit_type(acc: &mut Assists, ctx: &AssistContext<'_>) -> O
     }
 
     // The inferred type, from the salsa query.
-    let ty_text = ctx.file.file_text().and_then(|(db, ft)| {
-        hir::Semantics::new(db).binding_type_text(ft, name_span, ctx.file.bodies())
-    })?;
+    let ty_text = ctx
+        .file
+        .file_text()
+        .and_then(|(db, ft)| hir::Semantics::new(db).binding_type_text(ft, name_span))?;
     if ty_text == "unknown" || ty_text == "error" || ty_text == "unit" {
         return None;
     }

@@ -1,639 +1,223 @@
 # Architecture
 
-This document describes the high-level architecture of sail-lsp, modeled after
-[rust-analyzer's architecture guide](https://github.com/rust-analyzer/rust-analyzer/blob/master/docs/dev/architecture.md).
+Sail-LSP separates its incremental analysis engine from LSP transport, following
+[rust-analyzer's architecture](https://rust-analyzer.github.io/book/contributing/architecture.html).
+Native analysis runs without a Sail compiler. Optional Flycheck adds upstream
+compiler diagnostics alongside native results.
 
-## Bird's Eye View
-
-sail-lsp is a Language Server for the Sail ISA description language. It
-communicates with any editor over the Language Server Protocol (LSP) via
-standard I/O. The crate hierarchy mirrors rust-analyzer's layering so that
-features can be ported between the two projects with minimal friction.
-
-```
-                       +---------------------+
-                       |      sail-lsp       |  <- LSP transport (lib + bin)
-                       |  main_loop          |
-                       |  handlers/ lsp/     |
-                       |  mem_docs task_pool |
-                       |  reload  op_queue   |
-                       +--+---+---+---+--+---+
-          +---------------+   |   |   |  +----------+
-          v                   v   v   v             v
-    +----------+  +------------+ +----------+ +----------+  +----------+
-    |   ide    |  |ide-assists | |ide-compl.| |ide-diag. |  | ide-ssr  |
-    | 39 mods  |  | 51 handlers| |11 provdrs| |40 handlrs|  |ssr engine|
-    +----+-----+  +------+-----+ +----+-----+ +----+-----+  +----+-----+
-         |               |            |             |              |
-         +-------+-------+------------+-------------+--------------+
-                 v
-           +----------+
-           |  ide-db  |  RootDatabase, WorkspaceSymbolIndex,
-           | FileDb   |  search, prime_caches, active_parameter,
-           | search   |  documentation, imports, rename, fixture
-           +----+-----+
-                |
-        +-------+----------+
-        v       v          v
-     +-----+ +------+ +--------+
-     | hir | |hir-ty| |hir-def |
-     |Sema | |infer/| |ItemTree|
-     |     | |lower/| |DefMap  |
-     +--+--+ +--+---+ +---+----+
-        |       |          |
-        +-------+----------+
-                v
-          +----------+
-          |  syntax  |  <- rowan CST + ted tree editor
-          +----+-----+
-               v
-          +----------+
-          |  parser  |  <- hand-written lexer + SyntaxKind
-          +----+-----+
-               v
-          +----------+
-          | base-db  |  <- salsa inputs (FileText, FileId, VFS)
-          +----+-----+
-               |
-        +------+------+
-        v             v
-   +--------+   +-----------+
-   |  vfs   |   | vfs-notify|  <- filesystem abstraction
-   +--------+   +-----------+
-
-  +-------+  +-------+  +--------+  +---------+
-  | stdx  |  | paths |  | intern |  | profile |  <- utility crates
-  +-------+  +-------+  +--------+  +---------+
-```
-
-## Crate Responsibilities
-
-### Foundation layer
-
-| Crate | Role |
-|-------|------|
-| `base-db` | Salsa 0.25.2 infrastructure: `FileText` (salsa input), `FileId(u32)`, `SourceDatabase` trait, `Files` (VFS with content-hash dedup + pending change batching), `WorkspaceFiles` (salsa input consumed by `workspace_context_query`), `SourceRoot` (local vs library), `Durability` (HIGH for disk, LOW for open files). |
-| `parser` | Hand-written Sail lexer (`hand_lexer.rs`), `Token`/`Span` types, `SyntaxKind` enum (~200 variants), `SailLanguage` (rowan Language trait), `Event` protocol, full-fidelity lex pipeline (`lex_full.rs`), `Literal` enum (shared by parser/hir-def/hir-ty), `TokenSet` for parser recovery. `KW_CONFIG` token, `InfixOp`/`OP_IDENT` for subscript operators like `<_s`, `<=_u`. |
-| `syntax` | Rowan CST: `event_parser` (Pratt parser -> SyntaxNode), typed AST wrappers (`ast.rs`), stable pointers (`ptr.rs`: SyntaxNodePtr, AstPtr), CST->ParsedFile lowering (`cst_lower.rs`), salsa tracked queries (`parse_query.rs`: parse_file, parsed_file_query), tree editor (`ted.rs`: insert/remove/replace without re-parsing), preprocessor types (`preprocess.rs`). Parser handles: `config` expressions, scattered `clause` definitions, `private` modifier, `$[attr]` attributes, `///` doc comments, infix subscript operators, `[e with f=v]` struct update, mapping guards `if ... =>`, type ascription `(e : t)`, `try/catch`. |
-| `stdx` | Generic helpers: `format_to!`, `NonEmptyVec`, `is_ci`, `anymap`, `panic_context`, `process`, `rand`, `thread` pool, `variance`. No Sail-specific code. |
-| `paths` | `AbsPath`/`AbsPathBuf` newtypes for absolute filesystem paths, backed by `camino`. |
-| `intern` | GC-able interning infrastructure: `intern`, `intern_slice`, `gc`, `symbol`. |
-| `profile` | `StopWatch`, `MemoryUsage`, optional `google_cpu_profiler` for CPU profiling. |
-| `vfs` | Virtual filesystem abstraction: `VfsPath`, `FileSet`, `AnchoredPath`, `PathInterner`, `Loader` trait. Decouples the server from the physical filesystem. |
-| `vfs-notify` | `notify`-based file watcher implementing the `vfs::Loader` trait. |
-
-### Definition layer
-
-| Crate | Role |
-|-------|------|
-| `hir-def` | Per-file stable data structures: `Body`/`ExprId`/`PatId` arenas + `BodySourceMap`, `ExpressionStore` (`expr_store/`), `ItemTree` (`item_tree/` — signature-hash), `CallableBodies` + `EffectTag` (11 variants), `CallGraph`, `nameres/` (DefMap + DefId), `Resolver` (scope-chain: Local > Module > Workspace), `Name` (SmolStr-interned), `IncludeGraph`, `AnalysisScope`, scattered definition tracking, `WorkspaceDefMap`, `bitfield`, `callable_info`, `diagnostics`, `effects`, `find_path`, `signatures`, `project`. Salsa queries in `def_query`: item_tree, callable_bodies, callgraph, CallableId (interned), file_callable_ids. Database trait: `DefDatabase`. |
-| `hir` | `Semantics` facade for IDE consumers: type queries, `diagnostics.rs` (`AnyDiagnostic` enum + `inference_diagnostic()` cooking), `hir_query` (workspace callgraph builder), ref/impl counts, workspace def map. `symbols.rs`, `display.rs`, `from_id.rs`, `has_source.rs`. Does NOT depend on ide-db (RA architecture). |
-| `hir-ty` | Type-checker: `infer/` (multi-file inference engine), `lower/` (type lowering), `typecheck` (InferenceContext with body/resolver/return_ty/diverges), `subtype.rs` (directional type checks), `match_check` (pattern exhaustiveness), `overload.rs` (Sail multi-dispatch), `flow.rs` (control flow analysis), `representability.rs`, `inhabitedness.rs`, `query.rs` (per-callable `infer_callable_query`). Effect system: declared + inferred + transitive. Z3 SMT solver for numeric constraints. Database trait: `HirDatabase`. **LSP-free** -- no lsp-types dependency. |
-
-### IDE layer
-
-| Crate | Role |
-|-------|------|
-| `ide-db` | Foundation: `FileDb` trait, `RootDatabase` (#[salsa::db]) + `SalsaFile` adapter, `defs` (SymbolKind, CompletionItemKind), `text_edit` (TextEdit), `source_change` (SourceChange), `workspace_index` (WorkspaceSymbolIndex -- O(1) name lookup), `search` (FindUsages -- two-stage search), `active_parameter` (ActiveParameter), `prime_caches` (salsa pre-warming with parallel rayon phase), `ide_types` (HoverResult, InlayHint, Diagnostic, Annotation, HlRange, etc.), `line_index`, `symbol_index`, `helpers`, `keywords`, `pragmas`, `documentation`, `fixture`, `imports/`, `rename`, `syntax_helpers/`, `type_inference`, `span`, `text_document`. |
-| `ide` | 39 IDE feature modules: `goto_definition`, `goto_declaration`, `goto_implementation`, `goto_type_definition`, `references`, `rename`, `hover/`, `syntax_highlighting/`, `annotations/`, `inlay_hints/`, `call_hierarchy`, `calls`, `signature_help`, `folding_ranges` (CST-aware), `file_structure`, `matching_brace`, `extend_selection`, `highlight_related`, `typing/` (on_enter), `join_lines`, `move_item`, `formatting`, `completion`, `ssr`, `navigation`, `navigation_target`, `analysis` (Analysis/AnalysisHost), `moniker`, `static_index`, `markup`, `doc_links/`, debug views (view_hir, view_item_tree, view_syntax_tree), Sail-specific (bitfield_layout, effect_annotations, expand_include, include_graph_view). |
-| `ide-completion` | Provider-based completion: `context.rs` (CompletionContext with `sema: Semantics`, `db`, `expected_type`, `DotAccess` with `receiver_ty`), `completions.rs` (Completions accumulator + `complete_name_ref` dispatcher), `completions/` directory with 11 providers (dot, expr, flyimport, item_list, keyword, pattern, postfix, pragma, record, snippet, type_). Entry: `completions()`. |
-| `ide-diagnostics` | Diagnostic rendering + 40 handlers: `DiagnosticsContext` with `sema: Semantics`, handlers import `AnyDiagnostic` from `hir::diagnostics`. Parse errors via `parse_errors()` firewall query. `err_recover` pattern. `new_with_syntax_node_ptr()` for precise ranges. **LSP-free**. |
-| `ide-assists` | Code actions: `assist_context.rs` (AssistId, AssistKind, Assist, AssistContext, Assists accumulator, Handler type), `handlers/` (51 registered handlers via `all()` static array), `assists()` entry point (RA pattern). |
-| `ide-ssr` | Structural search-replace: `parsing` ($name placeholder syntax), `matching` (AST pattern match), `resolving` (semantic resolution), `replacing` (substitution), `nester` (overlap removal), `fragments` (expression parsing), `search` (per-tree matching), `errors`. |
-
-### Transport layer
-
-| Crate | Role |
-|-------|------|
-| `sail-lsp` | LSP server with **lib + bin split**: `main.rs` (thin binary entry calling `sail_lsp::main()`), `lib.rs` (library exposing all server logic). **main_loop.rs**: `GlobalState`, event loop matching RA `handle_event` exactly: select! -> coalesce -> process_changes (vfs_done gated) -> quiescence block (diagnostics, GC) -> op queues -> take_changes -> publish -> status -> timing. **global_state.rs**: `GlobalStateSnapshot` with its `Analysis` (including the immutable include graph) + `client_caps`. **handlers/**: `dispatch.rs` (RequestDispatcher with `on_sync`/`on` -- both `catch_unwind`), `request.rs`, `notification.rs`. **lsp/**: `capabilities.rs` (server + client capabilities), `from_proto.rs`, `to_proto.rs`, `ext.rs`. **mem_docs.rs**: MemDocs with `take_changes()`. **task_pool.rs**: `stdx::thread::Pool`-backed TaskPool with `catch_unwind` at spawn level. **reload.rs**: workspace reload logic. **op_queue.rs**: typed operation queue. **diagnostics.rs**: DiagnosticCollection + fetch_native_diagnostics (catch_unwind). **config.rs**: SailLspConfig. **cli.rs**: command-line interface. **hover_ext.rs**, **code_action_helpers.rs**: handler helpers. **integrated_benchmarks.rs**: `#[cfg(test)]` benchmarks (run via `RUN_SLOW_BENCHES=1`). **tests.rs**: LSP integration tests. |
-
-## Key Design Patterns
-
-### lib + bin split (sail-lsp)
-
-The `sail-lsp` crate has both `lib.rs` and `main.rs`. The binary is a thin
-wrapper calling `sail_lsp::main()`. This enables `integrated_benchmarks.rs` to
-live as a `#[cfg(test)]` module with full access to server internals, matching
-RA's pattern for in-crate benchmarks.
-
-### Async dispatch (RA pattern)
-
-`RequestDispatcher` separates execution priority from cancellation retry policy:
-- **`on_sync`**: runs on main thread with `&GlobalStateSnapshot` (fast, for formatting/symbols)
-- **`on`**: clones a snapshot and dispatches ordinary worker tasks.
-- **`on_latency_sensitive`**: dispatches interactive requests; its retry flag is independent of priority. Thread intent is a platform scheduling hint, not a separate Linux priority queue.
-
-Responses from async handlers flow back as `Task::Response` through the unified Task enum.
-The main loop completes the request queue entry before sending an async response.
-Responses and retries for already completed or client-cancelled requests are discarded.
-Handlers run outside the main loop; cancellation uses `salsa::Cancelled` panic catching.
-
-### process_changes (RA pattern)
-
-Notification handlers buffer VFS changes to a pending queue. `process_changes()` flushes them
-to salsa in a single batch **after** event handling (lazy, RA pattern). This batches
-rapid-fire edits into one salsa revision bump.
-
-### WorkspaceSymbolIndex
-
-Built after workspace scan. HashMap-based name->SymbolEntry index. Used by:
-- GotoDefinition/Declaration/Implementation (O(1) instead of O(n) file scan)
-- WorkspaceSymbol search
-- Reference/implementation count caching
-
-Updated incrementally on file changes via `index_dirty_files`.
-
-### Two-stage search (ide-db/search.rs)
-
-RA pattern: `FindUsages` with `SearchScope`:
-1. **Stage 1**: WorkspaceSymbolIndex lookup -> candidate file URLs (O(1))
-2. **Stage 2**: Per-file `symbol_occurrences` scan in candidates only
-
-Returns `UsageSearchResult { references: HashMap<Url, Vec<FileReference>> }` with
-`ReferenceCategory` (Read/Write/Import).
-
-### Cache pre-warming (ide-db/prime_caches.rs)
-
-Two-phase pre-warming after workspace scan:
-
-- **Phase 1** (sequential): `parse_file` -> `parsed_file_query` -> `item_tree_query` -> `callable_bodies_query` per file (~230ms).
-- **Phase 2** (parallel): `infer_callable_query` for all callables via rayon `par_iter()` + `db.clone()` (~1.6s on 24 threads, 8.8x speedup vs sequential 14.2s).
-
-Takes `&RootDatabase` (concrete type, not trait object) for `db.clone()` in rayon workers.
-Cancellation checked per-callable. Reports "Indexing" and "Type inference" progress phases.
-
-### Salsa query chain
-
-```
-FileText (salsa input)
-  -> parse_file(db, ft)             -> ParsedFileData {tokens, green, errors}
-  -> parse_errors(db, ft)           -> Option<Box<[SyntaxError]>>  <- firewall query
-  -> parsed_file_query(db, ft)      -> ParsedFile {decls, symbol_occurrences, call_sites}
-  -> item_tree_query(db, ft)        -> ItemTree {entries, signature_hash, fixities}
-  -> callable_bodies_query(db, ft)  -> CallableBodies {per-callable Body arenas}
-  -> callgraph_query(db, ft)        -> CallGraph {forward, reverse, sites}
-  -> file_callable_ids(db, ft)      -> Vec<CallableId>
-  -> infer_callable_query(db, id)   -> TypeCheckResult {inference, diagnostics}
-  -> signature_index_query(db, ft)  -> HashMap<String, CallableSignature>
-
-WorkspaceFiles (salsa input)
-  -> directory(db, wf, range) -> shared declaration directory
-  -> workspace_context(db, wf) -> complete compatibility/reference view
-```
-
-For configured source projects, `WorkspaceSourceProject` and per-file directive
-events feed a pure preprocessing plan. `Change` applies its active file set,
-module ownership and `WorkspacePreprocessing` regions together. Semantic CSTs
-preserve offsets while removing inactive nodes; raw CSTs remain available for
-editing. Body-only changes backdate the event projection and reuse the plan.
-Workspace operator precedence is refreshed through a compact `file_fixities`
-query over the semantic CST. This uses the same declaration extraction as
-ItemTree, without eagerly lowering signatures and generated declarations on
-the input-update thread. Changes to precedence still invalidate parsing.
-
-Per-item inference: a body edit reuses other callable results while their
-body-query dependencies remain cached. LRU eviction can require revalidating
-another callable in the edited file; it must not invalidate unrelated files.
-`body_with_source_map` has LRU=512. The semantic callable key hashes node
-boundaries and non-trivia token kinds/text; internal comments and whitespace
-therefore reuse inference, while operator regrouping changes the key. Recovery
-syntax uses a conservative text key. Source-map queries read current lowering
-and use a position-sensitive key. Legacy raw diagnostic spans carry their
-origin token positions in `InferenceResult` and are relocated against the
-current source tokens; ExprId/PatId diagnostics use the current map directly.
-The origin belongs to the inference result: Salsa can update an equal body
-query value while keeping its dependants backdated.
-
-Cache defaults retain all parse, environment and inference results and use a
-512-entry LRU for callable bodies and source maps. The host can change these
-capacities at a safe idle boundary; a configured soft RSS target uses bounded
-hysteresis rather than repeatedly shrinking caches. Cache collection requires
-exclusive database ownership, including the absence of retained request snapshots.
-See [cache configuration](configuration.md#analysis-cache-policy) for the policy
-and `query_cache_stats` for its retention/recomputation probe. Smaller capacities
-trade retained query results for recomputation; they do not impose a hard bound
-on process memory.
-
-Type inference and type navigation use an incremental declaration index in
-`hir-ty/src/infer/dependencies/index.rs`. The complete `workspace_context` query
-remains available for compatibility and reference tests; it is no longer a
-production inference dependency.
+## Layers and entry points
 
 ```text
-infer(def) -> callable_body(def)
-           -> callable_environment(file, names)
-                -> file_symbols(file) -> top_level_env(file)
-                -> directory(workspace, range) -> file_directory(file)
-                -> contribution_selection(file, names) -> file_contributions(file)
+sail-lsp                         LSP, configuration, VFS loading, task lifecycle
+  -> ide                        Analysis snapshots and feature orchestration
+  -> ide-assists / ide-completion / ide-diagnostics / ide-ssr
+       -> ide-db                RootDatabase, source changes, indexes and search
+            -> hir              Semantics facade, definitions and source identity
+                 -> hir-ty      Inference, subtyping, effects and numeric proofs
+                 -> hir-def     Items, scopes, bodies and ordered declarations
+                 -> hir-expand  Preprocessing projections
+                      -> syntax -> parser
+
+base-db                         Salsa source inputs and change transactions
 ```
 
-Callable roots are extracted from the already-read body, without adding another
-tracked body-to-names query. Equal root sets reuse the same environment query.
-Names use interned `Name` values. Each file exports immutable symbol contributions;
-workspace merges follow file order and preserve insert-first versus append
-semantics for signatures, overloads, constructors and scattered declarations.
-Shared empty tables avoid allocating a full set of empty `Arc` maps per symbol.
-
-The immutable declaration directory groups up to 32 file leaves per query and
-shares unchanged branches. A signature edit preserving names retains the whole
-directory; a rename rebuilds the affected leaf, batch and ancestor path. Bloom
-masks only prune candidates: exact leaf membership determines matches. Each
-directory memoizes up to 16,384 name lookups; this cache contains no database
-state and is excluded from equality. Retained directories keep their original
-contents across edits. A cache miss can still visit many branches when masks
-are saturated; this is not a constant-time lookup guarantee.
-
-Selections follow signature/type/constraint references to a fixed point,
-including overload members, mapping directions, constructors, enum members and
-generated bitfield accessors. Field-to-record edges use a separate key namespace.
-Missing names depend on the directory, so insertion and renaming are observed.
-Reads are grouped by contributing file into semantic projection queries. Signature
-changes rebuild only that file's contributions; unchanged projections backdate
-and preserve unrelated inference results. Salsa records the reverse dependencies.
-Type navigation uses the same index; spelling suggestions read per-file function
-name projections only when needed.
-
-Semantic equality covers types, constraints, effects, record fields, mappings,
-overloads and declaration locations. Hashes are not used to decide semantic
-projection equality. Exhaustive field patterns require an explicit projection
-when environment structs gain a semantic field. Local declarations retain their
-precedence over workspace contributions.
-
-Shared fields, recursive unions and file-global constraints can broaden a
-selection. Roots are conservative source/HIR names rather than resolved scope
-edges; a local binding can add an unnecessary global dependency. Traversing all
-cached callables after an edit still validates query dependencies throughout the
-workspace, even when only three inference results change. Cold/body-edit targets
-and rust-analyzer performance parity remain unachieved.
-
-Regression tests retain old `Arc` results and verify dependent recomputation and
-unrelated reuse for signatures, types, mappings, overloads, additions/deletions,
-renames and workspace membership changes. They compare selected inference with
-the complete-environment path, including expression/pattern types and diagnostics.
-Changing a body to call a different function removes its old dependency.
-
-Semantic diagnostics use the file's cached CST and ItemTree. They fall back to
-parsing only for a `FileDb` implementation that cannot provide these caches.
-`incremental_stats` checks body-edit reuse and signature-edit invalidation,
-including actual diagnostic changes in a cross-file consumer. The body-query
-LRU can require revalidating another callable in the edited file.
-
-`invalidation_matrix` additionally captures Salsa `WillExecute` events through
-`RootDatabase::with_event_callback`, checking execution counts against inference
-result replacement in an ordered project. It covers internal/leading comments,
-bodies, signatures, include targets/contents and manifest membership. Unrelated
-results must remain shared; dependent caller diagnostics must change.
-
-The physical `parse_file` query keeps one optional previous text/fixity seed per
-file. Its weak green-tree reference does not pin trees after database disposal;
-empty file updates clear the seed. Safe token/block edits reparse locally, rebuild
-tokens and validation, and retain parser errors separately. Changed fixities or
-unsafe syntax use full parsing. The cache is not semantic state: text and fixities
-fully determine results, regardless of which snapshot last populated the seed.
-`reparse_stats` compares this normal path with the same query after clearing its
-seed, checking trees, tokens and errors on every edit. Run it against the current
-source to measure the effect; historical timings do not establish current reuse.
-
-### Type inference state and applied types
-
-Speculative inference snapshots cover variable bindings, fresh variable IDs,
-pending obligations and placeholder-name mappings. Successful probes commit the
-underlying `ena` snapshot; failed probes roll back. Inner commits remain undoable
-by an outer snapshot. Placeholder mappings use an undo log of changed entries,
-so a rejected candidate cannot leave a name pointing to a subsequently reused
-variable ID. Snapshots close in LIFO order, including diagnostic-only probes.
-
-`TyKind::Named(name, args)` and `TyKind::App` both represent applied types. The
-unifier uses the same comparison form for both, including nested applications,
-argument count and argument types. Resolving a type and checking for a recursive
-inference-variable binding traverse `Named` arguments as well. Finalization turns
-unresolved variables inside those arguments into unknown types; known bindings
-and numeric placeholders propagate into them. Raw unification is reflexive for
-an unbound variable, and an error type does not bind and poison that variable.
-
-Direct inference-table regression tests cover these invariants alongside the
-existing source-level diagnostic, hover and incremental tests. This does not
-make all compatibility checks strict: undecidable numeric constraints,
-configuration-dependent aliases and recovery/coercion policy remain separate
-from structural unification correctness.
-
-### Subtyping and dependent constraints
-
-`subtype::is_subtype(actual, expected)` is directional and transactional. It
-checks interval containment, tuple components, application arguments and
-function variance. Its result separates proof, pending constraint and failure.
-Coercion accepts pending goals for inference recovery using `Deferred`, retains
-them in the table, and never retries the opposite subtype direction.
-
-`InferenceTable::check_compatibility(expected, actual)` now routes ordinary
-expectations through that directional relation, including nested tuples, type
-applications and function variance. It distinguishes `Proven`, `Deferred`,
-`Recovery` and `Mismatch`; the boolean `unify` adapter means acceptable for
-continued inference, not a proof. Legacy binding machinery may resolve variables
-before a second directional check. It cannot rescue a known nested mismatch.
-Explicit recovery still handles erased refinements, configuration-dependent
-aliases and struct literals with erased generic arguments. Mapping selection and
-semantic equality now use the same directional relation. Alias expansion substitutes
-actual parameters before using the body. Generic vectors retain their element
-argument when compared with other vectors.
-
-Tuple expectations reach individual elements. When `if` or `match` has an
-expected type, every branch is checked against that type without also requiring
-one branch's inferred type to be a subtype of another. Numeric literal match
-arms add an equality only within the arm. Numeric `let 'n = ...` bindings retain
-singleton identity and known bounds, as do global numeric `as` binders. General
-branch joining and flow-sensitive refinement remain incomplete.
-
-Type instantiation, alias expansion, existential freshening and skolemization
-share `infer/substitution.rs`. Substitution is simultaneous: inserted replacements
-are not substituted again. Numeric alias arguments retain their AST, including
-conditional expressions. Braced parameterized alias bodies use the full CST type
-reader so existential binders reach the substitution engine. At an existential
-binder, shadowed mappings are removed;
-free variables in active replacements trigger alpha-renaming of conflicting
-binders in both the body and predicate. Fresh names avoid existing free and bound
-names and are deterministic within the operation, keeping Salsa results stable.
-The common path borrows the small substitution maps; binder entry uses copy-on-write.
-Legacy textual arguments and inference placeholders use whole-variable tokens,
-with parentheses around inserted expressions. Unknown boolean operands remain
-Unknown under conjunction, disjunction and negation. This operation is distinct
-from the solver's deliberately transitive, cycle-checked numeric normalization.
-
-Numeric evaluation and polynomial/linear normalization use checked arithmetic;
-constant division and remainder follow Sail's Euclidean convention. Overflow
-and zero division defer. The optional Z3 backend translates opaque numeric
-functions with their arguments, uses structural cache keys, and adds only
-valid exponent facts. Lightweight evaluation remains bounded by `i64`.
-Strict integer bounds against literals reuse the same cheap nonnegative and
-positive proofs via a checked successor (`n > -1` becomes `n >= 0`). Partial
-arithmetic keeps its domain requirements. Absolute-value bounds use both signed
-interval inequalities; finite width facts can make large powers concrete without
-SMT. A loop lower bound `div(a, d) <= i` preserves nonnegativity when `a >= 0`
-and `d > 0`; this inspects bounded direct facts without recursive bound cycles.
-Solver cache keys ignore identical
-repeated assumptions but retain every distinct fact and substitution; timeout
-and cancellation outcomes remain uncached.
-
-`ScopedObligation` retains the goal, cause, source expression, lexical assumptions
-and referenced inference placeholders. Finalization resolves live bindings before
-fallback can erase distinct unknowns to `_`, then solves under the captured
-context. Failed goals are reported at their origin; unresolved goals remain in
-the inference result. Compatibility/recovery unknowns are quiet, while explicit
-reportable constraints retain their warning policy. Nested expression scopes do
-not overwrite already captured evidence, and rollback removes speculative goals.
-Assumption slices are shared by goals captured together. Early subtype checks use
-the inexpensive solver; optional SMT is deferred to final contextual solving,
-without a duplicate normalization-stage SMT call.
-
-Conditional numeric equality uses three outcomes: proven, disproven and unknown.
-A known condition selects its branch; an unknown condition cannot bind a branch
-variable just to satisfy the equality. Parsing preserves nested conditional ASTs.
-
-Actual existentials open into fresh rigid witnesses and scoped assumptions;
-expected existentials introduce flexible witnesses and retain their predicates.
-Universe levels prevent local rigid witnesses from escaping into older inference
-variables, including through nested bindings. Values leaving a local elimination
-scope are repackaged with their predicates. Snapshot rollback restores names,
-levels, bindings and obligations. Generated names avoid user variables and type
-arguments. Local type-pattern aliases preserve witness identity under shadowing.
-
-Mapping direction selection and semantic equality use the directional relation;
-equality requires both directions. Structural binding collection is explicitly
-non-proving. Constructor payloads share existential witness allocation and keep
-unresolved predicates. Scoped goals retain universe and rigid-variable metadata;
-quantified entailment uses bounded concrete counterexamples and, when enabled,
-exact supported SMT translations. Unknown remains unknown.
-
-Representable flow joins include arbitrary-precision integer ranges, tuple
-components and existential numeric alternatives for invariant constructors.
-Conditional joins retain supported boolean predicates and numeric indices;
-an unrepresentable join still returns to the caller's recovery path. This is
-not a complete least-common-supertype algorithm for all Sail types.
-
-Type/Int/Bool/Order binder kinds survive lowering and alias substitution.
-Ordered metadata checks resolve user constructors in the declaration's scope,
-including cross-file kind mismatches, without borrowing future declarations.
-For alias headers with omitted kinds, diagnostics infer direct parameter uses
-from builtin constructor argument positions in the body. Conflicting evidence
-stays unspecified; nested existential scopes are excluded from this projection.
-Bare parameters used as tuple components or function parameter/return types
-infer Type. Existential and forall binders isolate same-spelled variables from
-the alias header's kind inference.
-A synonym whose entire result is an unannotated header variable cannot infer
-its result kind (`type Id('a) = 'a`). It reports a kind error at the result
-variable; an explicit binder kind supplies the missing evidence.
-Alias kind projections are memoized by syntax-node identity within one
-diagnostic pass, avoiding repeated body parsing for multiple references. The
-temporary map is discarded after that pass and cannot retain stale edit data.
-The shared cases in `analysis/kind_oracle_tests.rs` exercise IDE diagnostics in
-single-file and cross-file forms. To compare the same cases to a real compiler,
-run `SAIL_ORACLE_BIN=/path/to/sail cargo test -p ide upstream_kind_oracle -- --ignored --nocapture`.
-That explicit test fails without the compiler and reports its version. The
-pinned corpus workflow runs it and retains the output as `kind-oracle.log`.
-These checks and the kind regression tests establish specific supported cases;
-they do not establish complete upstream kind-checking equivalence.
-
-Numeric expressions use arbitrary-precision integer constants and bounded
-evaluation. Partial arithmetic and resource exhaustion retain Unknown rather
-than inventing a value. Cancellation-aware SMT budgets, retry behavior and their
-limits are described below under numeric inference. See
-`infer/p2_audit.rs`, `infer/boolean_audit.rs` and IDE
-`analysis/ordered_names_tests.rs` for the corresponding regression coverage.
-
-### Completion provider architecture (ide-completion)
-
-RA pattern: `CompletionContext` (with `sema: Semantics`) -> `Completions` accumulator -> providers -> `CompletionItem`.
-
-11 providers: dot, expr, flyimport, item_list, keyword, pattern, postfix, pragma, record, snippet, type_.
-
-All providers follow `(acc: &mut Completions, ctx: &CompletionContext, ...)` parameter order (RA convention).
-
-Expected-type ranking goes through `Semantics` to the inference subtype relation,
-including aliases, generic identity and numeric constraints. Recovery types do
-not count as matches. Completion checks use the non-SMT solver and preserve the
-weaker `CouldUnify` rank for unresolved obligations. Functions are ranked by their
-semantic return schemes, including overload alternatives.
-
-Outside comments and literals, completion inserts a temporary identifier into a
-reparsed tree to classify incomplete calls, field initializers and dot access.
-The real database and text edits retain original source coordinates; the marker
-never enters the user's buffer. Locals are resolved at a real preceding token
-when the cursor lies beyond an incomplete body's current semantic range.
-
-### Assist handler architecture (ide-assists)
-
-RA pattern: `AssistContext` -> `handlers::all()` -> `Assists` accumulator.
-
-51 handlers registered in `handlers/mod.rs` via `all()` static array.
-
-`extract_to_include` moves a selection of complete top-level declarations into a
-sibling file. `SourceChange` carries file creation separately from source edits;
-the server emits ordered LSP `documentChanges` only when the client supports
-`CreateFile`. Existing targets and stale extraction requests are rejected.
-
-### Diagnostic handler architecture (ide-diagnostics)
-
-40 handlers with `err_recover` pattern. `DiagnosticsContext` holds `sema: Semantics`.
-Handlers import `AnyDiagnostic` from `hir::diagnostics`. Parse errors via firewall query.
-The context also carries the current `FileText`, allowing display ranges to resolve
-AST pointers through `Semantics::parse` while retaining full syntax targets for
-fixes. Missing-field diagnostics carry instantiated field types; expression fixes
-use type-specific defaults and pattern fixes use wildcards.
-
-### SSR engine (ide-ssr)
-
-`experimental/ssr` returns versioned `WorkspaceEdit` previews. Parameters follow
-RA: `query`, `parseOnly`, flattened `textDocument`/`position`, and `selections`
-(empty means project sources). Expressions are the default; `type:`, `item:` and
-`pattern:` select a fragment grammar. For example,
-`combine($a, $b) ==>> flipped($b, $a)` swaps captured arguments.
-
-Rules resolve fixed references in their value/type namespace at the invocation
-scope. Fixed item names identify declarations; captured item names permit
-matching different declarations. Expression captures retain parentheses for
-precedence; type/item/name captures use their grammatical context. Nested
-matches keep the outermost selected match. Search checks cancellation and
-filters selections before overlap removal. The IDE owns workspace traversal,
-library exclusions and include-instance safety; the finder owns matching,
-source correspondence and rendering. No second workspace cache is maintained.
-
-Fragment bindings reuse HIR lowering and expression scopes. Rendering freshens
-introduced fixed binders, updates captured references to their original owners,
-and checks binding origins again in the parsed result. Outer references must
-stay outer, and removed binders cannot let captured references escape. Type
-quantifiers receive the same capture protection. Binding-pattern replacements
-preserve bound names; item replacements preserve the declaration name. Ambiguous
-fixed binder correspondences can prevent a match. SSR checks syntax and binding
-identity, not behavioral equivalence or all dependent type obligations.
-
-`sail-lsp/ssrSearch` uses the same fragment grammars for read-only search and
-returns physical, deduplicated `Location[]`, including nested matches. A selected
-active include context disambiguates reads; an ambiguous unselected invocation
-is rejected. Edits retain stricter all-instance checks even after selection.
-Both paths exclude library sources. Replacements that discard comments are
-skipped, and the full resulting file must parse before edits are returned.
-
-`sail-lsp/ssrPreview` wraps the existing replacement request with the exact source
-text/version for every edited document, including closed files. The VS Code
-client checks those texts, opens the sources and records their versions before
-showing per-file diffs. Apply and Cancel are explicit commands. A source edit or
-close invalidates the preview; application rechecks versions and uses VS Code's
-versioned workspace-edit transaction. Starting another preview disposes the old
-one, including listeners and virtual diff contents. Normal didChange handling
-re-diagnoses applied edits.
-
-`includeContexts` and `selectIncludeContext` expose existing semantic views,
-identified by root/include occurrence and manifest/module identity rather than
-transient module indexes. Selection belongs to the open document. Analysis
-snapshots order active views by preference, retaining the complete instance
-list so shared-source edits cannot hide behind a selected view. Project model
-installation emits `projectGraphChanged`; the client discards obsolete graph
-responses and resolves module navigation against live manifest symbols.
-
-### FileDb trait (ide-db)
-
-Every IDE feature module takes `&dyn FileDb` instead of depending on the binary
-crate. Methods: `text()`, `position_at()`, `offset_at()`, `tokens()`, `token_at()`,
-`parsed()`, `item_tree()`, `bodies()` and the `file_text()` database bridge.
-
-Semantic queries live on `hir::Semantics`: `signature_index()`,
-`binding_type_text()` and `expr_type_text()`. The signature index is tracked in
-`hir::semantic_queries`; pure signature extraction lives in `hir-def`. The IDE
-signature adapter retains a syntax-only fallback for text fixtures without a
-database. Code lens counts use the existing symbol index; compatibility collectors
-read the cached call graph and item tree without separate count queries.
-
-Register defaults, explicit undefined generation and `undefined` expressions share
-the typed eligibility and inhabitedness checks in `hir-ty`. Declaration checks
-reuse the current declaration environment instead of reparsing the file through a
-second CST-based eligibility checker.
-
-`SalsaFile` implements `FileDb` by delegating to salsa tracked queries -- automatically
-memoized and invalidated when `FileText` changes.
-
-### ted.rs -- syntax tree editor (syntax)
-
-Mutations without re-parsing via rowan's `splice_children`:
-- `Position`: `after(elem)`, `before(elem)`, `first_child_of(node)`, `last_child_of(node)`
-- Operations: `insert_raw`, `insert_all_raw`, `remove`, `remove_all`, `replace`, `replace_with_many`, `replace_all`, `append_child`, `prepend_child`
-- `Element` trait abstracts over SyntaxNode/SyntaxToken/SyntaxElement
-
-### Effect system
-
-Tracks side effects through the type-checker and call graph:
-1. **EffectTag** (hir-def): 11 variants per CallableBody
-2. **Declared effects**: from TYPE_EFFECT CST nodes in function signatures
-3. **Inferred effects**: transitive propagation via `transitive_effects_query` salsa query
-4. **Outcome effects**: effect tracking through function outcomes
-5. **Pure function enforcement**: val spec `pure` -> diagnostic on effect mismatch
-6. **Hover display**: shows both declared and transitive effects
-7. **Code lens**: per-callable effect annotations with propagation info
-
-### Workspace reload
-
-Project discovery follows an explicit configuration or a bounded search: the
-workspace directory, then its immediate non-hidden children. It never recursively
-selects a manifest or assembles a Sail program from sorted directory contents.
-Ambiguous/invalid projects report a load error and preserve the last good model.
-Successful loads log the selected manifests.
-
-VFS presence and semantic membership are separate. `WorkspacePreprocessing`
-records files reached from manifest roots and active includes. The per-file
-membership query determines whether name resolution uses the configured program
-or a detached local declaration scope. Unlinked buffers retain syntax checking,
-hover and local navigation, but publish `unlinked-file` instead of running
-whole-program semantic diagnostics. Membership changes invalidate these results
-through Salsa, including when a manifest is created or removed.
-
-`didChangeWatchedFiles` with `.sail` file CREATED/DELETED sets `needs_reload` flag.
-Main loop spawns background `Task::WorkspaceScan` to re-scan workspace folders,
-rebuild include graph + SourceRoots + WorkspaceSymbolIndex. Progress reported.
-
-### Cancellation
-
-`dispatch.rs::catch_cancelled` wraps handlers in `std::panic::catch_unwind`.
-A `salsa::Cancelled` panic either retries a live request or produces a server
-cancellation response, according to the handler policy. Client cancellation
-completes the request with `RequestCanceled` and prevents later retries/responses.
-Async handlers on thread pool can be effectively cancelled when `on_did_change`
-modifies salsa inputs (snapshot revision mismatch triggers Cancelled).
-
-### Dependent types and interactive solver limits
-
-`hir-ty` uses one numeric/constraint AST, with inline small integers and arbitrary
-precision for larger values. Arguments retain Type/Int/Bool/Order distinctions;
-alias expansion preserves symbolic configuration constants. Refinement facts are
-lexically scoped, and joins preserve representable ranges, tuples, conditional
-indices and existential alternatives. Erased widths cannot become proof evidence.
-
-`Analysis::with_db` owns a solver budget shared by nested inference and solver
-fallbacks. Direct inference installs the same bounded default when no request
-scope exists. Limits are 200 ms of native checks, 50 ms per check and 64 checks;
-translation and other analysis work are outside that time account. Active checks
-use a scoped watchdog and Z3's cross-thread interrupt handle, plus a resource
-limit. Timeout/cancellation yields Unknown. No detached solver task or watchdog
-outlives its context. Salsa cancellation is polled between expressions and goals.
-A query that encounters a resource-limited check records an untracked read, so it
-can retry next revision; normal inference retains precise dependency reuse.
-
-The native arithmetic solver proves nonnegativity of identical integer
-polynomial factors (`p * p >= 0`) before requesting SMT. This covers integer
-constants, variables, negation, sums, differences and products, with bounded
-structural traversal. Partial terms such as division and exponentiation do not
-gain a proof through this rule. A square is not assumed strictly positive.
-
-
-### Include instances and physical sources
-
-Preprocessing records individual visits keyed by root occurrence, module and
-include path. Additional active visits use stable, tagged analysis file handles;
-VFS paths and URLs stay physical. `WorkspacePreprocessing` maps analysis handles
-back to physical source inputs and stores separate region masks. Raw parsing and
-source text are shared, while item trees, module scopes and inference use the
-instance identity. `Change` installs the complete projection before publishing
-a snapshot. Empty guarded revisits do not create extra semantic files.
-
-Position requests select an active view; diagnostics aggregate views at physical
-locations. Rename maps semantic edits back to source files and rejects edits to
-tokens active in multiple contexts. Physical dependency cycles are not sufficient
-evidence of recursive inclusion; the ordered visit walk supplies that evidence.
+`vfs` and `vfs-notify` supply filesystem loading and watching. `project-model`
+parses and evaluates project manifests. `stdx`, `paths`, `intern` and `profile`
+provide shared infrastructure.
+
+The server calls features through `ide::Analysis`; handlers convert protocol
+parameters and results. `hir::Semantics` owns semantic queries used by the IDE
+layer. `FileDb` provides source/syntax access and a bridge to the database for
+compatibility callers. New semantic decisions belong in `Semantics` rather than
+another `FileDb` adapter.
+
+Dependencies point downwards: `hir` does not depend on `ide-db`, and IDE/type
+crates do not depend on LSP types. Byte offsets remain internal until the
+transport converts them through a `LineIndex` to UTF-16 positions.
+
+## Source inputs and project identity
+
+The VFS stores physical file contents. Editor overlays take precedence over disk
+contents; closing a document restores its disk-backed state. Notifications buffer
+changes, and the main loop drains them through `Change`/`FileChange` into one
+Salsa input transaction. Source roots determine durability. Retained analysis
+snapshots must be released before a database write.
+
+Project discovery uses explicit configuration or a bounded search of each
+workspace root and its immediate children. It does not construct a program by
+recursively sorting Sail files. Manifest order, selected module dependencies,
+typed variables and preprocessing determine the active program.
+
+VFS presence and project membership are separate. An open unlinked file retains
+local syntax/editing features, but project-dependent diagnostics require a loaded
+semantic context. Missing project sources are reported while available files
+remain linked. An invalid reload retains that project's last usable model;
+failures in one workspace folder do not discard other projects.
+
+Preprocessing records **include visits**, not only physical paths. A visit is
+identified by its root occurrence, module and include chain. Multiple active
+visits can share physical text while retaining different semantic file handles,
+region masks and environments. Physical locations are used for editor output;
+semantic identities are used for resolution and inference.
+
+Position queries select an active view. Diagnostics aggregate views at physical
+locations. Selecting an include context changes read preference, but edits still
+check all affected instances. Inactive conditional branches do not contribute
+semantic declarations. See [project configuration](configuration.md#workspace)
+for selection and reload behavior.
+
+## Incremental queries
+
+The main dependency chain is:
+
+```text
+FileText
+  -> cached parse / validation
+  -> ItemTree and ordered declaration projections
+  -> callable bodies and source maps
+  -> selected declaration environment
+  -> per-callable inference
+  -> IDE feature results
+
+WorkspaceFiles + preprocessing configuration
+  -> ordered source/include plan
+  -> membership, visibility and declaration directory
+```
+
+The parser keeps a previous-tree seed for safe local token/block reparsing and
+falls back to a full parse for unsafe edits. Full-fidelity tokens, validation and
+compatibility metadata are computed lazily from the exact source snapshot.
+Cancellation must propagate through parser recovery rather than becoming a
+synthetic syntax error.
+
+Item and declaration projections separate semantic content from positions.
+Body-only edits can reuse unrelated signatures and inference. Trivia-only edits
+can reuse semantic bodies while source maps reflect current offsets. Bodies and
+source maps are shared separately through `Arc`; result equality compares values,
+not allocation identities.
+
+Configured projects use ordered declaration contributions. Each callable selects
+the signatures, types, fields, overloads and constraints reachable from its roots.
+Missing-name lookups depend on the declaration directory, so adding a previously
+missing declaration invalidates consumers. Local declarations retain their
+precedence, and later declarations cannot become visible through a fallback.
+
+Selection is conservative: shared fields, recursive types, global constraints
+and unresolved scope edges can broaden dependencies. Revalidating cached queries
+is distinct from re-executing inference. Incrementality tests check both Salsa
+executions and result reuse; historical timings do not establish RA performance
+parity.
+
+Cache limits and memory-pressure collection operate at idle boundaries with
+exclusive database access. They cannot force release of trees or solver contexts
+still owned by snapshots. See [cache policy](configuration.md#analysis-cache-policy)
+and [validation tools](../CONTRIBUTING.md#validation).
+
+## Type checking and proofs
+
+`hir-ty` keeps type, integer, boolean and order arguments distinct. Subtyping is
+directional and transactional. Compatibility separates proven relations, deferred
+obligations, recovery and mismatches; acceptance for continued inference is not a
+proof. Speculative overload checks roll back bindings, fresh variables, captured
+obligations and placeholder mappings together.
+
+Substitution is simultaneous and capture-avoiding across aliases, existential
+binders and quantifiers. Numeric refinements and branch assumptions are lexically
+scoped. Obligations retain their source, cause and assumptions until finalization,
+before unresolved placeholders are erased for display. General branch joins and
+flow-sensitive refinement remain incomplete.
+
+Bounded native arithmetic handles cheap proofs before the optional Z3 fallback.
+Partial arithmetic keeps its domain requirements. Timeout, cancellation and
+resource exhaustion produce Unknown, never evidence that a constraint is false.
+Unresolved reportable constraints retain their warning policy; ordinary recovery
+does not create an invented error.
+
+`Analysis::with_db` establishes a solver budget shared by nested queries. Direct
+inference installs bounded defaults as well. Scoped watchdogs interrupt active
+solver checks and finish before their contexts are dropped. Resource-limited
+results retry after a later database revision; normal results retain tracked
+dependencies. Numeric proofs, subtype rules and supported compiler modes have
+separate regression/oracle coverage.
+
+Effects combine declared annotations, body inference and transitive call-graph
+information. IDE presentation distinguishes source-written schemes from confirmed
+call-site specializations. Ambiguous overloads and unproved applications do not
+publish a fabricated specialization.
+
+## IDE features and source edits
+
+Completion combines cursor classification, visible declarations and expected-type
+ranking. A temporary reparsed identifier classifies incomplete syntax without
+changing database inputs or source coordinates. Recovery types do not count as
+proven matches. Type-directed search uses bounded work and validates the complete
+application before offering a candidate.
+
+References and rename share semantic definition identity. Search first restricts
+scope and text candidates, then checks syntax and binding identity. Comments,
+strings, shadowed locals and unrelated fields cannot become usages by spelling
+alone. Rename and signature edits validate bindings across affected source views;
+unsafe or unsupported edits are declined.
+
+Assists return `SourceChange`, including resource operations separately from text
+edits. The server checks client capabilities, source versions and current edit
+preconditions when resolving actions. Inlining and parameter removal preserve
+evaluation order and effects; real-compiler execution tests cover supported cases.
+Formatting shares one engine between editor requests and `sail-lsp fmt`; its
+project configuration and no-op reasons are documented in
+[formatting](configuration.md#formatting).
+
+### Structural search and replacement
+
+SSR supports expression rules by default, with `type:`, `item:` and `pattern:`
+fragment grammars. Fixed names resolve in the invocation scope; captures retain
+source correspondence and precedence. Rendering protects binding identity and
+freshens introduced binders. Replacements that discard comments are skipped, and
+the resulting file must parse.
+
+`sail-lsp/ssrSearch` returns physical, deduplicated locations.
+`experimental/ssr` produces versioned workspace edits; `sail-lsp/ssrPreview` adds
+source snapshots for client previews. Apply rechecks source versions, and edits
+or closes invalidate the preview. Read selection may disambiguate an include
+instance, while edits retain all-instance safety checks. Library files are
+excluded. SSR checks syntax and binding identity, not behavioral equivalence or
+all dependent type obligations.
+
+## Server lifecycle and external tools
+
+The event loop batches input changes and schedules loading, diagnostics and cache
+work. Semantic requests run on workers with immutable snapshots; execution
+priority and cancellation retry policy are separate. A cancelled/completed
+request cannot later publish a response or retry.
+
+Large-project preprocessing can run on an independent worker database. Results
+carry immutable inputs and are installed only if generation, configuration and
+overlay contents still match. At most one worker and one replacement input are
+retained. Watcher recovery reloads known dependencies while preserving unsaved
+buffers. Stale scan, task and diagnostic results are discarded.
+
+Native diagnostics and per-project compiler results have separate lifecycles.
+Flycheck checks saved inputs with the owning project's configuration, and defers
+while affected buffers are dirty. Unsupported compiler configurations are visible
+skips rather than checks against different defaults. Optional context and JSON
+diagnostic protocols are supplied as companion Sail patches; ordinary checks use
+the stock CLI. See [Flycheck](configuration.md#flycheck) for protocol versions,
+patches, fallback behavior, cache policy and limitations.
+
+Project tasks use explicit argument arrays and a versioned project context.
+Discovery does not execute commands. Clients revalidate tasks and dirty inputs
+before launch, and cancellation/shutdown reap their processes. See
+[project tasks](runnables.md) for the client contract and adapters.
+
+## Verification and maintenance
+
+[CONTRIBUTING.md](../CONTRIBUTING.md) owns build commands, regression tools and
+oracle regeneration. [Performance gates](performance-gates.md) distinguish
+same-host regression comparisons from pinned real-model targets.
+[Upstream monitoring](upstream-monitoring.md) covers manifest semantics and
+compiler/model revisions. These scopes are independent: passing typecheck
+fixtures does not establish project-system or editor-protocol equivalence.
+
+Keep run-specific reports, raw measurements and temporary probes in ignored
+`target/` or CI artifacts. Maintained tests, policies and oracle inputs belong in
+the repository; guides describe lasting behavior and limits.

@@ -158,7 +158,7 @@ pub enum DiagnosticTag {
 /// A diagnostic with byte-offset range (framework-independent).
 ///
 /// Conversion to `lsp_types::Diagnostic` happens in to_proto.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
     pub code: DiagnosticCode,
     pub message: String,

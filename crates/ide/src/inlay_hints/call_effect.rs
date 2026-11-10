@@ -35,9 +35,28 @@ pub(super) fn collect_call_effect_hints(
 ) {
     use hir::Expr;
 
-    let Some(bodies) = current_file.bodies() else {
+    let groups = body_groups(current_file, begin, end);
+
+    // Do not inspect other files when the viewport contains no call hint.
+    let visible_calls: Vec<_> = groups
+        .iter()
+        .flat_map(|bodies| bodies.entries())
+        .filter(|entry| span_intersects_range(entry.def_span, begin, end))
+        .flat_map(|entry| {
+            entry.body.iter_exprs().filter_map(move |(id, expr)| {
+                let Expr::Call { callee, .. } = expr else { return None };
+                let span = entry.source_map.expr_syntax(id)?;
+                if !span_ends_in_range(span, begin, end) {
+                    return None;
+                }
+                let Expr::Ident(name) = entry.body.expr(*callee)? else { return None };
+                Some((span, name.as_str()))
+            })
+        })
+        .collect();
+    if visible_calls.is_empty() {
         return;
-    };
+    }
 
     // Build a fallback effects map from all workspace bodies if
     // transitive_effects is not available.
@@ -68,68 +87,49 @@ pub(super) fn collect_call_effect_hints(
         &fallback_effects
     };
 
-    for entry in bodies.entries() {
-        for (id, hir) in entry.body.iter_exprs() {
-            let call_span = entry.source_map.expr_syntax(id).unwrap_or(parser::Span::new(0, 0));
-            if !span_starts_in_range(call_span, begin, end) {
-                continue;
-            }
-
-            if let Expr::Call { callee, args: _ } = hir {
-                // Resolve callee name
-                let callee_name = match entry.body.expr(*callee) {
-                    Some(Expr::Ident(name)) => name.as_str(),
-                    _ => continue,
-                };
-
-                // Skip synthetic accessors (bitfield getters/setters)
-                if callee_name.starts_with("_mod_")
-                    || callee_name.starts_with("_get_")
-                    || callee_name.starts_with("_set_")
-                    || callee_name.starts_with("_update_")
-                {
-                    continue;
-                }
-
-                let Some(effects) = effects_map.get(callee_name) else {
-                    continue;
-                };
-
-                // Filter out non-interesting effect tags
-                let effect_strs: Vec<&str> = effects
-                    .iter()
-                    .filter(|e| {
-                        !matches!(
-                            e,
-                            hir::EffectTag::Scattered
-                                | hir::EffectTag::NonExec
-                                | hir::EffectTag::Return
-                        )
-                    })
-                    .map(|e| e.as_str())
-                    .collect();
-
-                if effect_strs.is_empty() {
-                    continue;
-                }
-
-                let label = format!("/* {} */", effect_strs.join(", "));
-                hints.push(InlayHint {
-                    offset: call_span.end,
-                    label,
-                    kind: InlayHintKind::Other,
-                    tooltip: Some(format!(
-                        "Effects of `{callee_name}`: {}",
-                        effect_strs.join(", ")
-                    )),
-                    padding_left: Some(true),
-                    padding_right: Some(false),
-                    data: Some(serde_json::json!({
-                        "kind": "call_effect",
-                        "callee": callee_name,
-                    })),
-                });
-            }
+    for (call_span, callee_name) in visible_calls {
+        // Skip synthetic accessors (bitfield getters/setters)
+        if callee_name.starts_with("_mod_")
+            || callee_name.starts_with("_get_")
+            || callee_name.starts_with("_set_")
+            || callee_name.starts_with("_update_")
+        {
+            continue;
         }
+
+        let Some(effects) = effects_map.get(callee_name) else {
+            continue;
+        };
+
+        // Filter out non-interesting effect tags
+        let effect_strs: Vec<&str> = effects
+            .iter()
+            .filter(|e| {
+                !matches!(
+                    e,
+                    hir::EffectTag::Scattered | hir::EffectTag::NonExec | hir::EffectTag::Return
+                )
+            })
+            .map(|e| e.as_str())
+            .collect();
+
+        if effect_strs.is_empty() {
+            continue;
+        }
+
+        let label = format!("/* {} */", effect_strs.join(", "));
+        hints.push(InlayHint {
+            label_parts: Vec::new(),
+            offset: call_span.end,
+            label,
+            kind: InlayHintKind::Other,
+            tooltip: Some(format!("Effects of `{callee_name}`: {}", effect_strs.join(", "))),
+            padding_left: Some(true),
+            padding_right: Some(false),
+            data: Some(serde_json::json!({
+                "kind": "call_effect",
+                "callee": callee_name,
+            })),
+        });
     }
 }

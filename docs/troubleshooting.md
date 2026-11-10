@@ -36,6 +36,22 @@ In VS Code settings:
 Use `SAIL_LOG=debug` for additional tracing. To inspect protocol messages,
 enable the editor's LSP trace; that is separate from the stderr filter.
 
+## File changes are not reflected
+
+Server status and exported diagnostic reports expose native watcher failures.
+`File watching degraded` means subscriptions failed or the event stream ended.
+The loader keeps serving reads and retries native watching with exponential
+backoff, from one to thirty seconds. Recovery re-reads explicit dependencies
+and requests project discovery; it does not import inactive files just because
+their directory is watched. Unsaved editor buffers keep precedence over disk.
+
+A native lost-event/rescan signal requests a reload of affected known projects.
+Hints covering workspace roots, or paths outside the known model, trigger full
+discovery. Reports from obsolete loader configurations are ignored. Status
+clears the watcher warning after subscriptions recover. A successful native
+subscription is not proof that every network filesystem delivers events;
+`Sail: Reload Workspace` remains an explicit recovery option.
+
 ## Standard library not found
 
 sail-lsp embeds the Sail standard library. If you see missing-prelude errors,

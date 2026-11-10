@@ -76,6 +76,9 @@ impl<'t> Parser<'t> {
             return SyntaxKind::EOF;
         }
         self.steps.set(steps + 1);
+        if steps.is_multiple_of(1024) {
+            stdx::cancellation::checkpoint();
+        }
         self.inp.kind(self.pos + n)
     }
 
@@ -151,7 +154,12 @@ impl<'t> Parser<'t> {
         if self.eat(kind) {
             return true;
         }
-        self.error(format!("expected {:?}", kind));
+        self.error(match kind {
+            SyntaxKind::R_PAREN => "expected ')'".to_owned(),
+            SyntaxKind::R_CURLY => "expected '}'".to_owned(),
+            SyntaxKind::R_BRACK => "expected ']'".to_owned(),
+            _ => format!("expected {:?}", kind),
+        });
         false
     }
 

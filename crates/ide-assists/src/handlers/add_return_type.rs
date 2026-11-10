@@ -34,11 +34,8 @@ pub(crate) fn add_return_type(acc: &mut Assists, ctx: &AssistContext<'_>) -> Opt
     let body = def.children().filter(|n| n.kind() != SK::PARAM_LIST).last()?;
     let range = body.text_range();
     let ty = ctx.file.file_text().and_then(|(db, ft)| {
-        hir::Semantics::new(db).expr_type_text(
-            ft,
-            parser::Span::new(range.start().into(), range.end().into()),
-            ctx.file.bodies(),
-        )
+        hir::Semantics::new(db)
+            .expr_type_text(ft, parser::Span::new(range.start().into(), range.end().into()))
     })?;
     if ty == "unknown" || ty == "error" {
         return None;

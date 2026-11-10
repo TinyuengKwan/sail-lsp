@@ -20,7 +20,7 @@ def summarize(text):
             continue
         # Strip terminal styling before matching fields.
         line = re.sub(r'\x1b\[[0-9;]*m', '', line)
-        event = re.search(r'\b(request_worker|request_complete|process_changes|task_drain|apply_change|completion_phases|request_batch)\b', line)
+        event = re.search(r'\b(request_worker|request_complete|process_changes|task_drain|apply_change|completion_phases|hover_phases|hover_render_phases|request_batch|preprocess_events|preprocess_content|workspace_preprocess)\b', line)
         if event is None:
             continue
         method = re.search(r'\bmethod=(\S+)', line)

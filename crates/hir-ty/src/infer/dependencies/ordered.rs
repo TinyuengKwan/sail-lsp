@@ -30,148 +30,240 @@ struct Piece {
 type Contributions = HashMap<Name, Vec<Piece>>;
 
 #[salsa::tracked(returns(ref))]
-fn file_contributions(db: &dyn salsa::Database, file: FileText) -> Vec<Contributions> {
+fn file_sources(db: &dyn salsa::Database, file: FileText) -> Vec<syntax::GreenNode> {
     let Some(root) = syntax::parse_query::semantic_parse_file(db, file).syntax_node() else {
         return Vec::new();
     };
     let children: Vec<_> = root.children().collect();
-    let explicit_vals = hir_def::item_tree::generated::explicit_val_names(root.children());
-    children.iter().enumerate().map(|(index, node)| {
-        db.unwind_if_revision_cancelled();
-        // Reuse the existing type reader and signature metadata on one
-        // declaration. Its root is rebased, so no offsets enter the result.
-        // Attributes are siblings of their declaration in the CST. Include
-        // them in that declaration's projection so generated enum bindings
-        // appear at the enum, rather than disappearing from the ordered view.
-        let mut start = index;
-        if node.kind() != SK::ATTRIBUTE {
-            while start > 0 && children[start - 1].kind() == SK::ATTRIBUTE { start -= 1; }
+    children
+        .iter()
+        .enumerate()
+        .map(|(index, node)| {
+            db.unwind_if_revision_cancelled();
+            // Reuse the existing type reader and signature metadata on one
+            // declaration. Its root is rebased, so no offsets enter the result.
+            // Attributes are siblings of their declaration in the CST. Include
+            // them in that declaration's projection so generated enum bindings
+            // appear at the enum, rather than disappearing from the ordered view.
+            let mut start = index;
+            if node.kind() != SK::ATTRIBUTE {
+                while start > 0 && children[start - 1].kind() == SK::ATTRIBUTE {
+                    start -= 1;
+                }
+            }
+            syntax::GreenNode::new(
+                rowan::SyntaxKind(SK::SOURCE_FILE as u16),
+                children[start..=index]
+                    .iter()
+                    .map(|node| rowan::NodeOrToken::Node(node.green().into_owned())),
+            )
+        })
+        .collect()
+}
+
+#[salsa::tracked(returns(ref))]
+fn declaration_source(
+    db: &dyn salsa::Database,
+    file: FileText,
+    index: usize,
+) -> Option<syntax::GreenNode> {
+    file_sources(db, file).get(index).cloned()
+}
+
+#[salsa::tracked(returns(ref))]
+fn explicit_val_names(db: &dyn salsa::Database, file: FileText) -> HashSet<String> {
+    syntax::parse_query::semantic_parse_file(db, file)
+        .syntax_node()
+        .map(|root| hir_def::item_tree::generated::explicit_val_names(root.children()))
+        .unwrap_or_default()
+}
+
+#[salsa::tracked(returns(ref))]
+fn declaration_contributions(
+    db: &dyn salsa::Database,
+    file: FileText,
+    index: usize,
+) -> Contributions {
+    let Some(green) = declaration_source(db, file, index).as_ref() else {
+        return Contributions::new();
+    };
+    let root = syntax::SyntaxNode::new_root(green.clone());
+    let Some(node) = root.children().last() else { return Contributions::new() };
+    let node = &node;
+    let explicit_vals = explicit_val_names(db, file);
+    let text = root.text().to_string();
+    let (mut env, constants) = TopLevelEnv::from_cst(&root);
+    if let Some(name) = syntax::definition_name(node) {
+        if let Some(members) = env.enums.get(&name) {
+            for binding in hir_def::item_tree::generated::enum_bindings(node, &name, members.len())
+            {
+                if binding.kind == hir_def::item_tree::generated::Kind::EnumNumber
+                    && explicit_vals.contains(&binding.name)
+                {
+                    env.functions.remove(&binding.name);
+                }
+            }
         }
-        let green = syntax::GreenNode::new(rowan::SyntaxKind(SK::SOURCE_FILE as u16),
-            children[start..=index].iter().map(|node| rowan::NodeOrToken::Node(node.green().into_owned())));
-        let root = syntax::SyntaxNode::new_root(green);
-        let text = root.text().to_string();
-        let (mut env, constants) = TopLevelEnv::from_cst(&root);
+    }
+    let parsed = syntax::cst_lower::parsed_file_from_cst(&root, &text);
+    super::super::env::apply_callable_signature_metadata(&parsed, &text, &mut env);
+    let private = node.children().any(|c| c.kind() == SK::VISIBILITY);
+    let generated_visibility: HashMap<_, _> = syntax::definition_name(node)
+        .and_then(|name| env.enums.get(&name).map(|members| (name, members.len())))
+        .into_iter()
+        .flat_map(|(name, count)| hir_def::item_tree::generated::enum_bindings(node, &name, count))
+        .map(|binding| {
+            (
+                binding.name,
+                binding.kind.visibility(if private {
+                    hir_def::visibility::RawVisibility::Private
+                } else {
+                    hir_def::visibility::RawVisibility::Public
+                }) == hir_def::visibility::RawVisibility::Private,
+            )
+        })
+        .collect();
+    let fallback = matches!(node.kind(), SK::CALLABLE_DEF | SK::SCATTERED_CLAUSE_DEF);
+    let head = node.kind() == SK::SCATTERED_DEF;
+    let clause = node.kind() == SK::SCATTERED_CLAUSE_DEF;
+    let enum_parent = (clause && node.children_with_tokens().any(|t| t.kind() == SK::KW_ENUM))
+        .then(|| syntax::definition_name(node).map(|name| Name::new(&name)))
+        .flatten();
+    if head || clause {
         if let Some(name) = syntax::definition_name(node) {
-            if let Some(members) = env.enums.get(&name) {
-                for binding in hir_def::item_tree::generated::enum_bindings(node, &name, members.len()) {
-                    if binding.kind == hir_def::item_tree::generated::Kind::EnumNumber
-                        && explicit_vals.contains(&binding.name) {
-                        env.functions.remove(&binding.name);
-                    }
-                }
+            if node.children_with_tokens().any(|t| t.kind() == SK::KW_UNION) {
+                env.unions.entry(name.clone()).or_default();
+                env.scattered_open_types.insert(name);
+            } else if node.children_with_tokens().any(|t| t.kind() == SK::KW_ENUM) {
+                env.enums.entry(name.clone()).or_default();
+                env.scattered_open_types.insert(name);
             }
         }
-        let parsed = syntax::cst_lower::parsed_file_from_cst(&root, &text);
-        super::super::env::apply_callable_signature_metadata(&parsed, &text, &mut env);
-        let private = node.children().any(|c| c.kind() == SK::VISIBILITY);
-        let generated_visibility: HashMap<_, _> = syntax::definition_name(node)
-            .and_then(|name| env.enums.get(&name).map(|members| (name, members.len())))
-            .into_iter()
-            .flat_map(|(name, count)| hir_def::item_tree::generated::enum_bindings(node, &name, count))
-            .map(|binding| (binding.name, binding.kind.visibility(if private { hir_def::visibility::RawVisibility::Private } else { hir_def::visibility::RawVisibility::Public }) == hir_def::visibility::RawVisibility::Private))
-            .collect();
-        let fallback = matches!(node.kind(), SK::CALLABLE_DEF | SK::SCATTERED_CLAUSE_DEF);
-        let head = node.kind() == SK::SCATTERED_DEF;
-        let clause = node.kind() == SK::SCATTERED_CLAUSE_DEF;
-        let enum_parent = (clause && node.children_with_tokens().any(|t| t.kind() == SK::KW_ENUM))
-            .then(|| syntax::definition_name(node).map(|name| Name::new(&name))).flatten();
-        if head || clause {
-            if let Some(name) = syntax::definition_name(node) {
-                if node.children_with_tokens().any(|t| t.kind() == SK::KW_UNION) {
-                    env.unions.entry(name.clone()).or_default();
-                    env.scattered_open_types.insert(name);
-                } else if node.children_with_tokens().any(|t| t.kind() == SK::KW_ENUM) {
-                    env.enums.entry(name.clone()).or_default();
-                    env.scattered_open_types.insert(name);
-                }
-            }
-        }
-        let facts = std::mem::take(&mut env.global_constraints);
-        let order = env.vector_order;
-        let has_members = node.children_with_tokens().any(|t| matches!(t.kind(), SK::KW_UNION | SK::KW_ENUM | SK::KW_NEWTYPE));
-        let private_members: HashSet<_> = (if has_members { hir_def::item_tree::extract_field_decls(node) } else { Vec::new() })
+    }
+    let facts = std::mem::take(&mut env.global_constraints);
+    let order = env.vector_order;
+    let has_members = node
+        .children_with_tokens()
+        .any(|t| matches!(t.kind(), SK::KW_UNION | SK::KW_ENUM | SK::KW_NEWTYPE));
+    let private_members: HashSet<_> =
+        (if has_members { hir_def::item_tree::extract_field_decls(node) } else { Vec::new() })
             .into_iter()
             .filter(|field| field.visibility == hir_def::visibility::RawVisibility::Private)
             .map(|field| field.name.to_string())
             .collect();
-        let mut output = Contributions::new();
-        for (name, symbol) in env.symbols() {
-            if name.is_empty() { continue; }
-            let mut data = symbol.data;
-            let mut add = |kind, fragment: TopLevelEnv, present: bool| {
-                if present {
-                    output.entry(Name::new(&name)).or_default().push(Piece {
-                        kind, private: if kind == Kind::Binding { generated_visibility.get(&name).copied().unwrap_or(private || private_members.contains(&name)) } else { private }, fallback,
-                        enum_parent: enum_parent.clone(), global: false,
-                        value: Arc::new(Symbol {
-                            data: fragment, references: symbol.references.clone(),
-                            pattern_constant: kind == Kind::Binding && constants.contains(&name),
-                        }),
-                    });
-                }
-            };
-            macro_rules! part { ($kind:ident; $($field:ident),+) => {{
+    let mut output = Contributions::new();
+    for (name, symbol) in env.symbols() {
+        if name.is_empty() {
+            continue;
+        }
+        let mut data = symbol.data;
+        let mut add = |kind, fragment: TopLevelEnv, present: bool| {
+            if present {
+                output.entry(Name::new(&name)).or_default().push(Piece {
+                    kind,
+                    private: if kind == Kind::Binding {
+                        generated_visibility
+                            .get(&name)
+                            .copied()
+                            .unwrap_or(private || private_members.contains(&name))
+                    } else {
+                        private
+                    },
+                    fallback,
+                    enum_parent: enum_parent.clone(),
+                    global: false,
+                    value: Arc::new(Symbol {
+                        data: fragment,
+                        references: symbol.references.clone(),
+                        pattern_constant: kind == Kind::Binding && constants.contains(&name),
+                    }),
+                });
+            }
+        };
+        macro_rules! part { ($kind:ident; $($field:ident),+) => {{
                 let mut fragment = TopLevelEnv::default();
                 let mut present = false;
                 $(present |= !data.$field.is_empty(); fragment.$field = std::mem::take(&mut data.$field);)+
                 add(Kind::$kind, fragment, present);
             }}; }
-            part!(Binding; functions, mappings, values, registers, constructors);
-            part!(Type; type_aliases, alias_schemes, constraint_synonyms, records, bitfields);
-            part!(Members; enums, unions, scattered_open_types);
-            part!(Overload; overloads);
-            part!(Field; known_field_names);
-            // Reverse field/member edges can contain references without data.
-            if name.starts_with('\0') || !output.contains_key(&Name::new(&name)) {
-                output.entry(Name::new(&name)).or_default().push(Piece {
-                    kind: Kind::Field, private, fallback: false,
-                    enum_parent: enum_parent.clone(), global: false,
-                    value: Arc::new(Symbol { data: TopLevelEnv::default(), references: symbol.references, pattern_constant: false }),
-                });
-            }
+        part!(Binding; functions, mappings, values, registers, constructors);
+        part!(Type; type_aliases, alias_schemes, constraint_synonyms, records, bitfields);
+        part!(Members; enums, unions, scattered_open_types);
+        part!(Overload; overloads);
+        part!(Field; known_field_names);
+        // Reverse field/member edges can contain references without data.
+        if name.starts_with('\0') || !output.contains_key(&Name::new(&name)) {
+            output.entry(Name::new(&name)).or_default().push(Piece {
+                kind: Kind::Field,
+                private,
+                fallback: false,
+                enum_parent: enum_parent.clone(),
+                global: false,
+                value: Arc::new(Symbol {
+                    data: TopLevelEnv::default(),
+                    references: symbol.references,
+                    pattern_constant: false,
+                }),
+            });
         }
-        for fact in facts {
-            let mut references = names_in(&fact.to_text());
-            references.retain(|n| n.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_' || c == '\''));
-            if references.is_empty() { references.insert(Name::new("")); }
-            for name in &references {
-                let mut data = TopLevelEnv::default();
-                data.global_constraints.push(fact.clone());
-                output.entry(name.clone()).or_default().push(Piece {
-                    kind: Kind::Fact, private: false, fallback: false,
-                    enum_parent: None, global: false,
-                    value: Arc::new(Symbol { data, references: references.clone(), pattern_constant: false }),
-                });
-            }
+    }
+    for fact in facts {
+        let mut references = names_in(&fact.to_text());
+        references.retain(|n| {
+            n.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_' || c == '\'')
+        });
+        if references.is_empty() {
+            references.insert(Name::new(""));
         }
-        if node.kind() == SK::DEFAULT_DEF {
-            let data = TopLevelEnv { vector_order: order, ..TopLevelEnv::default() };
-            output.entry(Name::new("")).or_default().push(Piece {
-                kind: Kind::Order, private: false, fallback: false,
-                enum_parent: None, global: false,
+        for name in &references {
+            let mut data = TopLevelEnv::default();
+            data.global_constraints.push(fact.clone());
+            output.entry(name.clone()).or_default().push(Piece {
+                kind: Kind::Fact,
+                private: false,
+                fallback: false,
+                enum_parent: None,
+                global: false,
+                value: Arc::new(Symbol {
+                    data,
+                    references: references.clone(),
+                    pattern_constant: false,
+                }),
+            });
+        }
+    }
+    if node.kind() == SK::DEFAULT_DEF {
+        let data = TopLevelEnv { vector_order: order, ..TopLevelEnv::default() };
+        output.entry(Name::new("")).or_default().push(Piece {
+            kind: Kind::Order,
+            private: false,
+            fallback: false,
+            enum_parent: None,
+            global: false,
+            value: Arc::new(Symbol { data, ..Default::default() }),
+        });
+    }
+    if node.kind() == SK::END_DEF {
+        if let Some(name) = syntax::definition_name(node) {
+            let mut data = TopLevelEnv::default();
+            data.scattered_open_types.insert(name.clone());
+            output.entry(Name::new(&name)).or_default().push(Piece {
+                kind: Kind::Closed,
+                private: false,
+                fallback: false,
+                enum_parent: None,
+                global: false,
                 value: Arc::new(Symbol { data, ..Default::default() }),
             });
         }
-        if node.kind() == SK::END_DEF {
-            if let Some(name) = syntax::definition_name(node) {
-                let mut data = TopLevelEnv::default();
-                data.scattered_open_types.insert(name.clone());
-                output.entry(Name::new(&name)).or_default().push(Piece {
-                    kind: Kind::Closed, private: false, fallback: false,
-                    enum_parent: None, global: false,
-                    value: Arc::new(Symbol { data, ..Default::default() }),
-                });
-            }
-        }
-        output
-    }).collect()
+    }
+    output
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Directory {
-    positions: HashMap<Declaration, usize>,
-    names: HashMap<Name, Vec<(usize, Declaration)>>,
+    positions: rustc_hash::FxHashMap<Declaration, usize>,
+    names: rustc_hash::FxHashMap<Name, Vec<(usize, Declaration)>>,
 }
 
 /// The workspace directory depends on declaration names, not their types.
@@ -179,10 +271,30 @@ struct Directory {
 /// directory for every file before checking the three affected bodies.
 #[salsa::tracked(returns(ref))]
 fn file_names(db: &dyn salsa::Database, file: FileText) -> Vec<Vec<Name>> {
-    file_contributions(db, file)
-        .iter()
-        .map(|declaration| {
-            let mut names: Vec<_> = declaration.keys().cloned().collect();
+    let Some(root) = syntax::parse_query::semantic_parse_file(db, file).syntax_node() else {
+        return Vec::new();
+    };
+    root.children()
+        .enumerate()
+        .map(|(index, node)| {
+            // A function/mapping body introduces no top-level names. Its
+            // directory entry needs only its header, never its type reader
+            // or compatibility body scrape. Other declaration forms retain
+            // their generated names, field edges and constraint facts.
+            if node.kind() == SK::CALLABLE_DEF
+                || (node.kind() == SK::SCATTERED_CLAUSE_DEF
+                    && node
+                        .children_with_tokens()
+                        .any(|t| matches!(t.kind(), SK::KW_FUNCTION | SK::KW_MAPPING)))
+            {
+                return syntax::definition_name(&node)
+                    .as_deref()
+                    .map(Name::new)
+                    .into_iter()
+                    .collect();
+            }
+            let mut names: Vec<_> =
+                declaration_contributions(db, file, index).keys().cloned().collect();
             names.sort();
             names
         })
@@ -195,15 +307,21 @@ fn directory(
     _ws: base_db::WorkspaceFiles,
     program: source_order::Program,
 ) -> Directory {
-    let mut result = Directory { positions: HashMap::new(), names: HashMap::new() };
+    let declarations = program.declarations(db);
+    let mut result = Directory { positions: Default::default(), names: Default::default() };
+    result.positions.reserve(declarations.len());
+    result.names.reserve(declarations.len());
+    let mut files = rustc_hash::FxHashMap::default();
     let vectors: HashMap<_, _> =
         source_order::scattered::enum_vectors(db, program).iter().map(|v| (v.end, v)).collect();
-    for (position, &declaration) in program.declarations(db).iter().enumerate() {
+    for (position, &declaration) in declarations.iter().enumerate() {
         result.positions.insert(declaration, position);
         if let Some(vector) = vectors.get(&declaration) {
             result.names.entry(Name::new(&vector.name)).or_default().push((position, declaration));
         }
-        if let Some(names) = file_names(db, declaration.file).get(declaration.index) {
+        let names =
+            files.entry(declaration.file).or_insert_with(|| file_names(db, declaration.file));
+        if let Some(names) = names.get(declaration.index) {
             for name in names {
                 result.names.entry(name.clone()).or_default().push((position, declaration));
             }
@@ -238,9 +356,8 @@ fn contribution(db: &dyn salsa::Database, declaration: Declaration, name: Name) 
             }];
         }
     }
-    file_contributions(db, declaration.file)
-        .get(declaration.index)
-        .and_then(|c| c.get(&name))
+    declaration_contributions(db, declaration.file, declaration.index)
+        .get(&name)
         .cloned()
         .unwrap_or_default()
 }

@@ -185,6 +185,7 @@ fn load_workspace(root: &Path) -> (AnalysisHost, Files, LoadedFiles, LoadedFiles
             include_paths: Vec::new(),
             target: None,
             modules: graph,
+            module_options: Default::default(),
         });
     }
     host.apply_change(std::mem::take(&mut change));
@@ -400,7 +401,7 @@ fn main() {
             total_lines += sf.text().lines().count();
             let ft = files.file_text(*fid).unwrap();
             let parsed = syntax::parse_query::parse_file(analysis.db(), ft);
-            if let Some(errs) = &parsed.errors {
+            if let Some(errs) = parsed.errors() {
                 parse_error_count += errs.len();
             }
         }

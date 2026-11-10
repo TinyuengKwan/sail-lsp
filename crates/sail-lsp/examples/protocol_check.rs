@@ -1,42 +1,11 @@
-//! Protocol check: does a range that leaves the server point at the text it
-//! claims to?
+//! Check LSP range conversions over a Sail corpus.
 //!
-//! The fifth probe, and it exists because the other four cannot see this
-//! layer. `corpus_check`, `conformance_check`, `mutation_check` and
-//! `analysis_stats` all enter at `Analysis::*` with **byte offsets** and
-//! compare diagnostics. Everything between the LSP wire and `Analysis` —
-//! `from_proto`, `to_proto`, the position encoding — is downstream of all of
-//! them.
+//! Every syntax node/token range must round-trip through the transport's
+//! conversions and select the same text in a client interpreting UTF-16 columns.
+//! This checks conversion helpers; handler wiring and document lifecycle are
+//! covered separately by server tests.
 //!
-//! What lived there: `Position::character` is a UTF-16 column (LSP's default
-//! `positionEncoding`, which this server negotiates nothing else than) and it
-//! was passed through as a *byte* column in both directions. On any line
-//! holding a non-ASCII character every position was wrong and slicing at one
-//! panicked — while all four probes stayed green, because a diagnostic can be
-//! exactly right about *which bytes* and still be drawn on the wrong column.
-//!
-//! rust-analyzer covers this with `tests/slow-tests` (3.6k lines) driving a
-//! real server over the protocol. This is the cheap half of that: the same
-//! conversions the handlers call, over a real corpus, with the client's view
-//! simulated.
-//!
-//! ## The two properties
-//!
-//! 1. **Round trip.** `from_proto(to_proto(range)) == range`. Catches a
-//!    conversion that loses information.
-//! 2. **Client view.** A client reads `Range` as UTF-16 and slices its own
-//!    copy of the line. Re-encoding the line to UTF-16, slicing by the
-//!    emitted columns and decoding must give back exactly the bytes the
-//!    server meant. Catches a conversion that is *self-consistent and
-//!    wrong* — which is what a missing encoding conversion is, and what the
-//!    round trip alone would pass.
-//!
-//! ## Usage
-//!
-//! ```sh
-//! cargo run --release --example protocol_check -- /path/to/sail-riscv
-//! cargo run --release --example protocol_check -- --list /path/to/sail-riscv
-//! ```
+//! Usage: `cargo run --release --example protocol_check -- [--list] /path/to/corpus`
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 

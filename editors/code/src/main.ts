@@ -9,12 +9,18 @@ import * as vscode from "vscode";
 import * as path from "path";
 import * as os from "os";
 import * as fs from "fs";
+import { explicitSettings } from "./configuration";
 import { managedServerPath } from "./installation";
 import { registerDiagnosticReport } from "./diagnosticReport";
 import { registerRunnables } from "./runnables";
 import { ProjectGraphEntry, GraphNode, graphChildren, isCycle } from "./projectGraph";
 import { registerStructuralReplace } from "./ssr";
-import { AnalysisContext, formatAnalysisContext } from "./analysisContext";
+import {
+    AnalysisContext,
+    analysisSourceLinks,
+    formatAnalysisContext,
+    readAnalysisView,
+} from "./analysisContext";
 import {
     LanguageClient,
     Location as ProtocolLocation,
@@ -59,6 +65,20 @@ const ViewHirRequest = new RequestType<
 const ViewItemTreeRequest = new RequestType<TextDocumentParams, string, void>(
     "sail-lsp/viewItemTree",
 );
+interface ExpansionPreview {
+    root: string;
+    expansion: string;
+    context: string | null;
+    project: unknown;
+    mappings: {
+        range: { start: vscode.Position; end: vscode.Position };
+        origin: ProtocolLocation;
+        kind: string;
+    }[];
+}
+const ExpandIncludeRequest = new RequestType<TextDocumentParams, ExpansionPreview | null, void>(
+    "sail-lsp/expandInclude",
+);
 const RecheckNotification = new NotificationType0("sail-lsp/recheck");
 const ReloadWorkspaceNotification = new NotificationType0("sail-lsp/reloadWorkspace");
 const RunFlycheckNotification = new NotificationType<FlycheckScope>("sail-lsp/runFlycheck");
@@ -66,6 +86,9 @@ const CancelFlycheckNotification = new NotificationType<FlycheckScope>("sail-lsp
 const ClearFlycheckNotification = new NotificationType<FlycheckScope>("sail-lsp/clearFlycheck");
 
 let client: LanguageClient | undefined;
+const explanationLinks = new Map<string, vscode.DocumentLink[]>();
+const analysisDocuments = new Map<string, string>();
+let previewSequence = 0;
 let outputChannel: vscode.OutputChannel;
 let statusBar: vscode.StatusBarItem;
 let activationErrorShown = false;
@@ -93,6 +116,31 @@ export interface ExtensionApi {
 export async function activate(context: vscode.ExtensionContext): Promise<ExtensionApi | void> {
     outputChannel = vscode.window.createOutputChannel("Sail Language Server");
     context.subscriptions.push(outputChannel);
+    context.subscriptions.push(
+        vscode.languages.registerDocumentLinkProvider(
+            [{ scheme: "untitled", language: "plaintext" }, { scheme: "sail-preview" }],
+            {
+                provideDocumentLinks(document) {
+                    return explanationLinks.get(document.uri.toString()) ?? [];
+                },
+            },
+        ),
+        vscode.workspace.registerTextDocumentContentProvider("sail-preview", {
+            provideTextDocumentContent(uri) {
+                return analysisDocuments.get(uri.toString()) ?? "Preview closed";
+            },
+        }),
+        vscode.workspace.onDidCloseTextDocument((document) => {
+            explanationLinks.delete(document.uri.toString());
+            analysisDocuments.delete(document.uri.toString());
+        }),
+        {
+            dispose() {
+                explanationLinks.clear();
+                analysisDocuments.clear();
+            },
+        },
+    );
 
     // RA's status bar item: health and whether the server is still working,
     // the last message on hover, the full status on click.
@@ -142,8 +190,23 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
         ],
         outputChannel,
         traceOutputChannel: outputChannel,
-        middleware: {},
-        initializationOptions: getInitializationOptions(),
+        middleware: {
+            workspace: {
+                configuration: async (params, token, next) => {
+                    const fallback = await next(params, token);
+                    if (!Array.isArray(fallback)) return fallback;
+                    return params.items.map((item, index) =>
+                        item.section === "sail-lsp"
+                            ? getInitializationOptions(
+                                  context,
+                                  item.scopeUri ? vscode.Uri.parse(item.scopeUri) : undefined,
+                              )
+                            : fallback[index],
+                    );
+                },
+            },
+        },
+        initializationOptions: getInitializationOptions(context),
         synchronize: { configurationSection: "sail-lsp" },
     };
 
@@ -295,11 +358,10 @@ function getExtraEnv(): Record<string, string> {
     return config.get<Record<string, string>>("server.extraEnv") ?? {};
 }
 
-function getInitializationOptions(): unknown {
-    // The whole `sail-lsp` section, as rust-analyzer sends its own: a hand
-    // copied subset drifted from package.json (it lacked generatedFiles and
-    // flycheck and still sent removed settings).
-    return JSON.parse(JSON.stringify(vscode.workspace.getConfiguration("sail-lsp")));
+function getInitializationOptions(context: vscode.ExtensionContext, scope?: vscode.Uri): unknown {
+    const config = vscode.workspace.getConfiguration("sail-lsp", scope);
+    const properties = context.extension.packageJSON.contributes.configuration.properties;
+    return explicitSettings(Object.keys(properties), (key) => config.inspect(key));
 }
 
 // ── Status ───────────────────────────────────────────────────────
@@ -627,15 +689,146 @@ function registerCommands(context: vscode.ExtensionContext): void {
             await showVirtualTextDocument(content);
         }),
 
+        vscode.commands.registerCommand("sail-lsp.explainFormatting", async () => {
+            const editor = vscode.window.activeTextEditor;
+            const currentClient = client;
+            if (!currentClient || !editor || editor.document.languageId !== "sail") return;
+            const source = editor.document;
+            const version = source.version;
+            const range = editor.selection.isEmpty
+                ? undefined
+                : currentClient.code2ProtocolConverter.asRange(editor.selection);
+            const result = await readAnalysisView(
+                () => client === currentClient && !source.isClosed && source.version === version,
+                () => latestStatus?.quiescent !== false,
+                () =>
+                    currentClient.sendRequest("sail-lsp/explainFormatting", {
+                        textDocument: { uri: source.uri.toString() },
+                        options: {
+                            tabSize:
+                                typeof editor.options.tabSize === "number"
+                                    ? editor.options.tabSize
+                                    : 2,
+                            insertSpaces:
+                                typeof editor.options.insertSpaces === "boolean"
+                                    ? editor.options.insertSpaces
+                                    : true,
+                        },
+                        range,
+                    }),
+            );
+            if (!result) return;
+            const uri = vscode.Uri.from({
+                scheme: "sail-preview",
+                path: `/formatting-${++previewSequence}.json`,
+            });
+            analysisDocuments.set(uri.toString(), JSON.stringify(result, null, 2));
+            const document = await vscode.workspace.openTextDocument(uri);
+            await vscode.window.showTextDocument(document, {
+                viewColumn: vscode.ViewColumn.Beside,
+                preserveFocus: false,
+                preview: true,
+            });
+        }),
+
+        vscode.commands.registerCommand("sail-lsp.expandInclude", async () => {
+            const editor = vscode.window.activeTextEditor;
+            if (!client || !editor || editor.document.languageId !== "sail") return;
+            const currentClient = client;
+            const document = editor.document;
+            const version = document.version;
+            const result = await readAnalysisView(
+                () =>
+                    client === currentClient && !document.isClosed && document.version === version,
+                () => latestStatus?.quiescent !== false,
+                () =>
+                    currentClient.sendRequest(ExpandIncludeRequest, {
+                        textDocument: { uri: document.uri.toString() },
+                    }),
+            );
+            if (!result) {
+                void vscode.window.showInformationMessage(
+                    "No preprocessing visit is available. Add this file to a loaded project.",
+                );
+                return;
+            }
+            const uri = vscode.Uri.from({
+                scheme: "sail-preview",
+                path: `/preprocessing-${++previewSequence}.txt`,
+            });
+            analysisDocuments.set(uri.toString(), result.expansion);
+            const links = result.mappings
+                .filter((mapping) => vscode.Uri.parse(mapping.origin.uri).scheme === "file")
+                .map((mapping) => {
+                    const start = mapping.origin.range.start;
+                    return new vscode.DocumentLink(
+                        new vscode.Range(
+                            mapping.range.start.line,
+                            mapping.range.start.character,
+                            mapping.range.end.line,
+                            mapping.range.end.character,
+                        ),
+                        vscode.Uri.parse(mapping.origin.uri).with({
+                            fragment: `L${start.line + 1},${start.character + 1}`,
+                        }),
+                    );
+                });
+            explanationLinks.set(uri.toString(), links);
+            const previewDocument = await vscode.workspace.openTextDocument(uri);
+            await vscode.window.showTextDocument(previewDocument, {
+                viewColumn: vscode.ViewColumn.Beside,
+                preserveFocus: false,
+                preview: true,
+            });
+        }),
+
         vscode.commands.registerCommand("sail-lsp.explainAnalysis", async () => {
             const editor = vscode.window.activeTextEditor;
             if (!client || !editor || editor.document.languageId !== "sail") return;
-            const result = await client.sendRequest(ExplainAnalysisRequest, {
-                textDocument: { uri: editor.document.uri.toString() },
-                position: client.code2ProtocolConverter.asPosition(editor.selection.active),
-            });
-            if (result) await showVirtualTextDocument(formatAnalysisContext(result));
-            else
+            const currentClient = client;
+            const source = editor.document;
+            const version = source.version;
+            const position = currentClient.code2ProtocolConverter.asPosition(
+                editor.selection.active,
+            );
+            const result = await readAnalysisView(
+                () => client === currentClient && !source.isClosed && source.version === version,
+                () => latestStatus?.quiescent !== false,
+                () =>
+                    currentClient.sendRequest(ExplainAnalysisRequest, {
+                        textDocument: { uri: source.uri.toString() },
+                        position,
+                    }),
+            );
+            if (result) {
+                const text = formatAnalysisContext(result);
+                const uri = vscode.Uri.from({
+                    scheme: "sail-preview",
+                    path: `/analysis-${++previewSequence}.txt`,
+                });
+                analysisDocuments.set(uri.toString(), text);
+                const document = await vscode.workspace.openTextDocument(uri);
+                explanationLinks.set(
+                    document.uri.toString(),
+                    analysisSourceLinks(result, text).map(
+                        (link) =>
+                            new vscode.DocumentLink(
+                                new vscode.Range(
+                                    document.positionAt(link.start),
+                                    document.positionAt(link.end),
+                                ),
+                                vscode.Uri.parse(link.location.uri).with({
+                                    fragment: `L${link.location.range.start.line + 1},${link.location.range.start.character + 1}`,
+                                }),
+                            ),
+                    ),
+                );
+                await vscode.window.showTextDocument(document, {
+                    viewColumn: vscode.ViewColumn.Beside,
+                    preserveFocus: false,
+                    preview: true,
+                });
+            } else
                 void vscode.window.showInformationMessage(
                     "Analysis is not available for this file yet.",
                 );

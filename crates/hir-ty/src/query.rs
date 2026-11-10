@@ -139,21 +139,6 @@ impl std::hash::Hash for ArcInferenceResult {
     }
 }
 
-/// Per-callable InferenceResult query.
-///
-/// Returns the InferenceResult directly, suitable for SourceAnalyzer
-/// and other consumers that need per-expression type information.
-/// LRU capacity is configurable by the analysis host; zero retains all results.
-#[salsa::tracked(returns(ref), lru = 4294967295)]
-pub fn infer_for_body<'db>(
-    db: &'db dyn salsa::Database,
-    id: hir_def::def_query::DefWithBodyId<'db>,
-) -> ArcInferenceResult {
-    // Delegate to infer which already does the work
-    let tc = infer(db, id);
-    ArcInferenceResult(Arc::new(tc.0.as_ref().clone()))
-}
-
 /// Per-file diagnostics collection from per-callable inference.
 ///
 /// Does NOT merge InferenceResult across callables -- only collects
@@ -186,6 +171,7 @@ pub fn infer<'db>(
     id: hir_def::def_query::DefWithBodyId<'db>,
 ) -> ArcInferenceResult {
     let _p = tracing::info_span!("infer", name = %id.name(db)).entered();
+    let started = std::time::Instant::now();
     let _solver_budget = crate::solver_budget::SolverBudget::enter(
         crate::CancellationToken::never(),
         Default::default(),
@@ -200,6 +186,8 @@ pub fn infer<'db>(
         return ArcInferenceResult(Arc::new(TypeCheckResult::default()));
     };
     let names = crate::infer::dependencies::callable_names(cb);
+    let body_us = started.elapsed().as_micros();
+    let environment_started = std::time::Instant::now();
     let env_data = if hir_def::source_order::program(db, id.file(db)).is_some() {
         hir_def::source_order::for_body(db, id)
             .map(|at| crate::infer::dependencies::ordered::environment(db, at, names.clone()))
@@ -211,6 +199,8 @@ pub fn infer<'db>(
     });
     let env = env_data.0.env.clone();
     let pattern_constants = env_data.0.pattern_constants.clone();
+    let environment_us = environment_started.elapsed().as_micros();
+    let infer_started = std::time::Instant::now();
 
     let entry = &*cb.body;
     let text: &str = &cb.text;
@@ -232,6 +222,7 @@ pub fn infer<'db>(
         ctx.infer_mapping_body_hir(&entry.name, entry);
     }
     let mut result = ctx.finish_query();
+    tracing::debug!(target: "sail_lsp::latency", "infer_phases name={} body_us={body_us} environment_us={environment_us} infer_us={}", id.name(db), infer_started.elapsed().as_micros());
     db.unwind_if_revision_cancelled();
     // A resource-limited proof can change when the next request has budget.
     // Revalidate only those bodies on the next revision; ordinary bodies retain
@@ -322,8 +313,8 @@ pub fn set_inference_cache_capacities(
     let environment = if environment == 0 { usize::MAX } else { environment };
     let inference = if inference == 0 { usize::MAX } else { inference };
     top_level_env::set_lru_capacity(db, environment);
+    crate::infer::declaration_constraints::set_cache_capacity(db, environment);
     infer::set_lru_capacity(db, inference);
-    infer_for_body::set_lru_capacity(db, inference);
     infer_body::set_lru_capacity(db, inference);
 }
 
@@ -678,6 +669,50 @@ mod tests {
             !Arc::ptr_eq(&old, &new),
             "resource-limited inference must not remain permanently cached"
         );
+    }
+
+    #[test]
+    #[cfg(feature = "z3-solver")]
+    fn declaration_budget_retries_after_an_unrelated_edit() {
+        use crate::solver_budget::{SolverBudget, SolverLimits};
+        use salsa::Setter;
+        let mut db = TestDb::default();
+        base_db::LanguageOptions::new(&db, true);
+        let source =
+            "default Order dec\nstruct Holder ('n : Int) = { value : bits('n * ('n + 1) + 1) }\n";
+        assert!(syntax::parse_text(source).1.is_empty());
+        let file = FileText::new(&db, Arc::from(source), base_db::FileId::from_raw(0));
+        let other = FileText::new(
+            &db,
+            Arc::from("function unrelated() -> int = 1"),
+            base_db::FileId::from_raw(1),
+        );
+        hir_def::def_query::set_workspace_files(&mut db, vec![file, other]);
+        let limited = SolverBudget::enter(
+            crate::CancellationToken::never(),
+            SolverLimits { checks: 0, ..Default::default() },
+        );
+        let first =
+            crate::infer::declaration_constraints::declaration_diagnostics(&db, file).clone();
+        assert!(SolverBudget::incomplete_count() > 0, "fixture must exhaust SMT: {first:?}");
+        assert!(!first.is_empty(), "strict declarations currently require a proof");
+        drop(limited);
+        other.set_text(&mut db).to(Arc::from("function unrelated() -> int = 2"));
+        let _budget = SolverBudget::enter(
+            crate::CancellationToken::never(),
+            SolverLimits {
+                total: std::time::Duration::from_secs(20),
+                per_check: std::time::Duration::from_secs(5),
+                checks: 64,
+            },
+        );
+        let retried =
+            crate::infer::declaration_constraints::declaration_diagnostics(&db, file).clone();
+        file.set_text(&mut db)
+            .to(Arc::from(format!("{source}// force an independent recomputation\n")));
+        let independent = crate::infer::declaration_constraints::declaration_diagnostics(&db, file);
+        assert!(independent.is_empty(), "a fresh proof must actually succeed: {independent:?}");
+        assert!(retried.is_empty(), "transient budget errors stayed cached: {retried:?}");
     }
 
     /// Keep both results alive so pointer comparisons cannot pass because an

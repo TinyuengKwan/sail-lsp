@@ -233,6 +233,7 @@ fn enum_vectors_impl(
     program: Program,
 ) -> Vec<EnumVector> {
     let declarations = program.declarations(db);
+    let mut files = rustc_hash::FxHashMap::default();
     let events: Vec<_> = declarations
         .iter()
         .enumerate()
@@ -241,7 +242,11 @@ fn enum_vectors_impl(
             Some(EventAt {
                 context,
                 file: at.file.file_id(db),
-                event: file_events(db, at.file).get(at.index)?.clone()?,
+                event: files
+                    .entry(at.file)
+                    .or_insert_with(|| file_events(db, at.file))
+                    .get(at.index)?
+                    .clone()?,
             })
         })
         .collect();

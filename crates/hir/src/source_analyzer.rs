@@ -5,9 +5,6 @@
 //! resolve to?". It bridges the syntax world (byte offsets, CST
 //! nodes) with the semantic world (ExprId, Ty, Resolver).
 //!
-//! No lifetime parameter because we store owned data. Single `Body`
-//! variant of `BodyOrSig` (Sail has no variant fields / generic sigs).
-
 use either::Either;
 use hir_def::body::{Body, BodySourceMap, ExprId, PatId};
 use hir_def::nameres::DefMap;
@@ -16,12 +13,12 @@ use hir_ty::infer::{InferenceResult, Ty};
 
 use std::sync::Arc;
 
-/// Semantic data for a callable body or signature.
-///
-/// Only `Body` variant (Sail has no variant fields / generic sigs).
+/// Shared semantic data for a callable body.
 #[derive(Clone)]
-pub(crate) enum BodyOrSig {
-    Body { body: Body, source_map: BodySourceMap, infer: Option<InferenceResult> },
+pub(crate) struct BodyAnalysis {
+    pub(crate) body: Arc<Body>,
+    pub(crate) source_map: Arc<BodySourceMap>,
+    pub(crate) infer: Option<Arc<InferenceResult>>,
 }
 
 /// Core analysis engine for a specific position in source code.
@@ -29,8 +26,8 @@ pub(crate) enum BodyOrSig {
 pub struct SourceAnalyzer {
     /// Use `make_resolver()` to derive a borrowing Resolver on demand.
     pub(crate) resolver: Arc<DefMap>,
-    /// Body/sig data (None if at module level).
-    pub(crate) body_or_sig: Option<BodyOrSig>,
+    /// Callable body data (None if at module level).
+    pub(crate) body: Option<BodyAnalysis>,
 }
 
 impl SourceAnalyzer {
@@ -41,7 +38,7 @@ impl SourceAnalyzer {
         offset: usize,
         name: &str,
     ) -> Option<crate::Local> {
-        let BodyOrSig::Body { body, source_map, .. } = self.body_or_sig.as_ref()?;
+        let BodyAnalysis { body, source_map, .. } = self.body.as_ref()?;
         let scopes = hir_def::source_order::bindings::body_scopes(db, file, body, offset);
         let key = hir_def::Name::new(name);
         let pat = body.iter_exprs().find_map(|(id, expr)| {
@@ -64,7 +61,7 @@ impl SourceAnalyzer {
     /// Create a SourceAnalyzer at module level (no body context).
     /// Used when the cursor is outside any callable body.
     pub(crate) fn new_for_resolver(resolver: Arc<DefMap>) -> Self {
-        Self { resolver, body_or_sig: None }
+        Self { resolver, body: None }
     }
 
     /// Construct a borrowing `Resolver` from the stored `Arc<DefMap>`.
@@ -100,7 +97,7 @@ impl SourceAnalyzer {
         file: base_db::FileText,
         offset: usize,
     ) -> Vec<crate::Local> {
-        let Some(BodyOrSig::Body { body, source_map, .. }) = &self.body_or_sig else {
+        let Some(BodyAnalysis { body, source_map, .. }) = &self.body else {
             return Vec::new();
         };
         let scopes = hir_def::source_order::bindings::body_scopes(db, file, body, offset);
@@ -140,18 +137,12 @@ impl SourceAnalyzer {
 
     /// Access the inference result, if available.
     pub(crate) fn infer(&self) -> Option<&InferenceResult> {
-        match &self.body_or_sig {
-            Some(BodyOrSig::Body { infer, .. }) => infer.as_ref(),
-            None => None,
-        }
+        self.body.as_ref()?.infer.as_deref()
     }
 
     /// Access the source map.
     pub(crate) fn source_map(&self) -> Option<&BodySourceMap> {
-        match &self.body_or_sig {
-            Some(BodyOrSig::Body { source_map, .. }) => Some(source_map),
-            None => None,
-        }
+        Some(&self.body.as_ref()?.source_map)
     }
 }
 
@@ -197,6 +188,7 @@ impl SourceAnalyzer {
         if name.starts_with('\'') {
             return Some(crate::PathResolution::TypeVar(crate::TypeVar {
                 name: hir_def::Name::new(name),
+                binding: None,
             }));
         }
         None

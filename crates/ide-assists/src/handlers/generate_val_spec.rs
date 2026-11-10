@@ -83,10 +83,9 @@ pub(crate) fn generate_val_spec(acc: &mut Assists, ctx: &AssistContext<'_>) -> O
     // no caller at all — while rust-analyzer's assists use `ctx.sema` in 89
     // of its 134.
     let sema = ctx.sema();
-    let bodies = ctx.file.bodies();
     let type_of = |span: parser::Span| -> String {
         let Some((sema, _, ft)) = sema.as_ref() else { return "_".to_owned() };
-        match sema.binding_type_text(*ft, span, bodies) {
+        match sema.binding_type_text(*ft, span) {
             Some(ty) if ty != "unknown" && ty != "error" => ty,
             _ => "_".to_owned(),
         }
@@ -112,7 +111,6 @@ pub(crate) fn generate_val_spec(acc: &mut Assists, ctx: &AssistContext<'_>) -> O
             sema.expr_type_text(
                 *ft,
                 parser::Span::new(usize::from(range.start()), usize::from(range.end())),
-                bodies,
             )
         })
         .filter(|ty| ty != "unknown" && ty != "error")

@@ -33,6 +33,7 @@ impl ItemTree {
         let mut tree = Self::empty();
         let mut fixities = Vec::new();
         for child in root.children() {
+            syntax::cancellation_checkpoint();
             // Extract fixity declarations (typed cast)
             if syntax::ast::FixityDef::can_cast(child.kind()) {
                 if let Some(fixity) = extract_fixity_decl(&child) {
@@ -107,6 +108,7 @@ impl ItemTree {
         let mut tree = Self::empty();
         let mut conditions = syntax::preprocess::CondFilter::new();
         for child in root.children() {
+            syntax::cancellation_checkpoint();
             if !conditions.accept(&child, symbols, target) {
                 continue;
             }
@@ -120,6 +122,7 @@ impl ItemTree {
         // they're top-level and don't depend on preprocessing)
         let mut fixities = Vec::new();
         for child in root.children() {
+            syntax::cancellation_checkpoint();
             if syntax::ast::FixityDef::can_cast(child.kind()) {
                 if let Some(fixity) = extract_fixity_decl(&child) {
                     fixities.push(fixity);
@@ -267,7 +270,25 @@ fn lower_cst_node(tree: &mut ItemTree, node: &syntax::SyntaxNode) -> Option<DefI
         None
     };
 
-    let full_text = node.text().to_string();
+    // Callable item metadata consumes only the header. Materializing the
+    // entire expression body just to discard it at `=` makes completion
+    // rebuild megabytes of unrelated text after a body edit.
+    let full_text = if node.kind() == SK::CALLABLE_DEF {
+        let mut header = String::new();
+        for element in node.children_with_tokens() {
+            if element.kind() == SK::EQ {
+                header.push('=');
+                break;
+            }
+            match element {
+                rowan::NodeOrToken::Node(node) => header.push_str(&node.text().to_string()),
+                rowan::NodeOrToken::Token(token) => header.push_str(token.text()),
+            }
+        }
+        header
+    } else {
+        node.text().to_string()
+    };
     let signature_text = extract_signature(&full_text);
     // For types with braced member lists (enum/union/struct/bitfield),
     // use the full text so extract_braced_idents_from_sig can find members.

@@ -38,8 +38,10 @@ pub(crate) mod pragma;
 /// Record field completion (inside `{ ... }` literals/patterns).
 pub(crate) mod record;
 
+mod custom;
 /// Snippet completion (code templates).
 pub(crate) mod snippet;
+mod term_search;
 
 /// Type-position completion (after `:` or `->`).
 pub(crate) mod type_;
@@ -86,10 +88,12 @@ pub(super) fn complete_name_ref(
     keywords: &[&str],
     builtins: &[&str],
 ) {
+    let started = std::time::Instant::now();
     // Dot access: `expr.|` → field/method completion
     if let Some(ref dot_access) = name_ref_ctx.dot_access {
         dot::complete_dot(acc, ctx, dot_access, all_files);
         postfix::complete_postfix(acc, ctx);
+        custom::postfix(acc, ctx);
         return;
     }
 
@@ -107,11 +111,13 @@ pub(super) fn complete_name_ref(
                 expr::complete_expr_path(
                     acc, ctx, all_files, path_ctx, expr_ctx, keywords, builtins,
                 );
+                term_search::complete(acc, ctx);
                 // Record literal field completion inside `StructName { | }`.
                 let record_items =
                     record::complete_record(ctx.file, ctx.text, ctx.offset, ctx.prefix, all_files);
                 acc.add_many(record_items);
                 postfix::complete_postfix(acc, ctx);
+                custom::postfix(acc, ctx);
             }
             context::PathKind::Type => {
                 let type_names = crate::completions::type_::collect_type_names(ctx, all_files);
@@ -132,6 +138,11 @@ pub(super) fn complete_name_ref(
         }
     }
 
+    custom::prefix(acc, ctx);
+
     // Flyimport — always try cross-file symbol suggestions
+    let scope_us = started.elapsed().as_micros();
+    let imports_started = std::time::Instant::now();
     flyimport::import_on_the_fly(acc, ctx, all_files, current_uri);
+    tracing::debug!(target: "sail_lsp::latency", "completion_name_ref scope_us={scope_us} imports_us={}", imports_started.elapsed().as_micros());
 }

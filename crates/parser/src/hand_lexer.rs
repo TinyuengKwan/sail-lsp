@@ -10,16 +10,32 @@ use crate::lexer::{Span, Token};
 ///
 /// Matches the output of the chumsky `lexer().parse(input)` exactly.
 pub fn tokenize(input: &str) -> Vec<(Token, Span)> {
+    tokenize_inner(input, false)
+}
+
+/// Whether the source contains a token, stopping after the first one.
+/// Uses the same comment and malformed-character handling as `tokenize`.
+pub fn has_tokens(input: &str) -> bool {
+    !tokenize_inner(input, true).is_empty()
+}
+
+fn tokenize_inner(input: &str, stop_after_first: bool) -> Vec<(Token, Span)> {
     let bytes = input.as_bytes();
     let len = bytes.len();
     let mut pos = 0;
     let mut tokens = Vec::new();
+    let mut next_checkpoint = 0;
 
     while pos < len {
+        if stop_after_first && !tokens.is_empty() {
+            break;
+        }
+        checkpoint_bytes(pos, &mut next_checkpoint);
         // Skip whitespace
         if bytes[pos].is_ascii_whitespace() {
             pos += 1;
             while pos < len && bytes[pos].is_ascii_whitespace() {
+                checkpoint_bytes(pos, &mut next_checkpoint);
                 pos += 1;
             }
             continue;
@@ -29,6 +45,7 @@ pub fn tokenize(input: &str) -> Vec<(Token, Span)> {
         if pos + 1 < len && bytes[pos] == b'/' && bytes[pos + 1] == b'/' {
             pos += 2;
             while pos < len && bytes[pos] != b'\n' {
+                checkpoint_bytes(pos, &mut next_checkpoint);
                 pos += 1;
             }
             continue;
@@ -39,6 +56,7 @@ pub fn tokenize(input: &str) -> Vec<(Token, Span)> {
             pos += 2;
             let mut depth = 1u32;
             while pos < len && depth > 0 {
+                checkpoint_bytes(pos, &mut next_checkpoint);
                 if pos + 1 < len && bytes[pos] == b'/' && bytes[pos + 1] == b'*' {
                     depth += 1;
                     pos += 2;
@@ -88,6 +106,7 @@ pub fn tokenize(input: &str) -> Vec<(Token, Span)> {
         if bytes[pos] == b'"' {
             pos += 1; // skip opening quote
             while pos < len && bytes[pos] != b'"' && bytes[pos] != b'\n' && bytes[pos] != b'\r' {
+                checkpoint_bytes(pos, &mut next_checkpoint);
                 if bytes[pos] == b'\\' {
                     pos += 1; // skip backslash
                     if pos < len {
@@ -135,6 +154,7 @@ pub fn tokenize(input: &str) -> Vec<(Token, Span)> {
             if after_quote < len && is_ident_start(bytes[after_quote]) {
                 pos = after_quote + 1;
                 while pos < len && is_ident_continue(bytes[pos]) {
+                    checkpoint_bytes(pos, &mut next_checkpoint);
                     pos += 1;
                 }
                 let s = input[start..pos].to_owned();
@@ -152,6 +172,7 @@ pub fn tokenize(input: &str) -> Vec<(Token, Span)> {
             if bytes[pos] == b'0' && pos + 1 < len && bytes[pos + 1] == b'x' {
                 pos += 2;
                 while pos < len && (bytes[pos].is_ascii_hexdigit() || bytes[pos] == b'_') {
+                    checkpoint_bytes(pos, &mut next_checkpoint);
                     pos += 1;
                 }
                 let s = input[start..pos].to_owned();
@@ -164,6 +185,7 @@ pub fn tokenize(input: &str) -> Vec<(Token, Span)> {
                 pos += 2;
                 while pos < len && (bytes[pos] == b'0' || bytes[pos] == b'1' || bytes[pos] == b'_')
                 {
+                    checkpoint_bytes(pos, &mut next_checkpoint);
                     pos += 1;
                 }
                 let s = input[start..pos].to_owned();
@@ -173,6 +195,7 @@ pub fn tokenize(input: &str) -> Vec<(Token, Span)> {
 
             // Decimal digits
             while pos < len && bytes[pos].is_ascii_digit() {
+                checkpoint_bytes(pos, &mut next_checkpoint);
                 pos += 1;
             }
 
@@ -180,6 +203,7 @@ pub fn tokenize(input: &str) -> Vec<(Token, Span)> {
             if pos < len && bytes[pos] == b'.' && pos + 1 < len && bytes[pos + 1].is_ascii_digit() {
                 pos += 1; // skip dot
                 while pos < len && bytes[pos].is_ascii_digit() {
+                    checkpoint_bytes(pos, &mut next_checkpoint);
                     pos += 1;
                 }
                 let s = input[start..pos].to_owned();
@@ -202,6 +226,7 @@ pub fn tokenize(input: &str) -> Vec<(Token, Span)> {
             } else {
                 pos += 1;
                 while pos < len && is_ident_continue(bytes[pos]) {
+                    checkpoint_bytes(pos, &mut next_checkpoint);
                     pos += 1;
                 }
             }
@@ -224,6 +249,7 @@ pub fn tokenize(input: &str) -> Vec<(Token, Span)> {
             // Regular directive: $ident rest_of_line
             let payload_start = pos;
             while pos < len && bytes[pos] != b'\n' {
+                checkpoint_bytes(pos, &mut next_checkpoint);
                 pos += 1;
             }
             let payload_text = &input[payload_start..pos];
@@ -300,6 +326,7 @@ pub fn tokenize(input: &str) -> Vec<(Token, Span)> {
 
             pos += 1;
             while pos < len && is_ident_continue(bytes[pos]) {
+                checkpoint_bytes(pos, &mut next_checkpoint);
                 pos += 1;
             }
             let text = &input[start..pos];
@@ -655,9 +682,33 @@ fn keyword_or_id(text: &str) -> Token {
     }
 }
 
+/// Progress thresholds also cover a single enormous comment/string/identifier,
+/// and do not assume UTF-8 cursor positions hit an exact byte alignment.
+pub(crate) fn checkpoint_bytes(position: usize, next: &mut usize) {
+    if position >= *next {
+        *next = position.saturating_add(4096);
+        stdx::cancellation::checkpoint();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn token_presence_handles_trivia_errors_and_nested_comments() {
+        for (source, expected) in [
+            ("", false),
+            (" // comment\n /* outer /* inner */ rest */ ", false),
+            ("/* unclosed", false),
+            ("™", false),
+            ("/* prefix */ function f() = 1", true),
+            ("™ val x : int", true),
+            ("\"string\"", true),
+        ] {
+            assert_eq!(has_tokens(source), expected, "{source:?}");
+        }
+    }
 
     #[test]
     fn keyword_val() {

@@ -1,7 +1,5 @@
 //! Inlay Hints — parameter names, types, caller counts, closing braces.
-//! Architecture: `inlay_hints()` walks the file and collects `InlayHint`
-//! values with `InlayKind` tags. Hints can be lazy-resolved via
-//! `inlay_hints_resolve()`.
+//! Providers collect hints for the requested viewport; Analysis adds navigation links.
 
 mod types;
 pub use types::*;
@@ -18,36 +16,6 @@ use base_db::TextRange;
 use ide_db::FileDb;
 use parser::Span;
 use url::Url;
-
-/// Kind of inlay hint.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub enum InlayKind {
-    /// Type annotation for a binding.
-    Type,
-    /// Parameter name hint at call site.
-    Parameter,
-    /// Closing brace label (e.g., `// fn foo`).
-    ClosingBrace,
-    /// Caller count hint.
-    CallerCount,
-    /// Effect annotation hint.
-    ///
-    /// Shows observed effects at function definition sites
-    /// (e.g., `/* throw, exit */`).
-    Effect,
-    /// Constant value hint.
-    ///
-    /// Shows the evaluated numeric value of constant expressions inline,
-    /// e.g., `sizeof(xlen)` -> `= 64`. Useful for Sail's dependent type
-    /// system where `sizeof()` calls are ubiquitous but their concrete
-    /// values depend on configuration.
-    ConstantValue,
-}
-
-// `InlayHintPosition` and a second `InlayHint` — range, position,
-// pad_left/pad_right — used to sit here, in rust-analyzer's shape, with no
-// constructor: every provider builds the one the server converts, which
-// lived in `ide-db` and now lives beside them in `types.rs`.
 
 /// Configuration for inlay hint computation.
 #[derive(Clone, Debug)]
@@ -83,7 +51,7 @@ impl Default for InlayHintsConfig {
             caller_count_hints: true,
             effect_hints: true,
             chaining_hints: true,
-            discriminant_hints: true,
+            discriminant_hints: false,
         }
     }
 }
@@ -92,32 +60,74 @@ fn span_starts_in_range(span: Span, begin: usize, end: usize) -> bool {
     span.start >= begin && span.start <= end
 }
 
-/// Inlay hints — returns internal InlayHint (byte-offset positions).
-pub fn inlay_hints_ide(
-    all_files: &[(&Url, &dyn FileDb)],
-    current_uri: &Url,
-    current_file: &dyn FileDb,
-    range: TextRange,
-) -> Vec<InlayHint> {
-    inlay_hints_ide_with_types(
-        all_files,
-        current_uri,
-        current_file,
-        range,
-        None,
-        None,
-        &InlayHintsConfig::default(),
-    )
+fn span_intersects_range(span: Span, begin: usize, end: usize) -> bool {
+    span.end >= begin && span.start <= end
 }
 
-/// Inlay hints with optional salsa-provided TypeCheckResult for type hints.
-/// Added `transitive_effects` parameter for salsa-cached effects.
-pub fn inlay_hints_ide_with_types(
+fn span_ends_in_range(span: Span, begin: usize, end: usize) -> bool {
+    span.end >= begin && span.end <= end
+}
+
+fn body_groups(file: &dyn FileDb, begin: usize, end: usize) -> Vec<&hir::CallableBodies> {
+    if let Some((db, input)) = file.file_text() {
+        hir::Semantics::new(db).bodies_in_range(input, Some((begin, end)))
+    } else {
+        file.bodies().into_iter().collect()
+    }
+}
+
+pub(crate) fn visible_callable_heads(
+    file: &dyn FileDb,
+    begin: usize,
+    end: usize,
+) -> Vec<(String, Span)> {
+    if let Some(tree) = file.item_tree() {
+        return tree
+            .top_level_items()
+            .iter()
+            .filter(|id| {
+                matches!(
+                    id.def_kind(tree),
+                    hir::DefKind::Function
+                        | hir::DefKind::ValSpec
+                        | hir::DefKind::Mapping
+                        | hir::DefKind::MappingSpec
+                )
+            })
+            .filter(|id| span_ends_in_range(id.name_span(tree), begin, end))
+            .map(|id| (id.name(tree).to_string(), id.name_span(tree)))
+            .collect();
+    }
+    file.parsed()
+        .into_iter()
+        .flat_map(|parsed| &parsed.callable_heads)
+        .filter(|head| span_ends_in_range(head.name_span, begin, end))
+        .map(|head| (head.name.clone(), head.name_span))
+        .collect()
+}
+
+pub(crate) fn needs_effects(file: &dyn FileDb, range: TextRange) -> bool {
+    let (begin, end) = (base_db::range_start(range), base_db::range_end(range));
+    body_groups(file, begin, end).iter().any(|bodies| {
+        bodies.entries().iter().any(|entry| {
+            span_ends_in_range(entry.def_span, begin, end)
+                || (span_intersects_range(entry.def_span, begin, end)
+                    && entry.body.iter_exprs().any(|(id, expr)| {
+                        matches!(expr, hir::Expr::Call { .. })
+                            && entry
+                                .source_map
+                                .expr_syntax(id)
+                                .is_some_and(|span| span_ends_in_range(span, begin, end))
+                    }))
+        })
+    })
+}
+
+/// Collect viewport hints with the caller's settings and cached effects.
+pub fn inlay_hints_ide(
     all_files: &[(&Url, &dyn FileDb)],
-    _current_uri: &Url,
     current_file: &dyn FileDb,
     range: TextRange,
-    type_check: Option<&hir::TypeCheckResult>,
     transitive_effects: Option<
         &std::collections::HashMap<String, std::collections::BTreeSet<hir::EffectTag>>,
     >,
@@ -147,7 +157,7 @@ pub fn inlay_hints_ide_with_types(
         closing_brace::collect_closing_brace_hints(current_file, begin, end, min_lines, &mut hints);
     }
     if config.type_hints {
-        bind_pat::collect_type_hints(current_file, begin, end, &mut hints, type_check);
+        bind_pat::collect_type_hints(current_file, begin, end, &mut hints);
     }
     if config.effect_hints {
         // Use salsa-cached transitive effects from transitive_effects
@@ -162,9 +172,10 @@ pub fn inlay_hints_ide_with_types(
             transitive_effects,
         );
     }
-    chaining::collect_chaining_hints(all_files, current_file, begin, end, &mut hints, config);
+    chaining::collect_chaining_hints(current_file, begin, end, &mut hints, config);
     discriminant::collect_discriminant_hints(current_file, begin, end, &mut hints, config);
 
+    hints.retain(|hint| hint.offset >= begin && hint.offset <= end);
     hints.sort_by(|lhs, rhs| lhs.offset.cmp(&rhs.offset).then(lhs.label.cmp(&rhs.label)));
     if let Some(limit) = config.max_length {
         for hint in &mut hints {
@@ -213,6 +224,163 @@ mod tests {
     use super::*;
     use hir::callgraph::SourceFileInfo;
     use ide_db::test_utils::TestFile;
+
+    #[test]
+    fn runtime_integer_hints_do_not_expose_private_witness_names() {
+        let source = "function identity(argument : int) -> int = argument + 0\nfunction caller(argument : int) -> int = {\n  let observed = identity(argument);\n  let literal = 3;\n  observed\n}\n";
+        let (analysis, files) = crate::fixture::project_analysis(source);
+        let start = source.find("let observed").unwrap();
+        let file = analysis.files_ref().file_text(files[0].0).unwrap();
+        let raw =
+            hir::Semantics::new(analysis.db()).type_of_pat(file, start + "let ".len()).unwrap();
+        assert_eq!(raw.ctor_name(), Some("atom"), "keep the precise runtime singleton internally");
+        assert!(!raw.is_fully_known(), "the witness has no source-level constant value");
+        assert_eq!(
+            hir::Semantics::new(analysis.db()).binding_type_text(
+                file,
+                parser::Span::new(start + 4, start + "let observed".len())
+            ),
+            Some(raw.display_text()),
+            "source-generating assists must retain the precise type"
+        );
+        let hints = analysis
+            .inlay_hints(
+                files[0].0,
+                base_db::text_range(start, source.len()),
+                &InlayHintsConfig::default(),
+            )
+            .unwrap();
+        let observed = hints
+            .iter()
+            .find(|hint| {
+                hint.offset == start + "let observed".len() && hint.kind == InlayHintKind::Type
+            })
+            .unwrap();
+        assert_eq!(observed.label, ": int", "{hints:?}");
+        assert!(
+            hints.iter().any(|hint| hint.label == ": atom(3)"),
+            "literal indices must remain precise: {hints:?}"
+        );
+        assert!(hints.iter().all(|hint| !hint.label.contains("'_sk")), "{hints:?}");
+
+        // A source-written index that resembles the allocator's naming
+        // convention must remain visible; classification is semantic.
+        let source = "val indexed : forall ('_sk2__value : Int). int('_sk2__value) -> int('_sk2__value)\nfunction indexed(value) = { let preserved = value; preserved }\n";
+        let (analysis, files) = crate::fixture::project_analysis(source);
+        let start = source.find("let preserved").unwrap();
+        let hints = analysis
+            .inlay_hints(
+                files[0].0,
+                base_db::text_range(start, source.len()),
+                &InlayHintsConfig::default(),
+            )
+            .unwrap();
+        assert!(hints.iter().any(|hint| hint.kind == InlayHintKind::Type && hint.label.contains("'_sk2__value")), "source binder was hidden: {hints:?}");
+    }
+
+    #[test]
+    fn viewport_type_hints_infer_only_the_visible_callable() {
+        use std::sync::{Arc, Mutex};
+        let source = "function offscreen() -> int = { let hidden = 9; hidden }\nfunction visible() -> int = { let shown = 1; shown }\nfunction later() -> int = { let last = 2; last }\n";
+        let queries = Arc::new(Mutex::new(Vec::new()));
+        let observed = queries.clone();
+        let mut db = ide_db::root_database::RootDatabase::with_event_callback(Some(Box::new(
+            move |event| {
+                if let salsa::EventKind::WillExecute { database_key } = event.kind {
+                    // Formatting the query key reads Salsa's ingredient metadata;
+                    // it does not execute a query or depend on tracing filters.
+                    observed.lock().unwrap().push(format!("{database_key:?}"));
+                }
+            },
+        )));
+        let file_id = base_db::FileId::from_raw(0);
+        let mut change = ide_db::apply_change::Change::new();
+        change.change_file(file_id, source);
+        change.set_workspace_files(vec![file_id]);
+        db.apply_change(change);
+        let uri = Url::parse("file:///tmp/viewport.sail").unwrap();
+        let files = db.files().clone();
+        let urls =
+            crate::analysis::UrlMap::new([(uri.clone(), file_id)].into(), [(file_id, uri)].into());
+        let analysis = crate::analysis::Analysis::with_url_map(db, files, urls);
+        let config = InlayHintsConfig {
+            type_hints: true,
+            parameter_hints: false,
+            effect_hints: false,
+            caller_count_hints: false,
+            closing_brace_hints_min_lines: None,
+            chaining_hints: false,
+            discriminant_hints: false,
+            max_length: None,
+        };
+        let start = source.find("shown =").unwrap();
+        let range = base_db::text_range(start, start + 5);
+        let viewport = analysis.inlay_hints(file_id, range, &config).unwrap();
+        assert_eq!(viewport.len(), 1, "{viewport:?}");
+        assert_eq!(viewport[0].offset, start + 5);
+        assert!(viewport[0].label.contains("1"), "{viewport:?}");
+        let executed = queries.lock().unwrap().clone();
+        assert_eq!(
+            executed.iter().filter(|key| key.starts_with("callable_bodies_for_name(")).count(),
+            1,
+            "{executed:?}"
+        );
+        assert!(
+            executed.iter().all(|key| !key.starts_with("callable_bodies(")),
+            "offscreen body lowering: {executed:?}"
+        );
+        assert_eq!(
+            executed.iter().filter(|key| key.starts_with("infer(")).count(),
+            1,
+            "{executed:?}"
+        );
+        assert!(
+            executed.iter().all(|key| !key.starts_with("infer_body(")),
+            "whole-file inference: {executed:?}"
+        );
+        queries.lock().unwrap().clear();
+        let defaults = analysis.inlay_hints(file_id, range, &InlayHintsConfig::default()).unwrap();
+        assert_eq!(format!("{viewport:?}"), format!("{defaults:?}"));
+        let default_queries = queries.lock().unwrap().clone();
+        assert!(
+            default_queries.iter().all(|key| !key.starts_with("callable_bodies(")
+                && !key.starts_with("callable_bodies_for_name(")),
+            "offscreen lowering with default hints: {default_queries:?}"
+        );
+        let full =
+            analysis.inlay_hints(file_id, base_db::text_range(0, source.len()), &config).unwrap();
+        let subset: Vec<_> = full
+            .into_iter()
+            .filter(|hint| hint.offset >= start && hint.offset <= start + 5)
+            .collect();
+        assert_eq!(format!("{viewport:?}"), format!("{subset:?}"));
+    }
+
+    #[test]
+    fn viewport_hints_are_filtered_by_their_display_position() {
+        let source = "function risky() = {\n throw(\"err\")\n}\nfunction main() = risky()\n";
+        let file = TestFile::new(source);
+        let uri = Url::parse("file:///tmp/view.sail").unwrap();
+        let all: Vec<(&Url, &dyn FileDb)> = vec![(&uri, &file)];
+        let config = InlayHintsConfig {
+            closing_brace_hints_min_lines: Some(1),
+            max_length: None,
+            ..Default::default()
+        };
+        let full = inlay_hints_ide(&all, &file, full_range(&file), None, &config);
+        assert!(!full.is_empty());
+        // One-byte viewports include the boundary cases where a node starts
+        // outside the view, but its hint is displayed inside it.
+        for start in 0..source.len() {
+            let actual =
+                inlay_hints_ide(&all, &file, base_db::text_range(start, start + 1), None, &config);
+            let expected: Vec<_> = full
+                .iter()
+                .filter(|hint| hint.offset >= start && hint.offset <= start + 1)
+                .collect();
+            assert_eq!(format!("{actual:?}"), format!("{expected:?}"), "viewport {start}");
+        }
+    }
 
     #[test]
     fn parameter_hints_follow_replaced_signatures_and_display_limits() {
@@ -266,7 +434,8 @@ mod tests {
         let uri = Url::parse("file:///tmp/main.sail").unwrap();
         let foreign_uri = Url::parse("file:///tmp/unrelated.sail").unwrap();
         let all: Vec<(&Url, &dyn FileDb)> = vec![(&uri, &file), (&foreign_uri, &foreign)];
-        let hints = inlay_hints_ide(&all, &uri, &file, full_range(&file));
+        let hints =
+            inlay_hints_ide(&all, &file, full_range(&file), None, &InlayHintsConfig::default());
         assert!(hints.iter().all(|hint| hint.kind != InlayHintKind::Parameter), "{hints:?}");
     }
 
@@ -280,7 +449,13 @@ mod tests {
         let file = TestFile::new(source);
         let uri = Url::parse("file:///tmp/test.sail").unwrap();
         let all_files: Vec<(&Url, &dyn FileDb)> = vec![(&uri, &file as &dyn FileDb)];
-        let hints = inlay_hints_ide(&all_files, &uri, &file, full_range(&file));
+        let hints = inlay_hints_ide(
+            &all_files,
+            &file,
+            full_range(&file),
+            None,
+            &InlayHintsConfig::default(),
+        );
         let caller_hints: Vec<String> =
             hints.iter().filter(|h| h.label.contains("caller")).map(|h| h.label.clone()).collect();
         assert!(
@@ -300,7 +475,13 @@ function c() = shared()
         let file = TestFile::new(source);
         let uri = Url::parse("file:///tmp/test.sail").unwrap();
         let all_files: Vec<(&Url, &dyn FileDb)> = vec![(&uri, &file as &dyn FileDb)];
-        let hints = inlay_hints_ide(&all_files, &uri, &file, full_range(&file));
+        let hints = inlay_hints_ide(
+            &all_files,
+            &file,
+            full_range(&file),
+            None,
+            &InlayHintsConfig::default(),
+        );
         let labels: Vec<String> = hints.iter().map(|h| h.label.clone()).collect();
         assert!(
             labels.iter().any(|l| l == "(3 callers)"),
@@ -314,7 +495,13 @@ function c() = shared()
         let file = TestFile::new(source);
         let uri = Url::parse("file:///tmp/test.sail").unwrap();
         let all_files: Vec<(&Url, &dyn FileDb)> = vec![(&uri, &file as &dyn FileDb)];
-        let hints = inlay_hints_ide(&all_files, &uri, &file, full_range(&file));
+        let hints = inlay_hints_ide(
+            &all_files,
+            &file,
+            full_range(&file),
+            None,
+            &InlayHintsConfig::default(),
+        );
         let caller_hints: Vec<String> =
             hints.iter().filter(|h| h.label.contains("caller")).map(|h| h.label.clone()).collect();
         assert!(
@@ -329,7 +516,13 @@ function c() = shared()
         let file = TestFile::new(source);
         let uri = Url::parse("file:///tmp/test.sail").unwrap();
         let all_files: Vec<(&Url, &dyn FileDb)> = vec![(&uri, &file as &dyn FileDb)];
-        let hints = inlay_hints_ide(&all_files, &uri, &file, full_range(&file));
+        let hints = inlay_hints_ide(
+            &all_files,
+            &file,
+            full_range(&file),
+            None,
+            &InlayHintsConfig::default(),
+        );
         let caller_hints: Vec<String> =
             hints.iter().filter(|h| h.label.contains("caller")).map(|h| h.label.clone()).collect();
         assert!(
@@ -347,7 +540,13 @@ function main() = add(1, 2)
         let file = TestFile::new(source);
         let uri = Url::parse("file:///tmp/test.sail").unwrap();
         let all_files: Vec<(&Url, &dyn FileDb)> = vec![(&uri, &file as &dyn FileDb)];
-        let hints = inlay_hints_ide(&all_files, &uri, &file, full_range(&file));
+        let hints = inlay_hints_ide(
+            &all_files,
+            &file,
+            full_range(&file),
+            None,
+            &InlayHintsConfig::default(),
+        );
 
         let labels = hints
             .iter()
@@ -370,7 +569,13 @@ let typed : int = 2
         let file = TestFile::new(source);
         let uri = Url::parse("file:///tmp/test.sail").unwrap();
         let all_files: Vec<(&Url, &dyn FileDb)> = vec![(&uri, &file as &dyn FileDb)];
-        let hints = inlay_hints_ide(&all_files, &uri, &file, full_range(&file));
+        let hints = inlay_hints_ide(
+            &all_files,
+            &file,
+            full_range(&file),
+            None,
+            &InlayHintsConfig::default(),
+        );
 
         let type_hints = hints
             .iter()
@@ -385,6 +590,7 @@ let typed : int = 2
     #[test]
     fn resolves_type_hint_tooltip() {
         let mut hint = InlayHint {
+            label_parts: Vec::new(),
             offset: 0,
             label: ": int".to_string(),
             kind: InlayHintKind::Type,
@@ -414,7 +620,13 @@ function main() = thrower()
         let file = TestFile::new(source);
         let uri = Url::parse("file:///tmp/test.sail").unwrap();
         let all_files: Vec<(&Url, &dyn FileDb)> = vec![(&uri, &file as &dyn FileDb)];
-        let hints = inlay_hints_ide(&all_files, &uri, &file, full_range(&file));
+        let hints = inlay_hints_ide(
+            &all_files,
+            &file,
+            full_range(&file),
+            None,
+            &InlayHintsConfig::default(),
+        );
 
         let call_effect_hints: Vec<&str> = hints
             .iter()
@@ -437,7 +649,13 @@ function main() = pure_fn(42)
         let file = TestFile::new(source);
         let uri = Url::parse("file:///tmp/test.sail").unwrap();
         let all_files: Vec<(&Url, &dyn FileDb)> = vec![(&uri, &file as &dyn FileDb)];
-        let hints = inlay_hints_ide(&all_files, &uri, &file, full_range(&file));
+        let hints = inlay_hints_ide(
+            &all_files,
+            &file,
+            full_range(&file),
+            None,
+            &InlayHintsConfig::default(),
+        );
 
         let call_effect_hints: Vec<&str> = hints
             .iter()
@@ -467,7 +685,13 @@ function main() = dangerous()
         let file = TestFile::new(source);
         let uri = Url::parse("file:///tmp/test.sail").unwrap();
         let all_files: Vec<(&Url, &dyn FileDb)> = vec![(&uri, &file as &dyn FileDb)];
-        let hints = inlay_hints_ide(&all_files, &uri, &file, full_range(&file));
+        let hints = inlay_hints_ide(
+            &all_files,
+            &file,
+            full_range(&file),
+            None,
+            &InlayHintsConfig::default(),
+        );
 
         let call_effect_hints: Vec<&str> = hints
             .iter()
@@ -494,7 +718,13 @@ function main() = risky()
         let file = TestFile::new(source);
         let uri = Url::parse("file:///tmp/test.sail").unwrap();
         let all_files: Vec<(&Url, &dyn FileDb)> = vec![(&uri, &file as &dyn FileDb)];
-        let hints = inlay_hints_ide(&all_files, &uri, &file, full_range(&file));
+        let hints = inlay_hints_ide(
+            &all_files,
+            &file,
+            full_range(&file),
+            None,
+            &InlayHintsConfig::default(),
+        );
 
         let tooltip = hints
             .iter()

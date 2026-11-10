@@ -44,7 +44,17 @@ pub fn parsed_file_from_cst(root: &SyntaxNode, text: &str) -> ParsedFile {
     parsed
 }
 
+/// Extract compatibility metadata for one declaration from the cached CST.
+/// Spans remain in the original file's coordinates. Position queries should
+/// not reparse and scrape unrelated declarations to inspect a single call.
+pub fn parsed_definition_from_cst(node: &SyntaxNode, text: &str) -> ParsedFile {
+    let mut parsed = ParsedFile::default();
+    lower_definition(node, &mut parsed, text);
+    parsed
+}
+
 fn lower_definition(node: &SyntaxNode, parsed: &mut ParsedFile, text: &str) {
+    crate::cancellation_checkpoint();
     let kind = node.kind();
     let span = node_span(node);
 
@@ -89,7 +99,7 @@ fn lower_definition(node: &SyntaxNode, parsed: &mut ParsedFile, text: &str) {
                     true,
                 );
                 // E4: Also push SymbolOccurrence so rename finds scattered clauses.
-                // Without this, rename_edits misses clause names in other files.
+                // Without this, reference search misses clause names in other files.
                 if let Some(ns) = first_ident_span(node) {
                     parsed.symbol_occurrences.push(SymbolOccurrence {
                         name: name.clone(),
@@ -104,7 +114,7 @@ fn lower_definition(node: &SyntaxNode, parsed: &mut ParsedFile, text: &str) {
         }
         SK::END_DEF => {
             // Push SymbolOccurrence for `end foo` markers
-            // so rename_edits finds and renames them along with the
+            // so reference search finds them along with the
             // scattered head and clauses. Without this, `end foo` is
             // missed during rename of scattered function `foo`.
             if let Some(name) = first_ident(node) {
@@ -490,6 +500,7 @@ impl<'a> ExprWalker<'a> {
     }
 
     fn walk_node(&mut self, node: &SyntaxNode) {
+        crate::cancellation_checkpoint();
         match node.kind() {
             SK::CALL_EXPR => self.walk_call(node),
             SK::LET_EXPR => self.walk_let(node),
@@ -1156,6 +1167,30 @@ fn type_node_to_param(node: &SyntaxNode) -> CallableParam {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn compatibility_body_walk_can_be_cancelled_after_it_starts() {
+        use std::cell::Cell;
+        thread_local! { static VISITS: Cell<usize> = const { Cell::new(0) }; }
+        fn checkpoint() {
+            VISITS.with(|visits| {
+                visits.set(visits.get() + 1);
+                if visits.get() == 32 {
+                    std::panic::resume_unwind(Box::new(stdx::cancellation::Cancelled));
+                }
+            });
+        }
+        let source = format!("function f(x : int) -> int = {{ {} x }}", "x + 1; ".repeat(1024));
+        let (root, _) = crate::parsing::parse_text(&source);
+        VISITS.with(|visits| visits.set(0));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _scope = stdx::cancellation::enter(checkpoint);
+            super::parsed_file_from_cst(&root, &source)
+        }));
+        assert!(result.unwrap_err().is::<stdx::cancellation::Cancelled>());
+        assert_eq!(VISITS.with(Cell::get), 32);
+        assert!(!super::parsed_file_from_cst(&root, &source).callable_heads.is_empty());
+    }
+
     use super::*;
     use crate::parsing::parse_text;
 

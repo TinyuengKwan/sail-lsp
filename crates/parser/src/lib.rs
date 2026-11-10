@@ -24,7 +24,7 @@ pub use T_ as T;
 
 pub use event::ParseError;
 pub use grammar::FixityContext;
-pub use hand_lexer::tokenize;
+pub use hand_lexer::{has_tokens, tokenize};
 pub use input::Input;
 pub use lex_full::{single_token, LexError};
 pub use lexer::{Span, Token};

@@ -405,9 +405,39 @@ pub fn normalize_type_at(
     table.normalize_alias_deep(ty)
 }
 
+/// A concrete application of one unambiguous callable scheme. The original
+/// declaration and its quantified binders remain separate from this value.
+#[derive(Clone, Debug)]
+pub struct CallInstantiation {
+    pub target: String,
+    pub ty: Ty,
+    pub implicit_params: Vec<bool>,
+    /// Proven substitutions keyed by the declaration's original quantified names.
+    pub type_arguments: Vec<(String, Ty)>,
+}
+
+/// One rejected overload candidate, recorded by the actual inference probe.
+/// Expression identities keep source links valid after trivia-only edits.
+#[derive(Clone, Debug)]
+pub struct CallCandidateFailure {
+    pub target: String,
+    pub signature: String,
+    pub reason: String,
+    pub status: &'static str,
+    pub arguments: Vec<hir_def::ExprId>,
+}
+
 /// Per-callable inference result, keyed by `ExprId`/`PatId`.
 #[derive(Clone, Debug, Default)]
 pub struct InferenceResult {
+    /// Private witnesses introduced by existential elimination, rather than
+    /// source-written dependent indices. Their identities remain available to
+    /// inference; presentation can avoid exposing an unnameable numeric value.
+    pub(crate) hidden_numeric_witnesses: std::collections::HashSet<String>,
+    /// Unique, fully resolved applications, captured before fallback can turn
+    /// an unconstrained variable into a default type. Keyed by callee ExprId.
+    pub call_instantiations: FxHashMap<hir_def::ExprId, CallInstantiation>,
+    pub call_failures: FxHashMap<hir_def::ExprId, Vec<CallCandidateFailure>>,
     /// The actual leaf chosen for an overloaded callee expression. Keep its
     /// name rather than reconstructing identity from the instantiated type.
     pub selected_overloads: FxHashMap<hir_def::ExprId, String>,
@@ -757,6 +787,21 @@ impl std::ops::BitOrAssign for Diverges {
 }
 
 impl InferenceResult {
+    /// Editor presentation only. Source edits and semantic comparisons must
+    /// retain the precise type, rather than using its visible carrier.
+    pub fn display_type(&self, ty: &Ty) -> String {
+        if constraint::is_numeric_scalar_ty(ty) {
+            let mut names = std::collections::HashSet::new();
+            substitution::ty_names(ty, &mut names, false);
+            if names.iter().any(|name| self.hidden_numeric_witnesses.contains(name)) {
+                // The exact singleton still lives in the inference result.
+                // An unnamed runtime integer has no source-level index the
+                // editor can show; its carrier is the useful visible type.
+                return "int".to_owned();
+            }
+        }
+        ty.display_text()
+    }
     // ── Methods merged from the former `TypeCheckResult` impl ────────
 
     /// Legacy text-based diagnostics accessor (was `TypeCheckResult::diagnostics`).
@@ -797,6 +842,22 @@ impl InferenceResult {
         span: Span,
         bodies: Option<&hir_def::CallableBodies>,
     ) -> Option<String> {
+        self.binding_type_at_span(span, bodies).map(Ty::display_text)
+    }
+
+    pub fn binding_type_display(
+        &self,
+        span: Span,
+        bodies: Option<&hir_def::CallableBodies>,
+    ) -> Option<String> {
+        self.binding_type_at_span(span, bodies).map(|ty| self.display_type(ty))
+    }
+
+    fn binding_type_at_span(
+        &self,
+        span: Span,
+        bodies: Option<&hir_def::CallableBodies>,
+    ) -> Option<&Ty> {
         // First try PatId->Ty path
         if let Some(bodies) = self.bodies.as_deref().or(bodies) {
             for entry in bodies.entries() {
@@ -804,7 +865,7 @@ impl InferenceResult {
                     if let Some(s) = entry.source_map.pat_syntax(pat_id) {
                         if s.start == span.start && s.end == span.end {
                             if let Some(ty) = self.pat_ty(pat_id) {
-                                return Some(ty.display_text());
+                                return Some(ty);
                             }
                         }
                     }
@@ -938,6 +999,7 @@ impl InferenceResult {
 
     /// Merge another InferenceResult into this one (for per-file aggregation).
     pub fn merge(&mut self, other: InferenceResult) {
+        self.hidden_numeric_witnesses.extend(other.hidden_numeric_witnesses);
         for (id, ty) in other.type_of_expr.iter() {
             self.type_of_expr.insert(id, ty.clone());
         }
@@ -949,6 +1011,8 @@ impl InferenceResult {
         self.diagnostics.extend(other.diagnostics);
         self.method_resolutions.extend(other.method_resolutions);
         self.selected_overloads.extend(other.selected_overloads);
+        self.call_instantiations.extend(other.call_instantiations);
+        self.call_failures.extend(other.call_failures);
         self.unsolved_constraints.extend(other.unsolved_constraints);
         self.refuted_constraints.extend(other.refuted_constraints);
         self.obligation_stats.merge(other.obligation_stats);
@@ -2031,6 +2095,10 @@ fn parse_constraint_from_tokens(tokens: &[(parser::SyntaxKind, String)]) -> Cons
     }
 
     // `is_mem_width('width)` — upstream's `NC_app`.
+    // CST readers may insert spaces between every token. Predicate calls have
+    // exactly the same meaning with whitespace before/inside parentheses.
+    let compact: Vec<_> = tokens.iter().filter(|(kind, _)| !kind.is_trivia()).cloned().collect();
+    let tokens = compact.as_slice();
     if tokens.len() >= 3
         && tokens[0].0 == SK::IDENT
         && tokens[1].0 == SK::L_PAREN

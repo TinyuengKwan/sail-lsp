@@ -17,8 +17,15 @@
 //! a language server that spawns processes nobody asked for is a surprise.
 
 use std::path::{Path, PathBuf};
+pub(crate) mod cache;
+mod history;
+mod policy;
+pub(crate) mod toolchain;
+pub(crate) use history::{CheckHistory, RunReport};
+pub(crate) use policy::CompilerDiagnosticPolicy;
+pub(crate) mod structured;
 mod worker;
-pub(crate) use worker::{Status, Worker};
+pub(crate) use worker::{run_task, Status, Worker};
 
 use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 

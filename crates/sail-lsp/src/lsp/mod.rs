@@ -4,9 +4,7 @@
 
 pub(crate) mod capabilities;
 pub(crate) mod ext;
-// Public so `examples/protocol_check.rs` can measure through them. They are
-// pure conversions with no invariant to protect, and the probe has to enter
-// where the product does — the rule `corpus_check` states in its own header.
+// Shared with the corpus range-conversion checker.
 pub mod from_proto;
 pub(crate) mod semantic_tokens;
 pub mod to_proto;

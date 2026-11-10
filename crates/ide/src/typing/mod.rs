@@ -29,12 +29,22 @@ pub fn on_char_typed(
     char_typed: char,
 ) -> Option<Vec<ide_db::text_edit::TextEdit>> {
     let text = file.text();
-    if offset > text.len() {
+    if offset == 0 || offset > text.len() || !text.is_char_boundary(offset) {
+        return None;
+    }
+    let (root, _) = syntax::parse_text(text);
+    let token = root.token_at_offset((offset as u32).into()).left_biased()?;
+    let expected = match char_typed {
+        '>' => syntax::SyntaxKind::R_ARROW,
+        '}' => syntax::SyntaxKind::R_CURLY,
+        _ => return None,
+    };
+    if token.kind() != expected || usize::from(token.text_range().end()) != offset {
         return None;
     }
     match char_typed {
         '>' => on_gt_typed(text, offset),
-        '}' => on_closing_brace_typed(text, offset),
+        '}' => on_closing_brace_typed(text, offset, &root),
         _ => None,
     }
 }
@@ -63,7 +73,11 @@ fn on_gt_typed(text: &str, offset: usize) -> Option<Vec<ide_db::text_edit::TextE
 }
 
 /// Handle `}` typed — auto-indent to matching `{` level.
-fn on_closing_brace_typed(text: &str, offset: usize) -> Option<Vec<ide_db::text_edit::TextEdit>> {
+fn on_closing_brace_typed(
+    text: &str,
+    offset: usize,
+    root: &syntax::SyntaxNode,
+) -> Option<Vec<ide_db::text_edit::TextEdit>> {
     if offset < 1 {
         return None;
     }
@@ -73,12 +87,17 @@ fn on_closing_brace_typed(text: &str, offset: usize) -> Option<Vec<ide_db::text_
     let before = &text[..offset];
     let mut depth = 0i32;
     let mut match_pos = None;
-    for (i, ch) in before[..offset - 1].char_indices().rev() {
-        match ch {
-            '}' => depth += 1,
-            '{' => {
+    let tokens: Vec<_> = root
+        .descendants_with_tokens()
+        .filter_map(|e| e.into_token())
+        .filter(|t| usize::from(t.text_range().end()) < offset)
+        .collect();
+    for token in tokens.into_iter().rev() {
+        match token.kind() {
+            syntax::SyntaxKind::R_CURLY => depth += 1,
+            syntax::SyntaxKind::L_CURLY => {
                 if depth == 0 {
-                    match_pos = Some(i);
+                    match_pos = Some(usize::from(token.text_range().start()));
                     break;
                 }
                 depth -= 1;
@@ -114,7 +133,7 @@ mod tests {
     fn typed(fixture: &str, ch: &str) -> Option<Vec<ide_db::text_edit::TextEdit>> {
         let (analysis, file, position) = crate::fixture::position(fixture);
         let url = analysis.url_for_file_id(file).unwrap().clone();
-        analysis.on_type_formatting(&url, position, ch).unwrap()
+        analysis.on_type_formatting(&url, position, ch, &Default::default()).unwrap()
     }
 
     /// A `}` re-indents its own line and nothing else — the badly

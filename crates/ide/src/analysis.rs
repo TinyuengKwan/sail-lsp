@@ -20,11 +20,17 @@ mod context;
 mod hierarchy;
 #[cfg(test)]
 mod imports_tests;
+mod inlay_links;
 #[cfg(test)]
 mod kind_oracle_tests;
 mod ordered_names;
 #[cfg(test)]
 mod ordered_names_tests;
+#[cfg(test)]
+mod preprocess_preview_tests;
+#[cfg(test)]
+mod refactor_tests;
+mod refactor_validation;
 mod shared_edits;
 
 /// Snapshot of URL ↔ FileId mapping from the VFS layer.
@@ -373,18 +379,10 @@ pub struct CodeAction {
     pub is_fix_all: bool,
 }
 
-/// Immutable snapshot of the world, analogous to RA's `GlobalStateSnapshot`.
-///
-/// Combines a salsa db snapshot (cheap Arc clone) with a `Files` snapshot
-/// (FileText handles) and a `UrlMap` snapshot (URL↔FileId mapping from VFS).
-/// Each handler gets its own `Analysis` so in-flight queries are not
-/// affected by mutations.
-///
-/// In RA, `GlobalStateSnapshot` holds `analysis: Analysis` + `vfs`.
-/// Here we flatten them into one struct for convenience since our
-/// tower-lsp architecture doesn't have a separate snapshot layer.
-/// + K2-3: Clone is cheap (salsa db clone = Arc bump, Files clone = Arc bump).
-///   Enables passing to worker threads for parallel diagnostics, prime_caches.
+/// Immutable semantic database and file/URL mappings for IDE requests.
+/// `AnalysisHost` mutates inputs; each `Analysis` retains a Salsa snapshot.
+/// Include-instance selection stays in that snapshot so features resolve the
+/// same physical source in the selected project context.
 #[derive(Clone)]
 pub struct Analysis {
     db: RootDatabase,
@@ -689,9 +687,10 @@ impl Analysis {
                 .collect(),
             None => self.all_salsa_files_vec(),
         };
-        let all: Vec<(&url::Url, &dyn FileDb)> =
-            owned.iter().map(|(u, s)| (u, s as &dyn FileDb)).collect();
-        crate::completion::resolve_completion_item_ide(item, &all);
+        let files: Vec<_> =
+            owned.iter().filter_map(|(_, file)| file.file_text().map(|(_, file)| file)).collect();
+        let details = hir::Semantics::new(&self.db).completion_details(&files, &item.label);
+        crate::completion::resolve_completion_details(item, details);
     }
 
     /// A code lens's title, and the sites it counts — what clicking it
@@ -792,16 +791,51 @@ impl Analysis {
         &self,
         url: &url::Url,
     ) -> Option<crate::expand_include::ExpandIncludeResult> {
-        let graph = self.include_graph.as_ref()?;
         let file_id = self.file_id(url)?;
-        Some(crate::expand_include::expand_includes(
-            graph,
-            file_id,
-            &|fid| {
-                self.url_for_file_id(fid).and_then(|u| self.file(u)).map(|sf| sf.text().to_string())
-            },
-            &|fid| self.file_label(fid),
-        ))
+        let physical = base_db::preprocess::physical_file(&self.db, file_id);
+        let Some(input) = base_db::preprocess::WorkspaceSourceProject::try_get(&self.db) else {
+            return Some(crate::expand_include::ExpandIncludeResult {
+                root: url.to_string(),
+                expansion: format!("// No loaded project: source only; no preprocessing environment is available.\n{}", self.file_by_id(physical)?.text()),
+                context: None,
+                mappings: vec![],
+            });
+        };
+        let (plan, trace) = hir::preprocess::trace_workspace(&self.db, input);
+        let preferred = self.preferred_views.get(&physical).copied().unwrap_or(file_id);
+        let visits: Vec<_> =
+            plan.instances.iter().filter(|instance| instance.source == physical).collect();
+        let selected = visits
+            .iter()
+            .find(|instance| {
+                let view = if instance.primary {
+                    physical
+                } else {
+                    self.db.include_instance_id(&instance.key).unwrap_or(physical)
+                };
+                view == preferred
+            })
+            .or_else(|| visits.iter().find(|instance| instance.active))
+            .or_else(|| visits.first())?;
+        let mut result = crate::expand_include::render(
+            &selected.key,
+            &trace,
+            |id| self.file_by_id(id).map(|file| file.text().to_string()),
+            |id| self.url_for_file_id(id).map_or_else(|| self.file_label(id), ToString::to_string),
+        );
+        let options = selected
+            .key
+            .module
+            .and_then(|module| input.project(&self.db).module_options.get(&module));
+        let header = format!("// Project: {}\n// Selected source: {}\n// Read-only snapshot of the loaded preprocessing configuration and current source buffers.\n", options.and_then(|options|options.project.as_ref()).map_or_else(|| "in-memory project".to_owned(), |path| path.display().to_string()), url);
+        for mapping in &mut result.mappings {
+            mapping.generated = base_db::text_range(
+                base_db::range_start(mapping.generated) + header.len(),
+                base_db::range_end(mapping.generated) + header.len(),
+            );
+        }
+        result.expansion.insert_str(0, &header);
+        Some(result)
     }
 
     /// A short, human-readable name for a file — its basename, or a
@@ -831,7 +865,7 @@ impl Analysis {
         url: &url::Url,
         range: base_db::TextRange,
         options: &ide_db::ide_types::FormatOptions,
-    ) -> crate::Cancellable<Option<Vec<ide_db::text_edit::TextEdit>>> {
+    ) -> crate::Cancellable<Option<crate::formatting::FormatResult>> {
         self.with_db(|a| a.range_format_inner(url, range, options))
     }
 
@@ -840,9 +874,9 @@ impl Analysis {
         url: &url::Url,
         range: base_db::TextRange,
         options: &ide_db::ide_types::FormatOptions,
-    ) -> Option<Vec<ide_db::text_edit::TextEdit>> {
+    ) -> Option<crate::formatting::FormatResult> {
         let sf = self.file(url)?;
-        crate::formatting::range_format_document_edits(&sf, range, options)
+        Some(crate::formatting::range_format_document_result(&sf, range, options))
     }
 
     /// Edits to apply when the user presses Enter.
@@ -850,17 +884,19 @@ impl Analysis {
         &self,
         url: &url::Url,
         position: ide_db::LineCol,
+        options: &ide_db::ide_types::FormatOptions,
     ) -> crate::Cancellable<Option<Vec<ide_db::text_edit::TextEdit>>> {
-        self.with_db(|a| a.on_enter_inner(url, position))
+        self.with_db(|a| a.on_enter_inner(url, position, options))
     }
 
     fn on_enter_inner(
         &self,
         url: &url::Url,
         position: ide_db::LineCol,
+        options: &ide_db::ide_types::FormatOptions,
     ) -> Option<Vec<ide_db::text_edit::TextEdit>> {
         let sf = self.file(url)?;
-        crate::formatting::on_enter_edits(&sf, position)
+        crate::formatting::on_enter_edits_with_options(&sf, position, options)
     }
 
     /// The counterpart of the bracket at `offset`.
@@ -938,7 +974,14 @@ impl Analysis {
         config: &ide_assists::AssistConfig,
     ) -> Vec<ide_db::assists::Assist> {
         let Some(sf) = self.file(url) else { return Vec::new() };
-        ide_assists::assists(config, &sf, range)
+        let owned: Vec<_> = self.all_salsa_files().into_iter().map(|(_, file)| file).collect();
+        let workspace: Vec<_> = owned
+            .iter()
+            .filter_map(|file| {
+                Some((file.file_text()?.1.file_id(&self.db), file as &dyn ide_db::FileDb))
+            })
+            .collect();
+        ide_assists::assists_with_workspace(config, &sf, range, &workspace)
     }
 
     /// Every code action available at `range`.
@@ -952,7 +995,7 @@ impl Analysis {
         url: &url::Url,
         range: ide_db::line_index::TextRange,
         diagnostics: &[ide_diagnostics::Diagnostic],
-        format: &ide_db::ide_types::FormatOptions,
+        format: Option<&ide_db::ide_types::FormatOptions>,
         assists: &ide_assists::AssistConfig,
     ) -> crate::Cancellable<Vec<CodeAction>> {
         self.with_db(|a| a.code_actions_inner(url, range, diagnostics, format, assists))
@@ -963,7 +1006,7 @@ impl Analysis {
         url: &url::Url,
         range: ide_db::line_index::TextRange,
         diagnostics: &[ide_diagnostics::Diagnostic],
-        format: &ide_db::ide_types::FormatOptions,
+        format: Option<&ide_db::ide_types::FormatOptions>,
         assists: &ide_assists::AssistConfig,
     ) -> Vec<CodeAction> {
         let Some(file_id) = self.file_id(url) else { return Vec::new() };
@@ -1047,7 +1090,7 @@ impl Analysis {
                 is_fix_all: false,
             });
         }
-        if let Some(edits) = self.format_inner(url, format) {
+        if let Some(edits) = format.and_then(|format| self.format_inner(url, format)) {
             if !edits.is_empty() {
                 out.push(CodeAction {
                     import: None,
@@ -1096,8 +1139,9 @@ impl Analysis {
         url: &url::Url,
         position: ide_db::LineCol,
         ch: &str,
+        options: &ide_db::ide_types::FormatOptions,
     ) -> crate::Cancellable<Option<Vec<ide_db::text_edit::TextEdit>>> {
-        self.with_db(|a| a.on_type_formatting_inner(url, position, ch))
+        self.with_db(|a| a.on_type_formatting_inner(url, position, ch, options))
     }
 
     fn on_type_formatting_inner(
@@ -1105,9 +1149,10 @@ impl Analysis {
         url: &url::Url,
         position: ide_db::LineCol,
         ch: &str,
+        options: &ide_db::ide_types::FormatOptions,
     ) -> Option<Vec<ide_db::text_edit::TextEdit>> {
         if ch == "\n" {
-            return self.on_enter_inner(url, position);
+            return self.on_enter_inner(url, position, options);
         }
         let sf = self.file(url)?;
         let mut chars = ch.chars();
@@ -1374,7 +1419,7 @@ impl Analysis {
         &self,
         file_id: FileId,
         options: &ide_db::ide_types::FormatOptions,
-    ) -> ide_db::ide_types::Cancellable<Option<Vec<ide_db::ide_types::IdeTextEdit>>> {
+    ) -> ide_db::ide_types::Cancellable<Option<crate::formatting::FormatResult>> {
         self.with_db(|a| a.format_document_inner(file_id, options))?
     }
 
@@ -2292,18 +2337,6 @@ impl Analysis {
     }
 
     //
-    // In RA, Analysis methods construct a Semantics internally and
-    // delegate through it. Here, Analysis cannot directly construct
-    // a Semantics because SalsaFile is created on the fly (no
-    // persistent &dyn FileDb storage). Once VFS lands (J-stage),
-    // files will be persistently stored and the bridge will work.
-    //
-    // For now, Analysis methods mirror what Semantics would do: the
-    // same query logic, just without the extra indirection. New
-    // semantic queries added to Semantics  are the canonical
-    // entry points for code that has a WorkspaceDb (e.g. sync_main
-    // handlers via TestWorkspace, or future VFS-backed state).
-
     /// Document symbols for a file.: takes FileId, not URL.
     fn document_symbols_inner(
         &self,
@@ -2374,12 +2407,15 @@ impl Analysis {
             None => return Ok(None),
         };
         let range = base_db::text_range(token_span.start, token_span.end);
+        let visibility_started = std::time::Instant::now();
         let owned: Vec<_> = self
             .visible_salsa_files(file_id)
             .into_iter()
             .filter(|(_, target)| ide_db::symbol_visible_from(&sf, target, &symbol_key))
             .collect();
+        let visibility_us = visibility_started.elapsed().as_micros();
         let refs: Vec<(&url::Url, &SalsaFile<'_>)> = owned.iter().map(|(u, sf)| (u, sf)).collect();
+        let markup_started = std::time::Instant::now();
         let Some(base) = crate::hover::hover_for_symbol(
             refs.iter().map(|(u, f)| (*u, *f)),
             url,
@@ -2391,6 +2427,8 @@ impl Analysis {
         ) else {
             return Ok(None);
         };
+        let markup_us = markup_started.elapsed().as_micros();
+        let supplement_started = std::time::Instant::now();
         // Field and method accesses carry information the structural hover
         // cannot see. The LSP handler used to add this afterwards, which
         // meant everyone else — tests, the coverage measurement — got the
@@ -2398,6 +2436,7 @@ impl Analysis {
         if let Some(ft) = self.file_text(file_id) {
             if let Some(extra) = crate::hover::hover_resolve_field_or_method(self.db(), ft, offset)
             {
+                tracing::debug!(target: "sail_lsp::latency", "hover_phases visibility_us={visibility_us} markup_us={markup_us} supplement_us={}", supplement_started.elapsed().as_micros());
                 return Ok(Some(crate::hover::HoverResult {
                     markup: format!("{}\n\n{}", base.markup, extra),
                     range: base.range,
@@ -2405,6 +2444,7 @@ impl Analysis {
                 }));
             }
         }
+        tracing::debug!(target: "sail_lsp::latency", "hover_phases visibility_us={visibility_us} markup_us={markup_us} supplement_us={}", supplement_started.elapsed().as_micros());
         Ok(Some(base))
     }
 
@@ -2466,7 +2506,25 @@ impl Analysis {
             hints.extend(self.instance_inlay_hints(view, range, config)?);
         }
         hints.sort_by_key(|hint| hint.offset);
-        hints.dedup_by(|a, b| a.offset == b.offset && a.label == b.label && a.kind == b.kind);
+        hints.dedup_by(|a, b| {
+            if a.offset != b.offset || a.label != b.label || a.kind != b.kind {
+                return false;
+            }
+            // Identical labels in different include contexts need not name the
+            // same declaration. Retain links only where the contexts agree.
+            if a.label_parts.len() != b.label_parts.len()
+                || a.label_parts.iter().zip(&b.label_parts).any(|(a, b)| a.value != b.value)
+            {
+                b.label_parts.clear();
+            } else {
+                for (candidate, retained) in a.label_parts.iter().zip(&mut b.label_parts) {
+                    if candidate.location != retained.location {
+                        retained.location = None;
+                    }
+                }
+            }
+            true
+        });
         Ok(hints)
     }
 
@@ -2480,30 +2538,39 @@ impl Analysis {
             Some(f) => f,
             None => return Ok(Vec::new()),
         };
-        let url = match self.url_for_file_id(file_id) {
-            Some(u) => u,
-            None => return Ok(Vec::new()),
-        };
-        let owned = self.visible_salsa_files(file_id);
+        // Only caller counts consume the workspace file collection. Both
+        // parameter and type hints resolve dependencies through Semantics;
+        // effects use their cached semantic projection below.
+        let needs_callers = config.caller_count_hints
+            && !crate::inlay_hints::visible_callable_heads(
+                &sf,
+                base_db::range_start(range),
+                base_db::range_end(range),
+            )
+            .is_empty();
+        let owned = if needs_callers { self.visible_salsa_files(file_id) } else { Vec::new() };
         let all: Vec<(&url::Url, &dyn FileDb)> =
             owned.iter().map(|(u, sf)| (u, sf as &dyn FileDb)).collect();
 
         // Through `hir`, not `hir_ty`: `ide` talks to one semantic API.
         let sema = hir::Semantics::new(&self.db);
         let ft = self.file_text(file_id);
-        let type_check = ft.filter(|_| config.type_hints).map(|ft| sema.infer_file(ft));
-        let transitive_effects =
-            ft.filter(|_| config.effect_hints).map(|ft| sema.transitive_effects(ft));
+        // Binding hints request the owning callable lazily, after applying
+        // the viewport filter. Whole-file inference here also checks every
+        // offscreen body even when the requested range has no bindings.
+        let transitive_effects = ft
+            .filter(|_| config.effect_hints && crate::inlay_hints::needs_effects(&sf, range))
+            .map(|ft| sema.transitive_effects(ft));
 
-        Ok(crate::inlay_hints::inlay_hints_ide_with_types(
+        let mut hints = crate::inlay_hints::inlay_hints_ide(
             &all,
-            url,
             &sf as &dyn FileDb,
             range,
-            type_check.as_deref(),
             transitive_effects.as_deref(),
             config,
-        ))
+        );
+        self.link_inlay_hints(file_id, &mut hints);
+        Ok(hints)
     }
 
     /// Code lenses for a file.
@@ -2559,7 +2626,7 @@ impl Analysis {
         &self,
         file_id: FileId,
         options: &ide_db::ide_types::FormatOptions,
-    ) -> ide_db::ide_types::Cancellable<Option<Vec<ide_db::ide_types::IdeTextEdit>>> {
+    ) -> ide_db::ide_types::Cancellable<Option<crate::formatting::FormatResult>> {
         let sf = match self.file_by_id(file_id) {
             Some(f) => f,
             None => return Ok(None),
@@ -2572,7 +2639,7 @@ impl Analysis {
         // in the handler beside it, passed all of them. "A feature's config
         // is a parameter, not a default" is a rule this file already
         // states.
-        Ok(crate::formatting::format_document_edits(&sf, options))
+        Ok(Some(crate::formatting::format_text(sf.text(), options)))
     }
 
     /// Compute full diagnostics (parse + semantic + type) for a file.
@@ -2863,8 +2930,7 @@ impl Analysis {
 
     fn expr_type_text_inner(&self, file_id: FileId, span: parser::Span) -> Option<String> {
         let ft = self.file_text(file_id)?;
-        let sf = SalsaFile::new(&self.db, ft);
-        hir::Semantics::new(&self.db).expr_type_text(ft, span, sf.bodies())
+        hir::Semantics::new(&self.db).expr_type_text(ft, span)
     }
 
     /// Get inferred type text for a binding by querying per-callable.
@@ -2883,8 +2949,7 @@ impl Analysis {
 
     fn binding_type_text_inner(&self, file_id: FileId, span: parser::Span) -> Option<String> {
         let ft = self.file_text(file_id)?;
-        let sf = SalsaFile::new(&self.db, ft);
-        hir::Semantics::new(&self.db).binding_type_text(ft, span, sf.bodies())
+        hir::Semantics::new(&self.db).binding_type_text(ft, span)
     }
 
     // Handlers call `analysis.method()` which internally
@@ -2909,23 +2974,6 @@ impl Analysis {
         let all: Vec<(&url::Url, &dyn FileDb)> =
             owned.iter().map(|(u, sf)| (u, sf as &dyn FileDb)).collect();
         Ok(crate::signature_help::signature_help(&all, url, &sf as &dyn FileDb, position))
-    }
-}
-
-/// Pre-materialized workspace of SalsaFiles for WorkspaceDb compatibility.
-/// Created by Analysis::workspace(). Stores all files so their references
-/// remain valid for WorkspaceDb::get_file() and all_files().
-pub struct SalsaWorkspace<'a> {
-    files: Vec<(url::Url, SalsaFile<'a>)>,
-}
-
-impl<'a> ide_db::WorkspaceDb for SalsaWorkspace<'a> {
-    fn get_file(&self, uri: &url::Url) -> Option<&dyn FileDb> {
-        self.files.iter().find(|(u, _)| u == uri).map(|(_, sf)| sf as &dyn FileDb)
-    }
-
-    fn all_files(&self) -> Vec<(&url::Url, &dyn FileDb)> {
-        self.files.iter().map(|(u, sf)| (u, sf as &dyn FileDb)).collect()
     }
 }
 

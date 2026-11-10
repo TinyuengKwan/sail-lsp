@@ -1,63 +1,6 @@
-use ide_db::{FileDb, LineCol};
+use ide_db::FileDb;
 use syntax::parser_lower::Decl;
 use url::Url;
-
-fn token_range_for_offsets(
-    tokens: &[(parser::Token, parser::Span)],
-    start_offset: usize,
-    end_offset: usize,
-) -> Option<(usize, usize)> {
-    let start_idx = tokens.iter().position(|(_, s)| s.start >= start_offset);
-    let end_idx = tokens.iter().rposition(|(_, s)| s.end <= end_offset).map(|i| i + 1);
-    start_idx.zip(end_idx)
-}
-
-/// Infer argument types at a call site for signature help / hover.
-///
-/// Uses salsa-cached InferenceResult via `Semantics::expr_type_text`
-/// instead of inline type inference.
-/// queries cached `InferenceResult` (`hir/src/source_analyzer.rs:381`).
-pub fn infer_call_arg_types_at_position(
-    _files: &[(&Url, &dyn FileDb)],
-    _current_uri: &Url,
-    current_file: &dyn FileDb,
-    position: LineCol,
-    callee: &str,
-) -> Option<Vec<Option<String>>> {
-    let offset = current_file.offset_at(&position);
-    let tokens = current_file.tokens()?;
-    let parsed = current_file.parsed()?;
-    let call = parsed.call_sites.iter().find(|call| {
-        call.callee == callee && call.callee_span.start <= offset && offset <= call.callee_span.end
-    })?;
-
-    let mut arg_types = Vec::new();
-    let mut current_idx = call.open_span.end;
-    let mut boundary_offsets: Vec<usize> =
-        call.arg_separator_spans.iter().map(|span| span.start).collect();
-    if let Some(close) = call.close_span {
-        boundary_offsets.push(close.start);
-    }
-
-    for boundary in boundary_offsets {
-        let inferred = token_range_for_offsets(tokens, current_idx, boundary).and_then(
-            |(start_idx, end_idx)| {
-                let start = tokens.get(start_idx).map(|(_, s)| s.start)?;
-                let end = tokens.get(end_idx.saturating_sub(1)).map(|(_, s)| s.end)?;
-                let span = parser::Span::new(start, end);
-                // Use salsa-cached InferenceResult instead of
-                // inline inference (infer_expr_type_text_in_files).
-                current_file.file_text().and_then(|(db, ft)| {
-                    hir::Semantics::new(db).expr_type_text(ft, span, current_file.bodies())
-                })
-            },
-        );
-        arg_types.push(inferred);
-        current_idx = boundary + 1;
-    }
-
-    Some(arg_types)
-}
 
 fn span_text(file: &dyn FileDb, span: parser::Span) -> &str {
     file.text()[span.start..span.end].trim()
@@ -84,9 +27,10 @@ pub fn binding_type_hint(
     // 1. Salsa-cached type from per-callable InferenceResult.
     // Semantics::binding_type_text queries infer
     // (salsa-tracked, LRU=256) — no recomputation.
-    if let Some(ty) = file.file_text().and_then(|(db, ft)| {
-        hir::Semantics::new(db).binding_type_text(ft, decl.span, file.bodies())
-    }) {
+    if let Some(ty) = file
+        .file_text()
+        .and_then(|(db, ft)| hir::Semantics::new(db).binding_type_display(ft, decl.span))
+    {
         return Some(ty);
     }
 

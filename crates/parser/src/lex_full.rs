@@ -76,7 +76,10 @@ pub fn lex_full_fidelity_with_errors(input: &str) -> (Vec<(FullToken, Span)>, Ve
     let mut errors = Vec::new();
     let mut cursor = 0;
 
-    for (token, span) in &parsed {
+    for (index, (token, span)) in parsed.iter().enumerate() {
+        if index.is_multiple_of(1024) {
+            stdx::cancellation::checkpoint();
+        }
         // Fill gap between cursor and this token with trivia
         if span.start > cursor {
             emit_trivia(input, cursor, span.start, &mut result, &mut errors);
@@ -106,14 +109,17 @@ fn emit_trivia(
 ) {
     let bytes = input.as_bytes();
     let mut pos = start;
+    let mut next_checkpoint = start;
 
     while pos < end {
+        crate::hand_lexer::checkpoint_bytes(pos, &mut next_checkpoint);
         let seg_start = pos;
 
         // Line comment: // ... or doc comment: /// ...
         if pos + 1 < end && bytes[pos] == b'/' && bytes[pos + 1] == b'/' {
             pos += 2;
             while pos < end && bytes[pos] != b'\n' {
+                crate::hand_lexer::checkpoint_bytes(pos, &mut next_checkpoint);
                 pos += 1;
             }
             // Detect `///` doc comment (but NOT `////` which is a section divider)
@@ -155,6 +161,7 @@ fn emit_trivia(
             pos += 2;
             let mut depth = 1u32;
             while pos + 1 < end && depth > 0 {
+                crate::hand_lexer::checkpoint_bytes(pos, &mut next_checkpoint);
                 if bytes[pos] == b'/' && bytes[pos + 1] == b'*' {
                     depth += 1;
                     pos += 2;
@@ -189,6 +196,7 @@ fn emit_trivia(
         if pos + 1 < end && bytes[pos] == b'(' && bytes[pos + 1] == b'*' {
             pos += 2;
             while pos + 1 < end && !(bytes[pos] == b'*' && bytes[pos + 1] == b')') {
+                crate::hand_lexer::checkpoint_bytes(pos, &mut next_checkpoint);
                 pos += 1;
             }
             if pos + 1 < end {
@@ -201,6 +209,7 @@ fn emit_trivia(
         // Whitespace
         if bytes[pos].is_ascii_whitespace() {
             while pos < end && bytes[pos].is_ascii_whitespace() {
+                crate::hand_lexer::checkpoint_bytes(pos, &mut next_checkpoint);
                 pos += 1;
             }
             out.push((FullToken::Whitespace, Span::new(seg_start, pos)));

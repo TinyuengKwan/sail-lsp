@@ -53,6 +53,55 @@ are uploaded on failures as well as successes. Real-model probes in the pinned
 corpus workflow complement this fixed synthetic regression gate; neither implies
 rust-analyzer performance parity or a cross-machine latency guarantee.
 
+## Pinned real-model absolute targets
+
+`corpus.yml` also runs `scripts/real_model_gate.py` against the pinned sail-riscv
+and sail-arm revisions in `benchmarks/real-model-performance.json`, with the
+pinned Sail standard library. Model revisions and clean source checkouts are
+required. Arm has no native manifest: the existing ordered `SAIL_SRCS` Makefile
+adapter is used for arm-v9.4-a and `devices.sail`. Its manifest, ordered sources
+and Makefile hash are recorded. The gate changes only unsaved document overlays.
+
+Three fresh server runs per model measure the first usable real-symbol
+completion, completion/hover/definition after body edits, completion alongside
+workspace search and cancelled references, completion after reload begins, and
+diagnostic repair after first observing a known error in an appended function.
+Existing model diagnostics outside that function do not satisfy the error check
+or prevent a repaired function from converging. Native background diagnostics
+remain enabled; external compiler Flycheck is disabled. Cache priming finishes
+before warm samples. First completion permits warm OS caches.
+
+The large-document workload edits the full vector arithmetic instruction file in
+RISC-V, plus Arm's `instrs64.sail` and 8 MB `sysregs_autogen.sail`. Minimum source
+sizes and project membership are checked. Uniquely named appended functions
+give exact expected parameter types, binding hints and name ranges while
+retaining the original model contents. Each cycle checks signature help,
+viewport inlay hints, full references and rename edits. Rename is applied to
+the unsaved overlay, then references and definition are checked at the new name;
+wrong ranges, stale versions and incomplete edits fail the gate. First use of
+each large document has its own cold-interaction target; subsequent body-edit
+completion, signature, inlay, references, rename and requery have independent
+limits.
+
+The policy defines absolute p95/p99 millisecond targets, including worker queue
+time separately from client-observed latency. Every repetition must pass; missing
+metrics, insufficient actual cancellations, missing real-symbol results, crashes,
+unlinked sources and protocol failures fail the gate. Raw responses, events,
+queue logs, binary hashes, build identity and host/affinity are retained under
+the output directory. A fresh process has one startup sample per run; its p95/p99
+are that observation, not an estimate of a startup tail distribution.
+
+```sh
+python3 scripts/real_model_gate.py --server target/release/sail-lsp \
+  --riscv /path/to/pinned/sail-riscv --arm /path/to/pinned/sail-arm \
+  --sail-src /path/to/clean/pinned/sail --output target/real-model-performance
+```
+
+These are initial project-specific targets, not measurements of rust-analyzer
+or a cross-machine performance promise. Review results on the recorded host;
+investigate failures before changing targets. This absolute gate complements
+the independent alternating synthetic regression comparison above.
+
 ## Request tracing and local investigations
 
 For an editor-style burst, enable the latency tracing target and summarize stderr:
@@ -68,6 +117,12 @@ Worker samples include retries. Server request totals begin when the main loop
 receives the request; the stdio workload also includes transport and unread
 messages. Compare repeated runs on the same host. A pipelined burst is a stress
 workload, not ordinary typing latency.
+`preprocess_events` and `preprocess_content` samples identify per-file projection
+costs by file ID and byte size, separating them from aggregate `apply_change`
+plan time. Raw logs preserve these IDs even when the summary groups durations.
+`hover_phases` separates visibility, markup and supplemental resolution;
+`hover_render_phases` divides markup into resolution, signature, annotation and
+effect work. These distinguish a first-query cache miss from worker queue delay.
 
 For query reuse, parsing and cache-retention investigations, use the tools in
 [contributor validation](../CONTRIBUTING.md#validation). `incremental_stats`

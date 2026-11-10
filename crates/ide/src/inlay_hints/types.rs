@@ -15,11 +15,19 @@
 pub struct InlayHint {
     pub offset: usize,
     pub label: String,
+    /// Optional navigable pieces; concatenation is exactly `label`.
+    pub label_parts: Vec<InlayHintLabelPart>,
     pub kind: InlayHintKind,
     pub tooltip: Option<String>,
     pub padding_left: Option<bool>,
     pub padding_right: Option<bool>,
     pub data: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InlayHintLabelPart {
+    pub value: String,
+    pub location: Option<crate::FileRange>,
 }
 
 /// Inlay hint kind.

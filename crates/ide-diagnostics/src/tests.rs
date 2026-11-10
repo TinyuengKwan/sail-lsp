@@ -878,3 +878,29 @@ fn type_pattern_errors_highlight_the_failed_written_argument() {
         assert_eq!(diagnostic.range.range, base_db::text_range(start, start + target.len()), "{source}: {diagnostic:?}");
     }
 }
+
+#[test]
+fn disabling_diagnostics_clears_both_pipelines_and_reenabling_restores_them() {
+    assert!(crate::DiagnosticsConfig::default().enabled);
+    let file = TestFile::new("function broken() -> int = absent(\n");
+    let (db, ft) = ide_db::FileDb::file_text(&file).unwrap();
+    let mut config = crate::DiagnosticsConfig::new();
+    let collect = |config: &crate::DiagnosticsConfig| {
+        crate::full_diagnostics(db, config, &crate::AssistResolveStrategy::None, &file, ft, None)
+    };
+    assert!(!collect(&config).is_empty());
+    config.enabled = false;
+    assert!(collect(&config).is_empty());
+    assert!(crate::syntax_diagnostics(db, &config, &file, ft).is_empty());
+    config.enabled = true;
+    assert!(!collect(&config).is_empty());
+}
+
+#[test]
+fn unfinished_call_delays_only_its_own_argument_count_error() {
+    let source = "val takes_two : (int, int) -> int\nfunction takes_two(x, y) = x\nfunction test() -> int = { takes_two(1); takes_two(\n";
+    let diagnostics = check_diagnostics(source);
+    assert_eq!(diagnostics.matches("mismatched-arg-count").count(), 1, "{diagnostics}");
+    let closed = check_diagnostics(&source.replace("takes_two(\n", "takes_two(1) }\n"));
+    assert_eq!(closed.matches("mismatched-arg-count").count(), 2, "{closed}");
+}

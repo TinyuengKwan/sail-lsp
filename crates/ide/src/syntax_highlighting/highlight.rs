@@ -70,7 +70,7 @@ pub(super) fn compute_semantic_tokens_filtered(
     // not contribute semantic classifications to the displayed document.
     let tokens = file
         .file_text()
-        .map(|(db, input)| syntax::parse_query::semantic_parse_file(db, input).tokens.as_slice())
+        .map(|(db, input)| syntax::parse_query::semantic_parse_file(db, input).tokens().as_slice())
         .or_else(|| file.tokens());
     let Some(tokens) = tokens else {
         return HlRanges { data: result };

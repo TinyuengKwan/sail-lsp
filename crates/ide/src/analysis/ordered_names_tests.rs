@@ -3249,6 +3249,111 @@ fn strict_bitvector_configuration_invalidates_types_and_preprocessing() {
 }
 
 #[test]
+fn strict_widths_use_visible_numeric_constraints_and_conditional_aliases() {
+    let provider = "default Order dec\ntype xlen : Int = config base.xlen\nconstraint xlen in {32, 64}\ntype asidlen : Int = if xlen == 32 then 9 else 16\ntype enabled : Bool = config extension.enabled\ntype flen_bytes : Int = if enabled then 8 else 4\ntype flen : Int = flen_bytes * 8\ntype vlen_exp : Int = config vector.exponent\nconstraint 3 <= vlen_exp <= 16\ntype vlen : Int = 2 ^ vlen_exp\n";
+    let consumer = "type X = bitvector(xlen)\ntype A = bitvector(asidlen)\ntype F = bitvector(flen)\ntype V = bitvector(vlen)\nstruct R('v : Int), 'v >= 12 = { page : bitvector('v - 12) }\ntype valid_mode('v) -> Bool = 'v in {32, 39, 48, 57}\ntype VPN('v), valid_mode('v) = bitvector('v - 12)\n";
+    for split in [false, true] {
+        let combined = format!("{provider}{consumer}");
+        let (mut host, map, _) = if split {
+            setup(&[("provider.sail", provider), ("consumer.sail", consumer)], &[0, 1], vec![])
+        } else {
+            setup(&[("main.sail", &combined)], &[0], vec![])
+        };
+        let mut change = ide_db::apply_change::Change::new();
+        change.set_strict_bitvector(true);
+        host.apply_change(change);
+        let diagnostics = snapshot(&host, &map)
+            .file_diagnostics(FileId::from_raw(u32::from(split)), &Default::default())
+            .unwrap();
+        let errors: Vec<_> =
+            diagnostics.iter().filter(|d| d.severity == ide_diagnostics::Severity::Error).collect();
+        assert!(errors.is_empty(), "split={split}\n{errors:?}");
+    }
+}
+
+#[test]
+fn strict_width_proofs_do_not_use_future_constraints_or_rebound_aliases() {
+    let cases = [
+        "default Order dec\ntype width : Int = config base.width\ntype Bad = bitvector(width)\nconstraint width >= 0\n",
+        "default Order dec\ntype width = 8\ntype Earlier = bitvector(width)\ntype width = -1\ntype Bad = bitvector(width)\n",
+        "default Order dec\ntype n : Int = config base.width\nconstraint n == 8\nstruct Bad('n : Int) = { value : bitvector('n) }\n",
+        "default Order dec\ntype enabled : Bool = config extension.enabled\ntype width : Int = if enabled then 8 else -1\ntype Bad = bitvector(width)\n",
+        "default Order dec\nstruct Bad('n : Int) = { value : bitvector('n) }\n",
+        "default Order dec\ntype mode('v) -> Bool = 'v in {8, 32}\ntype Bad('v), mode('v) = bitvector('v - 12)\n",
+    ];
+    for source in cases {
+        let (mut host, map, _) = setup(&[("main.sail", source)], &[0], vec![]);
+        let mut change = ide_db::apply_change::Change::new();
+        change.set_strict_bitvector(true);
+        host.apply_change(change);
+        let diagnostics = snapshot(&host, &map)
+            .file_diagnostics(FileId::from_raw(0), &Default::default())
+            .unwrap();
+        assert!(
+            diagnostics.iter().any(|d| d.severity == ide_diagnostics::Severity::Error
+                && d.message.contains("Well-formedness")),
+            "{source}\n{diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn declaration_proofs_are_cached_and_track_imported_facts() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let executions = Arc::new(AtomicUsize::new(0));
+    let observed = executions.clone();
+    let mut host = AnalysisHost::new();
+    host.db = RootDatabase::with_event_callback(Some(Box::new(move |event| {
+        if let salsa::EventKind::WillExecute { database_key } = event.kind {
+            if format!("{database_key:?}").contains("declaration_diagnostics") {
+                observed.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    })));
+    let provider = "default Order dec\ntype width : Int = config base.width\nconstraint width >= 0\nfunction unrelated() -> int = 0\n";
+    let (mut host, map, _) = super::hierarchy::tests::setup_with_host(
+        host,
+        &[("provider.sail", provider), ("consumer.sail", "type T = bitvector(width)\n")],
+        &[0, 1],
+        vec![],
+    );
+    let mut change = ide_db::apply_change::Change::new();
+    change.set_strict_bitvector(true);
+    host.apply_change(change);
+    let errors = |host: &AnalysisHost| {
+        snapshot(host, &map)
+            .file_diagnostics(FileId::from_raw(1), &Default::default())
+            .unwrap()
+            .into_iter()
+            .filter(|d| d.severity == ide_diagnostics::Severity::Error)
+            .collect::<Vec<_>>()
+    };
+    assert!(errors(&host).is_empty());
+    let first = executions.load(Ordering::Relaxed);
+    assert!(first > 0, "query instrumentation must observe the proof");
+    assert!(errors(&host).is_empty());
+    assert_eq!(executions.load(Ordering::Relaxed), first, "unchanged requests reuse proofs");
+    let mut change = ide_db::apply_change::Change::new();
+    change.change_file(FileId::from_raw(0), provider.replace("int = 0", "int = 1"));
+    host.apply_change(change);
+    assert!(errors(&host).is_empty());
+    assert_eq!(
+        executions.load(Ordering::Relaxed),
+        first,
+        "unrelated bodies are not proof dependencies"
+    );
+    let mut change = ide_db::apply_change::Change::new();
+    change.change_file(FileId::from_raw(0), provider.replace(">= 0", "== -1"));
+    host.apply_change(change);
+    assert!(!errors(&host).is_empty(), "changed imported evidence must invalidate the proof");
+    assert!(executions.load(Ordering::Relaxed) > first);
+    let mut change = ide_db::apply_change::Change::new();
+    change.change_file(FileId::from_raw(0), provider);
+    host.apply_change(change);
+    assert!(errors(&host).is_empty(), "repair clears the old proof failure");
+}
+
+#[test]
 fn record_undefined_eligibility_tracks_provider_constraints() {
     let provider = "default Order dec\nstruct R('n : Int) = { x : bitvector('n) }\n";
     let (mut host, map, _) = setup(
@@ -3535,7 +3640,7 @@ fn shared_ssr_and_assists_require_matching_semantics_and_changes() {
             "same={same}: {assists:?}"
         );
         let actions = analysis
-            .code_actions(&urls[0], range, &[], &Default::default(), &Default::default())
+            .code_actions(&urls[0], range, &[], Some(&Default::default()), &Default::default())
             .unwrap();
         assert_eq!(
             actions.iter().any(|a| a.title == "Extract to variable"),
@@ -3631,7 +3736,7 @@ fn shared_unused_fix_requires_a_diagnostic_in_every_active_context() {
                 &urls[0],
                 unused[0].range.range,
                 &unused,
-                &Default::default(),
+                Some(&Default::default()),
                 &Default::default(),
             )
             .unwrap();
@@ -3641,4 +3746,52 @@ fn shared_unused_fix_requires_a_diagnostic_in_every_active_context() {
             "same={same}: {actions:?}"
         );
     }
+}
+
+#[test]
+fn span_type_queries_lower_only_the_owning_callable() {
+    use std::sync::{Arc, Mutex};
+    let source = "function offscreen(x : int) -> int = x\nfunction visible(word : string) -> string = word\nfunction later(x : int) -> int = x\n";
+    let queries = Arc::new(Mutex::new(Vec::new()));
+    let observed = queries.clone();
+    let mut db =
+        ide_db::root_database::RootDatabase::with_event_callback(Some(Box::new(move |event| {
+            if let salsa::EventKind::WillExecute { database_key } = event.kind {
+                observed.lock().unwrap().push(format!("{database_key:?}"));
+            }
+        })));
+    let id = FileId::from_raw(0);
+    let mut change = ide_db::apply_change::Change::new();
+    change.change_file(id, source);
+    change.set_workspace_files(vec![id]);
+    db.apply_change(change);
+    let uri = url::Url::parse("file:///tmp/span-query.sail").unwrap();
+    let map = UrlMap::new([(uri.clone(), id)].into(), [(id, uri)].into());
+    let files = db.files().clone();
+    let analysis = Analysis::with_url_map(db, files, map);
+    let expression = source.rfind("word").unwrap();
+    assert_eq!(
+        analysis.expr_type_text(id, parser::Span::new(expression, expression + 4)).unwrap(),
+        Some("string".into())
+    );
+    let binding = source.find("word").unwrap();
+    assert_eq!(
+        analysis.binding_type_text(id, parser::Span::new(binding, binding + 4)).unwrap(),
+        Some("string".into())
+    );
+    let executed = queries.lock().unwrap();
+    assert!(
+        executed.iter().all(|key| !key.starts_with("callable_bodies(")),
+        "whole-file lowering: {executed:?}"
+    );
+    assert_eq!(
+        executed.iter().filter(|key| key.starts_with("callable_bodies_for_name(")).count(),
+        1,
+        "offscreen lowering: {executed:?}"
+    );
+    assert_eq!(
+        executed.iter().filter(|key| key.starts_with("infer(")).count(),
+        1,
+        "offscreen inference: {executed:?}"
+    );
 }

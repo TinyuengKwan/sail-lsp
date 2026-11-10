@@ -19,6 +19,7 @@ pub(crate) type ReqHandler = fn(&mut GlobalState, lsp_server::Response);
 type ReqQueue = lsp_server::ReqQueue<(String, std::time::Instant), ReqHandler>;
 
 pub(crate) struct GlobalState {
+    pub(crate) editor_commands: crate::editor_commands::State,
     /// MemDocs tracks open documents (text + version).
     pub mem_docs: crate::mem_docs::MemDocs,
     /// Buffers edited since the last save. External Sail reads disk, not these.
@@ -45,6 +46,9 @@ pub(crate) struct GlobalState {
 
     /// User configuration (from workspace/didChangeConfiguration).
     pub config: crate::config::SailLspConfig,
+    pub(crate) scoped_configs: Arc<std::collections::BTreeMap<Url, SailLspConfig>>,
+    pub(crate) configuration_inputs: crate::shared_configuration::Inputs,
+    pub(crate) pending_configuration: Option<crate::scoped_configuration::PendingConfiguration>,
 
     /// Workspace folders for reload.
     pub workspace_folders: std::collections::HashSet<Url>,
@@ -81,6 +85,7 @@ pub(crate) struct GlobalState {
     pub(crate) loader: Option<Box<dyn vfs::loader::Handle>>,
     /// Changes the loader has seen.
     pub(crate) loader_receiver: Option<crossbeam_channel::Receiver<vfs::loader::Message>>,
+    pub(crate) watcher_error: Option<String>,
     /// The scan's answer, waiting for the loader to have read it.
     ///
     /// The workspace is `(files in semantic order, count)` between
@@ -105,6 +110,8 @@ pub(crate) struct GlobalState {
     pub(crate) project_error: Option<String>,
     /// Settings the client sent that could not be read, last reported.
     pub(crate) config_errors: Vec<String>,
+    /// State-only project errors can change without a Salsa input revision.
+    pub(crate) diagnostics_refresh_requested: bool,
     /// The project each workspace folder loaded, or kept after its manifest
     /// broke. Flycheck checks these, and a failed reload falls back to them.
     pub(crate) projects: Arc<std::collections::BTreeMap<Url, crate::reload::FolderProject>>,
@@ -123,8 +130,15 @@ pub(crate) struct GlobalState {
         std::collections::HashMap<crate::flycheck::CheckTarget, crate::flycheck::Worker>,
     pub(crate) flycheck_status:
         std::collections::BTreeMap<crate::flycheck::CheckTarget, crate::flycheck::Status>,
+    pub(crate) flycheck_history:
+        std::collections::BTreeMap<crate::flycheck::CheckTarget, crate::flycheck::CheckHistory>,
     pub(crate) loading_module_graph: Option<base_db::module_graph::ModuleGraph>,
     pub(crate) loading_source_project: Option<base_db::preprocess::SourceProject>,
+    /// At most one independent preprocessing worker; newer loads replace
+    /// the pending input, rather than accumulating snapshots or workers.
+    pub(crate) preprocessing_running: bool,
+    pub(crate) pending_preprocessing: Option<crate::main_loop::PendingPreprocessing>,
+    pub(crate) preprocessing_cancel: crate::main_loop::PreprocessingCancellation,
 
     /// Task_pool is part of GlobalState.
     /// Generic `TaskPool<Task>` — Task defined in main_loop.rs.
@@ -188,13 +202,14 @@ pub(crate) struct GlobalState {
     pub(crate) effective_sail_dir: Option<std::path::PathBuf>,
     pub(crate) sail_dir_origin: &'static str,
 
-    /// Cached formatting options from the last `textDocument/formatting`
-    /// request. Used by code actions ("Format document") so they apply
+    /// Last client-supplied formatting options for each open document.
+    /// Used by code actions ("Format document") so they apply
     /// the same tab_size / insert_spaces settings the client sends for
     /// standard formatting. Without this, code actions use hardcoded
     /// defaults that may differ from the editor's configuration.
-    pub(crate) last_format_options:
-        std::sync::Arc<std::sync::Mutex<ide_db::ide_types::FormatOptions>>,
+    pub(crate) last_format_options: std::sync::Arc<
+        std::sync::Mutex<std::collections::HashMap<Url, ide_db::ide_types::FormatOptions>>,
+    >,
 }
 
 impl GlobalState {
@@ -204,6 +219,7 @@ impl GlobalState {
     ) -> Self {
         let (effective_sail_dir, sail_dir_origin) = Self::resolve_sail_dir();
         Self {
+            editor_commands: Default::default(),
             pending_change: ide_db::apply_change::Change::new(),
             mem_docs: crate::mem_docs::MemDocs::default(),
             dirty_documents: Default::default(),
@@ -222,12 +238,17 @@ impl GlobalState {
             discovery_watch_files: Vec::new(),
             loader: None,
             loader_receiver: None,
+            watcher_error: None,
             pending_workspace: None,
             workspace_load_version: 0,
             loading_project_config: None,
             loading_project_inputs: Default::default(),
             project_error: None,
             config_errors: Vec::new(),
+            diagnostics_refresh_requested: false,
+            scoped_configs: Arc::default(),
+            configuration_inputs: Default::default(),
+            pending_configuration: None,
             projects: Default::default(),
             manifest_diagnostics: Default::default(),
             manifest_texts: Default::default(),
@@ -235,9 +256,15 @@ impl GlobalState {
             flycheck_generation: 0,
             flycheck_workers: Default::default(),
             flycheck_status: Default::default(),
+            flycheck_history: Default::default(),
             module_contexts: Default::default(),
             loading_module_graph: None,
             loading_source_project: None,
+            preprocessing_running: false,
+            pending_preprocessing: None,
+            preprocessing_cancel: crate::main_loop::PreprocessingCancellation(
+                hir::CancellationToken::new(),
+            ),
             task_pool: crate::task_pool::TaskPool::new_with_threads(
                 task_sender,
                 crate::task_pool::TaskPool::<crate::main_loop::Task>::default_threads(),
@@ -260,7 +287,7 @@ impl GlobalState {
             effective_sail_dir,
             sail_dir_origin,
             last_format_options: std::sync::Arc::new(std::sync::Mutex::new(
-                ide_db::ide_types::FormatOptions::default(),
+                std::collections::HashMap::new(),
             )),
         }
     }
@@ -648,6 +675,7 @@ impl GlobalState {
     /// Immutable snapshot passed to handler (sync or async).
     pub(crate) fn snapshot(&mut self) -> GlobalStateSnapshot {
         GlobalStateSnapshot {
+            preview_links: self.editor_commands.links.clone(),
             analysis_health: self.analysis_health.clone(),
             cache_control: self.cache_control.clone(),
             server_status: self.current_status(),
@@ -664,22 +692,20 @@ impl GlobalState {
             },
             analysis: self.analysis_snapshot(),
             config: self.config.clone(),
+            global_config: self.config.clone(),
+            scoped_configs: self.scoped_configs.clone(),
             semantic_tokens_cache: self.semantic_tokens_cache.clone(),
             client_caps: self.client_caps.clone(),
             last_format_options: self.last_format_options.clone(),
             library_files: Arc::new(self.library_root.clone()),
             project_error: self.project_error.as_deref().map(Arc::from),
+            watcher_error: self.watcher_error.as_deref().map(Arc::from),
             projects: self.projects.clone(),
             module_contexts: self.module_contexts.clone(),
             manifest_texts: self.manifest_texts.clone(),
             flycheck_status: self.flycheck_status.clone(),
-            check_diagnostics: Arc::new(
-                self.diagnostics
-                    .check
-                    .iter()
-                    .map(|(&file, projects)| (file, projects.values().flatten().cloned().collect()))
-                    .collect(),
-            ),
+            flycheck_history: self.flycheck_history.clone(),
+            check_diagnostics: self.diagnostics.check.clone(),
             document_versions: self
                 .mem_docs
                 .iter()
@@ -687,6 +713,15 @@ impl GlobalState {
                 .chain(self.manifest_texts.iter().map(|(uri, doc)| (uri.clone(), doc.version)))
                 .collect(),
         }
+    }
+
+    pub(crate) fn snapshot_for_uri(&mut self, uri: Option<&Url>) -> GlobalStateSnapshot {
+        let config = uri.map(|uri| self.config_for_uri(uri).clone());
+        let mut snapshot = self.snapshot();
+        if let Some(config) = config {
+            snapshot.config = config;
+        }
+        snapshot
     }
 
     /// Send a notification to the client.
@@ -721,17 +756,20 @@ impl GlobalState {
 /// mutating shared state. Clone is cheap (salsa Arc + index Arc).
 #[derive(Clone)]
 pub(crate) struct GlobalStateSnapshot {
+    pub(crate) preview_links: Arc<std::collections::HashMap<Url, Vec<lsp_types::DocumentLink>>>,
     pub(crate) cache_control: crate::cache_control::CacheController,
     pub(crate) analysis_health: Arc<crate::analysis_health::AnalysisHealth>,
     pub(crate) server_status: crate::lsp_ext::ServerStatusParams,
     pub(crate) module_contexts: Arc<Vec<serde_json::Value>>,
-    pub(crate) check_diagnostics:
-        Arc<std::collections::HashMap<base_db::FileId, Vec<lsp_types::Diagnostic>>>,
+    pub(crate) check_diagnostics: crate::diagnostics::CompilerDiagnostics,
     pub(crate) flycheck_status:
         std::collections::BTreeMap<crate::flycheck::CheckTarget, crate::flycheck::Status>,
+    pub(crate) flycheck_history:
+        std::collections::BTreeMap<crate::flycheck::CheckTarget, crate::flycheck::CheckHistory>,
     pub(crate) workspace_status: WorkspaceStatus,
     pub(crate) document_versions: std::collections::HashMap<Url, i32>,
     pub(crate) project_error: Option<Arc<str>>,
+    pub(crate) watcher_error: Option<Arc<str>>,
     /// Open manifests' text.
     pub(crate) manifest_texts: Arc<std::collections::HashMap<Url, crate::mem_docs::DocumentData>>,
     /// The loaded projects, for project navigation.
@@ -740,13 +778,16 @@ pub(crate) struct GlobalStateSnapshot {
     pub analysis: Analysis,
     /// Server configuration.
     pub config: SailLspConfig,
+    pub(crate) global_config: SailLspConfig,
+    pub(crate) scoped_configs: Arc<std::collections::BTreeMap<Url, SailLspConfig>>,
     /// Per-file semantic token cache (shared via Arc<Mutex>).
     pub semantic_tokens_cache: crate::lsp::semantic_tokens::SemanticTokensCache,
     /// Client capabilities for feature detection.
     pub client_caps: crate::lsp::capabilities::ClientCapabilities,
-    /// Cached formatting options from the last `textDocument/formatting`
-    /// request. Shared via Arc<Mutex> with GlobalState.
-    pub last_format_options: std::sync::Arc<std::sync::Mutex<ide_db::ide_types::FormatOptions>>,
+    /// Per-document client formatting options, shared with GlobalState.
+    pub last_format_options: std::sync::Arc<
+        std::sync::Mutex<std::collections::HashMap<Url, ide_db::ide_types::FormatOptions>>,
+    >,
     /// Files belonging to `$SAIL_DIR` — the bundled library.
     ///
     /// rust-analyzer will not publish diagnostics for a library file, and
@@ -760,6 +801,10 @@ pub(crate) struct GlobalStateSnapshot {
 }
 
 impl GlobalStateSnapshot {
+    pub(crate) fn config_for_uri(&self, uri: &Url) -> &SailLspConfig {
+        crate::scoped_configuration::for_uri(&self.global_config, &self.scoped_configs, uri)
+    }
+
     /// Whether `file_id` is part of the bundled library rather than the
     /// user's own sources.
     pub(crate) fn is_library(&self, file_id: base_db::FileId) -> bool {

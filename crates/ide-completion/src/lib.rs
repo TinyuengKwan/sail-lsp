@@ -31,7 +31,10 @@ mod render;
 mod snippet;
 
 pub use crate::{
-    config::{CallableSnippets, CompletionConfig, CompletionFieldsToResolve, SnippetCap},
+    config::{
+        CallableSnippets, CompletionConfig, CompletionFieldsToResolve, CompletionTemplate,
+        SnippetCap,
+    },
     snippet::{Snippet, SnippetScope},
 };
 pub use context::completion_prefix;
@@ -204,6 +207,41 @@ pub fn completions_with_config(
 /// New code should match on `CompletionAnalysis` + `PathKind` instead.
 #[allow(unused_imports)]
 pub(crate) use context::CompletionPosition;
+
+/// Render metadata selected by the shared semantic API.
+pub fn resolve_completion_details(
+    item: &mut CompletionItem,
+    details: hir::semantics::CompletionDetails,
+) {
+    if builtin_docs(&item.label).is_some() {
+        resolve_completion_item_ide(item, &[]);
+        return;
+    }
+    let mut markdown = Vec::new();
+    if details.has_definition {
+        markdown.push(format!("**{:?}** **{}**", item.kind, item.label));
+        if let Some(documentation) = details.documentation {
+            markdown.push(format!("___\n\n{documentation}"));
+        }
+    }
+    if !details.signatures.is_empty() {
+        markdown.push("___".into());
+        if details.signatures.len() > 1 {
+            markdown.push(format!("**{} overloads:**", details.signatures.len()));
+        }
+        for signature in details.signatures {
+            markdown.push(format!("```sail\n{}\n```", signature.label));
+        }
+    }
+    if markdown.is_empty() {
+        markdown.push(format!(
+            "`{}`\n\n{}",
+            item.label,
+            item.detail.as_deref().unwrap_or("Sail symbol")
+        ));
+    }
+    item.documentation = Some(markdown.join("\n\n"));
+}
 
 /// Resolve a completion item by adding documentation.
 pub fn resolve_completion_item_ide(item: &mut CompletionItem, all_files: &[(&Url, &dyn FileDb)]) {
@@ -650,3 +688,6 @@ mod cursor_tests {
         assert!(!labels.contains(&"already"), "offered a name that is already defined: {labels:?}");
     }
 }
+
+#[cfg(test)]
+mod templates_tests;

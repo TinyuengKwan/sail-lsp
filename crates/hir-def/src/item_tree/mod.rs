@@ -417,6 +417,18 @@ impl DefItem {
         }
     }
 
+    /// The generated enum-to-number conversion, when the compiler supplies
+    /// one. Explicit signatures and suppression attributes remove that entry.
+    pub fn enum_number_conversion<'a>(&self, tree: &'a ItemTree) -> Option<&'a Name> {
+        if self.def_kind(tree) != DefKind::Enum {
+            return None;
+        }
+        tree.top_level_items().iter().find(|item| {
+            tree.generated.get(item).is_some_and(|origin| origin.owner == *self && origin.kind == generated::Kind::EnumNumber)
+                && matches!(item.type_ref(tree), Some(TypeRef::Fn { params, .. }) if params.as_slice() == [TypeRef::Named(self.name(tree).to_string())])
+        }).map(|item| item.name(tree))
+    }
+
     /// Get the type reference of this item (if available).
     pub fn type_ref<'a>(&self, tree: &'a ItemTree) -> Option<&'a TypeRef> {
         match self {

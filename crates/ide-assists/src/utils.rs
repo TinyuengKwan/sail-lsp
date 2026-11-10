@@ -5,6 +5,19 @@ use ide_db::FileDb;
 use ide_diagnostics::Diagnostic;
 use syntax::ast;
 
+/// `implicit(n)` marks a compiler-supplied function parameter. Once staged
+/// as an ordinary local value its Sail annotation is `int(n)`, not implicit(n).
+pub(crate) fn argument_annotation(ty: &hir::Ty, db: &dyn salsa::Database) -> String {
+    use hir::HirDisplay as _;
+    let ty = match ty.kind() {
+        hir::TyKind::App { name, args, .. } if name == "implicit" => {
+            hir::Ty::app("int", args.clone(), "")
+        }
+        _ => ty.clone(),
+    };
+    ty.display_to_string(db)
+}
+
 /// Extract a trivial expression from a block.
 ///
 /// If a block contains only a single item (no statements),

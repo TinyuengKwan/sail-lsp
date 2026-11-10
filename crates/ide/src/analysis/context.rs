@@ -131,6 +131,27 @@ impl Analysis {
                         .map(|url| url.as_str().to_owned())
                 })
                 .collect();
+            let types = active.then(|| {
+                let file = self.file_text(view)?;
+                let explanation = hir::Semantics::new(&self.db).explain_expression(file, offset);
+                Some(json!({
+                    "inferred": explanation.inferred,
+                    "mismatches": explanation.mismatches.iter().map(|mismatch| json!({
+                        "expected": mismatch.expected, "actual": mismatch.actual,
+                        "location": self.explanation_location(mismatch.range),
+                        "origins": mismatch.origins.iter().map(|(range,label)| json!({"label":label,"location":self.explanation_location(*range)})).collect::<Vec<_>>()
+                    })).collect::<Vec<_>>(),
+                    "candidates": explanation.candidates.iter().map(|candidate| json!({
+                        "target":candidate.target,"signature":candidate.signature,"reason":candidate.reason,"status":candidate.status,"argumentIndices":candidate.argument_indices,
+                        "declaration": candidate.declaration.and_then(|range| self.explanation_location(range)),
+                        "arguments": candidate.arguments.iter().filter_map(|range|self.explanation_location(*range)).collect::<Vec<_>>()
+                    })).collect::<Vec<_>>(),
+                    "constraints": explanation.constraints.iter().map(|constraint| json!({
+                        "constraint":constraint.constraint,"status":constraint.status,"reason":constraint.reason,"reasonCode":constraint.reason_code,
+                        "assumptions":constraint.assumptions,"origin":constraint.origin.and_then(|range|self.explanation_location(range))
+                    })).collect::<Vec<_>>()
+                }))
+            }).flatten();
             contexts.push(json!({"view":view.index(), "selected":self.preferred_views.get(&file) == Some(&view), "moduleIndex":module, "active":active,
                 "name":name, "resolved":resolved,
                 "resolution": if !active { "inactive conditional source region" }
@@ -138,9 +159,21 @@ impl Analysis {
                     else if definition.as_ref().is_some_and(Definition::is_local) { "local binding or type variable" }
                     else if resolved { "resolved in the active semantic scope" }
                     else { "no selected declaration at this position" },
-                "visibleFiles":visible_files,"candidates":candidates}));
+                "visibleFiles":visible_files,"candidates":candidates,"types":types}));
         }
         json!({"file":self.url_for_file_id(file).map(|url| url.as_str()), "projectMember":membership, "contexts":contexts})
+    }
+    fn explanation_location(&self, range: hir::FileRange) -> Option<Value> {
+        let file = base_db::preprocess::physical_file(&self.db, range.file_id);
+        let input = self.file_text(file)?;
+        let index = ide_db::line_index::LineIndex::new(input.text(&self.db));
+        let position = |offset| {
+            let position = index.line_col(offset);
+            json!({"line":position.line,"character":index.byte_col_to_utf16(position.line, position.col)})
+        };
+        Some(json!({"uri":self.url_for_file_id(file)?.as_str(),"range":{
+            "start":position(base_db::range_start(range.range)),"end":position(base_db::range_end(range.range))
+        }}))
     }
 }
 
@@ -149,6 +182,139 @@ mod tests {
     use super::super::hierarchy::tests::{setup, snapshot};
     use super::*;
     use base_db::module_graph::ModuleData;
+
+    #[test]
+    fn explains_actual_overload_rejections_and_links_candidate_declarations_and_arguments() {
+        let definitions = "val int_case : int -> int\nval bool_case : bool -> bool\noverload choose = { int_case, bool_case }\n";
+        let main = "function use() -> int = choose(\"text\")\n";
+        let (host, map, urls) =
+            setup(&[("defs.sail", definitions), ("main.sail", main)], &[0, 1], vec![]);
+        let analysis = snapshot(&host, &map);
+        let result = analysis
+            .explain_position(
+                FileId::from_raw(1),
+                analysis.file(&urls[1]).unwrap().position_at(main.find("text").unwrap()),
+            )
+            .unwrap();
+        let candidates = result["contexts"][0]["types"]["candidates"].as_array().unwrap();
+        assert_eq!(candidates.len(), 2, "{result}");
+        for candidate in candidates {
+            assert_eq!(candidate["status"], "mismatch", "{candidate}");
+            assert_eq!(candidate["declaration"]["uri"], urls[0].as_str());
+            assert_eq!(candidate["arguments"][0]["uri"], urls[1].as_str());
+            assert!(candidate["reason"].as_str().unwrap().contains("type shapes"));
+        }
+    }
+
+    #[test]
+    fn rejected_candidate_reports_the_actual_explicit_argument_number() {
+        let source = "val choose : (int, bool) -> int\nfunction use() -> int = choose(1, 3)\n";
+        let (host, map, urls) = setup(&[("main.sail", source)], &[0], vec![]);
+        let analysis = snapshot(&host, &map);
+        let result = analysis
+            .explain_position(
+                FileId::from_raw(0),
+                analysis.file(&urls[0]).unwrap().position_at(source.rfind("choose(").unwrap()),
+            )
+            .unwrap();
+        let candidate = &result["contexts"][0]["types"]["candidates"][0];
+        assert_eq!(candidate["argumentIndices"], serde_json::json!([2]), "{result}");
+    }
+
+    #[test]
+    fn rejected_calls_distinguish_refuted_and_unproven_constraints() {
+        for (source, status) in [
+            ("val needs : forall ('n : Int), 'n > 0. int('n) -> int\nfunction use() -> int = needs(0)\n", "refuted"),
+            ("val needs : forall 'n, opaque('n). bits('n) -> unit\nfunction use(x : bits(8)) -> unit = needs(x)\n", "unknown"),
+        ] {
+            let (host, map, urls) = setup(&[("main.sail", source)], &[0], vec![]);
+            let analysis = snapshot(&host, &map);
+            let result = analysis
+                .explain_position(
+                    FileId::from_raw(0),
+                    analysis.file(&urls[0]).unwrap().position_at(source.rfind("needs(").unwrap()),
+                )
+                .unwrap();
+            let types = &result["contexts"][0]["types"];
+            let evidence: Vec<_> = types["candidates"].as_array().unwrap().iter()
+                .chain(types["constraints"].as_array().unwrap()).collect();
+            assert!(evidence.iter().any(|entry|entry["status"] == status), "{result}");
+            if status == "unknown" {
+                assert!(evidence.iter().any(|entry|entry["reasonCode"].is_string() && entry["origin"]["uri"] == urls[0].as_str()), "{result}");
+            }
+        }
+    }
+
+    #[test]
+    fn expected_types_link_to_cross_file_parameters_and_return_declarations() {
+        for (declarations, main, needle, annotation) in [
+            ("val f : int -> int\n", "function use() -> int = f(true)\n", "true", "int"),
+            ("val f : int -> bool\n", "function f(x) = x + 1\n", "x + 1", "bool"),
+        ] {
+            let (host, map, urls) =
+                setup(&[("defs.sail", declarations), ("main.sail", main)], &[0, 1], vec![]);
+            let analysis = snapshot(&host, &map);
+            let result = analysis
+                .explain_position(
+                    FileId::from_raw(1),
+                    analysis.file(&urls[1]).unwrap().position_at(main.find(needle).unwrap()),
+                )
+                .unwrap();
+            let mismatches = result["contexts"][0]["types"]["mismatches"].as_array().unwrap();
+            assert!(!mismatches.is_empty(), "{result}");
+            let origin = &mismatches[0]["origins"][0]["location"];
+            assert_eq!(origin["uri"], urls[0].as_str(), "{result}");
+            let start = origin["range"]["start"]["character"].as_u64().unwrap() as usize;
+            let end = origin["range"]["end"]["character"].as_u64().unwrap() as usize;
+            assert_eq!(&declarations[start..end], annotation, "{result}");
+        }
+    }
+
+    #[test]
+    fn expected_type_origin_does_not_mistake_an_initializer_cast_for_a_binding_annotation() {
+        let source = "function f() -> unit = { let y : bool = { let x = (1 : int); 2 }; () }\n";
+        let (host, map, urls) = setup(&[("main.sail", source)], &[0], vec![]);
+        let analysis = snapshot(&host, &map);
+        let result = analysis
+            .explain_position(
+                FileId::from_raw(0),
+                analysis.file(&urls[0]).unwrap().position_at(source.find("2 }").unwrap()),
+            )
+            .unwrap();
+        let mismatches = result["contexts"][0]["types"]["mismatches"].as_array().unwrap();
+        assert!(!mismatches.is_empty(), "{result}");
+        let origin = &mismatches[0]["origins"][0]["location"];
+        let start = origin["range"]["start"]["character"].as_u64().unwrap() as usize;
+        let end = origin["range"]["end"]["character"].as_u64().unwrap() as usize;
+        assert_eq!(&source[start..end], "bool", "{result}");
+    }
+
+    #[test]
+    fn local_annotation_origin_uses_utf16_and_rebases_after_a_trivia_edit() {
+        let main = "function f() -> int = { let text = \"😀\"; let value : bool = 1; 0 }\n";
+        let (mut host, map, urls) = setup(&[("main.sail", main)], &[0], vec![]);
+        for prefix in ["", "// leading comment\n"] {
+            let source = format!("{prefix}{main}");
+            let mut change = ide_db::apply_change::Change::new();
+            change.change_file(FileId::from_raw(0), &source);
+            host.apply_change(change);
+            let analysis = snapshot(&host, &map);
+            let result = analysis
+                .explain_position(
+                    FileId::from_raw(0),
+                    analysis.file(&urls[0]).unwrap().position_at(source.find("= 1").unwrap() + 2),
+                )
+                .unwrap();
+            let location =
+                &result["contexts"][0]["types"]["mismatches"][0]["origins"][0]["location"];
+            assert_eq!(location["uri"], urls[0].as_str(), "{result}");
+            assert_eq!(location["range"]["start"]["line"], u32::from(!prefix.is_empty()));
+            assert_eq!(
+                location["range"]["start"]["character"].as_u64().unwrap() as usize,
+                main[..main.find("bool").unwrap()].encode_utf16().count()
+            );
+        }
+    }
 
     #[test]
     fn explains_private_and_non_required_declarations_using_semantic_scope() {

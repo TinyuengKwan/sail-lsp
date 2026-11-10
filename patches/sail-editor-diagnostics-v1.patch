@@ -1,0 +1,779 @@
+diff --git a/doc/editor-diagnostics-v1.schema.json b/doc/editor-diagnostics-v1.schema.json
+new file mode 100644
+index 000000000..a87a7e4c1
+--- /dev/null
++++ b/doc/editor-diagnostics-v1.schema.json
+@@ -0,0 +1,196 @@
++{
++  "$schema": "https://json-schema.org/draft/2020-12/schema",
++  "title": "Sail editor diagnostic stream record v1",
++  "oneOf": [
++    {
++      "type": "object",
++      "additionalProperties": false,
++      "required": [
++        "protocol",
++        "version",
++        "event",
++        "severity",
++        "code",
++        "message",
++        "span",
++        "related",
++        "fixes"
++      ],
++      "properties": {
++        "protocol": {
++          "const": "sail-editor-diagnostics"
++        },
++        "version": {
++          "const": 1
++        },
++        "event": {
++          "const": "diagnostic"
++        },
++        "severity": {
++          "enum": [
++            "error",
++            "warning",
++            "information",
++            "hint"
++          ]
++        },
++        "code": {
++          "type": "string",
++          "minLength": 1
++        },
++        "message": {
++          "type": "string"
++        },
++        "span": {
++          "anyOf": [
++            {
++              "$ref": "#/$defs/span"
++            },
++            {
++              "type": "null"
++            }
++          ]
++        },
++        "related": {
++          "type": "array",
++          "maxItems": 128,
++          "items": {
++            "type": "object",
++            "additionalProperties": false,
++            "required": [
++              "span",
++              "message"
++            ],
++            "properties": {
++              "span": {
++                "$ref": "#/$defs/span"
++              },
++              "message": {
++                "type": "string"
++              }
++            }
++          }
++        },
++        "fixes": {
++          "type": "array",
++          "maxItems": 32,
++          "items": {
++            "$ref": "#/$defs/fix"
++          }
++        }
++      }
++    },
++    {
++      "type": "object",
++      "additionalProperties": false,
++      "required": [
++        "protocol",
++        "version",
++        "event",
++        "success",
++        "diagnostics"
++      ],
++      "properties": {
++        "protocol": {
++          "const": "sail-editor-diagnostics"
++        },
++        "version": {
++          "const": 1
++        },
++        "event": {
++          "const": "summary"
++        },
++        "success": {
++          "type": "boolean"
++        },
++        "diagnostics": {
++          "type": "integer",
++          "minimum": 0
++        }
++      }
++    }
++  ],
++  "$defs": {
++    "span": {
++      "type": "object",
++      "additionalProperties": false,
++      "required": [
++        "file",
++        "byteStart",
++        "byteEnd",
++        "sourceHash"
++      ],
++      "properties": {
++        "file": {
++          "type": "string",
++          "description": "Absolute physical host path, preserving the supplied spelling."
++        },
++        "byteStart": {
++          "type": "integer",
++          "minimum": 0
++        },
++        "byteEnd": {
++          "type": "integer",
++          "minimum": 0
++        },
++        "sourceHash": {
++          "type": "object",
++          "additionalProperties": false,
++          "required": [
++            "algorithm",
++            "value"
++          ],
++          "properties": {
++            "algorithm": {
++              "const": "fnv1a64"
++            },
++            "value": {
++              "type": "string",
++              "pattern": "^[0-9a-f]{16}$"
++            }
++          }
++        }
++      }
++    },
++    "fix": {
++      "type": "object",
++      "additionalProperties": false,
++      "required": [
++        "title",
++        "edits"
++      ],
++      "properties": {
++        "title": {
++          "type": "string",
++          "minLength": 1
++        },
++        "edits": {
++          "type": "array",
++          "minItems": 1,
++          "maxItems": 128,
++          "items": {
++            "type": "object",
++            "additionalProperties": false,
++            "required": [
++              "span",
++              "oldText",
++              "newText"
++            ],
++            "properties": {
++              "span": {
++                "$ref": "#/$defs/span"
++              },
++              "oldText": {
++                "type": "string"
++              },
++              "newText": {
++                "type": "string"
++              }
++            }
++          }
++        }
++      }
++    }
++  },
++  "$comment": "The implementation additionally validates absolute host paths, byte order/bounds, UTF-8 boundaries, source hashes, edit overlap, located fixes, stream order/count and exit-status consistency."
++}
+diff --git a/doc/editor-diagnostics.md b/doc/editor-diagnostics.md
+new file mode 100644
+index 000000000..4e0799938
+--- /dev/null
++++ b/doc/editor-diagnostics.md
+@@ -0,0 +1,63 @@
++# Editor diagnostic stream (proposal, version 1)
++
++This companion implementation is an upstream review proposal. It is not a
++claim that a released Sail compiler implements the interface. Apply it after
++check-context v1; the two protocols negotiate independently.
++
++`--diagnostics-format-version` prints `1` and exits without loading sources.
++`--diagnostics-format json-v1` enables the stream and implies check-only mode.
++Clients must negotiate before adding the format option. Unsupported versions
++must remain visible when JSON was explicitly requested; an automatic client
++can use the existing terminal renderer when the protocol is unavailable.
++
++Stdout contains UTF-8 newline-delimited JSON conforming to
++[the schema](editor-diagnostics-v1.schema.json). Stderr remains available for
++process/infrastructure errors. The normal terminal renderer is unchanged when
++the option is absent. Interactive/backend output should not be combined with
++this check-only interface.
++
++Each diagnostic has a severity, stable code, message, nullable primary span,
++related locations and fixes. Generated or virtual sources without a physical
++location use `span: null`; clients must show their messages as global findings
++rather than inventing a file or reporting a clean check.
++
++Spans use absolute physical paths and zero-based UTF-8 byte offsets with an
++exclusive end. Path spelling is preserved; no filesystem canonicalization is
++required. `sourceHash` is the 64-bit FNV-1a fingerprint of the exact loaded
++source bytes, represented as 16 lowercase hexadecimal digits. Its purpose is
++source identity, not cryptographic authentication. CRLF and trailing newlines
++participate in the hash. Files are read in binary mode so the contract does
++not depend on host text-mode newline translation. Clients check the fingerprint
++and byte boundaries before converting to their negotiated position encoding.
++
++A fix is a title and 1..128 plain-text edits. Each edit includes a span with its
++source hash, `oldText` and `newText`. Edits must not overlap, including two
++insertions at the same offset. A fix is indivisible: clients validate every
++source, old text and range before offering it, and repeat validation at resolve.
++Versioned editor edits should be used for open documents. The initial producer
++attaches a value-preserving lowercase fix to the mixed-case hexadecimal-literal
++warning, using its AST location rather than interpreting an English message.
++Other diagnostics can expose fixes incrementally; absence of fixes is explicit.
++A warning promoted by `--warn-error` currently uses the fatal error interface
++and does not retain the ordinary warning's fixes.
++
++Exactly one final summary is required, even when there are no diagnostics.
++It gives the diagnostic count and success flag; the flag must agree with the
++process exit status and cannot be true after an error diagnostic. A stream with
++missing/duplicate summaries, wrong counts, unsupported records, invalid spans,
++or truncated output is a failed check. An unexpected exception or early exit
++after enabling the format emits a failure summary, never an empty success.
++
++Pure serialization, hash, UTF-8/CRLF and invalid-span tests live in
++`test/unit/test_editor_diagnostics.ml`. Build and run:
++
++```sh
++dune build --release src/bin/sail.exe
++SAIL_UNIT_TESTS=true dune runtest --release test/unit
++_build/default/src/bin/sail.exe --diagnostics-format-version
++_build/default/src/bin/sail.exe --diagnostics-format json-v1 --just-check model.sail
++```
++
++The compiler continues to stop at its existing fatal error boundary; this
++protocol does not imply multiple-error recovery. Context configuration, source
++selection and type-checking behavior remain owned by the compiler.
+diff --git a/src/bin/sail.ml b/src/bin/sail.ml
+index 8cbb2bdf7..7480c82c0 100644
+--- a/src/bin/sail.ml
++++ b/src/bin/sail.ml
+@@ -324,6 +324,24 @@ let rec options =
+         " type level exponentials must have a non-negative argument"
+       );
+       ("-plugin", Arg.String (fun plugin -> load_plugin options plugin), "<file> load a Sail plugin");
++      ( "-diagnostics_format_version",
++        Arg.Unit
++          (fun () ->
++            print_endline (string_of_int Editor_diagnostics.version);
++            exit 0
++          ),
++        " print supported editor diagnostic protocol version"
++      );
++      ( "-diagnostics_format",
++        Arg.Symbol
++          ( ["json-v1"],
++            fun _ ->
++              Editor_diagnostics.enable ();
++              Util.opt_colors := false;
++              opt_just_check := true
++          ),
++        "<json-v1> versioned structured check-only diagnostics"
++      );
+       ("-just_check", Arg.Set opt_just_check, " terminate immediately after typechecking");
+       ("-no_core", Arg.Set opt_no_core, " do not use any core definitions");
+       ( "-memo_z3",
+@@ -635,7 +653,9 @@ let main () =
+ 
+   let argv = Sail_file.sail_argv () in
+   ( try Arg.parse_argv_dynamic argv options (fun s -> opt_free_arguments := !opt_free_arguments @ [s]) usage_msg with
+-  | Arg.Bad _ ->
++  | Arg.Bad message ->
++      if Editor_diagnostics.enabled () then Reporting.print_error (Reporting.Err_general (Parse_ast.Unknown, message))
++      else prerr_endline message;
+       prerr_endline usage_msg;
+       Printf.eprintf "Use 'sail%s --help' for a list of available arguments.\n%!" !opt_tool_help;
+       exit 1
+@@ -718,10 +738,14 @@ let main () =
+ 
+ let () =
+   try
+-    try Parmap.toplevel_handler main with
++    try
++      Parmap.toplevel_handler main;
++      Editor_diagnostics.finish true
++    with
+     | Sys_error s -> raise (Reporting.err_general Parse_ast.Unknown s)
+     | Failure s -> raise (Reporting.err_general Parse_ast.Unknown s)
+   with Reporting.Fatal_error e ->
+     Reporting.print_error e;
++    Editor_diagnostics.finish false;
+     if !opt_memo_z3 then Constraint.save_digests !opt_memo_z3_path else ();
+     exit 1
+diff --git a/src/lib/editor_diagnostics.ml b/src/lib/editor_diagnostics.ml
+new file mode 100644
+index 000000000..7c9a94bf1
+--- /dev/null
++++ b/src/lib/editor_diagnostics.ml
+@@ -0,0 +1,136 @@
++(* SPDX-License-Identifier: BSD-2-Clause *)
++let version = 1
++let active = ref false
++let finished = ref false
++let count = ref 0
++let enable () = active := true
++let enabled () = !active
++
++(* Source identity, not a security hash. Hash the compiler's loaded bytes,
++   including CRLF and trailing newlines, rather than re-reading disk. *)
++let fingerprint text =
++  let hash = ref 0xcbf29ce484222325L in
++  String.iter (fun c -> hash := Int64.mul (Int64.logxor !hash (Int64.of_int (Char.code c))) 0x100000001b3L) text;
++  Printf.sprintf "%016Lx" !hash
++
++let sources = Hashtbl.create 16
++let source handle =
++  match Hashtbl.find_opt sources handle with
++  | Some source -> source
++  | None ->
++      let text = Sail_file.contents handle in
++      let hash = `Assoc [("algorithm", `String "fnv1a64"); ("value", `String (fingerprint text))] in
++      Hashtbl.add sources handle (text, hash);
++      (text, hash)
++
++let rec positions = function
++  | Parse_ast.Range (p1, p2) -> Some (p1, p2)
++  | Parse_ast.Unique (_, l) | Parse_ast.Generated l -> positions l
++  | Parse_ast.Hint (_, l1, l2) -> (
++      match positions l2 with Some _ as p -> p | None -> positions l1
++    )
++  | Parse_ast.Unknown -> None
++
++let byte_boundary text offset = offset = 0 || offset = String.length text || Char.code text.[offset] land 0xc0 <> 0x80
++
++let span location =
++  match positions location with
++  | None -> None
++  | Some ((p1 : Sail_file.position), p2) ->
++      let path = Sail_file.to_path p1.pos_fname in
++      let contents, hash = source p1.pos_fname in
++      if
++        Sail_file.Path.is_virtual path
++        || (not (Sail_file.handle_equal p1.pos_fname p2.pos_fname))
++        || p1.pos_cnum < 0 || p2.pos_cnum < p1.pos_cnum
++        || p2.pos_cnum > String.length contents
++        || (not (byte_boundary contents p1.pos_cnum))
++        || not (byte_boundary contents p2.pos_cnum)
++      then None
++      else (
++        let file = Sail_file.Path.to_string path in
++        let file = if Filename.is_relative file then Filename.concat (Sys.getcwd ()) file else file in
++        Some
++          (`Assoc
++             [
++               ("file", `String file);
++               ("byteStart", `Int p1.pos_cnum);
++               ("byteEnd", `Int p2.pos_cnum);
++               ("sourceHash", hash);
++             ]
++          )
++      )
++
++let rec hints = function
++  | Parse_ast.Hint (message, l1, l2) -> (l1, message) :: hints l2
++  | Parse_ast.Generated l | Parse_ast.Unique (_, l) -> hints l
++  | _ -> []
++
++type edit = { location : Parse_ast.l; replacement : string }
++type fix = { title : string; edits : edit list }
++
++let edit_json edit =
++  match (span edit.location, positions edit.location) with
++  | Some span, Some (p1, p2) ->
++      let old_text = String.sub (fst (source p1.pos_fname)) p1.pos_cnum (p2.pos_cnum - p1.pos_cnum) in
++      Some (`Assoc [("span", span); ("oldText", `String old_text); ("newText", `String edit.replacement)])
++  | _ -> None
++
++let replacement ~title location transform =
++  match (span location, positions location) with
++  | Some _, Some (p1, p2) ->
++      let text = String.sub (fst (source p1.pos_fname)) p1.pos_cnum (p2.pos_cnum - p1.pos_cnum) in
++      Some { title; edits = [{ location; replacement = transform text }] }
++  | _ -> None
++
++let fix_json fix =
++  let edits = List.filter_map edit_json fix.edits in
++  if edits = [] || List.length edits <> List.length fix.edits then None
++  else Some (`Assoc [("title", `String fix.title); ("edits", `List edits)])
++
++let diagnostic ~severity ~code ~message ~location ~related ~fixes =
++  let primary = span location in
++  let related =
++    related @ hints location
++    |> List.filter_map (fun (l, message) ->
++        Option.map (fun span -> `Assoc [("span", span); ("message", `String message)]) (span l)
++    )
++  in
++  `Assoc
++    [
++      ("protocol", `String "sail-editor-diagnostics");
++      ("version", `Int version);
++      ("event", `String "diagnostic");
++      ("severity", `String severity);
++      ("code", `String code);
++      ("message", `String message);
++      ("span", Option.value ~default:`Null primary);
++      ("related", `List related);
++      ("fixes", `List (if primary = None then [] else List.filter_map fix_json fixes));
++    ]
++
++let emit ~severity ~code ~message ~location ?(related = []) ?(fixes = []) () =
++  if !active then (
++    incr count;
++    Printf.printf "%s\n%!" (Yojson.Safe.to_string (diagnostic ~severity ~code ~message ~location ~related ~fixes))
++  )
++
++let finish success =
++  if !active && not !finished then (
++    finished := true;
++    Printf.printf "%s\n%!"
++      (Yojson.Safe.to_string
++         (`Assoc
++            [
++              ("protocol", `String "sail-editor-diagnostics");
++              ("version", `Int version);
++              ("event", `String "summary");
++              ("success", `Bool success);
++              ("diagnostics", `Int !count);
++            ]
++         )
++      )
++  )
++
++(* An unexpected exception or an early exit cannot look like a clean check. *)
++let () = at_exit (fun () -> finish false)
+diff --git a/src/lib/editor_diagnostics.mli b/src/lib/editor_diagnostics.mli
+new file mode 100644
+index 000000000..4d320e317
+--- /dev/null
++++ b/src/lib/editor_diagnostics.mli
+@@ -0,0 +1,32 @@
++(* SPDX-License-Identifier: BSD-2-Clause *)
++(** Versioned check-only diagnostics, independent of terminal rendering. *)
++val version : int
++
++val enable : unit -> unit
++val enabled : unit -> bool
++val fingerprint : string -> string
++val span : Parse_ast.l -> Yojson.Safe.t option
++
++type edit = { location : Parse_ast.l; replacement : string }
++type fix = { title : string; edits : edit list }
++
++val replacement : title:string -> Parse_ast.l -> (string -> string) -> fix option
++
++val diagnostic :
++  severity:string ->
++  code:string ->
++  message:string ->
++  location:Parse_ast.l ->
++  related:(Parse_ast.l * string) list ->
++  fixes:fix list ->
++  Yojson.Safe.t
++val emit :
++  severity:string ->
++  code:string ->
++  message:string ->
++  location:Parse_ast.l ->
++  ?related:(Parse_ast.l * string) list ->
++  ?fixes:fix list ->
++  unit ->
++  unit
++val finish : bool -> unit
+diff --git a/src/lib/initial_check.ml b/src/lib/initial_check.ml
+index 1204025f6..b72ecb0e9 100644
+--- a/src/lib/initial_check.ml
++++ b/src/lib/initial_check.ml
+@@ -1213,19 +1213,29 @@ let parse_hex_lit ?warn_inconsistent_case str =
+   let groups = String.split_on_char '_' str in
+   let failed = ref false in
+   let seen_case = ref None in
++  let warned_inconsistent = ref false in
+   let check_consistent_case = function
+     | None -> ()
+     | Some case -> (
+         match !seen_case with
+         | None -> seen_case := Some case
+         | Some previous ->
+-            if case = previous then ()
++            if case = previous || !warned_inconsistent then ()
+             else (
++              warned_inconsistent := true;
+               match warn_inconsistent_case with
+               | None -> ()
+               | Some l ->
+-                  Reporting.warn Version.v0_20_2 "Inconsistent hexadecimal casing" l
+-                    "This hexadecimal bitvector literal contains both lowercase and uppercase digits."
++                  let fixes =
++                    if Editor_diagnostics.enabled () then
++                      Option.to_list
++                        (Editor_diagnostics.replacement ~title:"Use lowercase hexadecimal digits" l
++                           String.lowercase_ascii
++                        )
++                    else []
++                  in
++                  Reporting.warn ~fixes ~code:"sail.warning.hex-case" Version.v0_20_2 "Inconsistent hexadecimal casing"
++                    l "This hexadecimal bitvector literal contains both lowercase and uppercase digits."
+             )
+       )
+   in
+diff --git a/src/lib/reporting.ml b/src/lib/reporting.ml
+index 60aafca6a..54f5748b8 100644
+--- a/src/lib/reporting.ml
++++ b/src/lib/reporting.ml
+@@ -242,8 +242,25 @@ let forbid_errors ocaml_pos f x =
+   | Fatal_error (Err_warning (l, short, m)) -> raise (err_unreachable l ocaml_pos (short ^ "\n" ^ m))
+ 
+ let print_error ?(interactive = false) e =
+-  let m1, hint, pos_l, m2 = dest_err ~interactive e in
+-  print_err_internal hint pos_l m1 m2
++  if Editor_diagnostics.enabled () then (
++    let code, location, message, hint =
++      match e with
++      | Err_general (l, m) -> ("sail.error", l, m, None)
++      | Err_unreachable (l, _, _, m) -> ("sail.internal", l, m, None)
++      | Err_todo (l, m) -> ("sail.unimplemented", l, m, None)
++      | Err_syntax (p, m) -> ("sail.syntax", Parse_ast.Range (p, p), m, None)
++      | Err_syntax_loc (l, m) -> ("sail.syntax", l, m, None)
++      | Err_lex (p, m) -> ("sail.lexical", Parse_ast.Range (p, p), m, None)
++      | Err_type (l, hint, m) -> ("sail.type", l, m, hint)
++      | Err_warning (l, short, m) -> ("sail.warning-as-error", l, short ^ ": " ^ m, None)
++    in
++    let message = match hint with None -> message | Some hint -> message ^ "\n\n" ^ hint in
++    Editor_diagnostics.emit ~severity:"error" ~code ~message ~location ()
++  )
++  else (
++    let m1, hint, pos_l, m2 = dest_err ~interactive e in
++    print_err_internal hint pos_l m1 m2
++  )
+ 
+ let _ =
+   Printexc.register_printer (function
+@@ -255,7 +272,7 @@ let _ =
+     | _ -> None
+     )
+ 
+-let print_type_error ?hint l msg = print_err_internal hint (Loc l) Util.("Type error" |> yellow |> clear) msg
++let print_type_error ?hint l msg = print_error (Err_type (l, hint, msg))
+ 
+ (* Warnings *)
+ 
+@@ -324,7 +341,22 @@ let suppressed_warning_info () =
+     suppressed_warnings := 0
+   )
+ 
+-let print_warning ~fatal short_str l explanation =
++let rec diagnostic_message = function
++  | Error_format.Line text -> (text, [])
++  | Error_format.Seq messages -> diagnostic_messages messages
++  | Error_format.Severity (_, message) -> diagnostic_message message
++  | Error_format.List messages ->
++      diagnostic_messages (List.map (fun (header, message) -> Error_format.Seq [Line header; message]) messages)
++  | Error_format.Location (prefix, hint, l, message) ->
++      let text, related = diagnostic_message message in
++      let label = Option.value ~default:prefix hint in
++      (text, (l, label) :: related)
++
++and diagnostic_messages messages =
++  let parts = List.map diagnostic_message messages in
++  (String.concat "\n" (List.map fst parts), List.concat_map snd parts)
++
++let print_warning ?(fixes = []) ?(code = "sail.warning") ~fatal short_str l explanation =
+   let open Error_format in
+   if fatal then (
+     let explanation =
+@@ -334,13 +366,20 @@ let print_warning ~fatal short_str l explanation =
+     in
+     raise (err_warning l short_str explanation)
+   )
++  else if Editor_diagnostics.enabled () then (
++    let explanation, related = diagnostic_message explanation in
++    Editor_diagnostics.emit ~severity:"warning" ~code
++      ~message:(short_str ^ ": " ^ explanation)
++      ~location:l ~related ~fixes ()
++  )
+   else (
+     prerr_endline (Util.("Warning" |> yellow |> clear) ^ ": " ^ short_str);
+     format_message (Location ("", None, l, explanation)) err_formatter;
+     prerr_endline ""
+   )
+ 
+-let format_warn ?once_from ?(force_show = false) version short_str l explanation =
++let format_warn ?once_from ?(force_show = false) ?(fixes = []) ?(code = "sail.warning") version short_str l explanation
++    =
+   let fatal =
+     match !opt_warn_error with
+     | Some below_version -> Version.check ~required:version ~against:below_version ()
+@@ -366,15 +405,15 @@ let format_warn ?once_from ?(force_show = false) version short_str l explanation
+         if not (ignore_position p1) then (
+           let shorts = RangeMap.find_opt (p1, p2) !seen_warnings |> Option.value ~default:[] in
+           if not (List.exists (fun s -> s = short_str) shorts) then (
+-            print_warning ~fatal short_str l explanation;
++            print_warning ~fixes ~code ~fatal short_str l explanation;
+             seen_warnings := RangeMap.add (p1, p2) (short_str :: shorts) !seen_warnings
+           )
+         )
+-    | _ -> print_warning ~fatal short_str l explanation
++    | _ -> print_warning ~fixes ~code ~fatal short_str l explanation
+   )
+ 
+-let warn ?once_from ?(force_show = false) version short_str l explanation =
+-  format_warn ?once_from ~force_show version short_str l (Line explanation)
++let warn ?once_from ?(force_show = false) ?(fixes = []) ?(code = "sail.warning") version short_str l explanation =
++  format_warn ?once_from ~force_show ~fixes ~code version short_str l (Line explanation)
+ 
+ let simple_warn version str = warn version str Parse_ast.Unknown ""
+ 
+diff --git a/src/lib/reporting.mli b/src/lib/reporting.mli
+index 00440a58e..8154fcc66 100644
+--- a/src/lib/reporting.mli
++++ b/src/lib/reporting.mli
+@@ -175,12 +175,22 @@ val forbid_errors : string * int * int * int -> ('a -> 'b) -> 'a -> 'b
+ 
+     @param force_show This parameter if true forces the warning to always be shown. *)
+ val warn :
+-  ?once_from:string * int * int * int -> ?force_show:bool -> Version.t -> string -> Parse_ast.l -> string -> unit
++  ?once_from:string * int * int * int ->
++  ?force_show:bool ->
++  ?fixes:Editor_diagnostics.fix list ->
++  ?code:string ->
++  Version.t ->
++  string ->
++  Parse_ast.l ->
++  string ->
++  unit
+ 
+ (** Print a formatted warning message. See [warn] for details of the arguments. *)
+ val format_warn :
+   ?once_from:string * int * int * int ->
+   ?force_show:bool ->
++  ?fixes:Editor_diagnostics.fix list ->
++  ?code:string ->
+   Version.t ->
+   string ->
+   Parse_ast.l ->
+diff --git a/src/lib/sail_file.ml b/src/lib/sail_file.ml
+index 8b092ddc5..948dfa75a 100644
+--- a/src/lib/sail_file.ml
++++ b/src/lib/sail_file.ml
+@@ -422,7 +422,8 @@ let apply_edits handle =
+   info.next_edit <- 0
+ 
+ let file_to_line_array filename =
+-  let chan = open_in filename in
++  (* Keep byte offsets and source hashes independent of host text-mode translation. *)
++  let chan = open_in_bin filename in
+   let linebuf = Buffer.create 256 in
+   let lines = Queue.create () in
+   (* Note that this has to be a little intricate, because it handles
+diff --git a/test/unit/test_editor_diagnostics.ml b/test/unit/test_editor_diagnostics.ml
+new file mode 100644
+index 000000000..31564db40
+--- /dev/null
++++ b/test/unit/test_editor_diagnostics.ml
+@@ -0,0 +1,66 @@
++(* SPDX-License-Identifier: BSD-2-Clause *)
++open Libsail
++open Yojson.Safe.Util
++
++let with_source text test =
++  let file = Filename.temp_file "sail-editor-json" ".sail" in
++  let output = open_out_bin file in
++  output_string output text;
++  close_out output;
++  Fun.protect
++    ~finally:(fun () -> Sys.remove file)
++    (fun () ->
++      let handle = Sail_file.open_file (Sail_file.Path.actual file) in
++      let at offset = { Sail_file.Position.pos_fname = handle; pos_cnum = offset; pos_lnum = 1; pos_bol = 0 } in
++      test file handle (fun first last -> Parse_ast.Range (at first, at last))
++    )
++
++let suites =
++  [
++    ( "editor diagnostics",
++      [
++        Alcotest.test_case "portable source hash vectors" `Quick (fun () ->
++            Alcotest.(check string) "empty" "cbf29ce484222325" (Editor_diagnostics.fingerprint "");
++            Alcotest.(check string) "hello" "a430d84680aabd0b" (Editor_diagnostics.fingerprint "hello")
++        );
++        Alcotest.test_case "UTF-8 CRLF byte spans and fix guards" `Quick (fun () ->
++            let text = "let banner = \"🙂\"\r\nlet value = 0xAb\r\n" in
++            with_source text (fun file handle location ->
++                Alcotest.(check string) "raw bytes" text (Sail_file.contents handle);
++                let first = String.index text '0' in
++                let fix =
++                  {
++                    Editor_diagnostics.title = "Lowercase hexadecimal digits";
++                    edits = [{ Editor_diagnostics.location = location first (first + 4); replacement = "0xab" }];
++                  }
++                in
++                let value =
++                  Editor_diagnostics.diagnostic ~severity:"warning" ~code:"hex-case" ~message:"Mixed case"
++                    ~location:(location first (first + 4))
++                    ~related:[(location 0 3, "declaration")]
++                    ~fixes:[fix]
++                in
++                Alcotest.(check int) "first byte" first (value |> member "span" |> member "byteStart" |> to_int);
++                Alcotest.(check string) "physical path" file (value |> member "span" |> member "file" |> to_string);
++                Alcotest.(check string)
++                  "guard" "0xAb"
++                  (value |> member "fixes" |> to_list |> List.hd |> member "edits" |> to_list |> List.hd
++                 |> member "oldText" |> to_string
++                  );
++                Alcotest.(check int) "related" 1 (value |> member "related" |> to_list |> List.length)
++            )
++        );
++        Alcotest.test_case "invalid and virtual spans are never invented" `Quick (fun () ->
++            assert (Editor_diagnostics.span Parse_ast.Unknown = None);
++            with_source "abc" (fun _ _ location ->
++                assert (Editor_diagnostics.span (location (-1) 0) = None);
++                assert (Editor_diagnostics.span (location 0 4) = None)
++            );
++            let _, handle = Sail_file.add_virtual_file ~contents:"abc" "editor-virtual" in
++            let p = { Sail_file.Position.pos_fname = handle; pos_cnum = 0; pos_lnum = 1; pos_bol = 0 } in
++            assert (Editor_diagnostics.span (Parse_ast.Range (p, p)) = None);
++            with_source "🙂" (fun _ _ location -> assert (Editor_diagnostics.span (location 1 2) = None))
++        );
++      ]
++    );
++  ]
+diff --git a/test/unit/test_libsail.ml b/test/unit/test_libsail.ml
+index 545f18772..3de21d793 100644
+--- a/test/unit/test_libsail.ml
++++ b/test/unit/test_libsail.ml
+@@ -5,4 +5,8 @@
+    single run covers the whole library. To test a new file, add a
+    [test_<file>.ml] module and append its [suites] below. *)
+ 
+-let () = Alcotest.run "libsail" (List.concat [Test_ast_util.suites; Test_sail_file.suites; Test_check_context.suites])
++let () =
++  Alcotest.run "libsail"
++    (List.concat
++       [Test_ast_util.suites; Test_sail_file.suites; Test_check_context.suites; Test_editor_diagnostics.suites]
++    )

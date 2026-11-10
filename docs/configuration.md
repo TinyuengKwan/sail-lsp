@@ -7,6 +7,62 @@ and `workspace/didChangeConfiguration` messages for subsequent updates.
 The exact format depends on your editor. Configuration is a JSON object under
 the `sail-lsp` key; missing fields retain defaults.
 
+When the client supports `workspace/configuration`, the server requests the
+global section and one section scoped to each workspace folder. Folder settings
+inherit missing values from the global section. In VS Code, put overrides in the
+folder's `.vscode/settings.json` (the corresponding options must support resource
+scope). Compiler command/arguments, diagnostics, include paths, target, manifest
+selection and editor features then follow that folder. Relative include paths
+are resolved against its root, without searching other folders' include paths.
+Shared files follow the selected project context, including sources outside the
+workspace roots. The native preprocessor keeps per-project conditional symbols,
+targets and include paths; different views retain independent strict-bitvector
+settings. Cache capacities, memory budget and cache-priming worker count govern
+the shared process and use global values.
+
+Startup waits at most five seconds for the scoped response before loading with
+the last available settings. Missing/error responses retain those settings and
+produce a log message. Folder changes request fresh scopes; superseded responses
+are ignored. Clients without this capability continue using initialization or
+notification settings globally.
+
+## Shared project settings
+
+Place `.sail-lsp.toml` in a workspace folder to share settings across VS Code,
+Zed, Neovim, and other LSP clients. The server reads it before project discovery
+and reloads saved changes, including creation and deletion. Relative workspace
+paths use that workspace folder; `flycheck.cacheDirectory` remains a client
+setting relative to the compiler working directory.
+
+```toml
+[workspace]
+projectFile = "model/riscv.sail_project"
+projectVariables = { RMEM = false }
+strictBitvector = true
+
+[flycheck]
+timeoutMs = 600000
+ignore = ["severity:warning"]
+
+[diagnostics]
+disabled = ["unused-variable"]
+```
+
+Precedence is defaults, repository settings, explicit global client settings,
+then explicit folder client settings. Explicit `false`, empty arrays, and JSON
+`null` overrides retain their meaning. The VS Code extension sends explicit
+values instead of filling the client layer with editor defaults. Other clients
+should likewise omit settings they want to inherit.
+
+Repository settings support the ordinary configuration sections below, except
+process-wide cache settings, `workspace.primeCachesNumThreads`, and runnables.
+`flycheck.enable`, `command`, `extraArgs`, and `cacheDirectory` must be set in the
+client: a repository file cannot authorize command execution or choose its
+executable. Unknown, malformed, or forbidden settings are reported with the
+configuration filename; the folder keeps its last valid repository settings
+until the file is repaired. Deleting the file removes that layer. Unsaved TOML
+changes take effect on save.
+
 ## VS Code
 
 Settings are exposed as `sail-lsp.*` in VS Code's settings UI. Example
@@ -42,7 +98,7 @@ vim.lsp.config("sail_lsp_managed", {
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `enable` | `bool` | `true` | Master enable/disable for diagnostics |
+| `enable` | `bool` | `true` | Enable native diagnostics; compiler findings are configured independently under `flycheck` |
 | `effectMismatch` | `bool` | `true` | Report effect diagnostics: `effect-violation` (an impure call in a pure function), `effect-mismatch`, `missing-effect-annotation` |
 | `disabled` | `string[]` | `[]` | Diagnostic codes to suppress (e.g., `"unused-variable"`) |
 | `disableExperimental` | `bool` | `false` | Suppress experimental diagnostics |
@@ -61,6 +117,17 @@ vim.lsp.config("sail_lsp_managed", {
 | `maxLength` | `number?` | `25` | Max hint text length before truncation |
 | `closingBraceHintsMinLines` | `number?` | `6` | Min lines for closing brace hints |
 
+`chainingHints` (default `true`) displays intermediate field-access types.
+`enumValueHints` (default `false`) shows the zero-based values of generated
+Sail enum-to-number conversions. Renamed conversion attributes are respected;
+manual or suppressed conversions do not produce guessed values.
+
+Type names in hints and parameter names with a unique source declaration are
+clickable. Links follow the current project and include context. Agreeing labels
+from different declarations do not acquire an arbitrary target. Truncated type
+names cannot link to a different type that merely shares the displayed prefix;
+the complete label remains available in the tooltip.
+
 ### `completion`
 
 | Key | Type | Default | Description |
@@ -72,6 +139,42 @@ vim.lsp.config("sail_lsp_managed", {
 | `autoimport` | `bool` | `false` | Enable auto-import (`$include`) on the fly |
 | `limit` | `number` | `200` | Maximum number of completion items |
 | `fullFunctionSignatures` | `bool` | `false` | Show full signatures in completions |
+| `customTemplates` | `object[]` | `[]` | User prefix/postfix templates, up to 128 |
+| `termSearch` | `bool` | `false` | Suggest type-directed expressions assembled from visible callables and local values |
+| `termSearchFuel` | `integer` | `1000` | Expression-search work budget, capped at 10000; zero disables search |
+
+Templates use LSP snippet syntax. Each needs `prefix`, `postfix`, or both,
+plus `body`; `description` is optional. `scope` is `item`, `expr` (default),
+or `type`. Postfix templates have expression scope and expand `${receiver}`
+to the original receiver, escaping its contents as snippet literals. Literal
+braces in the template body follow ordinary snippet rules. Bodies are limited
+to 64 KiB. For example:
+
+```json
+{
+  "completion": {
+    "customTemplates": [
+      {"prefix": "check", "body": "assert(${1:condition}, ${2:\"message\"})$0", "scope": "expr"},
+      {"postfix": "require", "body": "assert(${receiver}, ${1:\"message\"})$0", "description": "Assert this condition"},
+      {"prefix": "u64", "body": "bits(64)", "scope": "type"}
+    ]
+  }
+}
+```
+
+Custom postfix triggers replace built-in templates of the same name. `snippets`
+controls custom templates; `postfix` additionally controls postfix templates.
+Clients without snippet support receive plain text with defaults, the first
+choice and mirrored placeholders. Editor variables retain their default or
+name; transforms retain the untransformed value on these clients.
+
+Expression search is opt-in and also requires `snippets`. It composes up to
+three nested calls with at most eight alternatives at each goal. A shared
+fuel budget covers candidate visits, parameter goals, combinations and proofs;
+cancellation is checked while searching. Parameters, return type, shared
+quantifiers and declared constraints are verified jointly using the semantic
+type checker and inexpensive proofs, without invoking SMT. Candidates with
+unproved constraints are omitted. The resulting insertion is analyzed normally.
 
 With `autoimport` enabled, background cache priming also prepares the import
 catalog, including inactive candidate files. Enabling the setting schedules
@@ -113,8 +216,23 @@ beside the server's own analysis. `Sail: Recheck Projects` requests another run 
 | `enable` | `bool` | `false` | Run `sail --just-check` on save |
 | `command` | `string` | `"sail"` | The compiler binary |
 | `extraArgs` | `string[]` | `[]` | Extra compiler arguments (`--config`, `--strict-bitvector`, ...) |
-| `timeoutMs` | `integer` | `30000` | Maximum elapsed time per compiler invocation |
+| `timeoutMs` | `integer` | `600000` | Maximum elapsed time per compiler invocation, including capability negotiation |
 | `debounceMs` | `integer` | `200` | Coalesce repeated saves before starting the compiler |
+| `cache` | `"managed"`, `"compiler"`, `"disabled"` | `"managed"` | Manage a persistent per-project/toolchain SMT memo file, retain Sail's own cache policy, or disable memoization |
+| `cacheDirectory` | `string?` | `null` | Managed cache root; null uses the OS user cache directory, relative paths use the compiler working directory |
+| `diagnosticFormat` | `"auto"`, `"text"`, `"json"` | `"auto"` | Negotiate structured diagnostics, force stock terminal output, or require editor diagnostic protocol v1 |
+| `ignore` | `string[]` | `[]` | Hide matching compiler findings without discarding their raw results |
+| `warningsAsHint` | `string[]` | `[]` | Display matching compiler findings as hints |
+| `warningsAsInfo` | `string[]` | `[]` | Display matching compiler findings as information |
+
+Compiler display rules accept an exact diagnostic code, `"*"`, or
+`"severity:error"`, `"severity:warning"`, `"severity:information"`, and
+`"severity:hint"`. Stock terminal diagnostics usually have no code, so severity
+selectors are useful there. Ignore takes precedence over severity changes;
+hint takes precedence over information. Updating these rules redisplays retained
+findings without running Sail again. Native diagnostic rules do not affect
+compiler findings. Hiding or downgrading a compiler error does not turn the
+compiler's rejected result into a successful check.
 
 A save checks the project that lists the saved file (every loaded project,
 for a file only reached through `$include`), one compiler run per project:
@@ -141,6 +259,35 @@ type error.
 `workspace.strictBitvector` is
 forwarded as `--strict-bitvector`.
 
+Large models can take minutes on their first compiler check. Managed caching
+keeps memo files outside the source tree, keyed by project invocation and compiler
+and solver executable metadata. Each check reads a private copy and atomically
+publishes it after completion; cancellation and timeout discard private output.
+An unavailable cache falls back to an uncached compiler check and reports why.
+Explicit `--memo-z3`, `--memo-z3-path` and `--no-memo-z3` arguments take precedence
+over the managed policy. Existing memo files do not guarantee cache hits for new
+or changed constraints. Automatic checks remain disabled by default.
+
+Status and diagnostic reports include runtime, cache location/state, and the
+last successful check. Editing inputs or replacing a check marks an old success
+as referring to older saved inputs; it never certifies the current buffer.
+
+After an explicitly requested or enabled compiler check, the report also records
+the configured compiler's resolved executable, `--version`, and `--dir` output.
+It compares the compiler and native standard-library Sail source paths and bytes.
+Different installation paths alone are not a mismatch. A content mismatch is
+reported in status and diagnostic reports; set `SAIL_DIR` consistently before
+starting the server to select a shared library. No compiler is probed merely
+for native analysis while automatic checking is disabled. For a CLI inspection
+of a selected toolchain, use `sail-lsp doctor --compiler /path/to/sail --json`
+and optionally `--stdlib /path/to/SAIL_DIR`.
+
+Native analysis supports `workspace.strictBitvector` and source directives for
+`--strict-var`. A `--strict-var` supplied only through `flycheck.extraArgs` has no
+native command-line counterpart. Native `--strict-exponentials` is unsupported.
+The check report lists these support levels; forwarding an argument to the
+compiler does not claim native parity for that mode.
+
 Stock Sail 0.20.2/0.20.3 cannot express `workspace.target`, `includePaths`, project
 `generatedFiles`, or some typed project variables through its check CLI. For these
 configurations Flycheck probes `--check-context-version`. A compiler reporting
@@ -164,6 +311,35 @@ git -C /path/to/separate/sail apply "$PWD/patches/sail-check-context-v1.patch"
 After applying the patch to the chosen checkout, the resulting compiler must
 print `1` for `--check-context-version`. The server does not patch or install a
 compiler automatically.
+
+The optional second [companion patch](../patches/sail-editor-diagnostics-v1.patch)
+adds editor diagnostic protocol v1 on top of the context patch. Apply both in
+that order before building. Its protocol proposal, JSON schema and compiler
+unit tests are included in the patch. This protocol is also a local extension;
+released Sail versions do not provide it.
+
+```sh
+git -C /path/to/separate/sail apply --check "$PWD/patches/sail-editor-diagnostics-v1.patch"
+git -C /path/to/separate/sail apply "$PWD/patches/sail-editor-diagnostics-v1.patch"
+```
+
+With `diagnosticFormat: "auto"`, the server probes
+`--diagnostics-format-version` and uses `--diagnostics-format json-v1` when the
+compiler advertises version `1`. Otherwise it reads stock terminal diagnostics.
+`"json"` requires that capability and reports a skipped check when unavailable;
+`"text"` always uses terminal output. Context and diagnostic capabilities are
+negotiated independently. Probes and checking share the configured timeout.
+
+Structured diagnostics carry exact physical byte ranges, source fingerprints,
+related locations and optional fixes. The server converts ranges to LSP UTF-16
+positions and checks every edit against current text when offering and resolving
+the action. A changed source invalidates the whole fix, including multi-file
+fixes. A malformed or incomplete structured stream fails visibly instead of
+falling back to parsing its text. Errors without physical locations remain in
+check status. The companion currently demonstrates a source-based lowercase
+hexadecimal warning fix; it does not promise fixes for every compiler error.
+Warnings promoted with `--warn-error` do not retain warning fixes in Sail's
+fatal-error interface.
 
 The JSON object contains `version: 1`, `target` (string or null), `includePaths`
 (absolute paths, in search order), `variables` (JSON booleans or strings), and
@@ -328,6 +504,38 @@ resolve. Local bindings, multiple include contexts, pending reloads and project
 load failures are shown separately. Other clients can request
 `sail-lsp/explainAnalysis` with `TextDocumentPositionParams`.
 
+For a type error, the explanation includes the actual inferred and expected
+shapes, links to parameter/binding/return annotations, and the inference engine's
+recorded reasons for rejecting overload candidates. Related argument locations
+are navigable. Constraints distinguish a refutation from an undecided proof;
+undecided constraints retain their actual reason and assumptions. The command
+reads the owning callable and does not run a separate speculative type checker.
+
+**Sail: Preview Preprocessed Source** (`sail-lsp/expandInclude`) replays the
+production preprocessor over the current source buffers and loaded project
+configuration. It follows the selected include context, including repeated
+visits of the same physical file, incoming symbols from earlier roots, target
+selection, conditional regions and include order. Inactive code is omitted;
+directives show their branch result and symbol changes. Missing includes and
+cycle/depth limits remain visible. Source segments link back to physical
+locations. This is an annotated, read-only snapshot, not a generated compilation
+unit. Saving manifests still controls project configuration reloads. Unlinked
+files have no project visit; unconfigured buffers show source only.
+
+Clients without a Sail-specific UI can request `textDocument/codeAction` with
+`context.only: ["source.sail"]`. Concrete actions select an existing
+project/include context, open its manifest, explain the cursor, preview
+preprocessing, or run/cancel a project task. They use advertised
+`workspace/executeCommand` commands and `window/showDocument`; no editor-specific
+command handler is required. Preview actions are offered when the client
+advertises `window.showDocument.support`. They are not included in automatic
+quick-fix requests. Generic previews are private temporary files, excluded from
+Sail analysis, with standard document links; at most 16 are retained per server
+and they are removed on shutdown. Neovim's managed template provides named
+commands and keeps previews attached to their originating server for source
+navigation. See the [editor entrypoints](installation.md#project-and-analysis-commands).
+
+
 **Sail: Show Server Status** includes passive cache accounting: physical and
 semantic-view inputs, unique retained source/parse-seed text bytes, parse seeds,
 live weak tree references, and live analysis snapshots (including the status
@@ -340,6 +548,9 @@ threads. Unlike rust-analyzer's ordinary query workers, Sail workers can own a
 native Z3 context; bounding the pool prevents high core counts from multiplying
 that retained cost without limit. `workspace.primeCachesNumThreads` continues
 to control the separate, temporary cache-priming pool.
+Priming warms structural symbol/navigation indexes. Function-body inference
+remains on demand, so background startup does not typecheck every callable or
+fill the inference cache with unopened functions.
 These counters do not measure the sizes of inference results, trees, indexes or
 allocator overhead. The allocator heap estimate and operating-system RSS are
 different measurements; neither alone proves a leak or successful reclamation.
@@ -352,13 +563,64 @@ multiline parameter and expression layouts, aligned mapping tables, and
 instruction mapping clauses are preserved. Long single-line `@` and `^` chains
 wrap before an operator with one additional indentation level, keeping complete
 operands together. Parentheses, comments, and string contents remain intact;
-indivisible operands may exceed the width. Whole-document formatting removes leading/repeated blank lines and
+long calls, `if` branches, matches and boolean conditions also have syntax-aware
+layouts. Indivisible operands may exceed the width. Whole-document formatting removes leading/repeated blank lines and
 inserts one final newline unless the client explicitly overrides the newline
 options; comment and string contents are preserved.
 
 Indentation follows the client's `tabSize` and `insertSpaces`. The VS Code
 extension defaults Sail documents to two spaces; other editors should configure
 these options explicitly when editing sail-riscv.
+
+Input-triggered formatting uses the same indentation options. Closing-brace
+matching ignores comment and string tokens. Formatting returns local edits
+instead of replacing the whole document. Selection formatting applies complete
+edits within the selected lines and validates their combined syntax.
+
+Commit a `.sailfmt.toml` to share a style between editors and CI:
+
+```toml
+style_version = 1
+line_width = 100
+tab_size = 2
+insert_spaces = true
+```
+
+The nearest ancestor configuration is used, starting at the source file's
+directory. Its explicit values override editor settings; omitted values retain
+the editor's settings. A nested file replaces the ancestor configuration rather
+than merging it. Saved configuration changes apply to the next request without
+a restart. Unknown keys, invalid values and unsupported style versions are
+errors. Style version 1 supports the four keys shown above. These settings
+apply to Sail sources; manifest formatting has its own rules.
+
+The CLI and LSP use the same syntax-only engine:
+
+```sh
+sail-lsp fmt --check model/        # report differences, never write
+sail-lsp fmt model/                # format Sail files in place
+sail-lsp fmt --explain model/main.sail
+sail-lsp fmt --stdin-filepath model/main.sail < model/main.sail
+```
+
+`--config PATH` selects an explicit configuration. CLI indentation defaults to
+two spaces; a checked-in configuration makes it match all clients. Directory
+inputs recursively select `.sail` files and exclude `.git`, `target` and
+`node_modules`. `--check` exits nonzero for differences, invalid source or
+configuration errors. Every input is validated before any file is written.
+Without `--check`, changed files are replaced atomically and retain permissions.
+`--stdin-filepath` supplies configuration context without writing that file;
+formatted text goes to stdout. `--explain` emits JSON status records to stderr.
+
+Use **Sail: Explain Formatting** in VS Code, **Sail: Explain formatting** in
+standard source actions (including Zed), or `:SailFormatInfo` in Neovim. Clients
+can also request `sail-lsp/explainFormatting` with `textDocument`, optional
+`options` (standard LSP formatting options), and optional `range`. The result
+shows effective indentation/width, configuration path, style version and one of
+`changed`, `already_formatted`, `parse_error`, `safety_check_failed`,
+`range_boundary` or `unavailable`, with details. VS Code uses selected lines
+when there is a selection. Standard formatting logs the same status under
+`SAIL_LOG=sail_lsp::formatting=debug`; no-op results do not produce popups.
 
 ## Include contexts, symbols and refactoring
 
@@ -442,12 +704,6 @@ manifest move or an unrepresentable include path is refused atomically when it
 cannot be rewritten safely. Virtual-file aliases remain configuration entries;
 update `workspace.generatedFiles` when moving their physical source files.
 
-The optional [compiler patch](../patches/sail-check-context-v1.patch) defines the
-`Check_context` parser, schema and tests. Its `doc/check-context.md` describes the
-proposal's contract and build commands. Stock 0.20.2/0.20.3 use the legacy CLI for
-representable contexts; extended contexts require a capability reply of exactly
-`1`. A different protocol version is skipped with a visible reason.
-
 ## Quick fixes
 
 Availability depends on the current source, visible declarations and client edit
@@ -475,7 +731,7 @@ is not offered through a text-only heuristic.
 Query results can be limited independently through `sail-lsp.cache.parseCapacity`,
 `environmentCapacity`, `inferenceCapacity`, and `bodyCapacity`. These count results
 per query, not bytes. Defaults retain all parse, type environment and inference
-results, and 512 callable-body/source-map results. Zero disables eviction for a
+results (including declaration diagnostics), and 512 callable-body/source-map results. Zero disables eviction for a
 family. Usage tracking remains enabled so changing a limit can reclaim existing
 results as well as subsequently queried results.
 

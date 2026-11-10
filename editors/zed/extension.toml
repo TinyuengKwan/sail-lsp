@@ -8,7 +8,7 @@ repository = "https://github.com/TinyuengKwan/sail-zed"
 
 [language_servers.sail_lsp]
 name = "sail-lsp"
-languages = ["Sail", "Sail Project"]
+languages = ["Sail", "Sail Project", "Sail Analysis Preview"]
 
 [[capabilities]]
 kind = "process:exec"

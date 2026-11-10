@@ -45,12 +45,14 @@ pub struct SailLspConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct RunnablesConfig {
+    /// Timeout for the standard LSP task fallback (native clients own their tasks).
+    pub timeout_ms: u64,
     pub tasks: Vec<ProjectTaskConfig>,
     pub show_code_lens: bool,
 }
 impl Default for RunnablesConfig {
     fn default() -> Self {
-        Self { tasks: Vec::new(), show_code_lens: true }
+        Self { tasks: Vec::new(), show_code_lens: true, timeout_ms: 300_000 }
     }
 }
 
@@ -127,6 +129,14 @@ impl Default for FormattingConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct FlycheckConfig {
+    pub diagnostic_format: CompilerDiagnosticFormat,
+    pub cache: CompilerCacheMode,
+    /// Managed cache root; relative paths use the compiler working directory.
+    pub cache_directory: Option<String>,
+    /// Presentation of compiler findings, independent of native diagnostics.
+    pub ignore: Vec<String>,
+    pub warnings_as_hint: Vec<String>,
+    pub warnings_as_info: Vec<String>,
     pub timeout_ms: u64,
     pub debounce_ms: u64,
     /// Whether to run it at all.
@@ -137,15 +147,53 @@ pub struct FlycheckConfig {
     pub extra_args: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CompilerCacheMode {
+    #[default]
+    Managed,
+    Compiler,
+    Disabled,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CompilerDiagnosticFormat {
+    #[default]
+    Auto,
+    Text,
+    Json,
+}
+
 impl Default for FlycheckConfig {
     fn default() -> Self {
         Self {
+            diagnostic_format: CompilerDiagnosticFormat::Auto,
+            cache: CompilerCacheMode::Managed,
+            cache_directory: None,
+            ignore: Vec::new(),
+            warnings_as_hint: Vec::new(),
+            warnings_as_info: Vec::new(),
             enable: false,
             command: "sail".to_string(),
             extra_args: Vec::new(),
-            timeout_ms: 30_000,
+            timeout_ms: 600_000,
             debounce_ms: 200,
         }
+    }
+}
+
+impl FlycheckConfig {
+    /// Presentation changes do not alter or restart a compiler invocation.
+    pub(crate) fn same_invocation(&self, other: &Self) -> bool {
+        fn invocation(config: &FlycheckConfig) -> FlycheckConfig {
+            let mut config = config.clone();
+            config.ignore.clear();
+            config.warnings_as_hint.clear();
+            config.warnings_as_info.clear();
+            config
+        }
+        invocation(self) == invocation(other)
     }
 }
 
@@ -182,6 +230,10 @@ pub struct InlayHintsConfig {
     pub parameter_hints: bool,
     /// Show effect annotation hints (Sail-specific).
     pub effect_hints: bool,
+    /// Types of intermediate field-access expressions.
+    pub chaining_hints: bool,
+    /// Values of automatically generated Sail enum conversions.
+    pub enum_value_hints: bool,
     /// Maximum length of inlay hint text before truncation.
     pub max_length: Option<usize>,
     /// Minimum lines for closing brace hints.
@@ -192,6 +244,9 @@ pub struct InlayHintsConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct CompletionConfig {
+    pub custom_templates: Vec<CompletionTemplateConfig>,
+    pub term_search: bool,
+    pub term_search_fuel: usize,
     /// Master enable for completions.
     pub enable: bool,
     /// Add parentheses after function completion.
@@ -206,6 +261,75 @@ pub struct CompletionConfig {
     pub limit: usize,
     /// Show full function signatures in completions.
     pub full_function_signatures: bool,
+}
+
+/// Templates use LSP snippet syntax; `${receiver}` is reserved for postfix.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(try_from = "RawCompletionTemplate")]
+pub struct CompletionTemplateConfig {
+    pub prefix: Option<String>,
+    pub postfix: Option<String>,
+    #[serde(serialize_with = "serialize_template_body")]
+    pub body: std::sync::Arc<str>,
+    pub description: String,
+    pub scope: CompletionTemplateScope,
+}
+fn serialize_template_body<S: serde::Serializer>(
+    body: &std::sync::Arc<str>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(body)
+}
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CompletionTemplateScope {
+    Item,
+    #[default]
+    Expr,
+    Type,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCompletionTemplate {
+    prefix: Option<String>,
+    postfix: Option<String>,
+    body: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    scope: CompletionTemplateScope,
+}
+impl TryFrom<RawCompletionTemplate> for CompletionTemplateConfig {
+    type Error = String;
+    fn try_from(raw: RawCompletionTemplate) -> Result<Self, String> {
+        if raw.prefix.is_none() && raw.postfix.is_none() {
+            return Err("a template needs prefix or postfix".into());
+        }
+        for trigger in raw.prefix.iter().chain(&raw.postfix) {
+            if trigger.is_empty()
+                || trigger.len() > 128
+                || !trigger.chars().all(|c| c.is_alphanumeric() || c == '_')
+            {
+                return Err(
+                    "template triggers must contain 1..128 bytes of letters, digits or underscores"
+                        .into(),
+                );
+            }
+        }
+        if raw.body.len() > 65536 {
+            return Err("template body exceeds 64 KiB".into());
+        }
+        if raw.postfix.is_some() && !matches!(raw.scope, CompletionTemplateScope::Expr) {
+            return Err("postfix templates require expr scope".into());
+        }
+        Ok(Self {
+            prefix: raw.prefix,
+            postfix: raw.postfix,
+            body: raw.body.into(),
+            description: raw.description,
+            scope: raw.scope,
+        })
+    }
 }
 
 /// Code lens settings.
@@ -392,6 +516,25 @@ impl CompletionConfig {
     /// Convert LSP-level config to ide-completion config.
     pub fn to_ide_config(&self) -> ide::completion::CompletionConfig {
         ide::completion::CompletionConfig {
+            custom_templates: self
+                .custom_templates
+                .iter()
+                .take(128)
+                .map(|template| ide::completion::CompletionTemplate {
+                    prefix: template.prefix.clone(),
+                    postfix: template.postfix.clone(),
+                    body: template.body.clone(),
+                    description: template.description.clone(),
+                    scope: match template.scope {
+                        CompletionTemplateScope::Item => ide::completion::SnippetScope::Item,
+                        CompletionTemplateScope::Expr => ide::completion::SnippetScope::Expr,
+                        CompletionTemplateScope::Type => ide::completion::SnippetScope::Type,
+                    },
+                })
+                .collect::<Vec<_>>()
+                .into(),
+            term_search: self.term_search,
+            term_search_fuel: self.term_search_fuel.min(10000),
             enable_postfix_completions: self.postfix,
             enable_keyword_completions: true,
             enable_snippets: self.snippets,
@@ -415,6 +558,8 @@ impl Default for InlayHintsConfig {
             type_hints: true,
             parameter_hints: true,
             effect_hints: true,
+            chaining_hints: true,
+            enum_value_hints: false,
             max_length: Some(25),
             closing_brace_hints_min_lines: Some(6),
         }
@@ -431,8 +576,8 @@ impl InlayHintsConfig {
             closing_brace_hints_min_lines: self.closing_brace_hints_min_lines,
             caller_count_hints: false,
             effect_hints: self.effect_hints,
-            chaining_hints: false,
-            discriminant_hints: false,
+            chaining_hints: self.chaining_hints,
+            discriminant_hints: self.enum_value_hints,
         }
     }
 }
@@ -440,6 +585,9 @@ impl InlayHintsConfig {
 impl Default for CompletionConfig {
     fn default() -> Self {
         Self {
+            custom_templates: Vec::new(),
+            term_search: false,
+            term_search_fuel: 1000,
             enable: true,
             add_call_parenthesis: true,
             postfix: true,
@@ -576,11 +724,19 @@ impl SailLspConfig {
             }
             kept.insert(section.clone(), serde_json::Value::Object(good));
         }
-        let config =
-            serde_json::from_value(serde_json::Value::Object(kept)).unwrap_or_else(|err| {
+        let mut config: Self = serde_json::from_value(serde_json::Value::Object(kept))
+            .unwrap_or_else(|err| {
                 errors.push(err.to_string());
                 Self::default()
             });
+        if config.completion.custom_templates.len() > 128 {
+            errors.push("completion.customTemplates: at most 128 templates are supported".into());
+            config.completion.custom_templates.truncate(128);
+        }
+        if config.completion.term_search_fuel > 10000 {
+            errors.push("completion.termSearchFuel: capped at 10000 units".into());
+            config.completion.term_search_fuel = 10000;
+        }
         (config, errors)
     }
 }
@@ -887,6 +1043,7 @@ mod tests {
             autoimport: true,
             limit: 50,
             full_function_signatures: true,
+            ..Default::default()
         };
         let ide_config = config.to_ide_config();
         assert!(!ide_config.enable_postfix_completions);
@@ -894,5 +1051,42 @@ mod tests {
         assert_eq!(ide_config.limit, Some(50));
         assert!(ide_config.full_function_signatures);
         assert!(ide_config.snippet_cap.is_some());
+    }
+}
+
+#[cfg(test)]
+mod template_config_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn invalid_templates_are_reported_without_losing_other_completion_settings() {
+        for template in [
+            json!({"body":"body"}),
+            json!({"prefix":"","body":"body"}),
+            json!({"postfix":"wrap","body":"body","scope":"type"}),
+            json!({"prefix":"p","body":"body","unknown":true}),
+        ] {
+            let (config, errors) = SailLspConfig::from_json(
+                &json!({"completion":{"customTemplates":[template],"limit":17}}),
+            );
+            assert_eq!(config.completion.limit, 17);
+            assert!(config.completion.custom_templates.is_empty());
+            assert!(
+                errors.iter().any(|error| error.contains("completion.customTemplates")),
+                "{errors:?}"
+            );
+        }
+        let (config, errors) = SailLspConfig::from_json(
+            &json!({"completion":{"customTemplates":[{"postfix":"wrap","body":"wrap(${receiver})$0"}],"termSearch":true,"termSearchFuel":7}}),
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        let ide = config.completion.to_ide_config();
+        assert!(ide.term_search);
+        assert_eq!(ide.term_search_fuel, 7);
+        assert!(std::sync::Arc::ptr_eq(
+            &config.completion.custom_templates[0].body,
+            &ide.custom_templates[0].body
+        ));
+        assert!(std::sync::Arc::ptr_eq(&ide.custom_templates, &ide.clone().custom_templates));
     }
 }

@@ -87,6 +87,14 @@ jobs:
         run: cargo test -p sail-lsp project_runnable_exports_with_the_real_compiler -- --ignored --nocapture 2>&1 | tee target/corpus/runnable-export.log
       - name: Alias kind oracle (missing compiler fails)
         run: cargo test -p ide upstream_kind_oracle -- --ignored --nocapture 2>&1 | tee target/corpus/kind-oracle.log
+      - name: Neovim project and analysis entrypoints
+        run: |
+          curl -fL --retry 3 https://github.com/neovim/neovim/releases/download/v0.11.5/nvim-linux-x86_64.tar.gz -o target/corpus/nvim.tar.gz
+          echo 'b2f91117be5b5ea39edd7297156dc2a4a8df4add6c95a90809a8df19e7ab6f52  target/corpus/nvim.tar.gz' | sha256sum --check
+          tar -xzf target/corpus/nvim.tar.gz -C target/corpus
+          SAIL_LSP_TEST_SERVER="$PWD/target/release/sail-lsp" target/corpus/nvim-linux-x86_64/bin/nvim --headless -u NONE -l scripts/neovim_smoke.lua 2>&1 | tee target/corpus/neovim.log
+      - name: Refactoring execution preserves effects and implicit arguments
+        run: cargo test -p ide upstream_refactoring_execution -- --ignored --nocapture 2>&1 | tee target/corpus/refactoring-execution.log
       - name: Formatter corpus safety and idempotence
         run: |
           cargo test -p ide formatting:: -- --include-ignored 2>&1 | tee target/corpus/formatter.log
@@ -131,18 +139,26 @@ jobs:
       - name: Cache lifecycle observations
         run: |
           python3 scripts/editor_probe.py --server target/release/sail-lsp --workspace ../sail-riscv --cycles 30 --settle --heap-status --sweep-files 48 --sweep-rounds 3 --lifecycle-cycles 3 --output target/corpus/memory-lifecycle.json
+      - name: Pinned real-model absolute interaction targets
+        run: |
+          python3 -m unittest discover -s scripts -p test_real_model_gate.py
+          python3 scripts/real_model_gate.py --server target/release/sail-lsp --riscv ../sail-riscv --arm ../sail-arm --sail-src ../sail --output target/corpus/real-model-performance
       - name: Extended compiler protocol
         working-directory: sail
         run: |
           cp _build/default/src/bin/sail.exe ../sail-lsp/target/corpus/stock-sail
           git apply ../sail-lsp/patches/sail-check-context-v1.patch
+          git apply ../sail-lsp/patches/sail-editor-diagnostics-v1.patch
           opam exec -- dune build --release src/bin/sail.exe
+          SAIL_UNIT_TESTS=true opam exec -- dune runtest --release test/unit
       - name: Live compiler protocol tests
         env:
           SAIL_STOCK_BIN: ${{ github.workspace }}/sail-lsp/target/corpus/stock-sail
           SAIL_CHECK_CONTEXT_BIN: ${{ github.workspace }}/sail/_build/default/src/bin/sail.exe
+          SAIL_EDITOR_PROTOCOL_BIN: ${{ github.workspace }}/sail/_build/default/src/bin/sail.exe
         run: |
           cargo test -p sail-lsp flycheck::live -- --ignored --nocapture 2>&1 | tee target/corpus/check-context.log
+          cargo test -p sail-lsp structured_compiler_fix_applies_rechecks_and_rejects_stale_actions -- --ignored --nocapture 2>&1 | tee target/corpus/editor-protocol.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -155,4 +171,5 @@ jobs:
             sail-lsp/target/corpus/*.sha256
             sail-lsp/target/corpus/formatter/report.json
             sail-lsp/target/corpus/runnables-export/
+            sail-lsp/target/corpus/real-model-performance/
           if-no-files-found: error

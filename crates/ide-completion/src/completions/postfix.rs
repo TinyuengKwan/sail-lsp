@@ -3,6 +3,7 @@
 //! type category when type information is available.
 
 use super::Completions;
+#[cfg(test)]
 use crate::completions::dot::extract_receiver_expr;
 use crate::context::CompletionContext;
 use crate::item::CompletionItem;
@@ -13,57 +14,66 @@ pub(crate) fn complete_postfix(acc: &mut Completions, ctx: &CompletionContext<'_
     if !ctx.config.enable_postfix_completions {
         return;
     }
-    let mut items = postfix_completions(ctx.text, ctx.offset, ctx.prefix);
+    let Some((receiver_start, receiver_text)) = ctx
+        .offset
+        .checked_sub(ctx.prefix.len() + 1)
+        .filter(|&dot| ctx.text.as_bytes().get(dot) == Some(&b'.'))
+        .and_then(|dot| ctx.postfix_receiver(dot))
+    else {
+        return;
+    };
+    let mut items =
+        postfix_for_receiver(ctx.text, ctx.offset, ctx.prefix, receiver_start, receiver_text);
+    if ctx.config.enable_snippets {
+        items.retain(|item| {
+            !ctx.config
+                .custom_templates
+                .iter()
+                .any(|template| template.postfix.as_deref() == item.filter_text.as_deref())
+        });
+    }
 
     // B5-2: Try to determine receiver type for filtering.
     // Extract receiver span and look up its type via FileDb.
-    let prefix_start = ctx.offset.saturating_sub(ctx.prefix.len());
-    if prefix_start > 0 && ctx.text.as_bytes().get(prefix_start - 1) == Some(&b'.') {
-        let dot_pos = prefix_start - 1;
-        let receiver_text = crate::completions::dot::extract_receiver_expr(ctx.text, dot_pos);
-        if !receiver_text.is_empty() {
-            // Look up receiver type from binding type cache
-            let receiver_span =
-                parser::Span::new(dot_pos.saturating_sub(receiver_text.len()), dot_pos);
-            let type_text = ctx
-                .file
-                .file_text()
-                .and_then(|(db, ft)| {
-                    hir::Semantics::new(db).binding_type_text(ft, receiver_span, ctx.file.bodies())
-                })
-                .or_else(|| {
-                    ctx.file.file_text().and_then(|(db, ft)| {
-                        hir::Semantics::new(db).expr_type_text(ft, receiver_span, ctx.file.bodies())
-                    })
-                });
+    if !receiver_text.is_empty() {
+        // Look up receiver type from binding type cache
+        let receiver_span = parser::Span::new(receiver_start, receiver_start + receiver_text.len());
+        let type_text = ctx
+            .file
+            .file_text()
+            .and_then(|(db, ft)| hir::Semantics::new(db).binding_type_text(ft, receiver_span))
+            .or_else(|| {
+                ctx.file
+                    .file_text()
+                    .and_then(|(db, ft)| hir::Semantics::new(db).expr_type_text(ft, receiver_span))
+            });
 
-            if let Some(ty) = type_text {
-                let ty_lower = ty.to_ascii_lowercase();
-                // Filter templates by type category
-                items.retain(|item| {
-                    let trigger = item.filter_text.as_deref().unwrap_or("");
-                    match trigger {
-                        // Numeric/bitvector only
-                        "unsigned" | "signed" => {
-                            ty_lower.contains("bits")
-                                || ty_lower.contains("int")
-                                || ty_lower.contains("nat")
-                                || ty_lower.contains("range")
-                        }
-                        // Boolean only
-                        "if" | "not" => {
-                            ty_lower == "bool" || ty_lower.contains("bool")
+        if let Some(ty) = type_text {
+            let ty_lower = ty.to_ascii_lowercase();
+            // Filter templates by type category
+            items.retain(|item| {
+                let trigger = item.filter_text.as_deref().unwrap_or("");
+                match trigger {
+                    // Numeric/bitvector only
+                    "unsigned" | "signed" => {
+                        ty_lower.contains("bits")
+                            || ty_lower.contains("int")
+                            || ty_lower.contains("nat")
+                            || ty_lower.contains("range")
+                    }
+                    // Boolean only
+                    "if" | "not" => {
+                        ty_lower == "bool" || ty_lower.contains("bool")
                                 || ty_lower.contains("int") || ty_lower.contains("bits")
                                 // Allow for any type (if is common pattern)
                                 || trigger == "if"
-                        }
-                        // Match: useful for enum/union types
-                        "match" => true, // always available
-                        // Always available
-                        _ => true,
                     }
-                });
-            }
+                    // Match: useful for enum/union types
+                    "match" => true, // always available
+                    // Always available
+                    _ => true,
+                }
+            });
         }
     }
 
@@ -71,6 +81,7 @@ pub(crate) fn complete_postfix(acc: &mut Completions, ctx: &CompletionContext<'_
 }
 
 /// Generate postfix completions (e.g. `expr.if` -> `if expr then { }`)
+#[cfg(test)]
 pub(crate) fn postfix_completions(text: &str, offset: usize, prefix: &str) -> Vec<CompletionItem> {
     // Find the dot before the prefix
     let prefix_start = offset - prefix.len();
@@ -89,6 +100,22 @@ pub(crate) fn postfix_completions(text: &str, offset: usize, prefix: &str) -> Ve
         return Vec::new();
     }
 
+    postfix_for_receiver(
+        text,
+        offset,
+        prefix,
+        text[..dot_pos].trim_end().len() - receiver.len(),
+        receiver,
+    )
+}
+
+fn postfix_for_receiver(
+    text: &str,
+    offset: usize,
+    prefix: &str,
+    receiver_start: usize,
+    receiver: &str,
+) -> Vec<CompletionItem> {
     let prefix_lower = prefix.to_ascii_lowercase();
 
     let postfix_templates: &[(&str, &str, &str)] = &[
@@ -117,7 +144,10 @@ pub(crate) fn postfix_completions(text: &str, offset: usize, prefix: &str) -> Ve
 
         // Templates use doubled literal braces. Unescape before inserting the
         // receiver so braces belonging to the user's expression stay intact.
-        let snippet = template.replace("{{", "{").replace("}}", "}").replace("{}", receiver);
+        let snippet = template
+            .replace("{{", "{")
+            .replace("}}", "}")
+            .replace("{}", &super::custom::escape_literal(receiver));
 
         let mut item = CompletionItem::new(CompletionItemKind::Snippet, format!(".{trigger}"))
             .detail(*detail)
@@ -130,8 +160,7 @@ pub(crate) fn postfix_completions(text: &str, offset: usize, prefix: &str) -> Ve
             .take_while(|c| c.is_alphanumeric() || *c == '_')
             .map(char::len_utf8)
             .sum::<usize>();
-        item.source_range =
-            Some(base_db::text_range(dot_pos - receiver.len(), offset + suffix_len));
+        item.source_range = Some(base_db::text_range(receiver_start, offset + suffix_len));
         items.push(item);
     }
     items

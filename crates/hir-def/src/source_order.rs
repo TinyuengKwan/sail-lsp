@@ -92,21 +92,29 @@ fn ordered(
     result
 }
 
+#[salsa::tracked(returns(ref))]
+fn declaration_pointers(db: &dyn salsa::Database, file: FileText) -> Vec<syntax::SyntaxNodePtr> {
+    syntax::parse_query::semantic_parse_file(db, file)
+        .syntax_node()
+        .into_iter()
+        .flat_map(|root| {
+            root.children().map(|node| syntax::SyntaxNodePtr::new(&node)).collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 pub fn node(db: &dyn salsa::Database, declaration: Declaration) -> Option<syntax::SyntaxNode> {
-    syntax::parse_query::semantic_parse_file(db, declaration.file)
-        .syntax_node()?
-        .children()
-        .nth(declaration.index)
+    let root = syntax::parse_query::semantic_parse_file(db, declaration.file).syntax_node()?;
+    Some(declaration_pointers(db, declaration.file).get(declaration.index)?.to_node(&root))
 }
 
 /// Locate a program point without putting byte offsets into semantic keys.
 pub fn at_offset(db: &dyn salsa::Database, file: FileText, offset: usize) -> Option<Declaration> {
-    let root = syntax::parse_query::semantic_parse_file(db, file).syntax_node()?;
-    root.children().enumerate().find_map(|(index, node)| {
-        let range = node.text_range();
-        (usize::from(range.start()) <= offset && offset < usize::from(range.end()))
-            .then_some(Declaration { file, index })
-    })
+    let offset = rowan::TextSize::from(u32::try_from(offset).ok()?);
+    let pointers = declaration_pointers(db, file);
+    let index =
+        pointers.partition_point(|ptr| ptr.text_range().start() <= offset).checked_sub(1)?;
+    pointers[index].text_range().contains(offset).then_some(Declaration { file, index })
 }
 
 /// A body may retain its old source map after preceding text moves. Resolve
@@ -116,7 +124,8 @@ pub fn for_body<'db>(
     db: &'db dyn salsa::Database,
     id: crate::def_query::DefWithBodyId<'db>,
 ) -> Option<Declaration> {
-    let bodies = crate::def_query::callable_bodies(db, id.file(db)).as_ref()?;
+    let bodies = crate::def_query::callable_bodies_for_name(db, id.file(db), id.name(db).clone())
+        .as_ref()?;
     let body = bodies
         .0
         .entries()

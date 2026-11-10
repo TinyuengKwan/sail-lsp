@@ -30,6 +30,14 @@ use lsp_types::*;
 pub(crate) struct ClientCapabilities(pub(crate) lsp_types::ClientCapabilities);
 
 impl ClientCapabilities {
+    pub(crate) fn show_document_support(&self) -> bool {
+        self.0
+            .window
+            .as_ref()
+            .and_then(|window| window.show_document.as_ref())
+            .is_some_and(|show| show.support)
+    }
+
     pub(crate) fn versioned_edit_support(&self) -> bool {
         self.0
             .workspace
@@ -208,15 +216,19 @@ impl ClientCapabilities {
 /// Builds ServerCapabilities from config.
 pub(crate) fn server_capabilities(client: &ClientCapabilities) -> ServerCapabilities {
     ServerCapabilities {
+        execute_command_provider: Some(ExecuteCommandOptions {
+            commands: crate::editor_commands::COMMANDS
+                .iter()
+                .map(|command| (*command).to_owned())
+                .collect(),
+            work_done_progress_options: Default::default(),
+        }),
         text_document_sync: Some(TextDocumentSyncCapability::Kind(
             TextDocumentSyncKind::INCREMENTAL,
         )),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
-        // Only when the client can take a code action *literal*. Without
-        // that capability an action has to be sent as a `Command`, which
-        // this server has no `workspace/executeCommand` handler for — so
-        // advertising the feature would offer actions the client cannot
-        // apply. `code_action_literals_support` had no caller until now.
+        // Source edits carry structured/versioned WorkspaceEdits and lazy
+        // resolution data, which require code-action literal support.
         code_action_provider: client.code_action_literals_support().then(|| {
             CodeActionProviderCapability::Options(CodeActionOptions {
                 code_action_kinds: Some(vec![

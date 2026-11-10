@@ -78,7 +78,6 @@ fn raw_format(source: &str, options: &FormatOptions) -> String {
     let snippet = snippet::SnippetProvider::new(source.to_owned());
     let mut visitor = visitor::FmtVisitor::new(options, &snippet);
     visitor.walk_source_file(&tree);
-    format_lines(&mut visitor.buffer, options, &mut visitor.report);
     let mut raw = normalize_blank_lines(&visitor.buffer);
     post_process_text(&mut raw, source, options);
     raw

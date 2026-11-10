@@ -91,6 +91,7 @@ impl RequestDispatcher<'_> {
             _ => return self,
         };
 
+        let uri = crate::request_batch::document_uri(&req);
         let (id, params) = match parse::<R>(req) {
             Ok(it) => it,
             Err(response) => {
@@ -104,7 +105,7 @@ impl RequestDispatcher<'_> {
         if self.global_state.is_completed(&id) {
             return self;
         }
-        let snap = self.global_state.snapshot();
+        let snap = self.global_state.snapshot_for_uri(uri.as_ref());
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _ctx = stdx::panic_context::enter(panic_frame::<R>(&id));
             f(snap, params)
@@ -176,7 +177,8 @@ impl RequestDispatcher<'_> {
             return self;
         }
         let snapshot_started = std::time::Instant::now();
-        let snap = self.global_state.snapshot();
+        let uri = crate::request_batch::document_uri(&req);
+        let snap = self.global_state.snapshot_for_uri(uri.as_ref());
         let snapshot_us = snapshot_started.elapsed().as_micros();
         let queued = std::time::Instant::now();
         self.global_state.task_pool.spawn(intent, move || {
@@ -561,6 +563,21 @@ mod tests {
         }
         let text_document = serde_json::json!({ "uri": uri });
         let cancelled = [
+            check::<lsp_types::request::RangeFormatting>(
+                snap.clone(),
+                crate::handlers::request::handle_range_formatting,
+                serde_json::json!({"textDocument": text_document, "range":{"start":{"line":0,"character":0},"end":{"line":1,"character":0}},"options":{"tabSize":2,"insertSpaces":true}}),
+            ),
+            check::<crate::lsp_ext::ExplainFormatting>(
+                snap.clone(),
+                crate::formatting::explain,
+                serde_json::json!({"textDocument":text_document}),
+            ),
+            check::<lsp_types::request::OnTypeFormatting>(
+                snap.clone(),
+                crate::handlers::request::handle_on_type_formatting,
+                serde_json::json!({"textDocument":text_document,"position":{"line":1,"character":0},"ch":"}","options":{"tabSize":2,"insertSpaces":true}}),
+            ),
             check::<lsp_types::request::Formatting>(
                 snap.clone(),
                 crate::handlers::request::handle_formatting,
@@ -584,7 +601,7 @@ mod tests {
         ];
         drop(snap);
         writer.join().unwrap();
-        assert_eq!(cancelled, [true; 4], "a cancelled query must reach the dispatch policy");
+        assert_eq!(cancelled, [true; 7], "a cancelled query must reach the dispatch policy");
     }
 
     #[test]

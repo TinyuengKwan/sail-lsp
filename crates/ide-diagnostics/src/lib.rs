@@ -91,7 +91,7 @@ pub(crate) fn node_file_range(node: &hir::InFile<syntax::SyntaxNodePtr>) -> hir:
 pub use hir::diagnostics::Severity;
 
 /// Configuration for diagnostics computation.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct DiagnosticsConfig {
     /// Whether diagnostics are enabled at all.
     pub enabled: bool,
@@ -110,6 +110,21 @@ pub struct DiagnosticsConfig {
     pub max_diagnostics_per_file: Option<usize>,
     /// Whether the client supports snippet text edits in fixes.
     pub snippet_cap: Option<SnippetCap>,
+}
+
+impl Default for DiagnosticsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            disabled: Default::default(),
+            disable_experimental: false,
+            warnings_as_hint: Default::default(),
+            warnings_as_info: Default::default(),
+            style_lints: false,
+            max_diagnostics_per_file: None,
+            snippet_cap: None,
+        }
+    }
 }
 
 impl DiagnosticsConfig {
@@ -354,7 +369,7 @@ pub fn syntax_diagnostics(
     file: &dyn ide_db::FileDb,
     ft: base_db::FileText,
 ) -> Vec<Diagnostic> {
-    if config.disabled.contains("syntax-error") {
+    if !config.enabled || config.disabled.contains("syntax-error") {
         return Vec::new();
     }
 
@@ -398,6 +413,20 @@ pub fn syntax_diagnostics(
     res
 }
 
+fn call_is_unclosed(file: &dyn ide_db::FileDb, range: TextRange) -> bool {
+    use parser::SyntaxKind as SK;
+    let Some(root) = file.syntax() else { return false };
+    root.descendants()
+        .filter(|node| {
+            node.kind() == SK::CALL_EXPR
+                && node.text_range().start() == range.start()
+                && node.text_range().contains_range(range)
+        })
+        .min_by_key(|node| node.text_range().len())
+        .and_then(|node| node.children().find(|node| node.kind() == SK::ARG_LIST))
+        .is_some_and(|args| !args.children_with_tokens().any(|token| token.kind() == SK::R_PAREN))
+}
+
 /// Request semantic diagnostics for a file.
 ///
 /// Combines:
@@ -413,6 +442,9 @@ pub fn semantic_diagnostics(
     ft: base_db::FileText,
     workspace_names: Option<&WorkspaceNames>,
 ) -> Vec<Diagnostic> {
+    if !config.enabled {
+        return Vec::new();
+    }
     if base_db::preprocess::project_membership(db, ft.file_id(db)) == Some(false) {
         // Like RA's unlinked-file diagnostic, report the missing analysis
         // context once instead of diagnosing a program we have not loaded.
@@ -485,7 +517,24 @@ pub fn semantic_diagnostics(
                         value: syntax::SyntaxNodePtr::new(&node),
                     };
                     let name = item.name(tree).to_string();
-                    if let Some(first) = previous.get(&name) {
+                    // Repeated visits in one compilation are duplicates; the
+                    // same source loaded by independent projects is not.
+                    let project =
+                        base_db::module_graph::WorkspaceModules::try_get(db).and_then(|graph| {
+                            let owner = graph
+                                .graph(db)
+                                .modules
+                                .iter()
+                                .position(|module| module.files.contains(&view.file_id(db)))?;
+                            base_db::preprocess::WorkspaceSourceProject::try_get(db)?
+                                .project(db)
+                                .module_options
+                                .get(&owner)?
+                                .project
+                                .clone()
+                        });
+                    let key = (project, name.clone());
+                    if let Some(first) = previous.get(&key) {
                         if view == ft {
                             any_from_defs.push(AnyDiagnostic::DuplicateDefinition(
                                 DuplicateDefinition {
@@ -497,7 +546,7 @@ pub fn semantic_diagnostics(
                             ));
                         }
                     } else {
-                        previous.insert(name, location);
+                        previous.insert(key, location);
                     }
                 }
                 if view == ft {
@@ -617,6 +666,13 @@ pub fn semantic_diagnostics(
                     tcr.0.def_base,
                     &tcr.0.source_tokens,
                 ) {
+                    // Argument count is undecidable until this call's own
+                    // argument list is closed. Keep errors in other calls.
+                    if let AnyDiagnostic::MismatchedArgCount(count) = &d {
+                        if call_is_unclosed(file, count.node.value.text_range()) {
+                            continue;
+                        }
+                    }
                     any_diags.push(d);
                 }
             }

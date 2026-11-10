@@ -161,7 +161,7 @@ impl std::ops::Index<PatId> for Body {
 #[derive(Debug, Clone, Default)]
 pub struct BodySourceMap {
     pub file_id: Option<base_db::FileId>,
-    pub store: ExpressionStoreSourceMap,
+    pub store: std::sync::Arc<ExpressionStoreSourceMap>,
     /// Where the callable starts in the current revision. The source-map
     /// query reads current lowering independently of the semantic cache.
     pub def_base: usize,

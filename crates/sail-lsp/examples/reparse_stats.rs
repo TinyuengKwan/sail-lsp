@@ -44,8 +44,8 @@ fn main() {
             (cached, parsed, start.elapsed().as_nanos(), all)
         };
         assert_eq!(cached.green, parsed.green);
-        assert_eq!(cached.tokens, parsed.tokens);
-        assert_eq!(cached.errors, parsed.errors);
+        assert_eq!(cached.tokens(), parsed.tokens());
+        assert_eq!(cached.errors(), parsed.errors());
         if i >= 20 {
             inc_times.push(inc);
             full_times.push(all);

@@ -31,7 +31,7 @@ If you build locally, use the VSIX that matches your platform so the extension c
 
 The published extension is intended to ship as platform-specific packages, each containing the matching `sail-lsp` binary under `server/`.
 
-If you prefer a custom server build, set `sail-lsp.server.path` to an explicit binary path. If that setting is unset, the extension tries:
+If you prefer a custom server build, set `sail-lsp.server.path` to an explicit binary path. Server selection follows this order:
 
 1. `sail-lsp.server.path`
 2. The installer's registration (`SAIL_LSP_CONFIG_HOME/vscode.json`, otherwise
@@ -58,7 +58,7 @@ Common settings:
 | `sail-lsp.completion.enable` | `true` | Enable completions |
 | `sail-lsp.codeLens.enable` | `true` | Enable code lenses |
 | `sail-lsp.semanticTokens.enable` | `true` | Enable semantic highlighting |
-| `sail-lsp.z3.timeoutMs` | `1000` | Constraint solver timeout |
+| `sail-lsp.flycheck.enable` | `false` | Run the upstream compiler on save |
 
 Full configuration reference: [`docs/configuration.md`](../../docs/configuration.md)
 
@@ -76,6 +76,14 @@ Full configuration reference: [`docs/configuration.md`](../../docs/configuration
 - `Sail: View Item Tree`
 - `Sail: Show Server Version`
 - `Sail: Toggle Inlay Hints`
+- `Sail: Explain Formatting` — show effective options, project style and no-op reasons in a read-only view
+
+Formatting uses local text edits and respects a project's `.sailfmt.toml`.
+Use `sail-lsp fmt --check <file-or-directory>` in CI to check the same style;
+see [formatting configuration](../../docs/configuration.md#formatting).
+Enable `editor.formatOnType` for input-triggered formatting and
+`editor.formatOnSave` for formatting on save. If several Sail formatters are
+installed, choose `Lunarwwww.sail-lsp` as `editor.defaultFormatter` for `[sail]`.
 
 The syntax tree, HIR, and item tree commands are debugging aids intended for inspecting parser and semantic state for the active file.
 

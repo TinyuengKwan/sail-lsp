@@ -6,6 +6,7 @@ completions, navigation, error recovery, or duplicate responses fail the run.
 Timing observations have no single-run pass/fail threshold.
 """
 import argparse
+from collections import Counter
 import hashlib
 import json
 import tempfile
@@ -31,6 +32,9 @@ CASES = [
     ("type-error", "function edit_me(input) = probe_identity(true)$0\n", None, True),
     ("repaired", "function edit_me(input) = probe_identity(input)$0\n", None, False),
     ("existential-type", "type Box = { 'n : Int, 'n >= 0. bi$0", "bits", None),
+    ("missing-include", '$include "absent.sail"\nfunction edit_me(input) = provided(input)$0\n', None, True),
+    ("missing-include-independent-error", '$include "absent.sail"\nfunction edit_me(input) = probe_identity(true)$0\n', None, True),
+    ("broken-signature", "val broken : (int, $0", None, True),
     ("repaired-again", "function edit_me(input) = probe_identity(input)$0\n", None, False),
 ]
 
@@ -88,6 +92,7 @@ def run(server, output):
                     record = {"name": name, "version": version, "source": source,
                               "cursor": position(source, cursor)}
                     report["cases"].append(record)
+                    edit_started = time.monotonic()
                     client.send("textDocument/didChange", {
                         "textDocument": {**document, "version": version},
                         "contentChanges": [{"text": source}]})
@@ -111,8 +116,24 @@ def run(server, output):
                             assert hover and definition, (name, "missing navigation", offset)
                             targets = definition if isinstance(definition, list) else [definition]
                             assert all(t.get("uri", t.get("targetUri")) == document["uri"] for t in targets)
+                        diagnostic_started = time.monotonic()
                         diagnostic = ask(client, "textDocument/diagnostic", {"textDocument": document}, name)
                         record["diagnostics"] = diagnostic.get("items", [])
+                        record["diagnostic_latency_ms"] = round((time.monotonic() - diagnostic_started) * 1000, 3)
+                        record["edit_to_diagnostic_ms"] = round((time.monotonic() - edit_started) * 1000, 3)
+                        record["diagnostic_count"] = len(record["diagnostics"])
+                        record["diagnostic_codes"] = dict(Counter(d.get("code") for d in record["diagnostics"]))
+                        # Keep independent semantic findings visible. These are
+                        # categories, not inferred causal links across files.
+                        record["root_diagnostics"] = [d for d in record["diagnostics"] if d.get("code") in {"syntax-error", "unresolved-include"}]
+                        record["semantic_diagnostics"] = [d for d in record["diagnostics"] if d not in record["root_diagnostics"]]
+                        maxima = {"open-call": 1, "partial-argument": 2, "partial-match": 2, "open-block": 3}
+                        if name in maxima:
+                            assert record["diagnostic_count"] <= maxima[name], (name, "editing noise", record["diagnostics"])
+                        if name.startswith("missing-include"):
+                            assert record["diagnostic_codes"].get("unresolved-include") == 1, record
+                        if name == "missing-include-independent-error":
+                            assert record["diagnostic_codes"].get("type-error"), "independent type error was hidden"
                         errors = [d for d in record["diagnostics"] if d.get("severity") == 1]
                         if error_expected is not None:
                             assert bool(errors) == error_expected, (name, "error recovery", errors)

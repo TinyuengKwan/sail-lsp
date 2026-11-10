@@ -1,52 +1,13 @@
-//! Completion check: when a name is typed, is it offered?
+//! Sample completion recall, ranking and latency over written identifiers.
 //!
-//! The sixth probe over the corpus, and the first one that looks at
-//! completion at all. The other five say nothing about it: `corpus_check`
-//! and `conformance_check` score diagnostics, `mutation_check` scores
-//! diagnostics on mutated files, `analysis_stats` measures goto-definition
-//! and hover, and `protocol_check` measures ranges. Completion is the
-//! feature an editor user touches most often per keystroke and the one
-//! nothing here could put a number on.
+//! At reference sites, query after the configured prefix and check whether the
+//! existing identifier is offered. Results describe this sample, not all valid
+//! completions. The directory loader uses a flat workspace; it does not validate
+//! configured project visibility or simulate unsaved edits. Use the stdio gates
+//! for those interactions.
 //!
-//! ## The oracle is the corpus
-//!
-//! There is no upstream tool to differ against — `sail` has no completion —
-//! so the corpus is its own oracle, the same way `mutation_check` uses a
-//! mutated file's rejection: **at a name that is already written in the
-//! source, typing its first characters must offer that name.** The source
-//! says what the right answer is, and it says it 3,000 times.
-//!
-//! The cursor is placed after the first `--prefix` characters of an
-//! identifier that is a *reference* — an `IDENT_EXPR` or a `TYPE_NAMED`, not
-//! a declaration's own name and not a binding, because completing a name
-//! being *invented* has no right answer. `completion_prefix` reads
-//! backwards from the cursor only, so no edit is needed to simulate typing:
-//! the prefix the engine sees is the prefix an editor would send.
-//!
-//! ## What is measured
-//!
-//! - **offered**: the written name is somewhere in the list. This is
-//!   recall, and it is the number that matters: an item that is not offered
-//!   cannot be chosen however good the ranking is.
-//! - **rank**: where it sits in the list the client shows. Items arrive
-//!   sorted by relevance and carry a `sort_text` that preserves that order,
-//!   so the index *is* what the user scrolls past.
-//! - **size**: how many items come back. The list is cut at
-//!   `CompletionConfig::limit` (200 by default), so a name ranked past that
-//!   is not in this answer — the server marks such a list incomplete, and
-//!   the client asks again as the prefix grows.
-//! - **latency**: per query, p50 and p95. Completion runs on a keystroke;
-//!   it is the one feature where a millisecond figure is a correctness
-//!   figure.
-//!
-//! ## Usage
-//!
-//! ```sh
-//! cargo run --release --example completion_check -- /path/to/sail-riscv
-//! cargo run --release --example completion_check -- --list /path/to/sail-riscv
-//! cargo run --release --example completion_check -- --ranked /path/to/sail-riscv
-//! cargo run --release --example completion_check -- --prefix 1 /path/to/sail-riscv
-//! ```
+//! Usage: `cargo run --release --example completion_check -- [--list] [--ranked]
+//! [--prefix N] /path/to/corpus`
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 

@@ -1590,7 +1590,7 @@ fn expand_numeric_aliases_once(
 }
 
 /// One round: every alias name becomes its body, and the body is left alone.
-fn expand_numeric_aliases_in_numeric(
+pub(super) fn expand_numeric_aliases_in_numeric(
     expr: &NumericExpr,
     aliases: &HashMap<String, std::sync::Arc<super::env::AliasScheme>>,
 ) -> NumericExpr {

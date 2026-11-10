@@ -788,7 +788,7 @@ fn finish_body_with_guard(
     let body = Body { store, params: params.into_boxed_slice(), body_expr, mapping_arms, guard };
     let source_map = BodySourceMap {
         file_id: None,
-        store: store_source_map,
+        store: std::sync::Arc::new(store_source_map),
         def_base: 0,
         source_tokens: Vec::new(),
     };
@@ -1125,6 +1125,9 @@ impl ExprCollector {
     }
 
     pub(crate) fn lower_cst_expr(&mut self, node: &syntax::SyntaxNode) -> ExprId {
+        if (self.builder.exprs.len() + self.builder.pats.len()).is_multiple_of(1024) {
+            syntax::cancellation_checkpoint();
+        }
         use parser::SyntaxKind as SK;
 
         let span = Self::text_range_to_span(node.text_range());
@@ -1836,6 +1839,9 @@ impl ExprCollector {
 
     /// Lower a CST pattern node.
     pub(crate) fn lower_cst_pat(&mut self, node: &syntax::SyntaxNode) -> PatId {
+        if (self.builder.exprs.len() + self.builder.pats.len()).is_multiple_of(1024) {
+            syntax::cancellation_checkpoint();
+        }
         use parser::SyntaxKind as SK;
         let span = Self::text_range_to_span(node.text_range());
         let hir = match node.kind() {
@@ -2133,7 +2139,7 @@ pub fn lower_mapping_clause_text(
         body,
         BodySourceMap {
             file_id: None,
-            store: store_source_map,
+            store: std::sync::Arc::new(store_source_map),
             def_base: 0,
             source_tokens: Vec::new(),
         },

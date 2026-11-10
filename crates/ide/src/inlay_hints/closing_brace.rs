@@ -15,15 +15,16 @@ pub(super) fn collect_closing_brace_hints(
 
     for &id in tree.top_level_items() {
         let span = id.span(tree);
+        if !span_ends_in_range(span, begin, end) {
+            continue;
+        }
         let start_lc = file.position_at(span.start);
         let end_lc = file.position_at(span.end);
         if ((end_lc.line - start_lc.line) as usize) < min_lines {
             continue;
         }
-        if span.end < begin || span.end > end {
-            continue;
-        }
         hints.push(InlayHint {
+            label_parts: Vec::new(),
             offset: span.end,
             label: format!(" // {}", id.name(tree)),
             kind: InlayHintKind::Other,

@@ -157,7 +157,13 @@ impl<'t> Parser<'t> {
         allow_infix: bool,
     ) -> Option<CompletedMarker> {
         let kind = self.current();
-        if kind == SK::EOF || recovery.contains(kind) {
+        if kind == SK::EOF
+            || recovery.contains(kind)
+            || (super::DEF_START.contains(kind) && (kind != T![register] || self.nth(1) != T!['(']))
+        {
+            // An unfinished type argument must not consume the next function
+            // or declaration as an error followed by more type arguments.
+            // `register(...)` is the one definition keyword used as a type.
             return None;
         }
 

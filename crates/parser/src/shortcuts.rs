@@ -117,6 +117,9 @@ impl<'a> LexedStr<'a> {
         let mut is_first_enter = true;
 
         for step in output.iter() {
+            if token_idx.is_multiple_of(1024) {
+                stdx::cancellation::checkpoint();
+            }
             match step {
                 Step::Token { kind, n_input_tokens } => {
                     // Emit leading trivia before this non-trivia token

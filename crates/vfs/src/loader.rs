@@ -97,6 +97,11 @@ pub enum LoadingProgress {
 
 /// Messages from the loader to the main loop.
 pub enum Message {
+    /// Native watching recovered, or is degraded while recovery is retried.
+    WatchStatus { config_version: u32, error: Option<String> },
+    /// Native events were lost. Re-discover selected projects without loading
+    /// every unselected source in a watched directory into the VFS.
+    Rescan { config_version: u32, roots: Vec<AbsPathBuf> },
     /// Loading progress update.
     Progress {
         n_total: usize,

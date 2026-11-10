@@ -445,6 +445,15 @@ pub(super) mod tests {
         roots: &[usize],
         modules: Vec<ModuleData>,
     ) -> (AnalysisHost, UrlMap, Vec<url::Url>) {
+        setup_with_host(AnalysisHost::new(), sources, roots, modules)
+    }
+
+    pub(crate) fn setup_with_host(
+        mut host: AnalysisHost,
+        sources: &[(&str, &str)],
+        roots: &[usize],
+        modules: Vec<ModuleData>,
+    ) -> (AnalysisHost, UrlMap, Vec<url::Url>) {
         let urls: Vec<_> = sources
             .iter()
             .map(|(name, _)| url::Url::parse(&format!("file:///project/{name}")).unwrap())
@@ -454,7 +463,6 @@ pub(super) mod tests {
             urls.iter().cloned().zip(ids.iter().copied()).collect(),
             ids.iter().copied().zip(urls.iter().cloned()).collect(),
         );
-        let mut host = AnalysisHost::new();
         let mut change = Change::new();
         for (&id, (_, text)) in ids.iter().zip(sources) {
             change.change_file(id, *text);

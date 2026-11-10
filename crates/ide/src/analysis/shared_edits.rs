@@ -6,7 +6,7 @@ use ide_db::{defs::Definition, source_change::SourceChange};
 use salsa::Database as _;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum PhysicalSymbol {
+pub(super) enum PhysicalSymbol {
     Declaration(std::mem::Discriminant<Definition>, FileId, parser::Span, String),
     Local(FileId, parser::Span, String),
     Builtin(String),
@@ -126,7 +126,7 @@ impl Analysis {
         url: &url::Url,
         range: base_db::TextRange,
         diagnostics: &[ide_diagnostics::Diagnostic],
-        format: &ide_db::ide_types::FormatOptions,
+        format: Option<&ide_db::ide_types::FormatOptions>,
         config: &ide_assists::AssistConfig,
     ) -> Vec<CodeAction> {
         let Some(source) = self.url_map.lookup_file_id(url) else { return Vec::new() };
@@ -227,7 +227,12 @@ impl Analysis {
                             Definition::from_path_resolution(def)?.canonical(&self.db),
                         )
                     })
-                    .ok_or("Cannot prove binding identity in multiple include contexts")?;
+                    .ok_or_else(|| {
+                        format!(
+                            "Cannot prove binding identity of `{}` in multiple include contexts",
+                            token.text()
+                        )
+                    })?;
                 if expected.as_ref().is_some_and(|expected| expected != &symbol) {
                     return Err("An edited token resolves to different bindings in multiple include contexts".into());
                 }
@@ -381,7 +386,11 @@ impl Analysis {
         self.physical_definition(view, def)
     }
 
-    fn physical_definition(&self, view: FileId, def: Definition) -> Option<PhysicalSymbol> {
+    pub(super) fn physical_definition(
+        &self,
+        view: FileId,
+        def: Definition,
+    ) -> Option<PhysicalSymbol> {
         let name = def.name(&self.db)?.to_string();
         let kind = std::mem::discriminant(&def);
         let physical = |view| base_db::preprocess::physical_file(&self.db, view);
@@ -392,6 +401,10 @@ impl Analysis {
             match def {
                 Definition::Local(local) => {
                     return Some(PhysicalSymbol::Local(physical(view), local.span, name))
+                }
+                Definition::TypeVar(var) if var.binding.is_some() => {
+                    let (file, span) = var.binding?;
+                    (file, span)
                 }
                 Definition::Field(field) => (field.file_id?, field.declaration_span),
                 Definition::EnumVariant(member) => (member.file_id?, member.declaration_span),
@@ -479,6 +492,7 @@ impl Analysis {
                 }
             }
         }
+        self.validate_rename_bindings(change)?;
         Ok(expected)
     }
 }

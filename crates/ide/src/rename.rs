@@ -4,19 +4,8 @@
 //! the server asks for separately — whether the token under the cursor can
 //! be renamed at all, and what its current text is.
 //!
-//! There used to be a second rename here, reaching `Definition::rename` in
-//! ide-db through a `definition_from_decl` that returned `None`
-//! unconditionally, plus a `rename_legacy` kept "until the handlers
-//! migrate". Nothing called either. What the handlers actually call is
-//! `Analysis::rename`, which goes through `find_all_refs`.
-
 use ide_db::line_index::{LineCol, TextRange};
 use ide_db::FileDb;
-
-// Re-export from ide_db::rename for downstream consumers.
-pub use ide_db::rename::{IdentifierKind as IdKind, RenameError as Error};
-
-pub use crate::references::{normalize_validated_rename, rename_edits};
 
 /// The name under the cursor and its range, if it can be renamed.
 ///

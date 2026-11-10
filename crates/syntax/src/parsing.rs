@@ -57,7 +57,13 @@ pub fn parse_text_with_fixities(
         (SyntaxNode::new_root(green), errors)
     })) {
         Ok(result) => result,
-        Err(_) => {
+        Err(payload) => {
+            // Cancellation is control flow, not parser recovery. In
+            // particular, never cache a synthetic error CST for a revision
+            // whose computation was interrupted by an edit.
+            if payload.is::<salsa::Cancelled>() || payload.is::<stdx::cancellation::Cancelled>() {
+                std::panic::resume_unwind(payload);
+            }
             // Parser panic fallback: minimal valid tree
             let mut builder = rowan::GreenNodeBuilder::new();
             builder.start_node(parser::SyntaxKind::SOURCE_FILE.into());

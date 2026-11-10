@@ -58,6 +58,157 @@ pub fn return_type_match_at(
         .max()
 }
 
+/// Parameter goals after matching a callable's result. Unknown fresh variables
+/// never cross the query boundary: `None` asks search to try concrete leaves.
+pub fn parameters_for_result_at(
+    db: &dyn salsa::Database,
+    file: FileText,
+    offset: usize,
+    expected: &Ty,
+    name: &str,
+    fuel: &mut usize,
+) -> Vec<Vec<Option<Ty>>> {
+    let mut names = dependencies::names_in_type(expected);
+    names.insert(hir_def::Name::new(name));
+    let Some(env) = environment(db, file, offset, names) else { return Vec::new() };
+    let mut out = Vec::new();
+    for scheme in env.0.env.lookup_functions(name) {
+        if *fuel == 0 {
+            break;
+        }
+        *fuel -= 1;
+        db.unwind_if_revision_cancelled();
+        if let Some(PreparedApplication { mut table, params, .. }) =
+            application(&env.0.env, &scheme, expected)
+        {
+            let goals = params
+                .iter()
+                .map(|param| {
+                    let ty = table.deep_resolve(param);
+                    ty.is_fully_known().then_some(ty)
+                })
+                .collect();
+            if !out.contains(&goals) {
+                out.push(goals);
+            }
+        }
+    }
+    out
+}
+
+/// Verify the whole application in one inference table, including shared type
+/// variables and declared predicates. Unknown proofs never produce suggestions.
+pub fn application_matches_at(
+    db: &dyn salsa::Database,
+    file: FileText,
+    offset: usize,
+    expected: &Ty,
+    name: &str,
+    arguments: &[Ty],
+    fuel: &mut usize,
+) -> bool {
+    if arguments.iter().any(has_recovery) {
+        return false;
+    }
+    let mut names = dependencies::names_in_type(expected);
+    names.insert(hir_def::Name::new(name));
+    for arg in arguments {
+        names.extend(dependencies::names_in_type(arg));
+    }
+    let Some(env) = environment(db, file, offset, names) else { return false };
+    for scheme in env.0.env.lookup_functions(name) {
+        if *fuel == 0 {
+            break;
+        }
+        *fuel -= 1;
+        db.unwind_if_revision_cancelled();
+        let Some(PreparedApplication { mut table, params, ret, constraints }) =
+            application(&env.0.env, &scheme, expected)
+        else {
+            continue;
+        };
+        if params.len() != arguments.len() {
+            continue;
+        }
+        if !params
+            .iter()
+            .zip(arguments)
+            .all(|(param, arg)| table.check_compatibility(param, arg) == Compatibility::Proven)
+        {
+            continue;
+        }
+        if table.check_compatibility(expected, &ret) != Compatibility::Proven {
+            continue;
+        }
+        let goals: Vec<_> = table
+            .drain_obligations()
+            .into_iter()
+            .map(|ob| ob.goal.constraint())
+            .chain(constraints)
+            .collect();
+        if goals.iter().all(|goal| {
+            solver::solve_without_smt(&table.resolve_constraint(goal), &Subst::default(), &[])
+                == ConstraintStatus::Satisfied
+        }) {
+            return true;
+        }
+    }
+    false
+}
+
+struct PreparedApplication {
+    table: InferenceTable,
+    params: Vec<Ty>,
+    ret: Ty,
+    constraints: Vec<ConstraintExpr>,
+}
+
+fn application(
+    env: &TopLevelEnv,
+    scheme: &TypeScheme,
+    expected: &Ty,
+) -> Option<PreparedApplication> {
+    if has_recovery(expected) || has_recovery(&scheme.ret) || scheme.params.iter().any(has_recovery)
+    {
+        return None;
+    }
+    let mut table = InferenceTable::with_aliases(env.type_aliases.clone());
+    table.set_alias_schemes(env.alias_schemes.clone());
+    table.set_nominal_types(
+        env.records.keys().filter(|n| !env.type_aliases.contains_key(*n)).cloned().collect(),
+    );
+    let full_type = Ty::function(scheme.params.clone(), scheme.ret.clone());
+    table.reserve_source_names(&full_type.display_text());
+    table.reserve_source_names(&expected.display_text());
+    let mut variables = scheme.quantifiers.clone();
+    variables.extend(expr::scheme_free_params(scheme));
+    variables.sort();
+    variables.dedup();
+    let constraints: Vec<_> = scheme.constraints.iter().map(|c| c.expr.clone()).collect();
+    let subst = table.existential_substitution(
+        &variables,
+        &ConstraintExpr::And(constraints.clone()),
+        &full_type,
+        expected,
+    );
+    let ret = constraint::apply_subst(&scheme.ret, &subst);
+    if !table.check_compatibility(expected, &ret).is_compatible() {
+        return None;
+    }
+    let mut params: Vec<_> = scheme
+        .params
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !scheme.implicit_params.get(*i).copied().unwrap_or(false))
+        .map(|(_, param)| constraint::apply_subst(param, &subst))
+        .collect();
+    if params.len() == 1 && table.normalize_alias_deep(&params[0]) == Ty::scalar(Scalar::Unit) {
+        params.clear();
+    }
+    let constraints = constraints.iter().map(|c| substitution::constraint(c, &subst)).collect();
+    Some(PreparedApplication { table, params, ret, constraints })
+}
+
 /// Instantiate a record field from the inferred owner type, preserving aliases
 /// and type/numeric arguments. Used for an unfinished field initializer.
 pub fn field_type_at(

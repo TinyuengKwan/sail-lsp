@@ -27,6 +27,7 @@ pub struct Change {
     module_graph: Option<base_db::module_graph::ModuleGraph>,
     source_project: Option<base_db::preprocess::SourceProject>,
     strict_bitvector: Option<bool>,
+    prepared_workspace: Option<std::sync::Arc<hir::preprocess::PreparedWorkspaceData>>,
 }
 
 impl Change {
@@ -65,12 +66,17 @@ impl Change {
         self.strict_bitvector = Some(enabled);
     }
 
+    pub fn set_prepared_workspace(&mut self, data: hir::preprocess::PreparedWorkspaceData) {
+        self.prepared_workspace = Some(std::sync::Arc::new(data));
+    }
+
     pub fn is_empty(&self) -> bool {
         self.source_change.is_empty()
             && self.workspace_file_ids.is_none()
             && self.module_graph.is_none()
             && self.source_project.is_none()
             && self.strict_bitvector.is_none()
+            && self.prepared_workspace.is_none()
     }
 }
 
@@ -134,6 +140,34 @@ impl RootDatabase {
             }
         }
         let inputs_us = inputs_started.elapsed().as_micros();
+        let mut prepared_changed = change.prepared_workspace.is_some();
+        let prepared_started = std::time::Instant::now();
+        if let Some(input) = hir::preprocess::PreparedWorkspace::try_get(self) {
+            let obsolete = input.data(self).as_ref().is_some_and(|prepared| {
+                prepared.strict_bitvector != base_db::strict_bitvector(self)
+                    || base_db::preprocess::WorkspaceSourceProject::try_get(self)
+                        .is_none_or(|project| project.project(self) != &prepared.project)
+            });
+            if obsolete {
+                use salsa::Setter;
+                input.set_data(self).to(None);
+                prepared_changed = true;
+            }
+        }
+        if let Some(prepared) = change.prepared_workspace {
+            use salsa::Setter;
+            // A stale worker result is never authoritative. Normal queries
+            // remain the fallback for non-LSP callers and small workspaces.
+            if base_db::preprocess::WorkspaceSourceProject::try_get(self)
+                .is_some_and(|project| prepared.matches(self, project))
+            {
+                hir::preprocess::PreparedWorkspace::try_get(self)
+                    .expect("initialized prepared input")
+                    .set_data(self)
+                    .to(Some(prepared));
+            }
+        }
+        let prepared_us = prepared_started.elapsed().as_micros();
         let plan_started = std::time::Instant::now();
         if let Some(project) = base_db::preprocess::WorkspaceSourceProject::try_get(self) {
             let plan = hir::preprocess::workspace_plan(self, project).clone();
@@ -146,6 +180,7 @@ impl RootDatabase {
                 module.files.clear();
             }
             graph.globals.clear();
+            let mut strict_bitvectors = std::collections::BTreeMap::new();
             let mut file_texts = Vec::new();
             let mut instance_ids = std::collections::HashMap::new();
             for instance in plan.instances {
@@ -159,6 +194,13 @@ impl RootDatabase {
                     self.include_instance(instance.key.clone(), source)
                 };
                 let id = file.file_id(self);
+                if let Some(options) = instance
+                    .key
+                    .module
+                    .and_then(|owner| project.project(self).module_options.get(&owner))
+                {
+                    strict_bitvectors.insert(id, options.strict_bitvector);
+                }
                 instance_ids.insert(instance.key.clone(), id);
                 if id.is_instance() {
                     sources.insert(id, source);
@@ -184,7 +226,14 @@ impl RootDatabase {
                     regions.get(&id)?.get(region).copied().unwrap_or(false).then_some((id, region))
                 })
                 .collect();
-            base_db::preprocess::set_preprocessing(self, regions, sources, instances, order);
+            base_db::preprocess::set_preprocessing(
+                self,
+                regions,
+                sources,
+                instances,
+                order,
+                strict_bitvectors,
+            );
             base_db::module_graph::set_module_graph(self, graph);
             hir::def_query::set_workspace_files(self, file_texts);
         } else if let Some(file_ids) = change.workspace_file_ids {
@@ -193,9 +242,9 @@ impl RootDatabase {
             hir::def_query::set_workspace_files(self, file_texts);
         }
         tracing::debug!(target: "sail_lsp::latency",
-            "apply_change cancel_us={cancel_us} inputs_us={inputs_us} plan_us={}",
+            "apply_change cancel_us={cancel_us} inputs_us={inputs_us} prepared_us={prepared_us} plan_us={}",
             plan_started.elapsed().as_micros());
-        anything_written || graph_changed || membership_changed
+        anything_written || graph_changed || membership_changed || prepared_changed
     }
 }
 
@@ -203,6 +252,78 @@ impl RootDatabase {
 mod tests {
     use super::Change;
     use crate::root_database::RootDatabase;
+
+    #[test]
+    fn prepared_models_install_without_parsing_and_stale_sources_use_live_semantics() {
+        use base_db::{
+            preprocess::{SourceProject, WorkspaceSourceProject},
+            FileId, FileText,
+        };
+        use std::sync::Arc;
+        let root = FileId::from_raw(0);
+        let first = FileId::from_raw(1);
+        let second = FileId::from_raw(2);
+        let project = SourceProject {
+            roots: vec![root],
+            paths: vec![
+                ("/main.sail".into(), root),
+                ("/one.sail".into(), first),
+                ("/two.sail".into(), second),
+            ],
+            ..Default::default()
+        };
+        let source = "$include \"one.sail\"\nfunction body() = 1\n";
+        let prepare = || {
+            let worker = RootDatabase::default();
+            let files = [(root, source), (first, "val one : int\n"), (second, "val two : int\n")]
+                .into_iter()
+                .map(|(id, text)| (id, FileText::new(&worker, Arc::from(text), id)))
+                .collect();
+            let input = WorkspaceSourceProject::new(&worker, project.clone(), files);
+            hir::preprocess::prepare_workspace(&worker, input)
+        };
+        let prepared = prepare();
+        let expected = prepared.plan.clone();
+        let mut db = RootDatabase::default();
+        let mut change = Change::new();
+        change.set_source_project(project.clone());
+        change.change_file(root, source);
+        change.change_file(first, "val one : int\n");
+        change.change_file(second, "val two : int\n");
+        change.set_prepared_workspace(prepared);
+        db.apply_change(change);
+        let input = WorkspaceSourceProject::try_get(&db).unwrap();
+        assert_eq!(hir::preprocess::workspace_plan(&db, input), &expected);
+        assert_eq!(
+            db.files().memory_stats(&db).parse_seeds,
+            0,
+            "the host transaction must not rebuild worker CSTs"
+        );
+
+        let mut change = Change::new();
+        change.change_file(root, source.replace("one.sail", "two.sail"));
+        change.set_prepared_workspace(prepare());
+        db.apply_change(change);
+        let plan = hir::preprocess::workspace_plan(&db, input);
+        assert!(plan.edges.contains(&(root, second)));
+        assert!(
+            !plan.edges.contains(&(root, first)),
+            "stale include results must never override an edit"
+        );
+        assert_eq!(base_db::preprocess::project_membership(&db, first), Some(false));
+
+        let prepared = hir::preprocess::PreparedWorkspace::try_get(&db).unwrap();
+        let old = std::sync::Arc::downgrade(prepared.data(&db).as_ref().unwrap());
+        let mut change = Change::new();
+        change.set_source_project(base_db::preprocess::SourceProject {
+            roots: vec![second],
+            paths: vec![("/two.sail".into(), second)],
+            ..Default::default()
+        });
+        db.apply_change(change);
+        assert!(prepared.data(&db).is_none(), "a smaller model must release its old worker seed");
+        assert!(old.upgrade().is_none(), "obsolete prepared models must not retain source texts");
+    }
 
     #[test]
     fn source_order_interleaves_include_regions_and_keeps_instance_identity() {
@@ -312,7 +433,7 @@ mod tests {
         assert!(std::sync::Arc::ptr_eq(a.text(&db), b.text(&db)), "text is shared");
         let raw_a = syntax::parse_query::parse_file(&db, a);
         let raw_b = syntax::parse_query::parse_file(&db, b);
-        assert!(std::sync::Arc::ptr_eq(&raw_a.tokens, &raw_b.tokens), "raw parsing is shared");
+        assert!(std::ptr::eq(raw_a.tokens(), raw_b.tokens()), "raw parsing is shared");
         for (caller, own, foreign, file) in
             [(ids[0], "first", "second", a), (ids[1], "second", "first", b)]
         {
@@ -356,6 +477,76 @@ mod tests {
             views,
             "returning include reuses its identity"
         );
+    }
+
+    #[test]
+    fn shared_source_keeps_each_projects_target_includes_and_language_options() {
+        use base_db::{
+            module_graph::{ModuleData, ModuleGraph},
+            preprocess::{ModuleOptions, SourceProject},
+            FileId,
+        };
+        let ids: Vec<_> = (0..3).map(FileId::from_raw).collect();
+        let mut db = RootDatabase::default();
+        let mut change = Change::new();
+        change.change_file(ids[0], "$include <choice.sail>\n$iftarget c\nval native_only : int\n$else\nval other_only : bool\n$endif\n$ifdef STRICT_BITVECTOR\nval strict_only : int\n$endif\n");
+        change.change_file(ids[1], "val from_a : int\n");
+        change.change_file(ids[2], "val from_b : bool\n");
+        change.set_source_project(SourceProject {
+            roots: vec![ids[0], ids[0]],
+            root_modules: vec![Some(0), Some(1)],
+            paths: ["/shared/main.sail", "/a/choice.sail", "/b/choice.sail"]
+                .into_iter()
+                .zip(ids.iter().copied())
+                .map(|(p, id)| (p.into(), id))
+                .collect(),
+            modules: ModuleGraph {
+                modules: vec![ModuleData { files: vec![ids[0]], requires: vec![] }; 2],
+                globals: vec![],
+            },
+            module_options: [
+                (
+                    0,
+                    ModuleOptions {
+                        project: Some("/a/sail.proj".into()),
+                        include_paths: vec!["/a".into()],
+                        target: Some("c".into()),
+                        strict_bitvector: true,
+                    },
+                ),
+                (
+                    1,
+                    ModuleOptions {
+                        project: Some("/b/sail.proj".into()),
+                        include_paths: vec!["/b".into()],
+                        target: Some("ocaml".into()),
+                        strict_bitvector: false,
+                    },
+                ),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        });
+        db.apply_change(change);
+        let views = base_db::preprocess::file_instances(&db, ids[0]);
+        assert_eq!(views.len(), 2);
+        for (index, view) in views.into_iter().enumerate() {
+            let file = db.files().file_text(view).unwrap();
+            let text = syntax::parse_query::semantic_parse_file(&db, file)
+                .syntax_node()
+                .unwrap()
+                .text()
+                .to_string();
+            assert_eq!(text.contains("val native_only"), index == 0, "{text}");
+            assert_eq!(text.contains("val other_only"), index == 1, "{text}");
+            assert_eq!(text.contains("val strict_only"), index == 0, "{text}");
+            assert_eq!(base_db::preprocess::strict_bitvector_for_file(&db, view), index == 0);
+        }
+        let project = base_db::preprocess::WorkspaceSourceProject::try_get(&db).unwrap();
+        let plan = hir::preprocess::workspace_plan(&db, project);
+        assert!(plan.includes.contains(&(ids[0], 0, ids[1])));
+        assert!(plan.includes.contains(&(ids[0], 0, ids[2])));
     }
 
     #[test]

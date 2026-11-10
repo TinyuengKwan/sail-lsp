@@ -28,7 +28,7 @@ fn fixes_for(fixture: &str, code: &str) -> Vec<(String, String)> {
             &url,
             base_db::text_range(0, text.len()),
             &diagnostics,
-            &Default::default(),
+            Some(&Default::default()),
             &Default::default(),
         )
         .unwrap();

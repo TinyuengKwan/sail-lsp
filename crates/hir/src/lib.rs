@@ -514,6 +514,56 @@ pub enum Def {
 }
 
 impl Def {
+    /// Binding identity shared by navigation, references and parameter hints.
+    /// A callable body belongs to its visible signature or scattered head.
+    pub fn canonical(&self, db: &dyn salsa::Database) -> Self {
+        if !matches!(
+            self,
+            Self::Function(_)
+                | Self::Mapping(_)
+                | Self::ValSpec(_)
+                | Self::ScatteredHead(_)
+                | Self::ScatteredClause(_)
+                | Self::EndMarker(_)
+                | Self::TerminationMeasure(_)
+                | Self::Outcome(_)
+        ) {
+            return self.clone();
+        }
+        let loc = self.location();
+        if source_order::declarations_for(db, loc.file_text).is_none() {
+            return self.clone();
+        }
+        let Some((tree, item)) = loc.item(db) else { return self.clone() };
+        if tree.generated.contains_key(&item) {
+            return self.clone();
+        }
+        let Some(at) = source_order::at_offset(db, loc.file_text, item.name_span(tree).start)
+        else {
+            return self.clone();
+        };
+        let selected = if matches!(self, Self::ScatteredHead(_)) {
+            source_order::scattered::callable_head_signature(db, at)
+        } else {
+            source_order::bindings::resolve(
+                db,
+                at,
+                item.name(tree).clone(),
+                source_order::bindings::Namespace::Callable,
+            )
+        };
+        selected
+            .and_then(|declaration| {
+                def_at_declaration_in_namespace(
+                    db,
+                    declaration,
+                    item.name(tree).as_str(),
+                    source_order::bindings::Namespace::Callable,
+                )
+            })
+            .unwrap_or_else(|| self.clone())
+    }
+
     /// Which form this definition takes.
     pub fn kind(&self) -> DefKind {
         match self {
@@ -608,13 +658,13 @@ impl PathResolution {
     ) -> Self {
         use hir_def::resolver::TypeNs;
         match ns {
-            TypeNs::BuiltinType(name) => PathResolution::TypeVar(TypeVar { name }),
+            TypeNs::BuiltinType(name) => PathResolution::TypeVar(TypeVar { name, binding: None }),
             // Declared in another file. The name is all this file's
             // resolver knows; the workspace index is what places it.
-            TypeNs::Workspace(name) => PathResolution::TypeVar(TypeVar { name }),
+            TypeNs::Workspace(name) => PathResolution::TypeVar(TypeVar { name, binding: None }),
             TypeNs::AdtId(id) | TypeNs::TypeAliasId(id) => match def_at_raw(db, file_text, id.0) {
                 Some(def) => PathResolution::Def(def),
-                None => PathResolution::TypeVar(TypeVar { name: Name::new("") }),
+                None => PathResolution::TypeVar(TypeVar { name: Name::new(""), binding: None }),
             },
         }
     }
@@ -762,4 +812,6 @@ pub struct Local {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TypeVar {
     pub name: Name,
+    /// Source quantifier identity; None for builtin/recovery-only type names.
+    pub binding: Option<(base_db::FileId, hir_def::Span)>,
 }

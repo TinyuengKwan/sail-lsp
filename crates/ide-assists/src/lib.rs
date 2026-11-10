@@ -38,7 +38,17 @@ pub fn assists(
     file: &dyn FileDb,
     range: TextRange,
 ) -> Vec<assist_context::Assist> {
-    let ctx = assist_context::AssistContext::new(config, file, range);
+    assists_with_workspace(config, file, range, &[])
+}
+
+/// Semantic workspace views available to multi-file refactorings.
+pub fn assists_with_workspace(
+    config: &AssistConfig,
+    file: &dyn FileDb,
+    range: TextRange,
+    workspace: &[(base_db::FileId, &dyn FileDb)],
+) -> Vec<assist_context::Assist> {
+    let ctx = assist_context::AssistContext::with_workspace(config, file, range, workspace);
     let file_id = file
         .file_text()
         .map(|(db, ft)| ft.file_id(db))
@@ -249,7 +259,10 @@ mod lib_tests {
         assert!(edits.is_some(), "should inline call");
         let edits = edits.unwrap();
         assert!(!edits.is_empty());
-        assert_eq!(edits[0].new_text, "(5 + 5)");
+        assert_eq!(
+            edits[0].new_text,
+            "{ let __sail_inline_arg0 = 5; let x = __sail_inline_arg0; x + x }"
+        );
     }
 
     #[test]

@@ -1,43 +1,16 @@
-//! Foundation database trait for IDE feature modules.
+//! Shared database, file views and edit types for IDE features.
 //!
-//! give every IDE feature (semantic tokens, completion, hover, code
-//! actions, …) a small, abstract view of "a Sail file" so they can
-//! live in their own crates without dragging in `sail_server::state::
-//! File`'s entire transitive dependency surface.
+//! `RootDatabase` owns Salsa inputs and queries. `FileDb` exposes a file's
+//! text, syntax and coordinates; database-backed views also expose their
+//! `FileText` so features can use `hir::Semantics` for semantic queries.
+//! Text-only adapters remain available for tools such as SCIP export.
 //!
-//! `FileDb` is the seam: a trait whose surface is **only** the methods
-//! that real feature modules call. `sail_server::state::File` ships an
-//! impl in stage , and the moved feature modules take
-//! `&dyn FileDb` instead of `&File`.
-//!
-//! Future stages add:
-//!   - workspace-wide queries (`WorkspaceDb`)
-//!   - the `RootDatabase` analogue that owns the file map + caches
-//!   - the symbol index (`SymbolIndex`) that powers workspace symbols.
 
-// Module alignment summary (see crates/ide-db/DIFF_NOTES.md for full diff):
-//
-// ALIGN  — mirrors rust-analyzer's ide-db directly:
-//   assists, defs, documentation, fixture, helpers,
-//   imports, line_index, prime_caches, rename, root_database, search,
-//   source_change, symbol_index, signatures, syntax_helpers, text_edit
-//
-// CUSTOM — sail-lsp additions with no RA counterpart:
-//   signatures, ide_types, keywords, pragmas, span,
-//   type_inference, text_document, db_query
-//
-// ABSENT — RA-only Rust-specific modules not ported:
-//   famous_defs, traits, ty_filter, items_locator, path_transform, label
-
-// WorkspaceFile accessed via SourceFileInfo supertrait chain.
-// Re-export SourceFileInfo for hir-ty and other lower crates that need
-// text()/item_tree() without depending on ide-db.
+// Text and ItemTree access shared by file views.
 pub use hir::callgraph::SourceFileInfo;
 use parser::{Span, Token};
 use syntax::parser_lower::ParsedFile;
-use url::Url;
 
-// analysis.rs moved to crates/ide/src/analysis.rs in
 #[cfg(any(test, feature = "test-utils"))]
 pub mod annotations;
 pub mod apply_change;
@@ -76,16 +49,6 @@ pub mod syntax_helpers;
 pub mod test_utils;
 pub mod text_document;
 pub mod text_edit;
-/// Workspace-level abstraction over the file store. Implemented by
-/// `sail_server::backend::State`; used by the `Semantics<'_>` facade
-/// so it can live in crates/hir without depending on sail_server.
-pub trait WorkspaceDb {
-    /// Look up a file by URI.
-    fn get_file(&self, uri: &Url) -> Option<&dyn FileDb>;
-    /// Iterate all known files.
-    fn all_files(&self) -> Vec<(&Url, &dyn FileDb)>;
-}
-
 pub use keywords::{SAIL_BUILTINS, SAIL_KEYWORDS};
 
 pub use pragmas::KNOWN_PRAGMAS;
@@ -97,7 +60,7 @@ pub use helpers::{builtin_docs, function_snippet, inlay_param_name, CallableSign
 pub use prime_caches::ParallelPrimeCachesProgress;
 pub use signatures::{
     add_definitions, collect_callable_signatures, collect_callable_signatures_from,
-    extract_symbol_decls, find_callable_signature, instantiate_signature, SymbolDecl,
+    extract_symbol_decls, find_callable_signature, SymbolDecl,
 };
 pub use symbol_index::{Query, SearchMode};
 pub use text_document::{TextChange, TextChangeRange, TextDocument};
@@ -245,12 +208,7 @@ pub trait FileDb: hir::callgraph::SourceFileInfo {
 
     fn body_scopes(&self, callable: &hir::CallableBody) -> hir::ExprScopes {
         if let Some((db, file)) = self.file_text() {
-            return hir::source_order::bindings::body_scopes(
-                db,
-                file,
-                &callable.body,
-                callable.body_span.start,
-            );
+            return hir::Semantics::new(db).body_scopes(file, callable);
         }
         hir::ExprScopes::new_with_globals(&callable.body, |name| {
             self.item_tree().is_some_and(|tree| {
@@ -280,8 +238,10 @@ pub trait FileDb: hir::callgraph::SourceFileInfo {
 pub fn symbol_visible_from(from: &dyn FileDb, target: &dyn FileDb, name: &str) -> bool {
     match (from.file_text(), target.file_text()) {
         (Some((db, from)), Some((_, target))) => {
-            hir::visibility::symbol_visible_from(db, from.file_id(db), target, name)
+            hir::Semantics::new(db).symbol_visible_from(from.file_id(db), target, name)
         }
         _ => true,
     }
 }
+
+mod type_vars;

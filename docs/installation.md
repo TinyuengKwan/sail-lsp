@@ -245,10 +245,9 @@ The vendored Z3 build uses C++20 formatting APIs that require macOS 13.3.
 Both release and locked-source CI builds use the deployment target declared in
 the matrix above.
 
-These are build requirements/targets, not claims that this change has already run
-on every OS version. New native CI results become evidence only after the changed
-workflow runs. Native macOS installer/editor acceptance remains pending;
-no Mac execution environment is available for local validation. Local validation on Linux x86_64 does not validate Windows/macOS.
+The matrix specifies build and deployment requirements. Consult the native
+installation/release workflow artifacts for acceptance results on each runner;
+those results do not cover every OS version above the declared minimum.
 The local developer binary may require a newer glibc than the release floor;
 packaging rejects that for a release and records the measured floor for explicitly
 allowed dirty local packages. Alpine/musl, 32-bit systems and other targets do not
@@ -293,3 +292,47 @@ npm run package:vsix:linux-x64
 ```
 
 `--allow-dirty` is for local testing only. Release workflows never pass it.
+
+
+## Project and analysis commands
+
+VS Code offers **Sail: Explain Analysis at Cursor**, **Sail: Preview Preprocessed
+Source**, project navigation, include-context selection and project tasks in the
+command palette. Preprocessing opens a read-only snapshot with source links.
+
+The managed Neovim 0.11+ configuration installs these commands:
+
+| Command | Action |
+| --- | --- |
+| `:SailActions` | All Sail project/analysis source actions |
+| `:SailSelectProject` | Select the analysis project for this client session |
+| `:SailContext` | Select an actual project/module/include visit, or automatic selection |
+| `:SailProject` | Open the owning project manifest |
+| `:SailExplain` | Explain types, rejected overloads, constraints and visibility |
+| `:SailFormatInfo` | Explain formatting status, project style and effective options |
+| `:SailPreprocess` | Preview the selected preprocessing visit |
+| `:SailSource` / `gd` in a preview | Open a mapped source location |
+| `:SailTasks` | Select a loaded-project check, test or export task |
+| `:SailCancelTask` | Cancel the fallback process task and scoped compiler checks |
+
+Project selection updates the running Neovim client's settings; persist
+`settings["sail-lsp"].workspace.activeProject` in your configuration to keep it
+between sessions. A per-document include selection is cleared when that source
+buffer is closed. Generated preview buffers are read-only.
+
+Zed uses its normal **editor: toggle code actions** menu: choose a **Sail:**
+source action for context selection, navigation, analysis, preprocessing or
+project tasks. Install the repository development extension to register the
+Sail Analysis Preview language and source links. For persistent project
+selection configure `lsp.sail_lsp.settings.workspace.activeProject`. These
+entrypoints use standard LSP commands and document opening, avoiding an
+unsupported custom-command API in the extension. Native Zed/SSH UI acceptance
+is separate from the server protocol tests and the Neovim headless smoke test.
+
+Project task configuration and the standard-client execution limits are
+described in [project tasks](runnables.md). To repeat the native Neovim smoke
+check, build the server and run:
+
+```sh
+SAIL_LSP_TEST_SERVER="$PWD/target/debug/sail-lsp" nvim --headless -u NONE -l scripts/neovim_smoke.lua
+```

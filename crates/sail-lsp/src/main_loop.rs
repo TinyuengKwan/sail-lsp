@@ -14,9 +14,18 @@ use crate::global_state::GlobalState;
 /// unified enum for ALL background results (responses + tasks).
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum Task {
+    EditorDocument {
+        source: Option<crate::editor_commands::SourceStamp>,
+        result: Result<crate::editor_commands::Document, String>,
+    },
     /// Workspace scan discovered files on disk — which ones, in the order
     /// the project declares them. Not what they say: the loader reads them.
     WorkspaceScan(crate::reload::WorkspaceScan),
+    WorkspacePreprocessed {
+        revision: u64,
+        load_version: u32,
+        result: Result<hir::preprocess::PreparedWorkspaceData, String>,
+    },
     /// Async request handler completed — response ready to send.
     Response(lsp_server::Response),
     /// Async request handler was cancelled and should be retried.
@@ -27,14 +36,46 @@ pub(crate) enum Task {
     /// DiagnosticsTaskKind carries `(generation, Vec<(FileId, diags)>)`.
     Diagnostics(DiagnosticsTaskKind),
     /// What `sail --just-check` said, by the path it named.
-    FlycheckStarted { target: crate::flycheck::CheckTarget, generation: u64 },
+    FlycheckStarted {
+        target: crate::flycheck::CheckTarget,
+        generation: u64,
+        cache: crate::flycheck::cache::CacheInfo,
+    },
     Flycheck {
         target: crate::flycheck::CheckTarget,
         /// Only the latest run of a target is believed.
         generation: u64,
         found: crate::flycheck::FlycheckResult,
         status: crate::flycheck::Status,
+        run: crate::flycheck::RunReport,
     },
+}
+
+pub(crate) struct PendingPreprocessing {
+    revision: u64,
+    load_version: u32,
+    files: Vec<(Url, PathBuf)>,
+    count: usize,
+}
+
+pub(crate) struct PreprocessingCancellation(pub hir::CancellationToken);
+impl Drop for PreprocessingCancellation {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+fn preprocessing_database(cancel: hir::CancellationToken) -> ide_db::root_database::RootDatabase {
+    ide_db::root_database::RootDatabase::with_event_callback(Some(Box::new(move |event| {
+        if matches!(event.kind, salsa::EventKind::WillCheckCancellation)
+            && cancel.is_cancelled()
+            && !std::thread::panicking()
+        {
+            // This database has no shared consumers. Cancel at normal
+            // checkpoints and leave unwinding/discard cleanup uninterrupted.
+            std::panic::resume_unwind(Box::new(stdx::cancellation::Cancelled));
+        }
+    })))
 }
 
 /// Progress for prime_caches background task.
@@ -106,6 +147,36 @@ impl DiagnosticsTaskKind {
 }
 
 impl GlobalState {
+    fn compiler_policy_for(
+        &self,
+        target: &crate::flycheck::CheckTarget,
+    ) -> crate::flycheck::CompilerDiagnosticPolicy {
+        let path = match target {
+            crate::flycheck::CheckTarget::Project(manifest) => self
+                .projects
+                .values()
+                .find(|project| &project.manifest == manifest)
+                .map(|project| &project.workspace_root)
+                .unwrap_or(manifest),
+            crate::flycheck::CheckTarget::File(path) => path,
+        };
+        let uri = Url::from_file_path(path).ok();
+        let config = uri.as_ref().map(|uri| self.config_for_uri(uri)).unwrap_or(&self.config);
+        (&config.flycheck).into()
+    }
+
+    pub(crate) fn apply_compiler_diagnostic_policies(&mut self) {
+        for target in self.diagnostics.check_targets() {
+            let policy = self.compiler_policy_for(&target);
+            self.diagnostics.set_check_policy(&target, policy);
+            let (reported, visible) = self.diagnostics.check_counts(&target);
+            if let Some(run) =
+                self.flycheck_history.get_mut(&target).and_then(|h| h.last_run.as_mut())
+            {
+                run.diagnostics_ignored = reported.saturating_sub(visible);
+            }
+        }
+    }
     /// receive proactive diagnostic pushes. Closed files get diagnostics
     /// on-demand via `textDocument/diagnostic` pull requests.
     /// Get files that should receive push diagnostics.
@@ -160,7 +231,10 @@ impl GlobalState {
             return;
         }
         let analysis = self.analysis_snapshot();
-        let diag_config = self.config.diagnostics.to_ide_config();
+        let diag_configs: std::collections::HashMap<_, _> = subscribed
+            .iter()
+            .map(|(uri, _)| (uri.clone(), self.config_for_uri(uri).diagnostics.to_ide_config()))
+            .collect();
         self.task_pool.spawn_with_sender(
             stdx::thread::ThreadIntent::LatencySensitive,
             move |sender| {
@@ -176,7 +250,7 @@ impl GlobalState {
                                 &analysis,
                                 &subscribed,
                                 kind,
-                                &diag_config,
+                                |uri| diag_configs[uri].clone(),
                             )
                         },
                     );
@@ -201,6 +275,102 @@ impl GlobalState {
     /// transient flood of "not found" is the false positive this project
     /// pays most for.
     pub(crate) fn finish_workspace_load(&mut self, files: &[(Url, PathBuf)], count: usize) {
+        let db = self.analysis_host.raw_database();
+        let bytes: usize = self
+            .loading_source_project
+            .as_ref()
+            .map(|project| {
+                project
+                    .paths
+                    .iter()
+                    .filter_map(|(_, id)| db.files().file_text(*id))
+                    .map(|file| file.text(db).len())
+                    .sum()
+            })
+            .unwrap_or(0);
+        // Tiny fixtures and projects need no extra scheduling round. Large
+        // projects derive their model without borrowing the host database.
+        if self.loading_source_project.is_some() && (files.len() > 64 || bytes > 256 * 1024) {
+            self.pending_preprocessing = Some(PendingPreprocessing {
+                revision: self.fetch_workspaces_queue.revision(),
+                load_version: self.workspace_load_version,
+                files: files.to_vec(),
+                count,
+            });
+            self.start_workspace_preprocessing(None);
+            return;
+        }
+        self.finish_workspace_load_inner(files, count);
+    }
+
+    fn start_workspace_preprocessing(
+        &mut self,
+        seed: Option<hir::preprocess::PreparedWorkspaceData>,
+    ) {
+        if self.preprocessing_running || self.pending_preprocessing.is_none() {
+            return;
+        }
+        let pending = self.pending_preprocessing.as_ref().unwrap();
+        if pending.revision != self.fetch_workspaces_queue.revision()
+            || pending.load_version != self.workspace_load_version
+            || self.loading_project_config.as_ref().is_some_and(|(config, folders, revision)| {
+                *revision != self.fetch_workspaces_queue.revision()
+                    || *config != self.config.workspace
+                    || *folders != self.workspace_folders
+            })
+        {
+            // A reload can supersede discovery while VFS is still reading.
+            // No preprocessing worker was started, so no completion message
+            // will release this operation for its queued replacement.
+            self.pending_preprocessing = None;
+            self.loading_source_project = None;
+            self.loading_module_graph = None;
+            self.loading_project_config = None;
+            if self.fetch_workspaces_queue.op_in_progress() {
+                self.fetch_workspaces_queue.op_completed(());
+            }
+            return;
+        }
+        let Some(project) = self.loading_source_project.clone() else {
+            return;
+        };
+        let db = self.analysis_host.raw_database();
+        let sources: Vec<_> = project
+            .paths
+            .iter()
+            .filter_map(|(_, id)| {
+                db.files().file_text(*id).map(|file| (*id, file.text(db).clone()))
+            })
+            .collect();
+        let strict_bitvector = base_db::strict_bitvector(db);
+        let revision = self.fetch_workspaces_queue.revision();
+        let load_version = self.workspace_load_version;
+        self.preprocessing_running = true;
+        self.preprocessing_cancel = PreprocessingCancellation(hir::CancellationToken::new());
+        let cancel = self.preprocessing_cancel.0.clone();
+        self.task_pool.spawn(stdx::thread::ThreadIntent::Worker, move || {
+            let started = std::time::Instant::now();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                use salsa::Setter;
+                let mut db = preprocessing_database(cancel);
+                base_db::LanguageOptions::try_get(&db).unwrap().set_strict_bitvector(&mut db).to(strict_bitvector);
+                // Preserve compact results for unchanged sources when an
+                // overlay edit superseded the preceding plan. Repeating a
+                // whole-project cold derivation on each keystroke would
+                // otherwise prevent startup from catching up with typing.
+                if let Some(seed) = seed {
+                    hir::preprocess::PreparedWorkspace::try_get(&db).unwrap().set_data(&mut db).to(Some(std::sync::Arc::new(seed)));
+                }
+                let files = sources.into_iter().map(|(id, text)| (id, base_db::FileText::new(&db, text, id))).collect();
+                let input = base_db::preprocess::WorkspaceSourceProject::new(&db, project, files);
+                hir::preprocess::prepare_workspace(&db, input)
+            })).map_err(|payload| format!("Workspace preprocessing failed: {}", crate::analysis_health::panic_message(payload.as_ref())));
+            tracing::debug!(target: "sail_lsp::latency", "workspace_preprocess revision={revision} load_version={load_version} duration_us={}", started.elapsed().as_micros());
+            Task::WorkspacePreprocessed { revision, load_version, result }
+        });
+    }
+
+    fn finish_workspace_load_inner(&mut self, files: &[(Url, PathBuf)], count: usize) {
         let module_graph = self.loading_module_graph.take();
         let source_project = self.loading_source_project.take();
         let inputs = std::mem::take(&mut self.loading_project_inputs);
@@ -245,10 +415,8 @@ impl GlobalState {
         );
         self.projects = std::sync::Arc::new(inputs.projects);
         self.send_notification::<crate::lsp_ext::ProjectGraphChanged>(());
-        self.module_contexts = std::sync::Arc::new(crate::reload::loaded_module_contexts(
-            &self.projects,
-            &self.config.workspace,
-        ));
+        self.module_contexts =
+            std::sync::Arc::new(crate::reload::loaded_module_contexts(&self.projects));
         // An unloaded project's last check no longer describes anything.
         let manifests: std::collections::HashSet<_> =
             self.projects.values().map(|p| p.manifest.clone()).collect();
@@ -258,6 +426,7 @@ impl GlobalState {
         };
         self.diagnostics.retain_check_targets(keep);
         self.flycheck_latest.retain(|t, _| keep(t));
+        self.flycheck_history.retain(|t, _| keep(t));
         if self.projects.is_empty() {
             self.log_message(MessageType::WARNING,
                 "No Sail project loaded. Set sail-lsp.workspace.projectFile; unlinked files receive syntax diagnostics only.");
@@ -387,6 +556,9 @@ impl GlobalState {
         }
         self.flycheck_workers.clear();
         self.flycheck_status.clear();
+        for history in self.flycheck_history.values_mut() {
+            history.invalidate();
+        }
         self.flycheck_latest.clear();
         self.diagnostics.retain_check_targets(|_| false);
     }
@@ -401,8 +573,7 @@ impl GlobalState {
     /// file, with that project's manifest, variables and roots; a file no
     /// project knows is checked alone.
     pub(crate) fn request_flycheck(&mut self, saved: &std::path::Path) {
-        if !self.config.flycheck.enable
-            || self.fetch_workspaces_queue.op_requested()
+        if self.fetch_workspaces_queue.op_requested()
             || self.fetch_workspaces_queue.op_in_progress()
             || self.loading_project_config.is_some()
         {
@@ -516,6 +687,9 @@ impl GlobalState {
     pub(crate) fn cancel_flycheck(&mut self, document: Option<&lsp_types::TextDocumentIdentifier>) {
         let targets = self.flycheck_control_targets(document);
         for target in targets {
+            if let Some(history) = self.flycheck_history.get_mut(&target) {
+                history.invalidate();
+            }
             if let Some(worker) = self.flycheck_workers.get(&target) {
                 worker.cancel();
             }
@@ -536,6 +710,9 @@ impl GlobalState {
         }
         let targets = self.flycheck_control_targets(document);
         for target in &targets {
+            if let Some(history) = self.flycheck_history.get_mut(target) {
+                history.invalidate();
+            }
             if let Some(worker) = self.flycheck_workers.remove(target) {
                 worker.cancel();
             }
@@ -549,12 +726,15 @@ impl GlobalState {
     /// input changes, neither those findings nor an in-flight result describe
     /// the current buffer. Invalidate affected projects, preserving other runs.
     pub(crate) fn invalidate_flycheck_for_source(&mut self, uri: &Url) {
-        if self.flycheck_latest.is_empty() && self.diagnostics.check.is_empty() {
+        if self.flycheck_latest.is_empty() && self.diagnostics.check_targets().is_empty() {
             return;
         }
         let Ok(path) = uri.to_file_path() else { return };
         let targets = self.flycheck_targets_for_file(&path);
         for target in &targets {
+            if let Some(history) = self.flycheck_history.get_mut(target) {
+                history.invalidate();
+            }
             if let Some(worker) = self.flycheck_workers.get(target) {
                 worker.cancel();
             }
@@ -572,8 +752,7 @@ impl GlobalState {
         targets: Vec<crate::flycheck::CheckTarget>,
         manual: bool,
     ) {
-        if (!manual && !self.config.flycheck.enable)
-            || self.fetch_workspaces_queue.op_requested()
+        if self.fetch_workspaces_queue.op_requested()
             || self.fetch_workspaces_queue.op_in_progress()
             || self.loading_project_config.is_some()
         {
@@ -595,6 +774,22 @@ impl GlobalState {
             }
         }
         for target in targets {
+            let config_path = match &target {
+                crate::flycheck::CheckTarget::Project(manifest) => self
+                    .projects
+                    .values()
+                    .find(|p| &p.manifest == manifest)
+                    .map(|p| &p.workspace_root)
+                    .unwrap_or(manifest),
+                crate::flycheck::CheckTarget::File(path) => path,
+            };
+            let effective = Url::from_file_path(config_path)
+                .ok()
+                .map(|uri| self.config_for_uri(&uri).clone())
+                .unwrap_or_else(|| self.config.clone());
+            if !manual && !effective.flycheck.enable {
+                continue;
+            }
             if self.dirty_documents.iter().any(|uri| {
                 uri.to_file_path()
                     .ok()
@@ -612,8 +807,8 @@ impl GlobalState {
                     .values()
                     .find(|p| &p.manifest == manifest)
                     .map(|p| &p.config)
-                    .unwrap_or(&self.config.workspace),
-                crate::flycheck::CheckTarget::File(_) => &self.config.workspace,
+                    .unwrap_or(&effective.workspace),
+                crate::flycheck::CheckTarget::File(_) => &effective.workspace,
             };
             let root = match &target {
                 crate::flycheck::CheckTarget::Project(manifest) => self
@@ -621,14 +816,18 @@ impl GlobalState {
                     .values()
                     .find(|p| &p.manifest == manifest)
                     .map(|p| p.workspace_root.clone())
+                    .filter(|root| root.is_absolute())
                     .unwrap_or_else(|| manifest.parent().unwrap().to_path_buf()),
                 crate::flycheck::CheckTarget::File(file) => file.parent().unwrap().to_path_buf(),
             };
-            let includes = crate::reload::include_search_paths(&self.workspace_folders, workspace);
+            let includes = crate::reload::include_search_paths(
+                &[Url::from_directory_path(&root).unwrap()].into_iter().collect(),
+                workspace,
+            );
             let invocation = crate::flycheck::command_line_with_context(
                 &target,
                 workspace,
-                &self.config.flycheck.extra_args,
+                &effective.flycheck.extra_args,
                 &root,
                 &includes,
             );
@@ -650,7 +849,11 @@ impl GlobalState {
                 }
             };
             if !self.flycheck_workers.contains_key(&target) {
-                match crate::flycheck::Worker::new(target.clone(), self.task_pool.sender()) {
+                match crate::flycheck::Worker::new(
+                    target.clone(),
+                    self.task_pool.sender(),
+                    self.effective_sail_dir.clone(),
+                ) {
                     Ok(worker) => {
                         self.flycheck_workers.insert(target.clone(), worker);
                     }
@@ -668,7 +871,7 @@ impl GlobalState {
             self.flycheck_status.insert(target.clone(), crate::flycheck::Status::Queued);
             self.flycheck_workers.get_mut(&target).unwrap().submit(
                 generation,
-                &self.config.flycheck,
+                &effective.flycheck,
                 args,
                 cwd,
             );
@@ -694,6 +897,7 @@ pub fn main() {
         let result = match cmd {
             "install" => crate::install::run(&args[2..]),
             "doctor" => crate::doctor::run(&args[2..]),
+            "fmt" => crate::formatting::cli(&args[2..]),
             "parse" => path_arg
                 .ok_or_else(|| "Usage: sail-lsp parse <file>".to_string())
                 .and_then(crate::cli::cmd_parse),
@@ -850,10 +1054,12 @@ pub fn run_server(connection: Connection) {
         state.workspace_folders = disk_folders;
         // Request initial workspace scan via OpQueue.
         state.request_workspace_reload("startup", crate::reload::ReloadScope::All);
-        // Force start immediately — on first iteration, should_start_op() will fire.
-        let _ = state.fetch_workspaces_queue.should_start_op();
-        let scope = state.take_reload_scope();
-        state.fetch_workspaces("startup".into(), scope);
+        state.request_configuration();
+        if state.pending_configuration.is_none() {
+            let _ = state.fetch_workspaces_queue.should_start_op();
+            let scope = state.take_reload_scope();
+            state.fetch_workspaces("startup".into(), scope);
+        }
     } else {
         state.finish_workspace_load(&[], 0);
     }
@@ -930,6 +1136,7 @@ fn main_loop(
     task_receiver: &crossbeam_channel::Receiver<Task>,
 ) {
     let input = crate::request_batch::BufferedMessages::new(connection.receiver.clone());
+    let check_status_tick = crossbeam_channel::tick(std::time::Duration::from_secs(1));
     loop {
         let was_quiescent = state.is_quiescent();
         let loop_start = std::time::Instant::now();
@@ -943,6 +1150,15 @@ fn main_loop(
 
         let mut batch_changed = false;
         crossbeam_channel::select! {
+            // A silent compiler still needs elapsed-time updates. This timer
+            // is selected only while a check is queued or running; it starts
+            // no analysis work and does not wake an idle server.
+            recv(if state.flycheck_status.values().any(|status| status.busy()) {
+                check_status_tick.clone()
+            } else { crossbeam_channel::never() }) -> _ => {},
+            recv(state.pending_configuration.as_ref().map(|pending| crossbeam_channel::after(pending.deadline.saturating_duration_since(std::time::Instant::now()))).unwrap_or_else(crossbeam_channel::never)) -> _ => {
+                state.configuration_timed_out();
+            }
             recv(input.receiver) -> msg => {
                 let msg = match msg {
                     Ok(msg) => msg,
@@ -1000,14 +1216,17 @@ fn main_loop(
             // query keyed by the workspace's files, so an unchanged file's
             // symbols are reused and nothing is cloned per edit.
 
-            let project_or_mem_docs_changed =
-                became_quiescent || state_changed || memdocs_added_or_removed;
+            let diagnostics_refresh = std::mem::take(&mut state.diagnostics_refresh_requested);
+            let project_or_mem_docs_changed = became_quiescent
+                || state_changed
+                || memdocs_added_or_removed
+                || diagnostics_refresh;
 
             if became_quiescent {
                 state.prime_caches_queue.request_op("became quiescent".to_owned(), ());
             }
 
-            let client_refresh = became_quiescent || state_changed;
+            let client_refresh = became_quiescent || state_changed || diagnostics_refresh;
             if client_refresh {
                 // A refresh has nothing to come back, so its response is
                 // logged and dropped — but it goes through the queue, so an
@@ -1066,9 +1285,11 @@ fn main_loop(
             }
         }
 
-        if let Some((cause, ())) = state.fetch_workspaces_queue.should_start_op() {
-            let scope = state.take_reload_scope();
-            state.fetch_workspaces(cause, scope);
+        if state.pending_configuration.is_none() {
+            if let Some((cause, ())) = state.fetch_workspaces_queue.should_start_op() {
+                let scope = state.take_reload_scope();
+                state.fetch_workspaces(cause, scope);
+            }
         }
 
         if let Some((_cause, ())) = state.prime_caches_queue.should_start_op() {
@@ -1091,7 +1312,7 @@ fn main_loop(
                         let _ = report.send(Task::PrimeCaches(PrimeCachesProgress::Report(p)));
                     })
                 }));
-                // Priming's temporary workers and solver contexts are gone.
+                // Priming's temporary index workers have finished.
                 // Reclaim free allocator pages on this worker, never on the
                 // event loop or on each interactive request.
                 drop(analysis);
@@ -1107,7 +1328,7 @@ fn main_loop(
             for file_id in diagnostic_changes {
                 if let Some(url) = state.vfs.lookup_url(file_id) {
                     let mut diagnostics: Vec<lsp_types::Diagnostic> =
-                        state.diagnostics.diagnostics_for(file_id).cloned().collect();
+                        state.diagnostics.diagnostics_for(file_id).collect();
                     crate::diagnostics::explain_unlinked_file(
                         &mut diagnostics,
                         state.project_error.as_deref(),
@@ -1145,6 +1366,65 @@ fn main_loop(
 /// Process a completed background task.
 fn on_task(state: &mut GlobalState, task: Task) {
     match task {
+        Task::EditorDocument { source, result } => {
+            crate::editor_commands::present(state, source, result)
+        }
+        Task::WorkspacePreprocessed { revision, load_version, result } => {
+            state.preprocessing_running = false;
+            if revision != state.fetch_workspaces_queue.revision()
+                && state
+                    .pending_preprocessing
+                    .as_ref()
+                    .is_some_and(|pending| pending.revision == revision)
+            {
+                // The fetch operation includes preprocessing. Release the
+                // obsolete operation so its queued replacement can start;
+                // otherwise a reload requested during planning waits forever.
+                state.pending_preprocessing = None;
+                state.loading_source_project = None;
+                state.loading_module_graph = None;
+                state.loading_project_config = None;
+                if state.fetch_workspaces_queue.op_in_progress() {
+                    state.fetch_workspaces_queue.op_completed(());
+                }
+                return;
+            }
+            // Process overlay changes received during the computation before
+            // checking the exact source/configuration generation.
+            state.process_changes();
+            let db = state.analysis_host.raw_database();
+            let current = revision == state.fetch_workspaces_queue.revision()
+                && load_version == state.workspace_load_version;
+            match result {
+                Ok(prepared)
+                    if current
+                        && state.loading_source_project.as_ref() == Some(&prepared.project)
+                        && prepared.strict_bitvector == base_db::strict_bitvector(db)
+                        && prepared.projections.iter().all(|(id, source)| {
+                            db.files()
+                                .file_text(*id)
+                                .is_some_and(|file| *file.text(db) == source.text)
+                        }) =>
+                {
+                    if let Some(pending) = state.pending_preprocessing.take() {
+                        state.pending_change.set_prepared_workspace(prepared);
+                        state.finish_workspace_load_inner(&pending.files, pending.count);
+                    }
+                }
+                Err(error) if current => {
+                    state.pending_preprocessing = None;
+                    state.loading_source_project = None;
+                    state.loading_module_graph = None;
+                    state.loading_project_config = None;
+                    state.report_project_error(Some(error));
+                    if state.fetch_workspaces_queue.op_in_progress() {
+                        state.fetch_workspaces_queue.op_completed(());
+                    }
+                }
+                Ok(prepared) => state.start_workspace_preprocessing(Some(prepared)),
+                Err(_) => state.start_workspace_preprocessing(None),
+            }
+        }
         Task::WorkspaceScan(scan) => {
             if !scan.inputs.matches_disk() {
                 state.request_workspace_reload(
@@ -1161,6 +1441,7 @@ fn on_task(state: &mut GlobalState, task: Task) {
                 }
                 return;
             }
+            state.pending_preprocessing = None;
             let files = match scan.files {
                 Ok(files) => files,
                 Err(error) => {
@@ -1247,6 +1528,33 @@ fn on_task(state: &mut GlobalState, task: Task) {
                         &state.config.workspace,
                     ),
                     target: state.config.workspace.target.clone(),
+                    module_options: crate::reload::loaded_module_contexts(&scan.inputs.projects)
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, context)| {
+                            let manifest = Url::parse(context["manifest"].as_str()?)
+                                .ok()?
+                                .to_file_path()
+                                .ok()?;
+                            let project =
+                                scan.inputs.projects.values().find(|p| p.manifest == manifest)?;
+                            let folders = [Url::from_directory_path(&project.workspace_root).ok()?]
+                                .into_iter()
+                                .collect();
+                            Some((
+                                index,
+                                base_db::preprocess::ModuleOptions {
+                                    project: Some(manifest),
+                                    include_paths: crate::reload::include_search_paths(
+                                        &folders,
+                                        &project.config,
+                                    ),
+                                    target: project.config.target.clone(),
+                                    strict_bitvector: project.config.strict_bitvector,
+                                },
+                            ))
+                        })
+                        .collect(),
                     modules: graph.clone(),
                 });
             state.loading_module_graph = Some(graph);
@@ -1303,12 +1611,13 @@ fn on_task(state: &mut GlobalState, task: Task) {
                 }
             }
         }
-        Task::FlycheckStarted { target, generation } => {
+        Task::FlycheckStarted { target, generation, cache } => {
             if state.flycheck_latest.get(&target) == Some(&generation) {
+                state.flycheck_history.entry(target.clone()).or_default().start(cache);
                 state.flycheck_status.insert(target, crate::flycheck::Status::Running);
             }
         }
-        Task::Flycheck { target, generation, found, status } => {
+        Task::Flycheck { target, generation, found, status, run } => {
             if state.flycheck_latest.get(&target) != Some(&generation)
                 || state.fetch_workspaces_queue.op_requested()
                 || state.fetch_workspaces_queue.op_in_progress()
@@ -1316,19 +1625,48 @@ fn on_task(state: &mut GlobalState, task: Task) {
             {
                 return;
             }
+            if found.iter().any(|(path, diagnostic)| {
+                Url::from_file_path(path).ok().and_then(|uri| state.mem_docs.get(&uri)).is_some_and(
+                    |document| {
+                        !crate::flycheck::structured::matches_source(diagnostic, &document.data)
+                    },
+                )
+            }) {
+                state.flycheck_status.insert(target.clone(), crate::flycheck::Status::Stale);
+                if let Some(history) = state.flycheck_history.get_mut(&target) {
+                    history.invalidate();
+                }
+                state.diagnostics.set_check_diagnostics(&target, Vec::new());
+                return;
+            }
             if status.problem() {
                 state.log_message(MessageType::WARNING, format!("Flycheck {target:?}: {status:?}"));
             }
+            state.flycheck_history.entry(target.clone()).or_default().finish(run, &status);
             state.flycheck_status.insert(target.clone(), status);
-            // Group by file. A path the workspace does not know is dropped
-            // rather than guessed at — upstream may name a prelude file.
+            // Terminal locations require a known VFS path. Structured spans
+            // carry validated physical paths and hashes, including unopened files.
             let mut by_file: HashMap<base_db::FileId, Vec<lsp_types::Diagnostic>> = HashMap::new();
             for (path, diag) in found {
                 let Ok(url) = lsp_types::Url::from_file_path(&path) else { continue };
-                let Some(fid) = state.vfs.lookup_file_id_by_url(&url) else { continue };
+                let fid = match state.vfs.lookup_file_id_by_url(&url) {
+                    Some(fid) => fid,
+                    None if diag
+                        .data
+                        .as_ref()
+                        .and_then(|data| data.get("sailCompiler"))
+                        .is_some() =>
+                    {
+                        state.vfs.file_id_for_url(&url)
+                    }
+                    None => continue,
+                };
                 by_file.entry(fid).or_default().push(diag);
             }
+            let policy = state.compiler_policy_for(&target);
+            state.diagnostics.set_check_policy(&target, policy);
             state.diagnostics.set_check_diagnostics(&target, by_file.into_iter().collect());
+            state.apply_compiler_diagnostic_policies();
         }
         Task::PrimeCaches(progress) => match progress {
             PrimeCachesProgress::Begin => {
@@ -1481,6 +1819,7 @@ fn on_request(state: &mut GlobalState, req: Request) {
     }
 
     dispatcher
+        .on_sync_mut::<lsp_types::request::ExecuteCommand>(crate::editor_commands::execute)
         // This only serializes loaded project metadata. Reading it directly
         // avoids constructing an analysis snapshot while cache priming owns
         // Salsa state during startup.
@@ -1506,7 +1845,8 @@ fn on_request(state: &mut GlobalState, req: Request) {
             handlers::handle_resolve_completion_item,
         )
         .on_latency_sensitive::<true, request::InlayHintRequest>(handlers::handle_inlay_hint)
-        .on::<false, crate::lsp_ext::ExplainAnalysis>(handlers::handle_explain_analysis)
+        .on::<true, crate::lsp_ext::ExplainAnalysis>(handlers::handle_explain_analysis)
+        .on::<false, crate::lsp_ext::ExplainFormatting>(crate::formatting::explain)
         .on::<false, crate::lsp_ext::SsrPreview>(handlers::handle_ssr_preview)
         .on::<false, crate::lsp_ext::Ssr>(handlers::handle_ssr)
         .on::<false, crate::lsp_ext::SsrSearch>(handlers::handle_ssr_search)
@@ -1560,7 +1900,7 @@ fn on_request(state: &mut GlobalState, req: Request) {
         .on::<false, crate::lsp_ext::ViewSyntaxTree>(handlers::handle_view_syntax_tree)
         .on::<false, crate::lsp_ext::ViewHir>(handlers::handle_view_hir)
         .on::<false, crate::lsp_ext::ViewItemTree>(handlers::handle_view_item_tree)
-        .on::<false, crate::lsp_ext::ExpandInclude>(handlers::handle_expand_include)
+        .on::<true, crate::lsp_ext::ExpandInclude>(handlers::handle_expand_include)
         .on::<false, crate::lsp_ext::EffectAnnotations>(handlers::handle_effect_annotations)
         .on::<false, crate::lsp_ext::SailLspStatus>(handlers::handle_sail_lsp_status)
         .on::<false, crate::lsp_ext::DiagnosticReport>(handlers::handle_diagnostic_report)
@@ -1621,6 +1961,130 @@ fn noop_response(_state: &mut GlobalState, response: lsp_server::Response) {
 #[cfg(test)]
 mod project_reload_tests {
     use super::*;
+
+    #[test]
+    fn cancelled_preprocessing_unwinds_and_releases_an_isolated_database() {
+        for cancel_before_creation in [true, false] {
+            let cancel = hir::CancellationToken::new();
+            if cancel_before_creation {
+                cancel.cancel();
+            }
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let db = preprocessing_database(cancel.clone());
+                let id = base_db::FileId::from_raw(0);
+                let file = base_db::FileText::new(
+                    &db,
+                    std::sync::Arc::from("$define READY\nfunction test() = 1\n"),
+                    id,
+                );
+                let project = base_db::preprocess::SourceProject {
+                    roots: vec![id],
+                    paths: vec![("/isolated.sail".into(), id)],
+                    ..Default::default()
+                };
+                let input = base_db::preprocess::WorkspaceSourceProject::new(
+                    &db,
+                    project,
+                    [(id, file)].into(),
+                );
+                cancel.cancel();
+                hir::preprocess::prepare_workspace(&db, input)
+            }));
+            assert!(result.unwrap_err().is::<stdx::cancellation::Cancelled>());
+        }
+        assert!(syntax::SourceFile::parse("function recovered() = 1\n").errors().is_empty());
+    }
+
+    #[test]
+    fn large_workspace_preprocessing_is_background_and_rejects_obsolete_overlays() {
+        let (sender, _messages) = crossbeam_channel::unbounded();
+        let (task_sender, tasks) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender, task_sender);
+        state.config.flycheck.enable = false;
+        let dir = tempfile::tempdir().unwrap();
+        let files: Vec<_> = (0..65)
+            .map(|index| {
+                let path = dir.path().join(format!("file_{index}.sail"));
+                (Url::from_file_path(&path).unwrap(), path)
+            })
+            .collect();
+        for (index, (url, _)) in files.iter().enumerate() {
+            let text = if index == 0 {
+                "$include \"file_1.sail\"\n".to_owned()
+            } else {
+                format!("val file_{index} : int\n")
+            };
+            state.sync_disk_text(url, &text);
+        }
+        state.process_changes();
+        let ids: Vec<_> =
+            files.iter().map(|(url, _)| state.vfs.lookup_file_id_by_url(url).unwrap()).collect();
+        state.loading_source_project = Some(base_db::preprocess::SourceProject {
+            roots: vec![ids[0]],
+            paths: files.iter().zip(&ids).map(|((_, path), id)| (path.clone(), *id)).collect(),
+            ..Default::default()
+        });
+        state.finish_workspace_load(&files, files.len());
+        assert!(state.preprocessing_running);
+        assert!(!state.workspace_loaded, "foreground must return before the model is installed");
+        let obsolete = tasks.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        // Watch registration may echo files before the new model has been
+        // installed. Such events must update its sources without requesting
+        // another scan, which would otherwise starve startup indefinitely.
+        let revision = state.fetch_workspaces_queue.revision();
+        state.handle_vfs_msg(vfs::loader::Message::Changed {
+            files: vec![(
+                paths::AbsPathBuf::assert_utf8(files[0].1.clone()),
+                Some(b"$include \"file_1.sail\"\n".to_vec()),
+            )],
+        });
+        assert_eq!(state.fetch_workspaces_queue.revision(), revision);
+        assert!(!state.fetch_workspaces_queue.op_requested());
+        // A newer overlay arrives while the old model is being derived. It
+        // must remain authoritative even when the old completion arrives late.
+        crate::handlers::notification::handle_did_open_text_document(
+            &mut state,
+            DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: files[0].0.clone(),
+                    language_id: "sail".into(),
+                    version: 1,
+                    text: "$include \"file_2.sail\"\n".into(),
+                },
+            },
+        )
+        .unwrap();
+        state.process_changes();
+        on_task(&mut state, obsolete);
+        assert!(!state.workspace_loaded);
+        assert!(state.preprocessing_running, "only the latest input is rescheduled");
+        let current = tasks.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        on_task(&mut state, current);
+        assert!(state.workspace_loaded);
+        assert!(!state.preprocessing_running);
+        assert!(state.pending_preprocessing.is_none());
+        let db = state.analysis_host.raw_database();
+        let project = base_db::preprocess::WorkspaceSourceProject::try_get(db).unwrap();
+        let plan = hir::preprocess::workspace_plan(db, project);
+        assert!(plan.edges.contains(&(ids[0], ids[2])));
+        assert!(!plan.edges.contains(&(ids[0], ids[1])));
+        assert_eq!(db.live_snapshots(), 0, "independent workers must not retain host snapshots");
+        let project = project.project(db).clone();
+        state.fetch_workspaces_queue.request_op("reload model".into(), ());
+        state.fetch_workspaces_queue.should_start_op().unwrap();
+        state.loading_source_project = Some(project);
+        state.finish_workspace_load(&files, files.len());
+        let old = tasks.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        state.fetch_workspaces_queue.request_op("newer configuration".into(), ());
+        on_task(&mut state, old);
+        assert!(!state.preprocessing_running);
+        assert!(state.pending_preprocessing.is_none());
+        assert!(
+            !state.fetch_workspaces_queue.op_in_progress(),
+            "obsolete planning must release the fetch operation"
+        );
+        assert!(state.fetch_workspaces_queue.op_requested(), "the newer reload must remain queued");
+    }
 
     #[test]
     fn eviction_waits_for_the_pool_and_the_next_wave_publishes_its_findings() {
@@ -2088,6 +2552,7 @@ mod project_reload_tests {
         };
         state.flycheck_latest.insert(target.clone(), 2);
         let result = |generation, message| Task::Flycheck {
+            run: crate::flycheck::RunReport::default(),
             status: crate::flycheck::Status::Diagnostics { count: 1 },
             target: target.clone(),
             generation,
@@ -2121,6 +2586,7 @@ mod project_reload_tests {
         on_task(
             &mut state,
             Task::Flycheck {
+                run: crate::flycheck::RunReport::default(),
                 target: target.clone(),
                 generation: 1,
                 found: vec![],
@@ -2157,6 +2623,7 @@ mod project_reload_tests {
             let file_id = state.vfs.file_id_for_url(&url);
             let target = crate::flycheck::CheckTarget::Project(path.with_file_name("sail.proj"));
             let result = || Task::Flycheck {
+                run: crate::flycheck::RunReport::default(),
                 status: crate::flycheck::Status::Diagnostics { count: 1 },
                 target: target.clone(),
                 generation: 1,
@@ -2352,6 +2819,23 @@ mod project_reload_tests {
         state.process_changes();
         // Closing asks the same loader to restore the current disk contents.
         assert!(source_is(&state, overlay));
+        let before_rescan = state.workspace_load_version;
+        state.handle_vfs_msg(vfs::loader::Message::WatchStatus {
+            config_version: before_rescan,
+            error: Some("native stream lost events".into()),
+        });
+        state.handle_vfs_msg(vfs::loader::Message::Rescan {
+            config_version: before_rescan,
+            roots: vec![paths::AbsPathBuf::assert_utf8(external.clone())],
+        });
+        pump_until(&mut state, &tasks, |s| {
+            s.workspace_load_version > before_rescan && !s.fetch_workspaces_queue.op_in_progress()
+        });
+        assert!(source_is(&state, overlay), "recovery rescans must preserve editor text");
+        assert!(
+            state.watcher_error.is_none(),
+            "successful subscription refresh clears the warning"
+        );
         state.mem_docs.remove(&external_url);
         state.restore_disk_text(&external_url);
         pump_until(&mut state, &tasks, |s| source_is(s, "val external : unit\n"));
@@ -2470,6 +2954,40 @@ mod project_reload_tests {
         state.finish_workspace_load(&[], 0);
         assert_eq!(active_ids(&state), [id]);
         assert!(state.loading_project_config.is_none());
+    }
+
+    #[test]
+    fn reload_requested_before_large_project_preprocessing_releases_the_obsolete_load() {
+        let (mut state, url, id) = state_with_active_file();
+        state.sync_disk_text(
+            &url,
+            &format!("{}val previous : int\n", "// generated padding\n".repeat(16_000)),
+        );
+        state.process_changes();
+        state.fetch_workspaces_queue.request_op("initial discovery".into(), ());
+        state.fetch_workspaces_queue.should_start_op().unwrap();
+        let revision = state.fetch_workspaces_queue.revision();
+        state.loading_project_config =
+            Some((state.config.workspace.clone(), state.workspace_folders.clone(), revision));
+        state.loading_source_project = Some(base_db::preprocess::SourceProject {
+            roots: vec![id],
+            paths: vec![(url.to_file_path().unwrap(), id)],
+            ..Default::default()
+        });
+        // A watcher event arrives after discovery, before the VFS barrier.
+        state.request_workspace_reload(
+            "source discovered during loading",
+            crate::reload::ReloadScope::All,
+        );
+        state.finish_workspace_load(&[(url.clone(), url.to_file_path().unwrap())], 1);
+        assert!(!state.fetch_workspaces_queue.op_in_progress(), "a plan rejected before spawning a worker has no completion event to release this operation");
+        assert!(state.pending_preprocessing.is_none());
+        assert!(state.loading_source_project.is_none());
+        assert!(!state.preprocessing_running);
+        assert!(
+            state.fetch_workspaces_queue.should_start_op().is_some(),
+            "the queued replacement must be allowed to load"
+        );
     }
 
     #[test]

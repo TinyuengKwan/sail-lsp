@@ -1,0 +1,3 @@
+name = "Sail Analysis Preview"
+path_suffixes = ["sail-preview"]
+line_comments = ["// "]

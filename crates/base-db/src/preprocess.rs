@@ -13,6 +13,33 @@ pub struct SourceProject {
     pub include_paths: Vec<PathBuf>,
     pub target: Option<String>,
     pub modules: ModuleGraph,
+    /// Effective settings keyed by the owning project module.
+    pub module_options: BTreeMap<usize, ModuleOptions>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ModuleOptions {
+    pub project: Option<PathBuf>,
+    pub include_paths: Vec<PathBuf>,
+    pub target: Option<String>,
+    pub strict_bitvector: bool,
+}
+
+/// Semantic instances retain their owning module, including shared physical files.
+pub fn strict_bitvector_for_file(db: &dyn salsa::Database, file: FileId) -> bool {
+    let Some(input) = WorkspacePreprocessing::try_get(db) else {
+        return crate::strict_bitvector(db);
+    };
+    strict_bitvector_for_view(db, input, file)
+}
+
+#[salsa::tracked]
+fn strict_bitvector_for_view(
+    db: &dyn salsa::Database,
+    input: WorkspacePreprocessing,
+    file: FileId,
+) -> bool {
+    input.strict_bitvectors(db).get(&file).copied().unwrap_or_else(|| crate::strict_bitvector(db))
 }
 
 #[salsa::input(singleton)]
@@ -46,6 +73,8 @@ pub struct WorkspacePreprocessing {
     /// Region ordinals, unlike byte offsets, are stable under body edits.
     #[returns(ref)]
     pub order: Vec<(FileId, usize)>,
+    #[returns(ref)]
+    pub strict_bitvectors: BTreeMap<FileId, bool>,
 }
 
 /// `None` is a legacy analysis without an explicit project model. Once a
@@ -123,6 +152,7 @@ pub fn set_preprocessing(
     sources: BTreeMap<FileId, FileText>,
     instances: BTreeMap<FileId, Vec<FileId>>,
     order: Vec<(FileId, usize)>,
+    strict_bitvectors: BTreeMap<FileId, bool>,
 ) {
     use salsa::Setter;
     match WorkspacePreprocessing::try_get(db) {
@@ -136,12 +166,15 @@ pub fn set_preprocessing(
             if input.instances(db) != &instances {
                 input.set_instances(db).to(instances);
             }
+            if input.strict_bitvectors(db) != &strict_bitvectors {
+                input.set_strict_bitvectors(db).to(strict_bitvectors);
+            }
             if input.order(db) != &order {
                 input.set_order(db).to(order);
             }
         }
         None => {
-            WorkspacePreprocessing::new(db, regions, sources, instances, order);
+            WorkspacePreprocessing::new(db, regions, sources, instances, order, strict_bitvectors);
         }
     }
 }

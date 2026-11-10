@@ -1,0 +1,109 @@
+{
+  "schemaVersion": 2,
+  "repeats": 3,
+  "cycles": 12,
+  "reloadEvery": 4,
+  "minimumCancelledResponses": 3,
+  "models": {
+    "riscv": {
+      "revision": "20690c8a8d6ccbb0e6adea8e2977efd3adaf8391",
+      "file": "model/core/types.sail",
+      "needle": "zero_extend",
+      "prefixLength": 8,
+      "largeDocuments": [
+        {
+          "file": "model/extensions/V/vext_arith_insts.sail",
+          "role": "instruction",
+          "minimumBytes": 100000
+        }
+      ]
+    },
+    "arm": {
+      "revision": "7d0581642d0e3aaca367bbc5650aca7c53057543",
+      "file": "src/prelude.sail",
+      "needle": "implies(p,q) &",
+      "symbol": "implies",
+      "prefixLength": 3,
+      "largeDocuments": [
+        {
+          "file": "src/instrs64.sail",
+          "role": "instruction",
+          "minimumBytes": 2000000
+        },
+        {
+          "file": "src/sysregs_autogen.sail",
+          "role": "generated",
+          "minimumBytes": 8000000
+        }
+      ]
+    }
+  },
+  "limitsMs": {
+    "first_completion": {
+      "p95": 60000,
+      "p99": 60000
+    },
+    "completion": {
+      "p95": 250,
+      "p99": 750
+    },
+    "hover": {
+      "p95": 250,
+      "p99": 750
+    },
+    "definition": {
+      "p95": 250,
+      "p99": 750
+    },
+    "mixed_completion": {
+      "p95": 500,
+      "p99": 1500
+    },
+    "reload_completion": {
+      "p95": 1000,
+      "p99": 3000
+    },
+    "diagnostic_settle": {
+      "p95": 3000,
+      "p99": 10000
+    },
+    "cancel_response": {
+      "p95": 100,
+      "p99": 500
+    },
+    "interactive_queue": {
+      "p95": 250,
+      "p99": 750
+    },
+    "first_large_interaction": {
+      "p95": 30000,
+      "p99": 30000
+    },
+    "large_edit_completion": {
+      "p95": 1000,
+      "p99": 3000
+    },
+    "signature_help": {
+      "p95": 1000,
+      "p99": 3000
+    },
+    "inlay_hints": {
+      "p95": 1500,
+      "p99": 5000
+    },
+    "references": {
+      "p95": 3000,
+      "p99": 10000
+    },
+    "rename": {
+      "p95": 3000,
+      "p99": 10000
+    },
+    "rename_requery": {
+      "p95": 3000,
+      "p99": 10000
+    }
+  },
+  "scope": "Initial project-specific absolute targets on the recorded host and CPU affinity. Fresh server processes, warm OS caches permitted. Not published rust-analyzer latency guarantees or a cross-machine parity claim. Existing relative synthetic regression policy remains independent. Schema 2 adds real instruction/generated file overlays with semantically checked signature, viewport inlay, full-reference and applied-rename traffic. Appended uniquely named functions make expected answers exact without depending on model-specific compiler errors; full original file contents and project membership are preserved. Cold large-file interactions have a separate 30-second envelope; all schema-1 targets are unchanged.",
+  "renameEditFormat": "versionedDocumentChanges"
+}

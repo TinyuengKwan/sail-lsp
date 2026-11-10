@@ -26,6 +26,13 @@ pub struct Semantics<'db> {
     imp: SemanticsImpl<'db>,
 }
 
+/// A source-written parameter in a visible callable clause.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CallableParameter {
+    pub name: String,
+    pub source: Option<crate::FileRange>,
+}
+
 /// Internal implementation.
 ///
 /// Uses salsa queries directly for data fetching. A lightweight
@@ -81,14 +88,15 @@ impl<'db> SemanticsImpl<'db> {
         infer: bool,
     ) -> Option<SourceAnalyzer> {
         let db = self.db;
-        let file_id = file_text.file_id(db);
 
         // Use salsa queries for bodies, def_map, and inference.
-        let bodies = hir_def::def_query::callable_bodies(db, file_text).as_ref()?;
-
         // Build DefMap from salsa-cached query — Resolver derived on demand
         let def_map_arc = hir_def::def_query::file_def_map(db, file_text).as_ref()?;
         let resolver = def_map_arc.0.clone();
+        let Some(bodies) = hir_def::def_query::callable_bodies_at_offset(db, file_text, offset)
+        else {
+            return Some(SourceAnalyzer::new_for_resolver(resolver));
+        };
 
         // Find the callable containing this offset.
         //
@@ -105,35 +113,18 @@ impl<'db> SemanticsImpl<'db> {
             return Some(SourceAnalyzer::new_for_resolver(resolver));
         };
 
-        let body = (*callable.body).clone();
-        let mut source_map = (*callable.source_map).clone();
-        // Ensure file_id is set (does this in callable_bodies,
-        // but callable_bodies may not have it)
-        if source_map.file_id.is_none() {
-            source_map.file_id = Some(file_id);
-        }
+        let body = callable.body.clone();
+        let source_map = callable.source_map.clone();
 
-        if infer {
-            // Per-callable inference via salsa
-            let inference = self.infer_for_callable(db, file_text, &bodies.0, callable);
-            Some(SourceAnalyzer {
-                resolver,
-                body_or_sig: Some(crate::source_analyzer::BodyOrSig::Body {
-                    body,
-                    source_map,
-                    infer: inference,
-                }),
-            })
+        let inference = if infer {
+            Some(self.infer_for_callable(db, file_text, &bodies.0, callable))
         } else {
-            Some(SourceAnalyzer {
-                resolver,
-                body_or_sig: Some(crate::source_analyzer::BodyOrSig::Body {
-                    body,
-                    source_map,
-                    infer: None,
-                }),
-            })
-        }
+            None
+        };
+        Some(SourceAnalyzer {
+            resolver,
+            body: Some(crate::source_analyzer::BodyAnalysis { body, source_map, infer: inference }),
+        })
     }
 
     /// Run per-callable inference via salsa tracked query.
@@ -147,7 +138,7 @@ impl<'db> SemanticsImpl<'db> {
         file_text: FileText,
         bodies: &hir_def::bodies::CallableBodies,
         target: &hir_def::bodies::CallableBody,
-    ) -> Option<hir_ty::InferenceResult> {
+    ) -> Arc<hir_ty::InferenceResult> {
         // Compute clause index: count entries with same name before this one
         let target_name = &target.name;
         let mut clause_idx = 0u32;
@@ -161,14 +152,12 @@ impl<'db> SemanticsImpl<'db> {
         }
 
         // Find matching DefWithBodyId from salsa
-        let callable_ids = hir_def::def_query::file_def_with_body_ids(db, file_text);
-        let callable_id = callable_ids
-            .iter()
-            .find(|id| id.name(db) == *target_name && id.clause_index(db) == clause_idx)?;
+        let callable_id =
+            hir_def::def_query::DefWithBodyId::new(db, file_text, target_name.clone(), clause_idx);
 
         // Run inference via salsa tracked query
-        let result = hir_ty::query::infer(db, *callable_id);
-        Some(result.0.as_ref().clone())
+        let result = hir_ty::query::infer(db, callable_id);
+        result.0.clone()
     }
 }
 
@@ -177,6 +166,34 @@ impl<'db> Semantics<'db> {
     pub fn new(db: &'db dyn salsa::Database) -> Self {
         let imp = SemanticsImpl::new(db);
         Self { db, imp }
+    }
+
+    /// Declaration constraints use the same lexical proof environment as bodies.
+    /// Repeated diagnostics reuse the tracked result, including imported facts.
+    pub fn declaration_diagnostics(
+        &self,
+        file: FileText,
+    ) -> &'db Vec<crate::diagnostics::Diagnostic> {
+        hir_ty::infer::declaration_constraints::declaration_diagnostics(self.db, file)
+    }
+
+    pub fn bodies_at_offset(
+        &self,
+        file: FileText,
+        offset: usize,
+    ) -> Option<&'db hir_def::CallableBodies> {
+        hir_def::def_query::callable_bodies_at_offset(self.db, file, offset).map(|group| &*group.0)
+    }
+
+    pub fn bodies_in_range(
+        &self,
+        file: FileText,
+        range: Option<(usize, usize)>,
+    ) -> Vec<&'db hir_def::CallableBodies> {
+        hir_def::def_query::callable_bodies_in_range(self.db, file, range)
+            .into_iter()
+            .map(|group| &*group.0)
+            .collect()
     }
 
     /// Get the type of an expression at an offset.
@@ -302,6 +319,7 @@ impl<'db> Semantics<'db> {
             if name.starts_with('\'') {
                 return Some(crate::PathResolution::TypeVar(crate::TypeVar {
                     name: hir_def::Name::new(name),
+                    binding: None,
                 }));
             }
             let at = source_order::at_offset(db, file_text, offset)?;
@@ -348,6 +366,12 @@ impl<'db> Semantics<'db> {
                 // Union constructors are represented in the value namespace.
                 Namespace::Value
             };
+            if namespace == Namespace::Type {
+                // Type resolution includes compiler builtins after checking
+                // source declarations. The generic ordered value resolver
+                // must not turn a primitive annotation into an unknown name.
+                return self.resolve_type_path(file_text, offset, name);
+            }
             let called = if named_callee {
                 bindings::resolve(db, at, hir_def::Name::new(name), namespace).and_then(|decl| {
                     crate::def_at_declaration_in_namespace(db, decl, name, namespace)
@@ -440,7 +464,10 @@ impl<'db> Semantics<'db> {
                 .map(crate::PathResolution::Def);
             }
             return (name.starts_with('\'') || hir_def::is_builtin_type_name(name)).then(|| {
-                crate::PathResolution::TypeVar(crate::TypeVar { name: hir_def::Name::new(name) })
+                crate::PathResolution::TypeVar(crate::TypeVar {
+                    name: hir_def::Name::new(name),
+                    binding: None,
+                })
             });
         }
         let analyzer = self.imp.analyze(file, offset, false)?;
@@ -465,6 +492,227 @@ impl<'db> Semantics<'db> {
     pub fn parse(&self, file: FileText) -> Option<syntax::SyntaxNode> {
         let parsed = syntax::parse_query::parse_file(self.db, file);
         parsed.green.as_ref().map(|green| syntax::SyntaxNode::new_root((**green).clone()))
+    }
+
+    /// Body scopes and cross-file visibility have one semantic entry point.
+    pub fn body_scopes(
+        &self,
+        file: FileText,
+        callable: &hir_def::bodies::CallableBody,
+    ) -> crate::ExprScopes {
+        hir_def::source_order::bindings::body_scopes(
+            self.db,
+            file,
+            &callable.body,
+            callable.body_span.start,
+        )
+    }
+
+    pub fn symbol_visible_from(&self, from: FileId, target: FileText, name: &str) -> bool {
+        hir_def::visibility::symbol_visible_from(self.db, from, target, name)
+    }
+
+    /// Source parameters selected through canonical declaration identities.
+    pub fn callable_parameters_at(
+        &self,
+        file: base_db::FileText,
+        offset: usize,
+        name: &str,
+    ) -> Option<Vec<Vec<CallableParameter>>> {
+        let db = self.db;
+        use hir_def::source_order::{
+            self,
+            bindings::{self, Namespace},
+        };
+        source_order::declarations_for(db, file)?;
+        if matches!(
+            self.resolve_path(db, file, offset, name),
+            Some(crate::PathResolution::Local(_))
+        ) {
+            return Some(Vec::new());
+        }
+        let at = source_order::at_offset(db, file, offset)?;
+        if matches!(source_order::program(db, file), Some(source_order::Program::Inline(_)))
+            && !bindings::contains_name(db, at, &hir_def::Name::new(name))
+        {
+            return None;
+        }
+        let members = bindings::overload_leaf_members(db, at, hir_def::Name::new(name))
+            .unwrap_or_else(|| vec![hir_def::Name::new(name)]);
+        let mut result = Vec::new();
+        for member in members {
+            db.unwind_if_revision_cancelled();
+            let Some(selected) = bindings::resolve(db, at, member.clone(), Namespace::Callable)
+                .and_then(|decl| {
+                    crate::def_at_declaration_in_namespace(
+                        db,
+                        decl,
+                        member.as_str(),
+                        Namespace::Callable,
+                    )
+                })
+            else {
+                continue;
+            };
+            let canonical = selected.canonical(db);
+            for decl in bindings::declarations_named_at(db, at, member.clone(), Namespace::Callable)
+            {
+                let Some(def) = crate::def_at_declaration_in_namespace(
+                    db,
+                    decl,
+                    member.as_str(),
+                    Namespace::Callable,
+                ) else {
+                    continue;
+                };
+                if !matches!(
+                    def,
+                    crate::Def::Function(_)
+                        | crate::Def::Mapping(_)
+                        | crate::Def::ScatteredClause(_)
+                ) || def.canonical(db) != canonical
+                {
+                    continue;
+                }
+                let Some(node) = source_order::node(db, decl) else { continue };
+                let parsed =
+                    syntax::cst_lower::parsed_definition_from_cst(&node, decl.file.text(db));
+                for head in &parsed.callable_heads {
+                    if head.name == member.as_str()
+                        && node.text_range().contains((head.label_span.start as u32).into())
+                    {
+                        result.push(
+                            head.params
+                                .iter()
+                                .map(|param| CallableParameter {
+                                    name: param.name.clone().unwrap_or_else(|| "_".into()),
+                                    source: param.name_span.map(|span| crate::FileRange {
+                                        file_id: decl.file.file_id(db),
+                                        range: base_db::text_range(span.start, span.end),
+                                    }),
+                                })
+                                .collect(),
+                        );
+                    }
+                }
+            }
+        }
+        Some(result)
+    }
+
+    /// Position-aware overload expansion. `None` preserves external lookup
+    /// for an ad-hoc buffer; an empty result in a project is authoritative.
+    pub fn callable_signatures_at(
+        &self,
+        file: FileText,
+        offset: usize,
+        name: &str,
+    ) -> Option<Vec<hir_def::callable_info::CallableSignature>> {
+        use hir_def::callable_info::CallableSignature;
+        let db = self.db;
+        use hir_def::source_order::{
+            self,
+            bindings::{self, Namespace},
+        };
+        source_order::declarations_for(db, file)?;
+        let local = [offset, offset.saturating_sub(1)].into_iter().find_map(|at| {
+            match self.resolve_path(db, file, at, name) {
+                Some(crate::PathResolution::Local(local)) => Some(local),
+                _ => None,
+            }
+        });
+        // Incomplete code can bind a local under a global callable's name.
+        // It must not display the global signature as that local's signature.
+        if local.is_some() {
+            return Some(Vec::new());
+        }
+        let Some(at) = source_order::at_offset(db, file, offset)
+            .or_else(|| source_order::at_offset(db, file, offset.saturating_sub(1)))
+        else {
+            return Some(Vec::new());
+        };
+        if matches!(source_order::program(db, file), Some(source_order::Program::Inline(_)))
+            && !bindings::contains_name(db, at, &hir_def::Name::new(name))
+        {
+            return None; // Preserve external workspace lookup for an ad-hoc buffer.
+        }
+        fn collect(
+            db: &dyn salsa::Database,
+            at: source_order::Declaration,
+            name: &str,
+            seen: &mut std::collections::HashSet<String>,
+            out: &mut Vec<CallableSignature>,
+        ) {
+            if !seen.insert(name.to_owned()) {
+                return;
+            }
+            let Some(decl) =
+                bindings::resolve(db, at, hir_def::Name::new(name), Namespace::Callable)
+            else {
+                return;
+            };
+            let Some(node) = source_order::node(db, decl) else { return };
+            if let Some(members) = bindings::overload_leaf_members(db, at, hir_def::Name::new(name))
+            {
+                for member in members {
+                    collect(db, at, member.as_str(), seen, out);
+                }
+                return;
+            }
+            let definition =
+                crate::def_at_declaration_in_namespace(db, decl, name, Namespace::Callable);
+            let generated = definition.as_ref().is_some_and(|def| {
+                def.location()
+                    .item(db)
+                    .is_some_and(|(tree, item)| tree.generated.contains_key(&item))
+            });
+            if generated || node.kind() == parser::SyntaxKind::NAMED_DEF {
+                if let Some(signature) =
+                    definition.and_then(|def| def.location().lookup_signature(db))
+                {
+                    let (root, _) = syntax::parse_text(&signature);
+                    let parsed = syntax::cst_lower::parsed_file_from_cst(&root, &signature);
+                    out.extend(hir_def::callable_info::collect_callable_signatures_from(
+                        &parsed, &signature,
+                    ));
+                }
+                return;
+            }
+            let selected = syntax::cst_lower::parsed_definition_from_cst(&node, decl.file.text(db));
+            out.extend(hir_def::callable_info::collect_callable_signatures_from(
+                &selected,
+                decl.file.text(db),
+            ));
+        }
+        let mut result = Vec::new();
+        collect(db, at, name, &mut Default::default(), &mut result);
+        Some(result)
+    }
+
+    /// Metadata for legacy/ad-hoc completion. Candidate visibility is checked
+    /// by the caller; declaration selection and signature lookup live here.
+    pub fn completion_details(&self, files: &[FileText], name: &str) -> CompletionDetails {
+        let mut details = CompletionDetails::default();
+        let mut seen = std::collections::HashSet::new();
+        for &file in files {
+            self.db.unwind_if_revision_cancelled();
+            if !details.has_definition {
+                if let Some(tree) = hir_def::def_query::file_item_tree(self.db, file).as_deref() {
+                    if let Some(item) =
+                        tree.top_level_items().iter().find(|item| item.name(tree).as_str() == name)
+                    {
+                        details.has_definition = true;
+                        details.documentation = item.doc(tree).map(str::to_owned);
+                    }
+                }
+            }
+            if let Some(signature) = self.signature_index(file).get(name) {
+                if seen.insert(signature.label.clone()) {
+                    details.signatures.push(signature.clone());
+                }
+            }
+        }
+        details
     }
 
     pub fn signature_index(
@@ -792,7 +1040,7 @@ impl<'db> Semantics<'db> {
         name: &str,
         offset: usize,
     ) -> Option<Vec<(hir_def::Span, bool)>> {
-        let bodies = hir_def::def_query::callable_bodies(db, file_text).as_ref()?;
+        let bodies = hir_def::def_query::callable_bodies_at_offset(db, file_text, offset)?;
         for entry in bodies.0.entries() {
             // The cursor is inside this callable and this callable binds the
             // name. Asking `expr_at_offset` for an `Ident` instead missed
@@ -952,6 +1200,49 @@ impl<'db> Semantics<'db> {
         hir_ty::infer::completion::return_type_match_at(self.db, file, offset, expected, name)
     }
 
+    pub fn completion_parameter_goals(
+        &self,
+        file: FileText,
+        offset: usize,
+        expected: &Ty,
+        name: &str,
+        fuel: &mut usize,
+    ) -> Vec<Vec<Option<Ty>>> {
+        if *fuel == 0 || !self.completion_callable_available(file, offset, name) {
+            return Vec::new();
+        }
+        hir_ty::infer::completion::parameters_for_result_at(
+            self.db, file, offset, expected, name, fuel,
+        )
+    }
+
+    pub fn completion_application_matches(
+        &self,
+        file: FileText,
+        offset: usize,
+        expected: &Ty,
+        name: &str,
+        arguments: &[Ty],
+        fuel: &mut usize,
+    ) -> bool {
+        if *fuel == 0 || !self.completion_callable_available(file, offset, name) {
+            return false;
+        }
+        hir_ty::infer::completion::application_matches_at(
+            self.db, file, offset, expected, name, arguments, fuel,
+        )
+    }
+
+    fn completion_callable_available(&self, file: FileText, offset: usize, name: &str) -> bool {
+        if hir_def::source_order::program(self.db, file).is_some() {
+            return self.resolve_callable_at(file, offset, name).is_some();
+        }
+        self.imp
+            .analyze(file, offset, false)
+            .and_then(|sa| sa.local_at(self.db, file, offset, name))
+            .is_none()
+    }
+
     /// Declared shapes of a proposed callable, respecting source order and
     /// shadowing. Numeric constraints still belong to normal type checking.
     pub fn callable_types_at(&self, file: FileText, offset: usize, name: &str) -> Vec<Ty> {
@@ -971,6 +1262,29 @@ impl<'db> Semantics<'db> {
         let at = hir_def::source_order::at_offset(self.db, file, offset)?;
         let selected = resolve(self.db, at, hir_def::Name::new(name), Namespace::Callable)?;
         crate::def_at_declaration_in_namespace(self.db, selected, name, Namespace::Callable)
+    }
+
+    /// The type of this particular call, distinct from the declaration's
+    /// universally quantified scheme. Inference omits ambiguous, unresolved
+    /// and unproved applications rather than synthesizing substitutions from
+    /// argument text.
+    pub fn call_instantiation(
+        &self,
+        file: FileText,
+        offset: usize,
+    ) -> Option<hir_ty::infer::CallInstantiation> {
+        // Most hover targets are not callees. Keep those queries free of
+        // inference, including declaration and local-binding positions.
+        let bodies = hir_def::def_query::callable_bodies_at_offset(self.db, file, offset)?;
+        let owner = bodies.0.entry_at_offset(offset)?;
+        let callee_id = owner.source_map.expr_at_offset(offset)?;
+        if !owner.body.iter_exprs().any(
+            |(_, expr)| matches!(expr, hir_def::Expr::Call { callee, .. } if *callee == callee_id),
+        ) {
+            return None;
+        }
+        let sa = self.imp.analyze(file, offset, true)?;
+        sa.infer()?.call_instantiations.get(&sa.expr_id(offset)?).cloned()
     }
 
     /// 投産-4: Resolve a method/function call expression at the given offset.
@@ -1079,35 +1393,66 @@ impl<'db> Semantics<'db> {
     }
 
     /// The inferred type of the expression at `span`, as text.
-    pub fn expr_type_text(
+    /// Resolve the owning body before inference: arena IDs are local to a body
+    /// and must never be looked up in another callable's inference result.
+    pub fn expr_type_text(&self, file_text: FileText, span: parser::Span) -> Option<String> {
+        let (_, ty) = self.expr_type_data(file_text, span)?;
+        Some(ty.display_text())
+    }
+
+    /// Editor presentation of an exact expression, preserving source maps and
+    /// hiding only inference-private witnesses as in binding type hints.
+    pub fn expr_type_display(&self, file_text: FileText, span: parser::Span) -> Option<String> {
+        let (result, ty) = self.expr_type_data(file_text, span)?;
+        if matches!(ty.kind(), hir_ty::ty::TyKind::Error | hir_ty::ty::TyKind::Infer(_)) {
+            return None;
+        }
+        Some(result.display_type(&ty))
+    }
+
+    fn expr_type_data(
         &self,
         file_text: FileText,
         span: parser::Span,
-        bodies: Option<&hir_def::bodies::CallableBodies>,
-    ) -> Option<String> {
-        for &id in hir_def::def_query::file_def_with_body_ids(self.db, file_text) {
-            let result = hir_ty::query::infer(self.db, id);
-            if let Some(text) = result.0.expr_type_text(span, bodies) {
-                return Some(text);
-            }
-        }
-        None
+    ) -> Option<(Arc<hir_ty::InferenceResult>, Ty)> {
+        let bodies = hir_def::def_query::callable_bodies_at_offset(self.db, file_text, span.start)?;
+        let owner = bodies.0.entry_at_offset(span.start)?;
+        let expr = owner.body.iter_exprs().find_map(|(id, _)| {
+            let location = owner.source_map.expr_syntax(id)?;
+            (location.start == span.start
+                && (location.end == span.end || location.end == span.end.saturating_add(1)))
+            .then_some(id)
+        })?;
+        let result = self.imp.infer_for_callable(self.db, file_text, &bodies.0, owner);
+        let ty = result.expr_ty(expr)?.clone();
+        Some((result, ty))
     }
 
     /// The inferred type of the binding at `span`, as text.
-    pub fn binding_type_text(
+    pub fn binding_type_text(&self, file_text: FileText, span: parser::Span) -> Option<String> {
+        self.binding_type_data(file_text, span).map(|(_, ty)| ty.display_text())
+    }
+
+    /// Editor presentation of a binding, without exposing a private runtime
+    /// integer witness. Source generation retains the precise type-text API.
+    pub fn binding_type_display(&self, file: FileText, span: parser::Span) -> Option<String> {
+        self.binding_type_data(file, span).map(|(result, ty)| result.display_type(&ty))
+    }
+
+    fn binding_type_data(
         &self,
         file_text: FileText,
         span: parser::Span,
-        bodies: Option<&hir_def::bodies::CallableBodies>,
-    ) -> Option<String> {
-        for &id in hir_def::def_query::file_def_with_body_ids(self.db, file_text) {
-            let result = hir_ty::query::infer(self.db, id);
-            if let Some(text) = result.0.binding_type_text(span, bodies) {
-                return Some(text);
-            }
-        }
-        None
+    ) -> Option<(Arc<hir_ty::InferenceResult>, Ty)> {
+        let bodies = hir_def::def_query::callable_bodies_at_offset(self.db, file_text, span.start)?;
+        let owner = bodies.0.entry_at_offset(span.start)?;
+        let pat = owner.body.iter_pats().find_map(|(id, _)| {
+            let location = owner.source_map.pat_syntax(id)?;
+            (location == span).then_some(id)
+        })?;
+        let result = self.imp.infer_for_callable(self.db, file_text, &bodies.0, owner);
+        let ty = result.pat_ty(pat)?.clone();
+        Some((result, ty))
     }
 
     pub fn names_in_scope(&self, file_text: FileText, offset: usize) -> Vec<hir_def::Name> {
@@ -1222,3 +1567,151 @@ pub struct TopLevelNames {
     pub values: Vec<String>,
     pub records: Vec<String>,
 }
+
+/// Semantic completion metadata, independent of the editor's Markdown renderer.
+#[derive(Debug, Default)]
+pub struct CompletionDetails {
+    pub has_definition: bool,
+    pub documentation: Option<String>,
+    pub signatures: Vec<hir_def::callable_info::CallableSignature>,
+}
+
+#[cfg(test)]
+mod span_type_tests {
+    use super::*;
+
+    #[salsa::db]
+    #[derive(Default, Clone)]
+    struct TestDb {
+        storage: salsa::Storage<Self>,
+    }
+    #[salsa::db]
+    impl salsa::Database for TestDb {}
+
+    #[test]
+    fn call_types_come_from_confirmed_semantic_instances() {
+        for (source, callee, expected, target) in [
+            ("val identity : forall ('a : Type). 'a -> 'a\nfunction demo(x : string) -> string = identity(x)\n", "identity", "string -> string", "identity"),
+            ("default Order dec\nval widen : forall 'n 'm, 'm >= 'n. (implicit('m), bits('n)) -> bits('m)\nfunction demo(x : bits(4)) -> bits(8) = widen(x)\n", "widen", "(implicit(8), bits(4)) -> bits(8)", "widen"),
+            ("val keep : forall ('p : Bool). bool('p) -> bool('p)\nfunction demo(x : bool(true)) -> bool(true) = keep(x)\n", "keep", "bool(true) -> bool(true)", "keep"),
+            ("default Order dec\nval keep_order : forall ('n : Nat) ('o : Order). vector('n, 'o, int) -> vector('n, 'o, int)\nfunction demo(x : vector(4, dec, int)) -> vector(4, inc, int) = keep_order(x)\n", "keep_order", "vector(4, int) -> vector(4, int)", "keep_order"),
+            ("val int_case : int -> int\nval text_case : string -> string\noverload choose = {int_case, text_case}\nfunction demo(x : string) -> string = choose(x)\n", "choose", "string -> string", "text_case"),
+        ] {
+            let mut db = TestDb::default();
+            let file = FileText::new(&db, Arc::from(source), FileId::from_raw(0));
+            hir_def::def_query::set_workspace_files(&mut db, vec![file]);
+            let sema = Semantics::new(&db);
+            let offset = source.rfind(&format!("{callee}(x)")).unwrap();
+            let call = sema.call_instantiation(file, offset).unwrap_or_else(|| panic!("no instance for {source}: {:?}", sema.imp.analyze(file, offset, true).unwrap().infer()));
+            assert_eq!(call.ty.display_text(), expected, "{source}");
+            assert_eq!(call.target, target, "{source}");
+            if callee == "widen" { assert_eq!(call.implicit_params, [true, false]); }
+            // A declaration and an argument are not call-type targets.
+            assert!(sema.call_instantiation(file, source.find(callee).unwrap()).is_none());
+            assert!(sema.call_instantiation(file, offset + callee.len() + 1).is_none());
+        }
+    }
+
+    #[test]
+    fn unresolved_and_ambiguous_calls_do_not_publish_specializations() {
+        for (source, callee) in [
+            ("val unknown : forall ('a : Type). unit -> 'a\nfunction demo() = unknown()\n", "unknown"),
+            ("val first : int -> int\nval second : int -> int\noverload choose = {first, second}\nfunction demo(x : int) -> int = choose(x)\n", "choose"),
+            ("val need : int -> int\nfunction demo() -> int = need(true)\n", "need"),
+            ("val dependent : forall ('a : Type). 'a -> {'a, 'a > 0. bits('a)}\nfunction demo(x : string) = dependent(x)\n", "dependent"),
+        ] {
+            let mut db = TestDb::default();
+            let file = FileText::new(&db, Arc::from(source), FileId::from_raw(0));
+            hir_def::def_query::set_workspace_files(&mut db, vec![file]);
+            let offset = source.rfind(&format!("{callee}(")).unwrap();
+            assert!(Semantics::new(&db).call_instantiation(file, offset).is_none(), "{source}");
+        }
+    }
+
+    #[test]
+    fn position_queries_share_arenas_and_keep_current_view_source_maps() {
+        use crate::source_analyzer::BodyAnalysis;
+        use salsa::Setter;
+        let mut db = TestDb::default();
+        let source = "function first(x : int) -> int = x\n";
+        // A semantic include view uses identical physical text, but must
+        // retain its own provenance in every syntax pointer.
+        let physical = FileText::new(&db, Arc::from(source), FileId::from_raw(0));
+        let view = FileText::new(&db, Arc::from(source), FileId::for_instance(0));
+        let (old_body, old_map, weak) = {
+            let sema = Semantics::new(&db);
+            let offset = source.rfind('x').unwrap();
+            let first = sema.imp.analyze(view, offset, false).unwrap();
+            let second = sema.imp.analyze(view, offset - 1, false).unwrap();
+            let cached = sema.imp.analyze(view, offset - 1, false).unwrap();
+            let Some(BodyAnalysis { body, source_map, .. }) = &first.body else {
+                panic!("expected callable");
+            };
+            let lowered = hir_def::def_query::callable_bodies(&db, view).as_ref().unwrap();
+            assert!(Arc::ptr_eq(body, &lowered.0.entries()[0].body));
+            assert!(Arc::ptr_eq(source_map, &lowered.0.entries()[0].source_map));
+            let id = hir_def::def_query::DefWithBodyId::new(&db, view, "first".to_owned(), 0);
+            let query = hir_def::def_query::body_with_source_map(&db, id);
+            assert!(Arc::ptr_eq(body, &query.0 .0));
+            assert!(Arc::ptr_eq(&source_map.store, &query.0 .1.store));
+            for analyzer in [&second, &cached] {
+                let Some(BodyAnalysis { body: other, source_map: map, .. }) = &analyzer.body else {
+                    panic!("expected callable");
+                };
+                assert!(Arc::ptr_eq(body, other));
+                assert!(Arc::ptr_eq(source_map, map));
+            }
+            assert_eq!(source_map.file_id, Some(FileId::for_instance(0)));
+            let physical_analyzer = sema.imp.analyze(physical, offset, false).unwrap();
+            assert_eq!(physical_analyzer.source_map().unwrap().file_id, Some(FileId::from_raw(0)));
+            (body.clone(), source_map.clone(), Arc::downgrade(source_map))
+        };
+        let edited = format!("// moved\n{source}");
+        view.set_text(&mut db).to(Arc::from(edited.as_str()));
+        {
+            let sema = Semantics::new(&db);
+            let current = sema.imp.analyze(view, edited.rfind('x').unwrap(), false).unwrap();
+            let Some(BodyAnalysis { body, source_map, .. }) = &current.body else {
+                panic!("expected callable");
+            };
+            assert!(!Arc::ptr_eq(&old_body, body));
+            assert!(!Arc::ptr_eq(&old_map, source_map));
+            let before = old_map.expr_at_offset(source.rfind('x').unwrap()).unwrap();
+            let after = source_map.expr_at_offset(edited.rfind('x').unwrap()).unwrap();
+            assert_eq!(
+                source_map.expr_syntax(after).unwrap().start,
+                old_map.expr_syntax(before).unwrap().start + 9
+            );
+        }
+        drop(old_map);
+        drop(old_body);
+        drop(db);
+        assert!(weak.upgrade().is_none(), "old view maps must be releasable");
+    }
+
+    #[test]
+    fn span_type_queries_do_not_reuse_another_bodys_arena_ids() {
+        let mut db = TestDb::default();
+        let source =
+            "function first(x : int) -> int = x\nfunction second(word : string) -> string = word\n";
+        let file = FileText::new(&db, Arc::from(source), FileId::from_raw(0));
+        hir_def::def_query::set_workspace_files(&mut db, vec![file]);
+        let sema = Semantics::new(&db);
+        let expression = source.rfind("word").unwrap();
+        assert_eq!(
+            sema.expr_type_text(file, parser::Span::new(expression, expression + 4)),
+            Some("string".into())
+        );
+        let binding = source.find("word").unwrap();
+        assert_eq!(
+            sema.binding_type_text(file, parser::Span::new(binding, binding + 4)),
+            Some("string".into())
+        );
+        assert!(sema.expr_type_text(file, parser::Span::new(0, 8)).is_none());
+    }
+}
+
+mod explanations;
+pub use explanations::{
+    CandidateExplanation, ConstraintExplanation, ExpressionExplanation, MismatchExplanation,
+};

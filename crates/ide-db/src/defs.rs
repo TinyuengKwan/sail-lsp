@@ -193,7 +193,8 @@ impl Definition {
             | Self::Outcome(loc) => Some(loc.file_id(db)),
             Self::Field(field) => field.file_id,
             Self::EnumVariant(variant) => variant.file_id,
-            Self::BuiltinType(_) | Self::Local(_) | Self::TypeVar(_) | Self::Unresolved(_) => None,
+            Self::TypeVar(var) => var.binding.map(|(file, _)| file),
+            Self::BuiltinType(_) | Self::Local(_) | Self::Unresolved(_) => None,
         }
     }
 
@@ -342,60 +343,26 @@ impl Definition {
     /// Whether this definition lives inside a body rather than at the top
     /// level, which decides whether a search may leave the file.
     pub fn is_local(&self) -> bool {
-        matches!(self, Definition::Local(_) | Definition::TypeVar(_))
+        matches!(self, Definition::Local(_))
+            || matches!(self, Definition::TypeVar(var) if var.binding.is_none())
     }
 
     /// Signatures own their implementation clauses until the next signature
     /// replaces them. Keep this relation separate from declaration-site
     /// classification, which must still identify the token under the cursor.
     pub fn canonical(&self, db: &dyn salsa::Database) -> Self {
-        if self
-            .def_location()
-            .is_none_or(|loc| hir::source_order::declarations_for(db, loc.file_text).is_none())
-            || !matches!(
-                self,
-                Self::Function(_)
-                    | Self::Mapping(_)
-                    | Self::ValSpec(_)
-                    | Self::ScatteredHead(_)
-                    | Self::ScatteredClause(_)
-                    | Self::EndMarker(_)
-                    | Self::TerminationMeasure(_)
-                    | Self::Outcome(_)
-            )
-        {
-            return self.clone();
-        }
-        let Some(loc) = self.def_location() else { return self.clone() };
-        let Some((tree, item)) = loc.item(db) else { return self.clone() };
-        if tree.generated.contains_key(&item) {
-            return self.clone();
-        }
-        let Some(at) = hir::source_order::at_offset(db, loc.file_text, item.name_span(tree).start)
-        else {
-            return self.clone();
+        let definition = match self {
+            Self::Function(value) => hir::Def::Function(*value),
+            Self::Mapping(value) => hir::Def::Mapping(*value),
+            Self::ValSpec(value) => hir::Def::ValSpec(*value),
+            Self::ScatteredHead(value) => hir::Def::ScatteredHead(*value),
+            Self::ScatteredClause(value) => hir::Def::ScatteredClause(*value),
+            Self::EndMarker(value) => hir::Def::EndMarker(*value),
+            Self::TerminationMeasure(value) => hir::Def::TerminationMeasure(*value),
+            Self::Outcome(value) => hir::Def::Outcome(*value),
+            _ => return self.clone(),
         };
-        let selected = if matches!(self, Self::ScatteredHead(_)) {
-            hir::source_order::scattered::callable_head_signature(db, at)
-        } else {
-            hir::source_order::bindings::resolve(
-                db,
-                at,
-                item.name(tree).clone(),
-                hir::source_order::bindings::Namespace::Callable,
-            )
-        };
-        selected
-            .and_then(|decl| {
-                hir::def_at_declaration_in_namespace(
-                    db,
-                    decl,
-                    item.name(tree).as_str(),
-                    hir::source_order::bindings::Namespace::Callable,
-                )
-            })
-            .and_then(Self::from_def)
-            .unwrap_or_else(|| self.clone())
+        Self::from_def(definition.canonical(db)).unwrap_or_else(|| self.clone())
     }
 }
 
@@ -419,6 +386,22 @@ impl IdentClass {
         let (token, span) = file.token_at(position)?;
         let name = crate::token_symbol_key(token)?;
         let key = hir::Name::new(&name);
+        if name.starts_with('\'') {
+            if let Some((db, ft)) = file.file_text() {
+                if let Some((owner, binding)) = crate::type_vars::binding(db, ft, span.start, &name)
+                {
+                    let definition = Definition::TypeVar(hir::TypeVar {
+                        name: key.clone(),
+                        binding: Some((owner, binding)),
+                    });
+                    return Some(if owner == ft.file_id(db) && binding == *span {
+                        IdentClass::NameClass(NameClass::Definition(definition))
+                    } else {
+                        IdentClass::NameRefClass(NameRefClass::Definition(definition))
+                    });
+                }
+            }
+        }
 
         if let Some((db, ft)) = file
             .file_text()
@@ -481,7 +464,12 @@ impl IdentClass {
                 })
             })
             || classify_enum_member(file, &name, span.start).is_some();
-        if let Some(bodies) = file.bodies().filter(|_| !names_a_member) {
+        let bodies = if let Some((db, ft)) = file.file_text() {
+            hir::Semantics::new(db).bodies_at_offset(ft, span.start)
+        } else {
+            file.bodies()
+        };
+        if let Some(bodies) = bodies.filter(|_| !names_a_member) {
             for entry in bodies.entries() {
                 if span.start < entry.def_span.start || span.end > entry.def_span.end {
                     continue;
@@ -556,7 +544,9 @@ impl IdentClass {
             .and_then(Definition::from_path_resolution);
         let def = match resolved {
             Some(def) => def,
-            None if name.starts_with('\'') => Definition::TypeVar(hir::TypeVar { name: key }),
+            None if name.starts_with('\'') => {
+                Definition::TypeVar(hir::TypeVar { name: key, binding: None })
+            }
             None if file.file_text().is_some_and(|(db, ft)| {
                 base_db::module_graph::file_scope(db, ft.file_id(db)).is_some()
                     || hir::source_order::declarations_for(db, ft).is_some()
@@ -853,12 +843,15 @@ fn classify_enum_member(
 fn classify_struct_field(file: &dyn crate::FileDb, name: &str, span: &hir::Span) -> Option<Field> {
     use parser::SyntaxKind as SK;
 
-    let text = file.text();
-    let (root, _) = syntax::parse_text(text);
-    let token = root
-        .descendants_with_tokens()
-        .filter_map(|el| el.into_token())
-        .find(|t| usize::from(t.text_range().start()) == span.start && t.text() == name)?;
+    let root = file
+        .file_text()
+        .and_then(|(db, ft)| syntax::parse_query::semantic_parse_file(db, ft).syntax_node())
+        .or_else(|| file.syntax())
+        .unwrap_or_else(|| syntax::parse_text(file.text()).0);
+    let token =
+        root.token_at_offset((span.start as u32).into()).right_biased().filter(|token| {
+            usize::from(token.text_range().start()) == span.start && token.text() == name
+        })?;
     let init = token.parent().filter(|p| p.kind() == SK::FIELD_INIT)?;
     // The name, not the value: `struct { a = b }` has `b` under the same
     // `FIELD_INIT`, and it is an expression that resolves on its own.
@@ -1053,7 +1046,7 @@ fn classify_field_access(file: &dyn crate::FileDb, name: &str, span: &hir::Span)
     }) {
         return None;
     }
-    for entry in file.bodies()?.entries() {
+    for entry in hir::Semantics::new(db).bodies_at_offset(ft, span.start)?.entries() {
         if span.start < entry.def_span.start || span.end > entry.def_span.end {
             continue;
         }
@@ -1120,6 +1113,23 @@ fn classify_field_access(file: &dyn crate::FileDb, name: &str, span: &hir::Span)
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ordinary_names_do_not_reparse_the_file_to_check_for_a_struct_field() {
+        let source = "function target(x : int) -> int = x\nfunction use() = target(1)\n";
+        let file = crate::test_utils::TestFile::new(source);
+        syntax::parse_query::semantic_parse_file(file.db(), file.input());
+        let start = source.rfind("target").unwrap();
+        // Every lexer starts with a checkpoint. Cached token lookup must
+        // never enter it just to reject an ordinary call as a field label.
+        let _scope = stdx::cancellation::enter(|| panic!("unexpected whole-file parsing"));
+        assert!(super::classify_struct_field(
+            &file,
+            "target",
+            &parser::Span::new(start, start + 6),
+        )
+        .is_none());
+    }
+
     use super::*;
     use crate::test_utils::TestFile;
     use crate::FileDb;

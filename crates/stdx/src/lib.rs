@@ -10,6 +10,7 @@ mod macros;
 pub mod diff;
 
 pub mod assert;
+pub mod cancellation;
 pub mod panic_context;
 pub mod process;
 pub mod thread;

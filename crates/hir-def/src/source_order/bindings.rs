@@ -3,7 +3,7 @@
 //! must not reveal an older signature of the same name.
 use super::{Declaration, FileText, Program, WorkspaceFiles};
 use crate::Name;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use syntax::SyntaxKind as SK;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -248,10 +248,14 @@ type IndexedEvent = (usize, Declaration, Event);
 
 #[salsa::tracked(returns(ref))]
 fn index(db: &dyn salsa::Database, _files: WorkspaceFiles, program: Program) -> Index {
-    let mut result = Index { positions: HashMap::new(), bindings: HashMap::new() };
+    let declarations = program.declarations(db);
+    let mut result = Index { positions: HashMap::default(), bindings: HashMap::default() };
+    result.positions.reserve(declarations.len());
+    result.bindings.reserve(declarations.len());
+    let mut files = HashMap::default();
     let vectors: HashMap<_, _> =
         super::scattered::enum_vectors(db, program).iter().map(|v| (v.end, v)).collect();
-    for (position, &declaration) in program.declarations(db).iter().enumerate() {
+    for (position, &declaration) in declarations.iter().enumerate() {
         db.unwind_if_revision_cancelled();
         result.positions.insert(declaration, position);
         if let Some(vector) = vectors.get(&declaration) {
@@ -272,8 +276,9 @@ fn index(db: &dyn salsa::Database, _files: WorkspaceFiles, program: Program) -> 
                 event,
             ));
         }
-        for event in file_events(db, declaration.file).get(declaration.index).into_iter().flatten()
-        {
+        let events =
+            files.entry(declaration.file).or_insert_with(|| file_events(db, declaration.file));
+        for event in events.get(declaration.index).into_iter().flatten() {
             let mut event = event.clone();
             if let Some(parent) = &event.enum_parent {
                 if let Some((_, head, head_event)) =

@@ -1,33 +1,11 @@
-//! Corpus check: validate sail-lsp diagnostics against a directory of .sail files.
+//! Run native diagnostics over a flat directory of Sail sources.
 //!
-//! Runs the **same `Analysis::file_diagnostics` pipeline** that the LSP server uses,
-//! but does not drive the LSP workspace loader or incremental document path.
-//! Loader equivalence is covered separately by
-//! `reload::tests::server_workspace_order_matches_the_probe`.
+//! Uses `Analysis::file_diagnostics` with the bundled prelude and an include
+//! graph. It does not drive the server loader, configured module visibility or
+//! incremental document lifecycle. Use `analysis_stats` with a project manifest
+//! or the stdio gates when those properties matter.
 //!
-//! This distinction matters: the probe has an explicit, stable
-//! standard-library-first vector. Reconstructing `WorkspaceFiles` from a
-//! hash map in the real server once made editor diagnostics disagree while
-//! this probe remained green.
-//!
-//! ## Architecture alignment (RA)
-//!
-//! RA's `analysis-stats` CLI (`crates/rust-analyzer/src/cli/analysis_stats.rs:1310-1331`)
-//! calls `analysis.full_diagnostics()` — the same function the LSP server invokes via
-//! `fetch_native_diagnostics` (`crates/rust-analyzer/src/diagnostics.rs:298-305`).
-//! There is no separate "corpus-check-only" diagnostic logic in RA.
-//!
-//! This example follows the same pattern: load workspace → `Analysis` → `file_diagnostics`.
-//! No direct calls to `parse_text`, `ItemTree::build_from_cst`, `check_file`, or
-//! `TopLevelEnv::from_cst`. All diagnostics come from `ide-diagnostics` handlers.
-//!
-//! ## Usage
-//!
-//! ```sh
-//! cargo run --example corpus_check -- /path/to/sail-riscv
-//! cargo run --example corpus_check -- -v /path/to/sail-riscv        # verbose: per-file detail
-//! cargo run --example corpus_check -- --json /path/to/sail-riscv    # JSON output for CI
-//! ```
+//! Usage: `cargo run --example corpus_check -- [-v] [--json] /path/to/corpus`
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 

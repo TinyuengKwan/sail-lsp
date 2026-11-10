@@ -4,7 +4,10 @@
 //! syntax-only from semantic diagnostics; `fetch_native_diagnostics`
 //! computes diagnostics for a set of files.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    sync::Arc,
+};
 
 use base_db::FileId;
 use hir::callgraph::SourceFileInfo as _; // for .text() on SalsaFile
@@ -24,14 +27,34 @@ pub(crate) enum NativeDiagnosticsFetchKind {
     Semantic,
 }
 
+/// Immutable findings shared with requests. Presentation is derived for the
+/// requested physical file; policy changes never alter compiler evidence.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct CompilerDiagnostics {
+    raw: BTreeMap<crate::flycheck::CheckTarget, Arc<BTreeMap<FileId, Vec<lsp_types::Diagnostic>>>>,
+    policies:
+        Arc<BTreeMap<crate::flycheck::CheckTarget, crate::flycheck::CompilerDiagnosticPolicy>>,
+}
+impl CompilerDiagnostics {
+    pub(crate) fn for_file(
+        &self,
+        file: FileId,
+    ) -> impl Iterator<Item = lsp_types::Diagnostic> + '_ {
+        self.raw.iter().flat_map(move |(target, files)| {
+            let policy = self.policies.get(target);
+            files.get(&file).into_iter().flatten().filter_map(move |diagnostic| match policy {
+                Some(policy) => policy.project(diagnostic),
+                None => Some(diagnostic.clone()),
+            })
+        })
+    }
+}
+
 /// Tracks per-file diagnostic state with generation numbers.
 ///
-/// Three sources, as rust-analyzer has: native syntax, native semantic, and
-/// what the real compiler said. The third was absent and this comment used
-/// to record its absence as a "Sail simplification" — but the IDE's analysis
-/// is not the compiler's, and the classes it provably cannot decide are
-/// exactly the ones `sail --just-check` decides. The `changes` set tracks
-/// which files need to have their diagnostics republished.
+/// Native waves use generation numbers. Compiler findings stay isolated by
+/// check target and are projected through presentation policy. `changes`
+/// records physical files requiring fresh publication.
 #[derive(Debug, Default)]
 pub(crate) struct DiagnosticCollection {
     /// Per-file native syntax diagnostics (parse errors).
@@ -39,15 +62,9 @@ pub(crate) struct DiagnosticCollection {
     /// Per-file native semantic diagnostics (type errors).
     pub(crate) native_semantic:
         HashMap<FileId, (DiagnosticsGeneration, Vec<lsp_types::Diagnostic>)>,
-    /// Per-file diagnostics from `sail --just-check`, by the run that found
-    /// them. Not generation-keyed: a run replaces everything the previous run
-    /// of the same target said, because upstream stops at the first error in
-    /// a file and a partial merge would keep a finding it no longer makes.
-    /// Another project's run leaves them alone.
-    pub(crate) check: HashMap<
-        FileId,
-        std::collections::BTreeMap<crate::flycheck::CheckTarget, Vec<lsp_types::Diagnostic>>,
-    >,
+    /// Completed compiler runs and their presentation settings. Replacing one
+    /// target never discards another target's findings.
+    pub(crate) check: CompilerDiagnostics,
     /// Files whose diagnostics changed since last `take_changes()`.
     changes: HashSet<FileId>,
     /// Counter for supplying new generation numbers.
@@ -59,7 +76,8 @@ impl DiagnosticCollection {
     pub(crate) fn mark_all_changed(&mut self) {
         self.changes.extend(self.native_syntax.keys().copied());
         self.changes.extend(self.native_semantic.keys().copied());
-        self.changes.extend(self.check.keys().copied());
+        self.changes
+            .extend(self.check.raw.values().flat_map(|files| files.iter()).map(|(file, _)| *file));
     }
 
     pub(crate) fn is_current_generation(&self, generation: DiagnosticsGeneration) -> bool {
@@ -78,10 +96,24 @@ impl DiagnosticCollection {
         self.changes.insert(file_id);
     }
 
+    fn native_for_file(
+        &self,
+        file_id: FileId,
+    ) -> Option<(NativeDiagnosticsFetchKind, &(DiagnosticsGeneration, Vec<lsp_types::Diagnostic>))>
+    {
+        match (self.native_syntax.get(&file_id), self.native_semantic.get(&file_id)) {
+            (Some(syntax), Some(full)) if syntax.0 > full.0 => {
+                Some((NativeDiagnosticsFetchKind::Syntax, syntax))
+            }
+            (_, Some(full)) => Some((NativeDiagnosticsFetchKind::Semantic, full)),
+            (Some(syntax), None) => Some((NativeDiagnosticsFetchKind::Syntax, syntax)),
+            (None, None) => None,
+        }
+    }
+
     /// Set native diagnostics for a batch of files.
     /// Accepts a batch of `(FileId, Vec<Diagnostic>)` from a single
-    /// diagnostic wave. Only records a change if the diagnostics
-    /// actually differ from the previously stored set.
+    /// diagnostic wave. Republish when its payload or the selected wave changes.
     pub(crate) fn set_native_diagnostics(
         &mut self,
         kind: NativeDiagnosticsFetchKind,
@@ -94,13 +126,13 @@ impl DiagnosticCollection {
         if generation < self.generation {
             return;
         }
-        let target = match kind {
-            NativeDiagnosticsFetchKind::Syntax => &mut self.native_syntax,
-            NativeDiagnosticsFetchKind::Semantic => &mut self.native_semantic,
-        };
-
         for (file_id, mut diags) in diagnostics {
             diags.sort_by_key(|it| (it.range.start, it.range.end));
+            let selected_before = self.native_for_file(file_id).map(|(kind, _)| kind);
+            let target = match kind {
+                NativeDiagnosticsFetchKind::Syntax => &mut self.native_syntax,
+                NativeDiagnosticsFetchKind::Semantic => &mut self.native_semantic,
+            };
 
             if let Some((old_gen, existing)) = target.get_mut(&file_id) {
                 if generation < *old_gen {
@@ -108,6 +140,12 @@ impl DiagnosticCollection {
                 }
                 *old_gen = generation;
                 if *existing == diags {
+                    // Equal cached payloads can still replace the other wave:
+                    // new empty syntax clears old types; completed semantics
+                    // must then restore findings even if they are unchanged.
+                    if selected_before != self.native_for_file(file_id).map(|(kind, _)| kind) {
+                        self.changes.insert(file_id);
+                    }
                     continue;
                 }
             }
@@ -124,11 +162,57 @@ impl DiagnosticCollection {
         target: &crate::flycheck::CheckTarget,
         diagnostics: Vec<(FileId, Vec<lsp_types::Diagnostic>)>,
     ) {
-        self.retain_check_targets(|t| t != target);
-        for (file_id, diags) in diagnostics {
-            self.changes.insert(file_id);
-            self.check.entry(file_id).or_default().entry(target.clone()).or_default().extend(diags);
+        self.mark_check_files(target);
+        let mut by_file = BTreeMap::<FileId, Vec<lsp_types::Diagnostic>>::new();
+        for (file, diagnostics) in diagnostics {
+            by_file.entry(file).or_default().extend(diagnostics);
         }
+        self.check.raw.insert(target.clone(), Arc::new(by_file));
+        self.mark_check_files(target);
+    }
+
+    fn mark_check_files(&mut self, target: &crate::flycheck::CheckTarget) {
+        self.changes.extend(
+            self.check
+                .raw
+                .get(target)
+                .into_iter()
+                .flat_map(|files| files.iter())
+                .map(|(file, _)| *file),
+        );
+    }
+
+    pub(crate) fn set_check_policy(
+        &mut self,
+        target: &crate::flycheck::CheckTarget,
+        policy: crate::flycheck::CompilerDiagnosticPolicy,
+    ) {
+        if self.check.policies.get(target) == Some(&policy) {
+            return;
+        }
+        Arc::make_mut(&mut self.check.policies).insert(target.clone(), policy);
+        self.mark_check_files(target);
+    }
+
+    pub(crate) fn check_targets(&self) -> Vec<crate::flycheck::CheckTarget> {
+        self.check.raw.keys().cloned().collect()
+    }
+
+    pub(crate) fn check_counts(&self, target: &crate::flycheck::CheckTarget) -> (usize, usize) {
+        let diagnostics = self
+            .check
+            .raw
+            .get(target)
+            .into_iter()
+            .flat_map(|files| files.iter())
+            .flat_map(|(_, diagnostics)| diagnostics);
+        let policy = self.check.policies.get(target);
+        let (mut reported, mut visible) = (0, 0);
+        for diagnostic in diagnostics {
+            reported += 1;
+            visible += usize::from(policy.is_none_or(|policy| !policy.is_ignored(diagnostic)));
+        }
+        (reported, visible)
     }
 
     /// Forget the runs of targets that no longer exist. Clearing is a change.
@@ -136,43 +220,36 @@ impl DiagnosticCollection {
         &mut self,
         mut keep: impl FnMut(&crate::flycheck::CheckTarget) -> bool,
     ) {
-        for (file_id, by_target) in &mut self.check {
-            let before = by_target.len();
-            by_target.retain(|t, _| keep(t));
-            if by_target.len() != before {
-                self.changes.insert(*file_id);
-            }
+        let targets: std::collections::BTreeSet<_> =
+            self.check.raw.keys().chain(self.check.policies.keys()).cloned().collect();
+        for target in targets.into_iter().filter(|target| !keep(target)) {
+            self.mark_check_files(&target);
+            self.check.raw.remove(&target);
+            Arc::make_mut(&mut self.check.policies).remove(&target);
         }
-        self.check.retain(|_, by_target| !by_target.is_empty());
     }
 
     /// Get all diagnostics for a file (syntax + semantic + check).
     pub(crate) fn diagnostics_for(
         &self,
         file_id: FileId,
-    ) -> impl Iterator<Item = &lsp_types::Diagnostic> {
-        let syntax = self.native_syntax.get(&file_id);
-        let full = self.native_semantic.get(&file_id);
+    ) -> impl Iterator<Item = lsp_types::Diagnostic> {
         // The second wave calls file_diagnostics: it already contains syntax
         // findings. Do not duplicate them, or mix new syntax with old types.
-        let native = match (syntax, full) {
-            (Some(syntax), Some(full)) if syntax.0 > full.0 => Some(syntax),
-            (_, Some(full)) => Some(full),
-            (syntax, None) => syntax,
-        };
-        let check = self.check.get(&file_id).into_iter().flat_map(|m| m.values().flatten());
-        let mut seen = Vec::new();
-        native.into_iter().flat_map(|(_, d)| d).chain(check).filter(move |diagnostic| {
-            if seen.contains(diagnostic) {
-                return false;
+        let native = self.native_for_file(file_id).map(|(_, diagnostics)| diagnostics);
+        let mut out = Vec::new();
+        for diagnostic in
+            native.into_iter().flat_map(|(_, d)| d).cloned().chain(self.check.for_file(file_id))
+        {
+            if !out.contains(&diagnostic) {
+                out.push(diagnostic);
             }
-            seen.push(*diagnostic);
-            true
-        })
+        }
+        out.into_iter()
     }
 
     pub(crate) fn native_diagnostics_are_current(&self, file_id: FileId) -> bool {
-        !self.check.get(&file_id).is_some_and(|m| m.values().any(|diags| !diags.is_empty()))
+        self.check.for_file(file_id).next().is_none()
             && [self.native_syntax.get(&file_id), self.native_semantic.get(&file_id)]
                 .into_iter()
                 .flatten()
@@ -199,11 +276,11 @@ impl DiagnosticCollection {
 /// guessing that different messages/codes or native fixes mean the same thing.
 pub(crate) fn extend_unique(
     items: &mut Vec<lsp_types::Diagnostic>,
-    checks: &[lsp_types::Diagnostic],
+    checks: impl IntoIterator<Item = lsp_types::Diagnostic>,
 ) {
     for diagnostic in checks {
-        if !items.contains(diagnostic) {
-            items.push(diagnostic.clone());
+        if !items.contains(&diagnostic) {
+            items.push(diagnostic);
         }
     }
 }
@@ -231,17 +308,18 @@ pub(crate) fn fetch_native_diagnostics(
     analysis: &ide::analysis::Analysis,
     subscriptions: &[(lsp_types::Url, base_db::FileId)],
     kind: NativeDiagnosticsFetchKind,
-    config: &ide_diagnostics::DiagnosticsConfig,
+    config: impl Fn(&lsp_types::Url) -> ide_diagnostics::DiagnosticsConfig,
 ) -> ide::Cancellable<Vec<(base_db::FileId, Vec<lsp_types::Diagnostic>)>> {
     subscriptions
         .iter()
         .map(|(url, file_id)| {
+            let config = config(url);
             let diagnostics = match kind {
                 NativeDiagnosticsFetchKind::Syntax => {
-                    analysis.syntax_diagnostics(*file_id, config)?
+                    analysis.syntax_diagnostics(*file_id, &config)?
                 }
                 NativeDiagnosticsFetchKind::Semantic => {
-                    analysis.file_diagnostics(*file_id, config)?
+                    analysis.file_diagnostics(*file_id, &config)?
                 }
             };
             let lsp_diags = if let Some(sf) = analysis.file(url) {
@@ -264,6 +342,55 @@ pub(crate) fn fetch_native_diagnostics(
 mod tests {
     use super::*;
 
+    #[test]
+    fn compiler_presentation_is_reversible_and_never_filters_native_or_other_projects() {
+        let file = FileId::from_raw(0);
+        let a = crate::flycheck::CheckTarget::Project("a.sail_project".into());
+        let b = crate::flycheck::CheckTarget::Project("b.sail_project".into());
+        let compiler = lsp_types::Diagnostic {
+            source: Some("sail".into()),
+            severity: Some(lsp_types::DiagnosticSeverity::WARNING),
+            message: "compiler".into(),
+            ..Default::default()
+        };
+        let native = lsp_types::Diagnostic {
+            source: Some("sail-lsp".into()),
+            severity: Some(lsp_types::DiagnosticSeverity::ERROR),
+            message: "native".into(),
+            ..Default::default()
+        };
+        let mut collection = DiagnosticCollection::default();
+        collection.native_semantic.insert(file, (0, vec![native.clone()]));
+        collection.set_check_diagnostics(&a, vec![(file, vec![compiler.clone()])]);
+        collection.set_check_diagnostics(&b, vec![(file, vec![compiler.clone()])]);
+        let mut config =
+            crate::config::FlycheckConfig { ignore: vec!["*".into()], ..Default::default() };
+        collection.set_check_policy(&a, (&config).into());
+        assert_eq!(collection.check_counts(&a), (1, 0));
+        assert_eq!(collection.check_counts(&b), (1, 1));
+        assert_eq!(collection.diagnostics_for(file).count(), 2);
+        assert_eq!(collection.diagnostics_for(file).next(), Some(native.clone()));
+        config.ignore.clear();
+        config.warnings_as_hint = vec!["severity:warning".into()];
+        collection.set_check_policy(&a, (&config).into());
+        assert_eq!(collection.check_counts(&a), (1, 1));
+        let shown: Vec<_> = collection.diagnostics_for(file).collect();
+        assert!(shown.iter().any(|d| d.source.as_deref() == Some("sail")
+            && d.severity == Some(lsp_types::DiagnosticSeverity::HINT)));
+        assert!(shown.iter().any(|d| d == &compiler));
+        collection.set_check_policy(&a, Default::default());
+        assert_eq!(collection.diagnostics_for(file).collect::<Vec<_>>(), [native, compiler]);
+        config.ignore = vec!["*".into()];
+        collection.set_check_policy(&a, (&config).into());
+        collection.retain_check_targets(|target| target != &a);
+        collection.set_check_policy(&a, Default::default());
+        assert_eq!(
+            collection.check_counts(&a),
+            (0, 0),
+            "cleared raw findings cannot reappear after un-hiding"
+        );
+    }
+
     fn diagnostic(message: &str) -> lsp_types::Diagnostic {
         lsp_types::Diagnostic { message: message.into(), ..Default::default() }
     }
@@ -280,16 +407,11 @@ mod tests {
         native.data = Some(serde_json::json!({"fix": "unsigned"}));
         let mut collection = DiagnosticCollection::default();
         collection.native_semantic.insert(file, (0, vec![native.clone()]));
-        collection.check.insert(
-            file,
-            std::collections::BTreeMap::from([
-                (a, vec![compiler.clone()]),
-                (b, vec![compiler.clone()]),
-            ]),
-        );
-        let pushed: Vec<_> = collection.diagnostics_for(file).cloned().collect();
+        collection.set_check_diagnostics(&a, vec![(file, vec![compiler.clone()])]);
+        collection.set_check_diagnostics(&b, vec![(file, vec![compiler.clone()])]);
+        let pushed: Vec<_> = collection.diagnostics_for(file).collect();
         let mut pulled = vec![native];
-        extend_unique(&mut pulled, &[compiler.clone(), compiler]);
+        extend_unique(&mut pulled, [compiler.clone(), compiler]);
         assert_eq!(pushed, pulled);
         assert_eq!(pushed.len(), 2);
         assert_eq!(pushed[0].data.as_ref().unwrap()["fix"], "unsigned");
@@ -319,8 +441,7 @@ mod tests {
             second,
             vec![(file, vec![diagnostic("new syntax")])],
         );
-        let messages: Vec<_> =
-            collection.diagnostics_for(file).map(|d| d.message.as_str()).collect();
+        let messages: Vec<_> = collection.diagnostics_for(file).map(|d| d.message).collect();
         assert_eq!(messages, ["new syntax"]);
         assert!(collection.native_diagnostics_are_current(file));
         collection.set_native_diagnostics(
@@ -329,6 +450,47 @@ mod tests {
             vec![(file, vec![])],
         );
         assert_eq!(collection.diagnostics_for(file).count(), 0);
+    }
+
+    #[test]
+    fn unchanged_native_payloads_publish_when_the_selected_wave_changes() {
+        let mut collection = DiagnosticCollection::default();
+        let file = FileId::from_raw(0);
+        let first = collection.next_generation();
+        collection.set_native_diagnostics(
+            NativeDiagnosticsFetchKind::Syntax,
+            first,
+            vec![(file, vec![])],
+        );
+        collection.set_native_diagnostics(
+            NativeDiagnosticsFetchKind::Semantic,
+            first,
+            vec![(file, vec![diagnostic("semantic")])],
+        );
+        collection.take_changes();
+        let second = collection.next_generation();
+        collection.set_native_diagnostics(
+            NativeDiagnosticsFetchKind::Syntax,
+            second,
+            vec![(file, vec![])],
+        );
+        assert_eq!(collection.diagnostics_for(file).count(), 0);
+        assert_eq!(
+            collection.take_changes(),
+            Some(HashSet::from([file])),
+            "clear the previous semantic wave even when the syntax payload is unchanged"
+        );
+        collection.set_native_diagnostics(
+            NativeDiagnosticsFetchKind::Semantic,
+            second,
+            vec![(file, vec![diagnostic("semantic")])],
+        );
+        assert_eq!(collection.diagnostics_for(file).count(), 1);
+        assert_eq!(
+            collection.take_changes(),
+            Some(HashSet::from([file])),
+            "restore semantic findings even when their payload matches the previous generation"
+        );
     }
 
     #[test]
@@ -407,6 +569,6 @@ mod tests {
             vec![(file, vec![diag.clone()])],
         );
         assert!(collection.take_changes().is_some());
-        assert_eq!(collection.diagnostics_for(file).next(), Some(&diag));
+        assert_eq!(collection.diagnostics_for(file).next(), Some(diag.clone()));
     }
 }

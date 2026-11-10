@@ -100,6 +100,11 @@ impl Definition {
         new_name: &str,
     ) -> Result<SourceChange> {
         let (_validated, kind) = IdentifierKind::classify(new_name)?;
+        if matches!(self, Definition::BuiltinType(_))
+            || matches!(self,Definition::TypeVar(variable) if variable.binding.is_none() && crate::defs::BuiltinType::from_name(variable.name.as_str()).is_some())
+        {
+            return Err(RenameError("Compiler builtin types cannot be renamed".into()));
+        }
 
         if let Some(loc) = self.def_location() {
             if let Some((tree, item)) = loc.item(db) {
@@ -127,6 +132,13 @@ impl Definition {
             .ok_or_else(|| RenameError("Cannot rename: definition has no name".into()))?;
 
         let search = crate::search::FindUsages::new(self.clone(), old_name.as_str());
+        if kind == IdentifierKind::Underscore
+            && files.iter().any(|(_, file)| {
+                search.spans_in_file(*file).iter().any(|(_, declaration)| !declaration)
+            })
+        {
+            return Err(RenameError("Cannot discard a local binding that is still used".into()));
+        }
         let mut source_change = SourceChange::new();
         let canonical = self.canonical(db);
         let mut generated_searches = Vec::new();

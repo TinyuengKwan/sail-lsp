@@ -98,3 +98,22 @@ process. The former supplies the scope for `sail-lsp/runFlycheck`, cancelled
 with `sail-lsp/cancelFlycheck`. Entries include stable IDs, fingerprints,
 related documents and optional disabled reasons; clients should revalidate
 and check unsaved inputs before execution.
+
+
+## Standard LSP clients
+
+Sail source actions expose each available task through
+`workspace/executeCommand`. Discovery, project arguments, typed variables and
+stale/dirty-input checks are shared with VS Code. Compiler checks use Flycheck.
+For clients without a task terminal API, test/export tasks run in a dedicated
+server thread, with one fallback process task at a time. Commands and arguments
+are passed directly to the operating system; shell syntax is not interpreted.
+The environment inherits the server process and then the task's overrides.
+
+Results open in a read-only temporary preview, with exit status and at most
+1 MiB from each output stream. `runnables.timeoutMs` (default `300000`) limits
+these fallback tasks. The **Sail: Cancel project task** source action cancels
+and reaps the process group and cancels scoped compiler checks. Server shutdown
+also cancels and joins the fallback worker. Interactive input and a native
+terminal are provided by VS Code's task integration; the standard-client
+fallback captures output and supplies no stdin.

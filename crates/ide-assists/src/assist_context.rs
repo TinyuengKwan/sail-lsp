@@ -31,15 +31,26 @@ pub struct AssistContext<'a> {
     pub range: TextRange,
     /// The file's syntax tree, parsed once for the whole assist run.
     source_file: Option<syntax::SyntaxNode>,
+    /// Complete semantic workspace, including repeated include views.
+    pub workspace: &'a [(base_db::FileId, &'a dyn FileDb)],
 }
 
 impl<'a> AssistContext<'a> {
     pub fn new(config: &'a AssistConfig, file: &'a dyn FileDb, range: TextRange) -> Self {
+        Self::with_workspace(config, file, range, &[])
+    }
+
+    pub fn with_workspace(
+        config: &'a AssistConfig,
+        file: &'a dyn FileDb,
+        range: TextRange,
+        workspace: &'a [(base_db::FileId, &'a dyn FileDb)],
+    ) -> Self {
         // `FileDb::syntax()` defaults to `None`, so a handle that did not
         // override it left every handler without a tree — which is why
         // eight of them each parsed the text again. Parsed once, here.
         let source_file = file.syntax().or_else(|| Some(syntax::parse_text(file.text()).0));
-        Self { config, file, range, source_file }
+        Self { config, file, range, source_file, workspace }
     }
 
     /// The file's syntax tree.
@@ -196,6 +207,28 @@ impl Assists {
         }
         let mut source_change = ide_db::source_change::SourceChange::new();
         source_change.insert_source_edit(self.file_id, edits);
+        self.buf.push(Assist {
+            import: None,
+            id,
+            label: Label::new(label.into()),
+            group: None,
+            target,
+            source_change: Some(source_change),
+            command: None,
+        });
+    }
+
+    /// Add one atomic edit spanning declaration and usage files.
+    pub fn add_source_change(
+        &mut self,
+        id: AssistId,
+        label: impl Into<String>,
+        target: TextRange,
+        source_change: ide_db::source_change::SourceChange,
+    ) {
+        if source_change.is_empty() {
+            return;
+        }
         self.buf.push(Assist {
             import: None,
             id,

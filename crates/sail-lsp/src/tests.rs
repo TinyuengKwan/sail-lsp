@@ -23,9 +23,7 @@ use ide::navigation::{
     symbol_definition_locations, type_alias_edges, type_name_candidates_at_position, type_subtypes,
     type_supertypes,
 };
-use ide::references::{
-    reference_locations, rename_edits, resolve_symbol_at, symbol_spans_for_file,
-};
+use ide::references::{resolve_symbol_at, symbol_spans_for_file};
 use ide::signature_help::find_call_at_position;
 use ide_assists::{missing_semicolon_fix, quick_fix_for_diagnostic};
 use ide_db::{collect_callable_signatures, function_snippet, Parameter};
@@ -132,10 +130,10 @@ impl ide_db::FileDb for SalsaTestFile {
     }
     fn tokens(&self) -> Option<&[(parser::Token, parser::Span)]> {
         let parsed = syntax::parse_query::parse_file(&self.db, self.input);
-        if parsed.tokens.is_empty() {
+        if parsed.tokens().is_empty() {
             None
         } else {
-            Some(parsed.tokens.as_slice())
+            Some(parsed.tokens().as_slice())
         }
     }
     fn token_at(&self, position: ide_db::LineCol) -> Option<&(parser::Token, parser::Span)> {
@@ -1615,42 +1613,45 @@ fn resolves_match_pattern_bindings_via_ast_symbol_occurrences() {
 
 #[test]
 fn top_level_references_ignore_shadowed_local_bindings() {
-    let uri1 = Url::parse("file:///tmp/a.sail").unwrap();
-    let uri2 = Url::parse("file:///tmp/b.sail").unwrap();
+    use ide_db::FileDb;
     let source1 = "val foo : unit -> int\nfunction foo() = 1\nfunction use_foo() = foo()\n";
     let source2 = "function bar() = {\n  let foo = 1;\n  foo\n}\n";
-    let file1 = SalsaTestFile::new(source1.to_string());
-    let file2 = SalsaTestFile::new(source2.to_string());
-    assert!(file1.item_tree().is_some());
-    assert!(file2.item_tree().is_some());
-    let lc = file1.source.position_at(source1.find("foo() = 1").expect("foo definition"));
-
-    let symbol = resolve_symbol_at(&file1, lc).expect("resolved symbol");
-    let locations =
-        reference_locations(vec![(&uri1, &file1), (&uri2, &file2)], &uri1, &symbol, true);
-
-    assert_eq!(locations.len(), 3);
-    assert!(locations.iter().all(|location| location.url == uri1));
+    let (analysis, files) =
+        ide::fixture::analysis(&format!("//- /a.sail\n{source1}//- /b.sail\n{source2}"));
+    let id = files[0].0;
+    let uri = analysis.url_for_file_id(id).unwrap();
+    let file = analysis.file_by_id(id).unwrap();
+    let position = file.position_at(source1.find("foo() = 1").unwrap());
+    let results = analysis.find_all_refs(uri, position, None).unwrap().unwrap();
+    let declarations: Vec<_> = results.iter().flat_map(|result| &result.declarations).collect();
+    assert!(declarations.iter().all(|declaration| declaration.file_id == id));
+    assert!(results.iter().all(|result| result.references.keys().all(|file| *file == id)));
+    assert_eq!(
+        declarations.len()
+            + results
+                .iter()
+                .flat_map(|result| result.references.values())
+                .map(Vec::len)
+                .sum::<usize>(),
+        3
+    );
 }
 
 #[test]
 fn renames_type_variables_within_their_own_scope_only() {
-    let uri1 = Url::parse("file:///tmp/a.sail").unwrap();
-    let uri2 = Url::parse("file:///tmp/b.sail").unwrap();
+    use ide_db::FileDb;
     let source1 = "val f : forall ('n). bits('n) -> bits('n)\n";
     let source2 = "val g : forall ('n). bits('n) -> bits('n)\n";
-    let file1 = SalsaTestFile::new(source1.to_string());
-    let file2 = SalsaTestFile::new(source2.to_string());
-    assert!(file1.item_tree().is_some());
-    assert!(file2.item_tree().is_some());
-    let lc = file1.source.position_at(source1.find("'n").expect("type var"));
-
-    let symbol = resolve_symbol_at(&file1, lc).expect("resolved symbol");
-    let changes = rename_edits(vec![(&uri1, &file1), (&uri2, &file2)], &uri1, &symbol, "'m");
-
-    assert_eq!(changes.len(), 1);
-    assert_eq!(changes.get(&uri1).map(Vec::len), Some(3));
-    assert!(!changes.contains_key(&uri2));
+    let (analysis, files) =
+        ide::fixture::analysis(&format!("//- /a.sail\n{source1}//- /b.sail\n{source2}"));
+    let id = files[0].0;
+    let uri = analysis.url_for_file_id(id).unwrap();
+    let file = analysis.file_by_id(id).unwrap();
+    let position = file.position_at(source1.find("'n").unwrap());
+    let changes = analysis.rename(uri, position, "'m").unwrap().unwrap().unwrap();
+    assert_eq!(changes.source_file_edits.len(), 1);
+    assert_eq!(changes.source_file_edits.get(&id).map(Vec::len), Some(3));
+    assert!(!changes.source_file_edits.contains_key(&files[1].0));
 }
 
 /// A client that takes no Markdown is not sent Markdown.
@@ -2917,7 +2918,8 @@ fn inlay_hint_parameter_label_shown_for_known_call() {
     let uri = Url::parse("file:///tmp/test.sail").unwrap();
     let full = base_db::text_range(0, source.len());
     let all_files: Vec<(&Url, &dyn ide_db::FileDb)> = vec![(&uri, &file as &dyn ide_db::FileDb)];
-    let hints = ide::inlay_hints::inlay_hints_ide(&all_files, &uri, &file, full);
+    let hints =
+        ide::inlay_hints::inlay_hints_ide(&all_files, &file, full, None, &Default::default());
     let param_hints: Vec<_> = hints.iter().filter(|h| !h.label.contains("caller")).collect();
     assert!(!param_hints.is_empty(), "expected parameter hints");
 }
@@ -3145,6 +3147,7 @@ fn walk_rs(root: std::path::PathBuf) -> Vec<std::path::PathBuf> {
 fn the_server_goes_through_analysis() {
     const SOURCES: &[&str] = &[
         include_str!("handlers/request.rs"),
+        include_str!("formatting.rs"),
         include_str!("handlers/notification.rs"),
         include_str!("handlers/dispatch.rs"),
         include_str!("main_loop.rs"),
@@ -3471,6 +3474,7 @@ fn shutdown_does_not_end_the_loop() {
 fn an_assist_can_place_the_cursor() {
     const SOURCES: &[&str] = &[
         include_str!("handlers/request.rs"),
+        include_str!("formatting.rs"),
         include_str!("lsp/to_proto.rs"),
         include_str!("lsp/ext.rs"),
     ];
@@ -3498,7 +3502,7 @@ fn an_assist_can_place_the_cursor() {
 /// one call, so nothing advertised could depend on the answer — and two
 /// capability checks sat unused because of it. A client that cannot take a
 /// code action *literal* was offered code actions anyway (the fallback is a
-/// `Command`, and this server has no `workspace/executeCommand`), and a
+/// `Command` carrying the complete edit, which the project commands do not accept), and a
 /// client that cannot expand `${1:x}` was sent snippets that it inserts as
 /// literal text.
 #[test]
@@ -3507,6 +3511,7 @@ fn the_server_reads_the_client_capabilities_first() {
         include_str!("main_loop.rs"),
         include_str!("lsp/capabilities.rs"),
         include_str!("handlers/request.rs"),
+        include_str!("formatting.rs"),
     ];
     let all = SOURCES.concat();
 
@@ -3543,6 +3548,7 @@ fn the_server_can_hear_the_client_answer() {
         include_str!("main_loop.rs"),
         include_str!("global_state.rs"),
         include_str!("handlers/notification.rs"),
+        include_str!("scoped_configuration.rs"),
     ];
     let all = SOURCES.concat();
 
@@ -3743,6 +3749,7 @@ fn a_feature_the_ide_offers_can_be_asked_for() {
     let src = include_str!("../../ide/src/analysis.rs");
     let server: String = [
         include_str!("handlers/request.rs"),
+        include_str!("formatting.rs"),
         include_str!("handlers/notification.rs"),
         include_str!("main_loop.rs"),
         include_str!("cli.rs"),

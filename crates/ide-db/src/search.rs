@@ -304,6 +304,107 @@ impl<'a> FindUsages<'a> {
     /// Every mention of this definition in `file`, and whether each one
     /// declares it.
     pub fn spans_in_file(&self, file: &dyn FileDb) -> Vec<(parser::Span, bool)> {
+        if let crate::defs::Definition::TypeVar(var) = &self.def {
+            if var.binding.is_some() {
+                let Some(root) = file
+                    .file_text()
+                    .and_then(|(db, input)| {
+                        syntax::parse_query::semantic_parse_file(db, input).syntax_node()
+                    })
+                    .or_else(|| file.syntax())
+                else {
+                    return Vec::new();
+                };
+                return root
+                    .descendants_with_tokens()
+                    .filter_map(|e| e.into_token())
+                    .filter(|token| {
+                        token.kind() == syntax::SyntaxKind::TY_VAR && token.text() == self.name
+                    })
+                    .filter_map(|token| {
+                        let span = parser::Span::new(
+                            usize::from(token.text_range().start()),
+                            usize::from(token.text_range().end()),
+                        );
+                        let actual = crate::defs::Definition::classify_at(
+                            file,
+                            file.position_at(span.start),
+                        )?;
+                        if actual != self.def {
+                            return None;
+                        }
+                        Some((
+                            span,
+                            file.file_text().is_some_and(|(db, ft)| {
+                                var.binding == Some((ft.file_id(db), span))
+                            }),
+                        ))
+                    })
+                    .collect();
+            }
+        }
+        // Text search is a conservative candidate filter. Resolve only real
+        // tokens below, so comments, strings and shadowing cannot add usages.
+        if self.name.is_empty() || !file.text().contains(&self.name) {
+            return Vec::new();
+        }
+        if !self.def.is_local() && !self.name.starts_with('\'') {
+            if let Some((db, ft)) = file
+                .file_text()
+                .filter(|(db, ft)| hir::source_order::declarations_for(*db, *ft).is_some())
+            {
+                use crate::defs::{IdentClass, NameClass, NameRefClass};
+                let Some(root) = syntax::parse_query::semantic_parse_file(db, ft).syntax_node()
+                else {
+                    return Vec::new();
+                };
+                let expected = self.def.canonical(db);
+                let started = std::time::Instant::now();
+                let result = file
+                    .text()
+                    .match_indices(&self.name)
+                    .filter_map(|(offset, _)| {
+                        let token = root.token_at_offset((offset as u32).into()).right_biased()?;
+                        if token.text() != self.name
+                            || token.kind().is_trivia()
+                            || usize::from(token.text_range().start()) != offset
+                            || token.parent_ancestors().any(|node| {
+                                matches!(
+                                    node.kind(),
+                                    syntax::SyntaxKind::ATTRIBUTE
+                                        | syntax::SyntaxKind::DIRECTIVE_DEF
+                                )
+                            })
+                        {
+                            return None;
+                        }
+                        let (actual, mut declaration) =
+                            match IdentClass::classify_at(file, file.position_at(offset))? {
+                                IdentClass::NameClass(NameClass::Definition(def)) => (def, true),
+                                IdentClass::NameClass(NameClass::ConstReference(def))
+                                | IdentClass::NameRefClass(NameRefClass::Definition(def)) => {
+                                    (def, false)
+                                }
+                            };
+                        if actual.canonical(db) != expected {
+                            return None;
+                        }
+                        let span = parser::Span::new(offset, offset + self.name.len());
+                        // Scattered clauses are references to their head but
+                        // declaration sites for the references protocol.
+                        declaration |= hir::source_order::at_offset(db, ft, offset)
+                            .and_then(|at| hir::source_order::node(db, at))
+                            .is_some_and(|node| {
+                                node.kind() == syntax::SyntaxKind::SCATTERED_CLAUSE_DEF
+                                    && syntax::definition_name_span(&node) == Some(span)
+                            });
+                        Some((span, declaration))
+                    })
+                    .collect();
+                tracing::debug!(target: "sail_lsp::latency", "references_candidates file={:?} candidates_us={}", ft.file_id(db), started.elapsed().as_micros());
+                return result;
+            }
+        }
         if !self.def.is_local() {
             if let Some((db, ft)) = file.file_text() {
                 if hir::source_order::declarations_for(db, ft).is_none()

@@ -54,7 +54,7 @@ to ordinary Sail mode; use `workspace.strictBitvector` for projects built with
 - Formatting: document, range and on-type formatting, with bitfield alignment
 - Semantic highlighting, document symbols, folding and selection ranges
 - [Project tasks](docs/runnables.md), module dependencies and include-context selection
-- Structural search and replacement previews; see [scope and limits](docs/architecture.md#ssr-engine-ide-ssr)
+- Structural search and replacement previews; see [scope and limits](docs/architecture.md#structural-search-and-replacement)
 
 VS Code settings and commands are listed in the
 [extension guide](editors/code/README.md). For loading errors, logs and runtime

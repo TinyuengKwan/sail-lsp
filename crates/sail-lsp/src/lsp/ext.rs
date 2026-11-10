@@ -1,26 +1,7 @@
-//! LSP ↔ internal type conversion functions.
+//! LSP extensions and conversions for feature-specific protocol types.
 //!
-//! All LSP-specific type conversions live here so the IDE crates
-//! (ide, ide-db, etc.) can be framework-independent.
-//!
-//! Five position converters used to sit here with no caller, each the
-//! same conversion as one in `from_proto` or `to_proto`
-//! (`offset_from_position` / `from_proto::offset`,
-//! `range_from_text_range` / `to_proto::range`, and so on). Two doors is
-//! how one of them stops being maintained.
-
-// The two conversions that used to be here assigned
-// `Position::character` to a byte column and back:
-//
-//     LineCol { line: pos.line, col: pos.character }
-//     Position::new(lc.line, lc.col)
-//
-// `character` is a UTF-16 column. Twenty-seven handlers called this pair,
-// so the conversion fixed in `from_proto`/`to_proto` reached almost
-// nothing — and `protocol_check`, which exercises those two modules,
-// reported zero the whole time. They are `from_proto::line_col` and
-// `to_proto::position_from_line_col` now, both of which need a
-// `LineIndex`, which is what makes the wrong version unwritable.
+//! Position/range conversions live in `from_proto` and `to_proto` and require
+//! a `LineIndex` to translate between UTF-16 columns and internal byte offsets.
 
 /// Convert an internal SymbolKind to an LSP SymbolKind.
 pub fn lsp_symbol_kind(kind: ide_db::ide_types::SymbolKind) -> lsp_types::SymbolKind {
@@ -250,6 +231,18 @@ pub struct ExpandIncludeParams {
 pub struct ExpandIncludeResult {
     pub root: String,
     pub expansion: String,
+    pub context: Option<String>,
+    pub project: Option<serde_json::Value>,
+    pub mappings: Vec<ExpansionMapping>,
+}
+
+/// A rendered source/directive segment and its original physical location.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpansionMapping {
+    pub range: lsp_types::Range,
+    pub origin: lsp_types::Location,
+    pub kind: String,
 }
 
 /// Custom request: `sail-lsp/expandInclude`.
@@ -398,6 +391,20 @@ impl lsp_types::request::Request for JoinLines {
 /// indentation of the block just opened.
 pub enum OnEnter {}
 
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExplainFormattingParams {
+    pub text_document: lsp_types::TextDocumentIdentifier,
+    pub options: Option<lsp_types::FormattingOptions>,
+    pub range: Option<lsp_types::Range>,
+}
+pub enum ExplainFormatting {}
+impl lsp_types::request::Request for ExplainFormatting {
+    type Params = ExplainFormattingParams;
+    type Result = serde_json::Value;
+    const METHOD: &'static str = "sail-lsp/explainFormatting";
+}
+
 impl lsp_types::request::Request for OnEnter {
     type Params = lsp_types::TextDocumentPositionParams;
     type Result = Option<Vec<SnippetTextEdit>>;
@@ -480,6 +487,8 @@ pub struct SnippetWorkspaceEdit {
 #[serde(rename_all = "camelCase")]
 pub struct CodeAction {
     pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<lsp_types::Command>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<lsp_types::CodeActionKind>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -567,7 +576,8 @@ impl lsp_types::notification::Notification for RunFlycheck {
     const METHOD: &'static str = "sail-lsp/runFlycheck";
 }
 
-/// RA-compatible discovery shape; execution belongs to the client.
+/// RA-compatible discovery shape. Native clients execute tasks directly;
+/// standard source actions use the advertised server command fallback.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunnablesParams {

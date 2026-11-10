@@ -23,7 +23,7 @@ pub(crate) fn signature_help(
     let all_sigs = file
         .file_text()
         .and_then(|(db, ft)| {
-            ide_db::signatures::callable_signatures_at(db, ft, call.callee_span.start, &callee)
+            hir::Semantics::new(db).callable_signatures_at(ft, call.callee_span.start, &callee)
         })
         .unwrap_or_else(|| {
             ide_db::signatures::find_all_callable_signatures(all_files.iter().copied(), &callee)

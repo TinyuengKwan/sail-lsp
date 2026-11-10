@@ -1,11 +1,12 @@
-pub(crate) mod comment;
 #[cfg(test)]
 mod corpus_tests;
+#[cfg(test)]
+mod experience_tests;
 pub(crate) mod expr;
 pub(crate) mod items;
+mod layout;
 pub(crate) mod lists;
 mod missed_spans;
-pub(crate) mod report;
 pub(crate) mod rewrite;
 pub(crate) mod shape;
 pub(crate) mod snippet;
@@ -72,15 +73,89 @@ pub fn indent_level_from_cst(text: &str, offset: usize) -> u32 {
 /// Pipeline:
 ///   1. Parse source into CST
 ///   2. Walk CST with `FmtVisitor` (definition-level rewrites)
-///   3. `format_lines` (line overflow, trailing whitespace checks)
+///   3. `formatting_details` (line overflow, trailing whitespace checks)
 ///   4. Post-process (final newlines, trailing whitespace trim)
 ///
 /// Returns source unchanged on parse error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormatStatus {
+    Changed,
+    AlreadyFormatted,
+    ParseError,
+    SafetyCheckFailed,
+    RangeBoundary,
+}
+
+impl FormatStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Changed => "changed",
+            Self::AlreadyFormatted => "already_formatted",
+            Self::ParseError => "parse_error",
+            Self::SafetyCheckFailed => "safety_check_failed",
+            Self::RangeBoundary => "range_boundary",
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct FormatResult {
+    pub edits: Vec<IdeTextEdit>,
+    pub text: String,
+    pub status: FormatStatus,
+    pub details: Vec<String>,
+}
+
 pub fn format_document_cst(text: &str, options: &FormatOptions) -> String {
+    format_text(text, options).text
+}
+
+/// Syntax-only engine shared by LSP, explanation requests and the CLI.
+pub fn format_text(text: &str, options: &FormatOptions) -> FormatResult {
     // Phase 1: Parse.
     let (root, errors) = syntax::parse_text(text);
     if !errors.is_empty() {
-        return text.to_string();
+        return FormatResult {
+            edits: Vec::new(),
+            text: text.to_owned(),
+            status: FormatStatus::ParseError,
+            details: errors.iter().map(|e| format!("{} at byte {}", e.message, e.offset)).collect(),
+        };
+    }
+    // Recovery can retain a partially typed declaration without emitting a
+    // parser error. Unclosed delimiters still mean formatting is unavailable.
+    let mut delimiters = Vec::new();
+    use syntax::SyntaxKind as K;
+    for token in root.descendants_with_tokens().filter_map(|e| e.into_token()) {
+        match token.kind() {
+            K::L_PAREN => delimiters.push(K::R_PAREN),
+            K::L_CURLY => delimiters.push(K::R_CURLY),
+            K::L_BRACK => delimiters.push(K::R_BRACK),
+            K::L_CURLY_BAR => delimiters.push(K::R_CURLY_BAR),
+            K::L_BRACKET_BAR => delimiters.push(K::R_BRACKET_BAR),
+            K::R_PAREN | K::R_CURLY | K::R_BRACK | K::R_CURLY_BAR | K::R_BRACKET_BAR
+                if delimiters.pop() != Some(token.kind()) =>
+            {
+                return FormatResult {
+                    edits: Vec::new(),
+                    text: text.into(),
+                    status: FormatStatus::ParseError,
+                    details: vec![format!(
+                        "Unmatched delimiter at byte {}",
+                        usize::from(token.text_range().start())
+                    )],
+                };
+            }
+            _ => {}
+        }
+    }
+    if !delimiters.is_empty() {
+        return FormatResult {
+            edits: Vec::new(),
+            text: text.into(),
+            status: FormatStatus::ParseError,
+            details: vec!["Source contains unclosed delimiters".into()],
+        };
     }
 
     // Phase 2: Format.
@@ -88,35 +163,30 @@ pub fn format_document_cst(text: &str, options: &FormatOptions) -> String {
     let mut vis = visitor::FmtVisitor::new(options, &snip);
     vis.walk_source_file(&root);
 
-    // Phase 3: format_lines.
-    format_lines(&mut vis.buffer, options, &mut vis.report);
+    // Collect explanation details without storing report state in the visitor.
+    let details = formatting_details(&vis.buffer, options);
 
     // Phase 4: Normalize only whitespace tokens, never string/comment contents.
     let mut result = normalize_blank_lines(&vis.buffer);
     post_process_text(&mut result, text, options);
 
-    // Phase 5: Report.
-    // Consume the report (future: surface via LSP diagnostics).
-    let _has_issues = vis.report.has_errors();
-    for err in &vis.report.errors {
-        match &err.kind {
-            report::ErrorKind::LineOverflow(actual, max) => {
-                let _ = (actual, max, err.range);
-            }
-            report::ErrorKind::TrailingWhitespace => {
-                let _ = err.range;
-            }
-        }
-    }
-
     // Phase 6: A formatter moves whitespace and nothing else. If any other
     // token — a comment included — differs, the source is returned as it
     // was. A lost comment used to be recorded in the report, which nothing
     // reads, and the text that had lost it was returned.
-    if significant_tokens(text) != significant_tokens(&result) {
-        return text.to_string();
+    let (formatted_root, formatted_errors) = syntax::parse_text(&result);
+    if significant_tokens_in(&root) != significant_tokens_in(&formatted_root)
+        || !formatted_errors.is_empty()
+    {
+        return FormatResult { edits: Vec::new(), text: text.to_owned(), status: FormatStatus::SafetyCheckFailed,
+            details: vec!["Proposed formatting changed significant tokens or produced invalid syntax; no edits applied".into()] };
     }
-    result
+    FormatResult {
+        edits: diff_edits(text, &result),
+        status: if result == text { FormatStatus::AlreadyFormatted } else { FormatStatus::Changed },
+        text: result,
+        details,
+    }
 }
 
 /// What formatting must keep: every token but whitespace, each comment with
@@ -127,8 +197,12 @@ pub fn format_document_cst(text: &str, options: &FormatOptions) -> String {
 /// so a comma directly before a closing delimiter is dropped from both
 /// sides. It is the one token the grammar lets a formatter add.
 pub(crate) fn significant_tokens(text: &str) -> Vec<(syntax::SyntaxKind, String)> {
-    use syntax::SyntaxKind as SK;
     let (root, _) = syntax::parse_text(text);
+    significant_tokens_in(&root)
+}
+
+fn significant_tokens_in(root: &syntax::SyntaxNode) -> Vec<(syntax::SyntaxKind, String)> {
+    use syntax::SyntaxKind as SK;
     let raw: Vec<(SK, String)> = root
         .descendants_with_tokens()
         .filter_map(|el| el.into_token())
@@ -158,52 +232,33 @@ pub(crate) fn significant_tokens(text: &str) -> Vec<(syntax::SyntaxKind, String)
 /// Check each line for overflow and trailing whitespace.
 ///
 /// Called after the visitor produces output, before post-processing.
-fn format_lines(text: &mut str, options: &FormatOptions, report: &mut report::FormatReport) {
+fn formatting_details(text: &str, options: &FormatOptions) -> Vec<String> {
+    let mut details = Vec::new();
     let root_shape = shape::Shape::with_max_width(options);
     let max_width = root_shape.budget(0);
     let mut offset = 0usize;
 
     for line in text.split('\n') {
-        let range = base_db::text_range(offset, offset + line.len());
-
-        if line.len() > max_width {
-            report.push(report::ErrorKind::LineOverflow(line.len(), max_width), range);
+        let columns = line.trim_end_matches('\r').chars().fold(0, |column, character| {
+            if character == '\t' {
+                column + options.tab_spaces() - column % options.tab_spaces()
+            } else {
+                column + 1
+            }
+        });
+        if columns > max_width {
+            details.push(format!(
+                "Line width {columns} exceeds soft limit {max_width} at byte {offset}"
+            ));
         }
 
         if line != line.trim_end() {
-            report.push(report::ErrorKind::TrailingWhitespace, range);
+            details.push(format!("Trailing whitespace at byte {offset}"));
         }
 
         offset += line.len() + 1;
     }
-}
-
-/// CST-based formatting with line-range restriction.
-///
-/// Nodes outside `file_lines` are emitted verbatim by the visitor.
-pub fn format_document_cst_range(
-    text: &str,
-    options: &FormatOptions,
-    file_lines: visitor::FileLines,
-) -> String {
-    let (root, errors) = syntax::parse_text(text);
-    if !errors.is_empty() {
-        return text.to_string();
-    }
-
-    let snip = snippet::SnippetProvider::new(text.to_string());
-    let mut vis = visitor::FmtVisitor::with_file_lines(options, &snip, file_lines);
-    vis.walk_source_file(&root);
-
-    format_lines(&mut vis.buffer, options, &mut vis.report);
-
-    let mut result = vis.buffer;
-    post_process_text(&mut result, text, options);
-    // The same guard as the whole-document path: whitespace only.
-    if significant_tokens(text) != significant_tokens(&result) {
-        return text.to_string();
-    }
-    result
+    details
 }
 
 /// Whole-document blank-line policy. Range formatting deliberately leaves
@@ -239,25 +294,51 @@ fn normalize_blank_lines(source: &str) -> String {
 
 /// Post-process formatted output (trailing whitespace, final newlines).
 fn post_process_text(result: &mut String, original: &str, options: &FormatOptions) {
-    // Trim trailing whitespace per line
-    if options.trim_trailing_whitespace.unwrap_or(true) {
-        let lines: Vec<&str> = result.lines().collect();
-        *result = lines.iter().map(|l| l.trim_end()).collect::<Vec<_>>().join("\n");
+    let ending = line_ending(original);
+    let tokens = parser::LexedStr::new(result);
+    let mut processed = String::new();
+    for i in 0..tokens.len() {
+        let text = tokens.text(i);
+        if tokens.kind(i) != syntax::SyntaxKind::WHITESPACE {
+            processed.push_str(text);
+            continue;
+        }
+        let normalized = text.replace("\r\n", "\n");
+        for line in normalized.split_inclusive('\n') {
+            if let Some(body) = line.strip_suffix('\n') {
+                processed.push_str(if options.trim_trailing_whitespace.unwrap_or(true) {
+                    body.trim_end_matches([' ', '\t'])
+                } else {
+                    body
+                });
+                // Line-comment tokens can own the CR while whitespace owns
+                // the LF. Do not turn that boundary into CR-CR-LF.
+                if ending == "\r\n" && processed.ends_with('\r') {
+                    processed.push('\n');
+                } else {
+                    processed.push_str(ending);
+                }
+            } else {
+                processed.push_str(
+                    if i + 1 == tokens.len() && options.trim_trailing_whitespace.unwrap_or(true) {
+                        line.trim_end_matches([' ', '\t'])
+                    } else {
+                        line
+                    },
+                );
+            }
+        }
     }
-
-    // Preserve original final newline behavior
-    let has_final_newline = original.ends_with('\n');
-    if has_final_newline && !result.ends_with('\n') {
-        result.push('\n');
+    *result = processed;
+    if (original.ends_with('\n') || options.insert_final_newline.unwrap_or(true))
+        && !result.ends_with('\n')
+    {
+        result.push_str(ending);
     }
-
-    if options.insert_final_newline.unwrap_or(true) && !result.ends_with('\n') {
-        result.push('\n');
-    }
-
     if options.trim_final_newlines.unwrap_or(true) {
-        while result.ends_with("\n\n") {
-            result.pop();
+        let double = ending.repeat(2);
+        while result.ends_with(&double) {
+            result.truncate(result.len() - ending.len());
         }
     }
 }
@@ -267,12 +348,38 @@ pub fn format_document_edits(
     file: &dyn FileDb,
     options: &FormatOptions,
 ) -> Option<Vec<IdeTextEdit>> {
-    let original = file.text();
-    let formatted = format_document_cst(original, options);
-    if formatted == original {
-        return None;
+    let result = format_text(file.text(), options);
+    (result.status == FormatStatus::Changed).then_some(result.edits)
+}
+
+/// Preserve unchanged source as anchors for cursors, selections and decorations.
+/// Chunk lengths are UTF-8 bytes; the diff library only splits at character
+/// boundaries. Adjacent insertions/deletions form one non-overlapping edit.
+pub fn diff_edits(original: &str, formatted: &str) -> Vec<IdeTextEdit> {
+    let mut edits = Vec::new();
+    let mut offset = 0;
+    let mut pending: Option<(usize, String)> = None;
+    for chunk in dissimilar::diff(original, formatted) {
+        match chunk {
+            dissimilar::Chunk::Equal(text) => {
+                if let Some((start, new_text)) = pending.take() {
+                    edits.push(IdeTextEdit { range: base_db::text_range(start, offset), new_text });
+                }
+                offset += text.len();
+            }
+            dissimilar::Chunk::Delete(text) => {
+                pending.get_or_insert_with(|| (offset, String::new()));
+                offset += text.len();
+            }
+            dissimilar::Chunk::Insert(text) => {
+                pending.get_or_insert_with(|| (offset, String::new())).1.push_str(text);
+            }
+        }
     }
-    Some(vec![IdeTextEdit { range: base_db::text_range(0, original.len()), new_text: formatted }])
+    if let Some((start, new_text)) = pending {
+        edits.push(IdeTextEdit { range: base_db::text_range(start, offset), new_text });
+    }
+    edits
 }
 
 /// Range-format — returns internal IdeTextEdit.
@@ -281,6 +388,15 @@ pub fn range_format_document_edits(
     range: TextRange,
     options: &FormatOptions,
 ) -> Option<Vec<IdeTextEdit>> {
+    let result = range_format_document_result(file, range, options);
+    (result.status == FormatStatus::Changed).then_some(result.edits)
+}
+
+pub(crate) fn range_format_document_result(
+    file: &dyn FileDb,
+    range: TextRange,
+    options: &FormatOptions,
+) -> FormatResult {
     let start_lc = file.position_at(base_db::range_start(range));
     let end_lc = file.position_at(base_db::range_end(range));
     let start_line = start_lc.line;
@@ -292,38 +408,52 @@ pub fn range_format_document_edits(
     let original_start = file.offset_at(&ide_db::LineCol { line: start_line, col: 0 });
     let original_end = file.offset_at(&ide_db::LineCol { line: end_line_exclusive, col: 0 });
 
-    // Format *only* those lines. `format_document_cst_range` emits every
-    // node outside them verbatim and had no caller, while this formatted
-    // the whole document and then cut the requested lines out of the
-    // result — by line number, on both texts at once. That assumes
-    // formatted line N is original line N, and a reformat that joins or
-    // splits a line anywhere earlier breaks it: the edit then replaces
-    // the user's selection with unrelated text.
-    let file_lines = Some((start_line as usize, end_line_exclusive.saturating_sub(1) as usize));
-    let formatted_full = format_document_cst_range(file.text(), options, file_lines);
-    if formatted_full == file.text() {
-        return None;
-    }
+    format_range(file.text(), options, base_db::text_range(original_start, original_end))
+}
 
-    // Outside the range the two texts are identical by construction, so
-    // the replacement is what sits between the shared prefix and suffix —
-    // no line arithmetic, and nothing to be off by one about. If they are
-    // *not* identical the formatter reached outside its range, and
-    // declining beats handing the editor an edit built on a broken
-    // assumption.
-    let (prefix, suffix) = (&file.text()[..original_start], &file.text()[original_end..]);
-    if !formatted_full.starts_with(prefix) || !formatted_full.ends_with(suffix) {
-        return None;
+/// Keep complete edits inside the selected lines, using the enclosing syntax
+/// for context. A fragment is never parsed as a separate compilation unit.
+pub fn format_range(text: &str, options: &FormatOptions, range: TextRange) -> FormatResult {
+    let result = format_text(text, options);
+    if result.status != FormatStatus::Changed {
+        return result;
     }
-    let original_slice = &file.text()[original_start..original_end];
-    let formatted_slice = &formatted_full[prefix.len()..formatted_full.len() - suffix.len()];
-    if original_slice == formatted_slice {
-        return None;
+    let selected: Vec<_> = result
+        .edits
+        .into_iter()
+        .filter(|edit| {
+            range.contains_range(edit.range)
+                && (edit.range.start() < range.end() || usize::from(range.end()) == text.len())
+        })
+        .collect();
+    if selected.is_empty() {
+        return FormatResult {
+            edits: Vec::new(),
+            text: text.into(),
+            status: FormatStatus::RangeBoundary,
+            details: vec!["No complete formatting edits fall inside the selected lines".into()],
+        };
     }
-    Some(vec![IdeTextEdit {
-        range: base_db::text_range(original_start, original_end),
-        new_text: formatted_slice.to_string(),
-    }])
+    let mut formatted = text.to_owned();
+    for edit in selected.iter().rev() {
+        formatted.replace_range(
+            usize::from(edit.range.start())..usize::from(edit.range.end()),
+            &edit.new_text,
+        );
+    }
+    let (formatted_root, formatted_errors) = syntax::parse_text(&formatted);
+    if significant_tokens(text) != significant_tokens_in(&formatted_root)
+        || !formatted_errors.is_empty()
+    {
+        return FormatResult { edits: Vec::new(), text: text.into(), status: FormatStatus::RangeBoundary,
+            details: vec!["Selected edits need neighbouring syntax; expand the selection to include the expression".into()] };
+    }
+    FormatResult {
+        edits: selected,
+        text: formatted,
+        status: FormatStatus::Changed,
+        details: result.details,
+    }
 }
 
 /// Ranges to edit together as the name at `position` is typed: the binding
@@ -459,11 +589,26 @@ pub fn document_links_for_file(uri: &Url, file: &dyn FileDb) -> Vec<DocumentLink
 /// after opening brackets.
 /// Returns internal IdeTextEdit.
 pub fn on_enter_edits(file: &dyn FileDb, position: ide_db::LineCol) -> Option<Vec<IdeTextEdit>> {
+    on_enter_edits_with_options(
+        file,
+        position,
+        &FormatOptions { tab_size: 2, ..Default::default() },
+    )
+}
+
+pub fn on_enter_edits_with_options(
+    file: &dyn FileDb,
+    position: ide_db::LineCol,
+    options: &FormatOptions,
+) -> Option<Vec<IdeTextEdit>> {
     if position.line == 0 {
         return None;
     }
     let line_start = file.offset_at(&ide_db::LineCol { line: position.line, col: 0 });
     let current_offset = file.offset_at(&position);
+    if !file.text().get(line_start..current_offset)?.chars().all(|c| matches!(c, ' ' | '\t')) {
+        return None;
+    }
     let prev_line_idx = position.line - 1;
     let prev_start = file.offset_at(&ide_db::LineCol { line: prev_line_idx, col: 0 });
     let prev_end =
@@ -471,17 +616,59 @@ pub fn on_enter_edits(file: &dyn FileDb, position: ide_db::LineCol) -> Option<Ve
     let prev_line = &file.text()[prev_start..prev_end];
     let prev_trimmed = prev_line.trim_end_matches(['\n', '\r']);
     let stripped = prev_trimmed.trim_start();
+    let (syntax, _) = syntax::parse_text(file.text());
+    let tokens: Vec<_> = syntax.descendants_with_tokens().filter_map(|e| e.into_token()).collect();
+    // A newline inside a multiline literal/comment must not acquire code or
+    // a comment prefix merely because its source line resembles Sail syntax.
+    if tokens.iter().any(|t| {
+        !t.kind().is_trivia()
+            && t.kind() != syntax::SyntaxKind::WHITESPACE
+            && usize::from(t.text_range().start()) < current_offset
+            && usize::from(t.text_range().end()) > current_offset
+            && matches!(
+                t.kind(),
+                syntax::SyntaxKind::STRING_LIT
+                    | syntax::SyntaxKind::MULTILINE_STRING_LIT
+                    | syntax::SyntaxKind::ERROR
+            )
+    }) {
+        return None;
+    }
+    let comment = tokens.iter().any(|t| {
+        t.kind().is_trivia()
+            && t.kind() != syntax::SyntaxKind::WHITESPACE
+            && usize::from(t.text_range().start())
+                == prev_start + prev_trimmed.len() - stripped.len()
+            && t.text().starts_with("//")
+    });
+    if tokens.iter().any(|t| {
+        t.kind().is_trivia()
+            && t.kind() != syntax::SyntaxKind::WHITESPACE
+            && usize::from(t.text_range().start()) < current_offset
+            && usize::from(t.text_range().end()) > current_offset
+    }) {
+        return None;
+    }
+    let last = tokens
+        .iter()
+        .rfind(|t| {
+            !t.kind().is_trivia()
+                && usize::from(t.text_range().end()) <= prev_end
+                && usize::from(t.text_range().end()) > prev_start
+        })
+        .map(|t| t.kind());
+    let unit = if options.hard_tabs() { "\t".to_owned() } else { " ".repeat(options.tab_spaces()) };
 
     let make_edit = |new_text: String| -> IdeTextEdit {
         IdeTextEdit { range: base_db::text_range(line_start, current_offset), new_text }
     };
 
-    if stripped.starts_with("///") {
+    if comment && stripped.starts_with("///") {
         let indent: String =
             prev_trimmed.chars().take_while(|ch| *ch == ' ' || *ch == '\t').collect();
         return Some(vec![make_edit(format!("{indent}/// "))]);
     }
-    if stripped.starts_with("//") && !stripped.starts_with("///") {
+    if comment && stripped.starts_with("//") && !stripped.starts_with("///") {
         let comment_content = stripped.strip_prefix("//").unwrap_or("").trim_start();
         let next_start = file.offset_at(&ide_db::LineCol { line: position.line + 1, col: 0 });
         let next_end = file
@@ -498,7 +685,12 @@ pub fn on_enter_edits(file: &dyn FileDb, position: ide_db::LineCol) -> Option<Ve
             return Some(vec![make_edit(format!("{indent}// "))]);
         }
     }
-    if stripped.ends_with('{') {
+    if matches!(
+        last,
+        Some(
+            syntax::SyntaxKind::L_CURLY | syntax::SyntaxKind::L_PAREN | syntax::SyntaxKind::L_BRACK
+        )
+    ) {
         let cur_start = file.offset_at(&ide_db::LineCol { line: position.line, col: 0 });
         let cur_end = file
             .offset_at(&ide_db::LineCol { line: position.line + 1, col: 0 })
@@ -508,21 +700,23 @@ pub fn on_enter_edits(file: &dyn FileDb, position: ide_db::LineCol) -> Option<Ve
         if cur_trimmed == "}" || cur_trimmed.is_empty() {
             let indent: String =
                 prev_trimmed.chars().take_while(|ch| *ch == ' ' || *ch == '\t').collect();
-            return Some(vec![make_edit(format!("{indent}  "))]);
+            return Some(vec![make_edit(format!("{indent}{unit}"))]);
         }
     }
     // Sail keyword-blocks: `then`, `else`, `do` without braces
-    if stripped.ends_with("then") || stripped.ends_with("else") || stripped.ends_with("do") {
+    if matches!(
+        last,
+        Some(syntax::SyntaxKind::KW_THEN | syntax::SyntaxKind::KW_ELSE | syntax::SyntaxKind::KW_DO)
+    ) {
         let indent: String =
             prev_trimmed.chars().take_while(|ch| *ch == ' ' || *ch == '\t').collect();
-        return Some(vec![make_edit(format!("{indent}  "))]);
+        return Some(vec![make_edit(format!("{indent}{unit}"))]);
     }
 
-    // CST-based fallback — if no specific trigger matched,
-    // use CST ancestor walk to determine correct indent level.
-    let cst_level = indent_level_from_cst(file.text(), current_offset);
-    if cst_level > 0 {
-        let indent = "  ".repeat(cst_level as usize);
+    // Continue the actual surrounding layout rather than guessing a level
+    // from recovery nodes, whose ancestors can change while typing.
+    let indent: String = prev_trimmed.chars().take_while(|c| matches!(c, ' ' | '\t')).collect();
+    if !indent.is_empty() {
         return Some(vec![make_edit(indent)]);
     }
     None

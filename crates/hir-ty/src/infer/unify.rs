@@ -679,6 +679,10 @@ impl InferenceTable {
         self.rigid_variables.contains_key(name)
     }
 
+    pub(super) fn rigid_variable_names(&self) -> impl Iterator<Item = &str> {
+        self.rigid_variables.keys().map(String::as_str)
+    }
+
     /// Render source binder names without changing solver identities. Repeated
     /// binders retain a suffix so independent witnesses remain distinguishable.
     pub(super) fn display_constraint(&self, goal: &ConstraintExpr) -> String {
@@ -1615,7 +1619,7 @@ impl InferenceTable {
                 name,
                 args.iter()
                     .map(|arg| match arg {
-                        TyArg::Type(t) => TyArg::Type(self.deep_resolve(t)),
+                        TyArg::Type(t) => self.resolved_type_arg(t),
                         TyArg::Nexp(n) => self.resolve_nexp_arg(n),
                         TyArg::Bool(c) => TyArg::Bool(self.resolve_constraint(c)),
                         TyArg::Order(v) => TyArg::Order(v.clone()),
@@ -1627,7 +1631,7 @@ impl InferenceTable {
                 let new_args: Vec<TyArg> = args
                     .iter()
                     .map(|arg| match arg {
-                        TyArg::Type(t) => TyArg::Type(self.deep_resolve(t)),
+                        TyArg::Type(t) => self.resolved_type_arg(t),
                         TyArg::Nexp(nexp) => self.resolve_nexp_arg(nexp),
                         TyArg::Bool(c) => TyArg::Bool(self.resolve_constraint(c)),
                         TyArg::Order(v) => TyArg::Order(v.clone()),
@@ -1653,6 +1657,24 @@ impl InferenceTable {
             TyKind::Bidir { lhs, rhs } => Ty::bidir(self.deep_resolve(lhs), self.deep_resolve(rhs)),
             TyKind::Abstract { .. } => resolved,
         }
+    }
+
+    fn resolved_type_arg(&mut self, ty: &Ty) -> TyArg {
+        let ty = self.deep_resolve(ty);
+        // Fresh numeric indices share inference variables with types. Their
+        // concrete witnesses are represented by Param("8") in the table;
+        // restore the numeric argument kind when publishing a resolved type.
+        if let TyKind::Param(value) = ty.kind() {
+            match value.as_str() {
+                "true" => return TyArg::Bool(crate::ty::ConstraintExpr::Bool(true)),
+                "false" => return TyArg::Bool(crate::ty::ConstraintExpr::Bool(false)),
+                _ => {}
+            }
+            if let Some(number) = crate::ty::NumericExpr::integer_literal(value) {
+                return TyArg::Nexp(number);
+            }
+        }
+        TyArg::Type(ty)
     }
 
     /// Resolve a `TyArg::Nexp` by checking if any Var in the expression

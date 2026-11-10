@@ -100,8 +100,10 @@ impl RootDatabase {
             snapshot_owners: Arc::new(()),
         };
         base_db::LanguageOptions::new(&db, false);
+        hir::preprocess::PreparedWorkspace::new(&db, None);
         base_db::preprocess::WorkspacePreprocessing::new(
             &db,
+            Default::default(),
             Default::default(),
             Default::default(),
             Default::default(),
@@ -353,10 +355,10 @@ impl<'a> FileDb for SalsaFile<'a> {
 
     fn tokens(&self) -> Option<&[(Token, Span)]> {
         let parsed = syntax::parse_query::parse_file(self.db, self.input);
-        if parsed.tokens.is_empty() {
+        if parsed.tokens().is_empty() {
             None
         } else {
-            Some(parsed.tokens.as_slice())
+            Some(parsed.tokens().as_slice())
         }
     }
 
@@ -404,6 +406,56 @@ mod tests {
     use super::*;
     use base_db::FileId;
     use hir::callgraph::SourceFileInfo;
+
+    #[test]
+    fn an_edit_cancels_a_parse_that_has_already_started() {
+        use salsa::Database;
+        use std::{cell::Cell, sync::mpsc, time::Duration};
+        thread_local! {
+            static ENTERED: Cell<Option<mpsc::SyncSender<()>>> = const { Cell::new(None) };
+            static CHECKS: Cell<usize> = const { Cell::new(0) };
+        }
+        fn checkpoint() {
+            // The first checkpoint enters the lexer; the second is reached
+            // only after its cursor has consumed at least 4096 source bytes.
+            let checks = CHECKS.with(|n| {
+                n.set(n.get() + 1);
+                n.get()
+            });
+            if checks == 2 {
+                ENTERED.with(|sender| sender.take().unwrap().send(()).unwrap());
+            }
+            salsa::with_attached_database(|db| db.unwind_if_revision_cancelled());
+        }
+        let mut db = RootDatabase::default();
+        let snapshot = db.clone();
+        let (started, entered) = mpsc::sync_channel(1);
+        let (done, finished) = mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            ENTERED.with(|slot| slot.set(Some(started)));
+            let cancelled = salsa::Cancelled::catch(std::panic::AssertUnwindSafe(|| {
+                salsa::attach(&snapshot, || {
+                    let _scope = stdx::cancellation::enter(checkpoint);
+                    let text = "function heavy(x : int) -> int = x + 1\n".repeat(50_000);
+                    syntax::SourceFile::parse(&text)
+                })
+            }))
+            .is_err();
+            drop(snapshot);
+            done.send(cancelled).unwrap();
+        });
+        entered.recv_timeout(Duration::from_secs(5)).expect("lexer must start");
+        let cancel_started = std::time::Instant::now();
+        db.trigger_cancellation();
+        assert!(
+            finished.recv_timeout(Duration::from_secs(5)).unwrap(),
+            "parser fallback must propagate cancellation"
+        );
+        assert!(cancel_started.elapsed() < Duration::from_secs(2));
+        worker.join().unwrap();
+        let source = "function repaired(x : int) -> int = x\n";
+        assert!(syntax::SourceFile::parse(source).errors().is_empty());
+    }
 
     #[test]
     fn passive_memory_accounting_does_not_build_queries_and_tracks_snapshot_release() {

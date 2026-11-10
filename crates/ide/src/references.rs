@@ -1,15 +1,11 @@
-use std::collections::HashMap;
-
 use base_db::FileId;
 use ide_db::defs::Definition;
-use ide_db::ide_types::IdeTextEdit;
 use ide_db::line_index::TextRange;
 use ide_db::search::ReferenceCategory;
 use ide_db::{FileDb, LineCol};
 use std::collections::BTreeMap;
 
 use parser::Span;
-use url::Url;
 
 /// Result of a find-all-references operation.
 ///
@@ -56,6 +52,7 @@ pub fn find_all_refs(
     position: LineCol,
     search_scope: Option<ide_db::search::SearchScope>,
 ) -> Option<Vec<ReferenceSearchResult>> {
+    let started = std::time::Instant::now();
     // A local never leaves its body, so it is answered here in full and the
     // cross-file walk below is skipped entirely.
     if let Some(spans) = local_spans_through_hir(target_file, position) {
@@ -85,7 +82,10 @@ pub fn find_all_refs(
         return Some(vec![ReferenceSearchResult { declarations, references }]);
     }
 
+    let local_us = started.elapsed().as_micros();
+    let definitions_started = std::time::Instant::now();
     let defs = find_defs(target_file, position)?;
+    tracing::debug!(target: "sail_lsp::latency", "references_target local_us={local_us} definitions_us={}", definitions_started.elapsed().as_micros());
 
     let mut results = Vec::new();
     for def in &defs {
@@ -108,10 +108,12 @@ pub fn find_all_refs(
                     continue;
                 }
             }
-            for (span, is_decl) in spans_in_file(file, def, &name, true) {
-                if !is_decl {
-                    continue;
-                }
+            let file_started = std::time::Instant::now();
+            let spans = spans_in_file(file, def, &name, true);
+            if file_started.elapsed().as_millis() >= 1 {
+                tracing::debug!(target: "sail_lsp::latency", "references_file file={file_id:?} bytes={} spans={} search_us={}", file.text().len(), spans.len(), file_started.elapsed().as_micros());
+            }
+            for &(span, _) in spans.iter().filter(|(_, declaration)| *declaration) {
                 let range = base_db::text_range(span.start, span.end);
                 if !declarations.iter().any(|d| d.file_id == file_id && d.range == range) {
                     declarations.push(Declaration {
@@ -122,9 +124,9 @@ pub fn find_all_refs(
                     });
                 }
             }
-            let spans = spans_in_file(file, def, &name, false);
-            let root = file.syntax();
-            for (span, _) in spans {
+            let root =
+                spans.iter().any(|(_, declaration)| !declaration).then(|| file.syntax()).flatten();
+            for (span, _) in spans.into_iter().filter(|(_, declaration)| !declaration) {
                 let category = if root.as_ref().is_some_and(|root| is_assigned(root, span)) {
                     ReferenceCategory::WRITE
                 } else {
@@ -292,86 +294,6 @@ pub fn symbol_spans_for_file(
     spans_in_file(file, def, &search_name(def, file), include_declarations)
 }
 
-// There is no `declaration_spans_for_file`. Its doc claimed it was "what
-// rename needs to edit and what find-references needs to label", and
-// neither called it: rename edits every occurrence, and the label rides
-// on the `is_decl` flag `spans_in_file` already returns beside each span.
-// A filter over a live function is not a second function.
-
-pub fn reference_locations<'a, F, I>(
-    files: I,
-    current_uri: &Url,
-    def: &Definition,
-    include_declarations: bool,
-) -> Vec<ide_db::ide_types::FileLocation>
-where
-    F: FileDb + 'a,
-    I: IntoIterator<Item = (&'a Url, &'a F)>,
-{
-    let local_only = def.is_local();
-    let mut locations = Vec::new();
-
-    let files: Vec<_> = files.into_iter().collect();
-    let name = files
-        .iter()
-        .find(|(uri, _)| *uri == current_uri)
-        .map(|(_, file)| search_name(def, *file))
-        .unwrap_or_default();
-
-    for (uri, file) in files {
-        if local_only && uri != current_uri {
-            continue;
-        }
-        for (span, _) in spans_in_file(file, def, &name, include_declarations) {
-            locations.push(ide_db::span::file_location_from_span(uri, span));
-        }
-    }
-
-    locations.sort_by_key(|location| {
-        std::cmp::Reverse(match (current_uri.path_segments(), location.url.path_segments()) {
-            (Some(a), Some(b)) => a.zip(b).take_while(|(lhs, rhs)| lhs == rhs).count(),
-            _ => 0,
-        })
-    });
-    locations
-}
-
-pub fn rename_edits<'a, F, I>(
-    files: I,
-    current_uri: &Url,
-    def: &Definition,
-    new_text: &str,
-) -> HashMap<Url, Vec<IdeTextEdit>>
-where
-    F: FileDb + 'a,
-    I: IntoIterator<Item = (&'a Url, &'a F)>,
-{
-    let local_only = def.is_local();
-    let mut changes: HashMap<Url, Vec<IdeTextEdit>> = HashMap::new();
-
-    let files: Vec<_> = files.into_iter().collect();
-    let name = files
-        .iter()
-        .find(|(uri, _)| *uri == current_uri)
-        .map(|(_, file)| search_name(def, *file))
-        .unwrap_or_default();
-
-    for (uri, file) in files {
-        if local_only && uri != current_uri {
-            continue;
-        }
-        for (span, _) in spans_in_file(file, def, &name, true) {
-            changes.entry(uri.clone()).or_default().push(IdeTextEdit {
-                range: base_db::text_range(span.start, span.end),
-                new_text: new_text.to_string(),
-            });
-        }
-    }
-
-    changes.retain(|_, edits| !edits.is_empty());
-    changes
-}
-
 fn is_identifier_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'?' | b'\'' | b'~')
 }
@@ -418,12 +340,6 @@ pub fn normalize_validated_rename(
         _ => Ok(Some(base_name.to_string())),
     }
 }
-
-// ---- dyn-dispatch wrapper ----
-
-// `reference_locations_dyn` was here, with the same story as the four
-// in `navigation.rs`: a trait-object wrapper for a caller that never
-// existed.
 
 #[cfg(test)]
 mod through_analysis {

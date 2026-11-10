@@ -125,8 +125,7 @@ def measure(binary, policy, output, affinity):
                 usable(client, "textDocument/completion", {"textDocument": document, "position": at(source)}, "first-completion", completion_has_target)
                 metrics["first_completion"].append((time.monotonic() - began) * 1000)
                 wait_ready(client)
-                if not client.prime_completions:
-                    client.wait_for_priming(0)
+                client.wait_for_priming(0)
                 current_version = 1
                 for cycle in range(workload["cycles"]):
                     current_version += 1

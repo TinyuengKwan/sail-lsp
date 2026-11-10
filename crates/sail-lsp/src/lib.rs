@@ -33,8 +33,8 @@
 //!   cross-file diagnostic propagation and scope enforcement.
 //! - **`GlobalState::symbol_index`** — `SymbolIndex` for O(1)
 //!   name→location lookups without per-request file scans.
-//! - **`send_request`** — fire-and-forget (RA uses a registered `ReqHandler`
-//!   callback; sail-lsp drops server→client responses).
+//! - **`send_request`** — registers a `ReqHandler` callback and routes each
+//!   server→client response through the request queue.
 //!
 //! See `DIFF_NOTES.md` (crate root) for the full field-by-field diff.
 
@@ -46,7 +46,9 @@ mod analysis_health;
 mod cache_control;
 mod code_action_helpers;
 mod diagnostics;
+mod editor_commands;
 mod flycheck;
+mod formatting;
 mod global_state;
 mod handlers;
 mod main_loop;
@@ -58,6 +60,8 @@ mod reload;
 mod request_batch;
 mod runnables;
 mod sail_stdlib;
+mod scoped_configuration;
+mod shared_configuration;
 mod task_pool;
 pub mod tracing_setup;
 

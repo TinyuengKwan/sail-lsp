@@ -400,12 +400,7 @@ pub fn search(
         let Some(include_path) = relative_path(source_path, path) else { continue };
         let mut found = HashSet::new();
         let declarations = outline(db, target);
-        let public_names: HashSet<_> = declarations
-            .iter()
-            .flat_map(|decl| &decl.symbols)
-            .filter(|symbol| !symbol.private)
-            .map(|symbol| (&symbol.name, symbol.namespace))
-            .collect();
+        let public_names = std::cell::OnceCell::new();
         for decl in declarations.iter().rev() {
             for symbol in &decl.symbols {
                 if !symbol.matches_namespace(namespace)
@@ -426,7 +421,16 @@ pub fn search(
                 // branch. Defer mixed public/private names to the preview,
                 // which checks the declaration actually selected at the use.
                 if symbol.private
-                    && !public_names.contains(&(&symbol.name, symbol.namespace))
+                    && !public_names
+                        .get_or_init(|| {
+                            declarations
+                                .iter()
+                                .flat_map(|decl| &decl.symbols)
+                                .filter(|symbol| !symbol.private)
+                                .map(|symbol| (&symbol.name, symbol.namespace))
+                                .collect::<HashSet<_>>()
+                        })
+                        .contains(&(&symbol.name, symbol.namespace))
                     && !private_import_allowed(db, input, &views, *id)
                 {
                     continue;

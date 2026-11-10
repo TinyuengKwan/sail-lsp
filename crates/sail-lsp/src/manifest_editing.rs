@@ -404,6 +404,7 @@ pub(crate) fn add_to_project(
             project.manifest.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
         let title = format!("Add `{written}` to module `{module}` in {manifest_name}");
         actions.push(crate::lsp::ext::CodeAction {
+            command: None,
             title: title.clone(),
             kind: Some(lsp_types::CodeActionKind::QUICKFIX),
             diagnostics: Some(unlinked.to_vec()),
@@ -477,6 +478,7 @@ pub(crate) fn diagnostic_fixes(
                 let Ok(target) = Url::from_file_path(target) else { continue };
                 let title = format!("Create missing project source `{path}`");
                 actions.push(crate::lsp::ext::CodeAction {
+                    command: None,
                     title,
                     kind: Some(lsp_types::CodeActionKind::QUICKFIX),
                     diagnostics: Some(vec![diagnostic.clone()]),
@@ -504,6 +506,7 @@ pub(crate) fn diagnostic_fixes(
         };
         let Some(edit) = edit else { continue };
         actions.push(crate::lsp::ext::CodeAction {
+            command: None,
             title,
             kind: Some(lsp_types::CodeActionKind::QUICKFIX),
             diagnostics: Some(vec![diagnostic.clone()]),

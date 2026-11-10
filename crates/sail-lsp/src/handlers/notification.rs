@@ -19,7 +19,16 @@ pub(crate) fn handle_did_open_text_document(
     params: DidOpenTextDocumentParams,
 ) -> anyhow::Result<()> {
     let uri = params.text_document.uri;
+    if let Ok(mut cached) = state.last_format_options.lock() {
+        cached.remove(&uri);
+    }
+    if state.editor_commands.links.contains_key(&uri) {
+        return Ok(());
+    }
     let text = params.text_document.text;
+    if uri.to_file_path().ok().is_some_and(|path| crate::shared_configuration::is_config(&path)) {
+        return Ok(());
+    }
     if crate::manifest_editing::is_manifest(&uri) {
         let saved = uri.to_file_path().ok().and_then(|path| std::fs::read_to_string(path).ok());
         if saved.as_ref() != Some(&text) {
@@ -47,6 +56,9 @@ pub(crate) fn handle_did_change_text_document(
     params: DidChangeTextDocumentParams,
 ) -> anyhow::Result<()> {
     let uri = params.text_document.uri;
+    if state.editor_commands.links.contains_key(&uri) {
+        return Ok(());
+    }
     if crate::manifest_editing::is_manifest(&uri) {
         let texts = std::sync::Arc::make_mut(&mut state.manifest_texts);
         if let Some(doc) = texts.get_mut(&uri) {
@@ -84,6 +96,15 @@ pub(crate) fn handle_did_close_text_document(
     params: DidCloseTextDocumentParams,
 ) -> anyhow::Result<()> {
     let uri = params.text_document.uri;
+    if uri.to_file_path().ok().is_some_and(|path| crate::shared_configuration::is_config(&path)) {
+        return Ok(());
+    }
+    if let Ok(mut cached) = state.last_format_options.lock() {
+        cached.remove(&uri);
+    }
+    if state.editor_commands.links.contains_key(&uri) {
+        return Ok(());
+    }
     if crate::manifest_editing::is_manifest(&uri) {
         std::sync::Arc::make_mut(&mut state.manifest_texts).remove(&uri);
         state.dirty_documents.remove(&uri);
@@ -131,6 +152,19 @@ pub(crate) fn handle_did_save_text_document(
     state: &mut GlobalState,
     params: DidSaveTextDocumentParams,
 ) -> anyhow::Result<()> {
+    if params
+        .text_document
+        .uri
+        .to_file_path()
+        .ok()
+        .is_some_and(|path| crate::shared_configuration::is_config(&path))
+    {
+        state.refresh_shared_configuration();
+        return Ok(());
+    }
+    if state.editor_commands.links.contains_key(&params.text_document.uri) {
+        return Ok(());
+    }
     state.dirty_documents.remove(&params.text_document.uri);
     if let Some(doc) =
         std::sync::Arc::make_mut(&mut state.manifest_texts).get_mut(&params.text_document.uri)
@@ -160,6 +194,11 @@ pub(crate) fn handle_did_change_watched_files(
     };
     for change in &params.changes {
         let uri = &change.uri;
+        if uri.to_file_path().ok().is_some_and(|path| crate::shared_configuration::is_config(&path))
+        {
+            state.refresh_shared_configuration();
+            continue;
+        }
         let path_str = uri.path();
         let is_sail = path_str.ends_with(".sail");
         let is_project_file =
@@ -260,6 +299,15 @@ pub(crate) fn handle_did_change_workspace_folders(
     for removed in &params.event.removed {
         state.workspace_folders.remove(&removed.uri);
     }
+    state.scoped_configs = std::sync::Arc::new(
+        state
+            .scoped_configs
+            .iter()
+            .filter(|(root, _)| state.workspace_folders.contains(*root))
+            .map(|(root, config)| (root.clone(), config.clone()))
+            .collect(),
+    );
+    state.request_configuration();
     state.request_workspace_reload("workspace folders changed", crate::reload::ReloadScope::All);
     Ok(())
 }
@@ -277,39 +325,7 @@ pub(crate) fn handle_did_change_configuration(
         state.apply_client_settings(&params.settings);
         return Ok(());
     }
-    // Otherwise the parameters are meaningless — the protocol says so
-    // (microsoft/language-server-protocol#676) and clients act on it: VS
-    // Code sends `null`. Reading them, which is what this did, meant a
-    // settings change reached the server as an empty config or not at all.
-    // Ask for the settings instead.
-    state.send_request::<lsp_types::request::WorkspaceConfiguration>(
-        lsp_types::ConfigurationParams {
-            items: vec![lsp_types::ConfigurationItem {
-                scope_uri: None,
-                section: Some("sail-lsp".to_owned()),
-            }],
-        },
-        |state, response| {
-            match (response.error, response.result) {
-                (Some(err), _) => {
-                    log::error!("failed to fetch the server settings: {}", err.message)
-                }
-                (None, Some(json)) => {
-                    // One item asked for, one item back.
-                    let settings = json.get(0).cloned().unwrap_or(json);
-                    state.apply_client_settings(&settings);
-                    state.log_message(
-                        MessageType::INFO,
-                        format!(
-                            "Configuration updated: diagnostics={}",
-                            state.config.diagnostics.enable
-                        ),
-                    );
-                }
-                (None, None) => log::error!("empty response to workspace/configuration"),
-            }
-        },
-    );
+    state.request_configuration();
     Ok(())
 }
 

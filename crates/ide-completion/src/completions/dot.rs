@@ -105,13 +105,11 @@ pub(crate) fn field_completions(
     let receiver_span = parser::Span::new(dot_pos - receiver.len(), dot_pos);
     let ty_text = current_file
         .file_text()
-        .and_then(|(db, ft)| {
-            hir::Semantics::new(db).binding_type_text(ft, receiver_span, current_file.bodies())
-        })
+        .and_then(|(db, ft)| hir::Semantics::new(db).binding_type_text(ft, receiver_span))
         .or_else(|| {
-            current_file.file_text().and_then(|(db, ft)| {
-                hir::Semantics::new(db).expr_type_text(ft, receiver_span, current_file.bodies())
-            })
+            current_file
+                .file_text()
+                .and_then(|(db, ft)| hir::Semantics::new(db).expr_type_text(ft, receiver_span))
         });
 
     if let Some(ref ty_name) = ty_text {
@@ -165,7 +163,9 @@ pub(crate) fn extract_receiver_expr(text: &str, dot_pos: usize) -> &str {
     if last_byte == b')' || last_byte == b']' {
         let open = if last_byte == b')' { b'(' } else { b'[' };
         let mut depth = 1i32;
-        let mut pos = end - 2;
+        let Some(mut pos) = end.checked_sub(2) else {
+            return "";
+        };
         loop {
             if bytes[pos] == last_byte {
                 depth += 1;

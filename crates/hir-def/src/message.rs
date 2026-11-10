@@ -32,6 +32,33 @@ pub enum Message {
 }
 
 impl Message {
+    /// Render explanation text without embedding source offsets or styling.
+    /// Locations are carried separately by IDE clients as navigable links.
+    pub fn plain_text(&self) -> String {
+        match self {
+            Self::Line(text) => text.clone(),
+            Self::Seq(messages) => messages
+                .iter()
+                .map(Self::plain_text)
+                .filter(|text| !text.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Self::List(messages) => messages
+                .iter()
+                .map(|(label, message)| format!("{label}: {}", message.plain_text()))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Self::Location { prefix, hint, message, .. } => {
+                [prefix.clone(), hint.clone().unwrap_or_default(), message.plain_text()]
+                    .into_iter()
+                    .filter(|text| !text.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            }
+            Self::Severity(_, message) => message.plain_text(),
+        }
+    }
+
     pub fn line(text: impl Into<String>) -> Self {
         Self::Line(text.into())
     }

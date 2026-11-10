@@ -346,7 +346,7 @@ impl<'a> CompletionContext<'a> {
             CompletionAnalysis::NameRef(NameRefContext {
                 path_ctx: Some(PathCompletionCtx { kind: PathKind::Expr { .. }, .. }),
                 ..
-            }) => expected_type_and_name(&sema, db, file_text, token.as_ref()),
+            }) => expected_type_and_name(&sema, file_text, token.as_ref()),
             _ => (None, None),
         };
 
@@ -397,6 +397,36 @@ impl<'a> CompletionContext<'a> {
         }
     }
 
+    /// Obtain the receiver from the cached CST, preserving strings, Unicode
+    /// and balanced expressions. The fallback is only for syntax-only callers.
+    pub(crate) fn postfix_receiver(&self, dot: usize) -> Option<(usize, &'a str)> {
+        use syntax::SyntaxKind as SK;
+        if let Some(root) = self.file.syntax() {
+            let token = root.token_at_offset(syntax::TextSize::try_from(dot).ok()?).right_biased();
+            if let Some(dot_token) =
+                token.filter(|t| t.kind() == SK::DOT && usize::from(t.text_range().start()) == dot)
+            {
+                if let Some(receiver) = dot_token
+                    .parent_ancestors()
+                    .find(|n| n.kind() == SK::FIELD_ACCESS_EXPR)
+                    .and_then(|n| n.first_child())
+                {
+                    let range = receiver.text_range();
+                    let start = usize::from(range.start());
+                    let end = usize::from(range.end());
+                    if end <= dot {
+                        return Some((start, self.text.get(start..end)?));
+                    }
+                }
+            }
+        }
+        let receiver = crate::completions::dot::extract_receiver_expr(self.text, dot);
+        if receiver.is_empty() {
+            return None;
+        }
+        Some((self.text[..dot].trim_end().len() - receiver.len(), receiver))
+    }
+
     /// Lowercase prefix for case-insensitive matching.
     pub fn prefix_lower(&self) -> String {
         self.prefix.to_ascii_lowercase()
@@ -427,7 +457,7 @@ fn speculative_token(
     const MARKER: &str = "sailCompletionMarker";
     let parsed = syntax::parse_query::parse_file(db, file?);
     let at = syntax::TextSize::new(u32::try_from(offset).ok()?);
-    let root = parsed.reparse(syntax::TextRange::empty(at), MARKER).syntax_node()?;
+    let root = parsed.reparse_syntax(syntax::TextRange::empty(at), MARKER)?;
     root.token_at_offset(at + syntax::TextSize::new(1)).right_biased()
 }
 
@@ -749,7 +779,6 @@ fn detect_qualification(text: &str, offset: usize, prefix: &str) -> Qualified {
 /// all, only a `"f#1"` that no candidate's name could equal.
 fn expected_type_and_name(
     sema: &hir::Semantics<'_>,
-    db: &dyn salsa::Database,
     file_text: Option<base_db::FileText>,
     token: Option<&syntax::SyntaxToken>,
 ) -> (Option<hir::Ty>, Option<String>) {
@@ -797,11 +826,11 @@ fn expected_type_and_name(
                 Some(hir::TyKind::FnPtr(sig)) => sig.params.get(index).cloned(),
                 _ => None,
             };
-            let param_name =
-                ide_db::signatures::callable_signatures_at(db, ft, at, &callee.text().to_string())
-                    .and_then(|sigs| sigs.into_iter().next())
-                    .and_then(|sig| sig.params.into_iter().nth(index))
-                    .map(|p| p.name.split(':').next().unwrap_or(&p.name).trim().to_owned());
+            let param_name = sema
+                .callable_signatures_at(ft, at, &callee.text().to_string())
+                .and_then(|sigs| sigs.into_iter().next())
+                .and_then(|sig| sig.params.into_iter().nth(index))
+                .map(|p| p.name.split(':').next().unwrap_or(&p.name).trim().to_owned());
             (ty, param_name)
         }
         _ => (None, None),

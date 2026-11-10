@@ -46,6 +46,23 @@ fn clean(result: &hir::TypeCheckResult) {
 }
 
 #[test]
+fn reference_candidates_keep_identity_and_skip_non_semantic_text() {
+    use crate::{defs::Definition, root_database::SalsaFile, search::FindUsages, FileDb};
+    let declarations = "function target(x : int) -> int = x\nstruct Record = { target : int }\n";
+    let uses = "function use() = target(1)\nfunction shadow(target : int) = target\nfunction field(r : Record) = r.target\nfunction text() = \"target\"\n// target\nfunction target_suffix() = 1\n";
+    let (db, ids) = setup(&[("decl.sail", declarations), ("uses.sail", uses)], &[0, 1], vec![]);
+    let origin = SalsaFile::new(&db, db.files().file_text(ids[0]).unwrap());
+    let target =
+        Definition::classify_at(&origin, origin.position_at(declarations.find("target").unwrap()))
+            .unwrap();
+    let search = FindUsages::new(target, "target");
+    assert_eq!(search.spans_in_file(&origin), [(parser::Span::new(9, 15), true)]);
+    let file = SalsaFile::new(&db, db.files().file_text(ids[1]).unwrap());
+    let start = uses.find("target").unwrap();
+    assert_eq!(search.spans_in_file(&file), [(parser::Span::new(start, start + 6), false)]);
+}
+
+#[test]
 fn implicit_declarations_preserve_singletons_unless_annotated() {
     for (statements, accepted) in [
         ("x = 1; x = 1; x", true),
@@ -781,7 +798,7 @@ fn inline_program_shared_resolution_and_signatures_exclude_hidden_alternatives()
     let file = crate::test_utils::TestFile::new(source);
     let at = source.rfind("outer(x)").unwrap();
     let signatures =
-        crate::signatures::callable_signatures_at(file.db(), file.input(), at, "outer").unwrap();
+        hir::Semantics::new(file.db()).callable_signatures_at(file.input(), at, "outer").unwrap();
     assert_eq!(signatures.len(), 1, "{signatures:?}");
     assert!(signatures[0].label.contains("one"), "{signatures:?}");
     let sema = hir::Semantics::new(file.db());
@@ -943,4 +960,55 @@ fn scattered_enum_vector_edits_invalidate_length_and_availability_selectively() 
             "clause={clause} end={end}"
         );
     }
+}
+
+#[test]
+fn declaration_projections_reuse_unchanged_contributions_after_body_edits() {
+    use std::sync::Mutex;
+    let queries = Arc::new(Mutex::new(Vec::new()));
+    let observed = queries.clone();
+    let mut db = RootDatabase::with_event_callback(Some(Box::new(move |event| {
+        if let salsa::EventKind::WillExecute { database_key } = event.kind {
+            observed.lock().unwrap().push(format!("{database_key:?}"));
+        }
+    })));
+    let id = FileId::from_raw(0);
+    let mut source = String::new();
+    for index in 0..256 {
+        source.push_str(&format!("struct Record{index} = {{ field : int }}\n"));
+    }
+    source.push_str(
+        "function target(value : Record0) -> Record0 = value\nfunction edited() -> int = 0\n",
+    );
+    let mut change = Change::new();
+    change.change_file(id, &source);
+    change.set_source_project(SourceProject {
+        roots: vec![id],
+        paths: [("/project/main.sail".into(), id)].into(),
+        ..Default::default()
+    });
+    db.apply_change(change);
+    let before = infer(&db, id, "target");
+    clean(&before);
+    assert!(queries
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|key| key.starts_with("declaration_contributions(")));
+    queries.lock().unwrap().clear();
+    let mut change = Change::new();
+    change.change_file(id, source.replace("= 0", "= 1"));
+    let started = std::time::Instant::now();
+    db.apply_change(change);
+    let after = infer(&db, id, "target");
+    clean(&after);
+    assert!(Arc::ptr_eq(&before, &after), "unrelated body edit invalidated inference");
+    let executed = queries.lock().unwrap();
+    let rebuilt =
+        executed.iter().filter(|key| key.starts_with("declaration_contributions(")).count();
+    eprintln!(
+        "ABLATION declaration projections: elapsed_us={} rebuilt={rebuilt}",
+        started.elapsed().as_micros()
+    );
+    assert_eq!(rebuilt, 0, "unchanged declaration projections should backdate independently");
 }

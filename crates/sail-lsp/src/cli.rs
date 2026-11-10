@@ -365,7 +365,7 @@ pub fn cmd_analysis_stats(dir: &Path, verbose: bool) -> Result<(), String> {
             total_lines += sf.text().lines().count();
             let ft = files.file_text(*fid).unwrap();
             let parsed = syntax::parse_query::parse_file(analysis.db(), ft);
-            if let Some(errs) = &parsed.errors {
+            if let Some(errs) = parsed.errors() {
                 parse_error_count += errs.len();
             }
         }

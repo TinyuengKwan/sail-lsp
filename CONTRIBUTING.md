@@ -73,6 +73,8 @@ that every proof fits the production budget.
 | Interactive regression | `scripts/editing_replay.py`, `scripts/resource_replay.py` | Temporary projects, incomplete edits, reloads and finite resource-recovery workloads |
 | Stdio latency and model sweeps | `scripts/editor_probe.py`, `scripts/latency_summary.py` | Real server processes; see [performance methods](docs/performance-gates.md) |
 | Fixed performance gate | `scripts/performance_gate.py` | Same-host alternating binaries and the versioned policy in `benchmarks/` |
+| Real-model performance gate | `scripts/real_model_gate.py` | Pinned RISC-V/Arm models and the absolute targets in `benchmarks/real-model-performance.json` |
+| Neovim integration | `scripts/neovim_smoke.lua` | Native headless client; project/context actions, previews, links and tasks |
 | Project semantics | `scripts/upstream_monitor.py` | Stock compiler and production evaluator; see [upstream monitoring](docs/upstream-monitoring.md) |
 
 ```sh

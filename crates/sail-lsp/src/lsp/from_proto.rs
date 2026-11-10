@@ -45,34 +45,13 @@ mod document_identity_tests {
     }
 }
 
-/// Convert an LSP Position to a byte offset.
-///
-/// `Position::character` is a **UTF-16** column: that is LSP's default
-/// `positionEncoding`, and this server negotiates nothing else. It used to
-/// be passed straight through as a byte column, so on any line holding a
-/// non-ASCII character every position from the client was wrong — the
-/// bundled prelude's own licence header (`Union's Horizon 2020`) is such a
-/// line — and slicing at one panicked.
-///
-/// rust-analyzer keeps the same conversion in its `LineIndex`
-/// (`lib/line-index`, `to_utf8`/`to_wide` over a per-line wide-character
-/// table).
+/// Convert an LSP UTF-16 position to a byte offset using the source line index.
 pub fn offset(line_index: &LineIndex, pos: Position) -> usize {
     let col = line_index.utf16_col_to_byte(pos.line, pos.character);
     line_index.offset(LineCol { line: pos.line, col })
 }
 
-/// Convert an LSP Position to an internal `LineCol`, whose column is a
-/// **byte** column.
-///
-/// The same conversion `offset` does, for the `Analysis` methods that take
-/// a position rather than an offset. `lsp::ext` had a pair that did this
-/// by assignment — `LineCol { line: pos.line, col: pos.character }` — and
-/// twenty-seven handlers called it, so the UTF-16 fix that landed here
-/// reached almost nothing: every hover, goto, rename and signature help
-/// on a line with a non-ASCII character was still asking about the wrong
-/// column. `protocol_check` reported zero over 1.2M ranges because it
-/// exercises this module, and those handlers went round it.
+/// Convert an LSP UTF-16 position to an internal byte-column `LineCol`.
 pub fn line_col(line_index: &LineIndex, pos: Position) -> LineCol {
     LineCol { line: pos.line, col: line_index.utf16_col_to_byte(pos.line, pos.character) }
 }
@@ -240,6 +219,7 @@ pub fn inlay_hint(line_index: &LineIndex, hint: &lsp_types::InlayHint) -> InlayH
         lsp_types::InlayHintTooltip::MarkupContent(m) => m.value.clone(),
     });
     InlayHint {
+        label_parts: Vec::new(),
         offset,
         label,
         kind,

@@ -7,7 +7,6 @@ use parser::SyntaxKind as SK;
 use rowan::NodeOrToken;
 use syntax::SyntaxNode;
 
-use super::report::FormatReport;
 use super::rewrite::RewriteContext;
 use super::shape::{Indent, Shape};
 use super::snippet::SnippetProvider;
@@ -34,13 +33,6 @@ fn has_skip_format_attr(node: &SyntaxNode) -> bool {
     })
 }
 
-/// Optional line range for range-formatting.
-///
-/// `None` means "format all lines". `Some((lo, hi))` means only
-/// format lines in the inclusive range [lo, hi] (0-based).
-/// Nodes outside this range are emitted verbatim.
-pub(crate) type FileLines = Option<(usize, usize)>;
-
 /// CST visitor that accumulates formatted output.
 pub(crate) struct FmtVisitor<'a> {
     /// Accumulated formatted output.
@@ -53,13 +45,6 @@ pub(crate) struct FmtVisitor<'a> {
     pub(crate) config: &'a FormatOptions,
     /// Source text access.
     pub(crate) snippet_provider: &'a SnippetProvider,
-    /// Error accumulator.
-    pub(crate) report: FormatReport,
-    /// Optional line range to format. Nodes outside are emitted verbatim.
-    ///
-    /// rustfmt's `out_of_file_lines_range!` macro checks this to skip
-    /// formatting nodes outside the range.
-    pub(crate) file_lines: FileLines,
 }
 
 impl<'a> FmtVisitor<'a> {
@@ -71,46 +56,7 @@ impl<'a> FmtVisitor<'a> {
             block_indent: Indent::empty(),
             config,
             snippet_provider,
-            report: FormatReport::new(),
-            file_lines: None,
         }
-    }
-
-    /// Create a visitor that only formats lines in the given range.
-    ///
-    /// Lines outside the range are emitted verbatim (no formatting).
-    pub(crate) fn with_file_lines(
-        config: &'a FormatOptions,
-        snippet_provider: &'a SnippetProvider,
-        file_lines: FileLines,
-    ) -> Self {
-        Self {
-            buffer: String::with_capacity(snippet_provider.len()),
-            last_pos: 0,
-            block_indent: Indent::empty(),
-            config,
-            snippet_provider,
-            report: FormatReport::new(),
-            file_lines,
-        }
-    }
-
-    /// Check if a node's span is outside the configured file_lines range.
-    ///
-    /// Returns true if the node should be skipped (emitted verbatim).
-    fn out_of_file_lines_range(&self, node: &SyntaxNode) -> bool {
-        let Some((lo, hi)) = self.file_lines else {
-            return false; // None = format all
-        };
-        let range = node.text_range();
-        let text = self.snippet_provider.entire_snippet();
-        let start: usize = range.start().into();
-        let end: usize = range.end().into();
-        // Convert byte offsets to line numbers (0-based).
-        let start_line = text[..start].matches('\n').count();
-        let end_line = text[..end].matches('\n').count();
-        // Out of range if the node's lines don't intersect [lo, hi].
-        end_line < lo || start_line > hi
     }
 
     /// Current Shape (available width at current indent).
@@ -163,7 +109,6 @@ impl<'a> FmtVisitor<'a> {
             let start: usize = range.start().into();
             let end: usize = range.end().into();
 
-            // rustfmt uses format_missing_with_indent inside blocks.
             // At top level we use plain format_missing (no extra indent).
             self.format_missing(start);
 
@@ -200,18 +145,8 @@ impl<'a> FmtVisitor<'a> {
     ///
     /// Dispatches to items.rs for NAMED_DEF (struct/bitfield/enum/union/register)
     /// and CALLABLE_DEF (mapping). Falls back to verbatim source on None.
-    ///
-    /// (mirrors `skip_out_of_file_lines_range_visitor!` at utils.rs:392-399).
     fn visit_definition(&mut self, node: &SyntaxNode) {
         let range = node.text_range();
-
-        // If this node is outside the configured range, emit source verbatim
-        // and skip formatting — exactly as rustfmt does.
-        if self.out_of_file_lines_range(node) {
-            self.push_str(self.snippet_provider.span_to_snippet(range));
-            return;
-        }
-
         // $[skip_format] — emit verbatim, skip all formatting.
         if has_skip_format_attr(node) {
             self.push_str(self.snippet_provider.span_to_snippet(range));
@@ -244,6 +179,7 @@ impl<'a> FmtVisitor<'a> {
                 // one, formatting again produced different text.
                 let formatted = self.rewrite_exprs_of(&formatted);
                 let formatted = super::expr::wrap_operator_chains(&formatted, self.config);
+                let formatted = super::layout::expressions(&formatted, self.config);
                 self.push_str(&formatted);
                 if !matches!(node.kind(), SK::CALLABLE_DEF | SK::CALLABLE_SPEC) {
                     self.emit_trailing_content(node);
@@ -255,6 +191,7 @@ impl<'a> FmtVisitor<'a> {
                 let source = self.snippet_provider.span_to_snippet(range);
                 let formatted = self.apply_expr_rewrites(node, source);
                 let formatted = super::expr::wrap_operator_chains(&formatted, self.config);
+                let formatted = super::layout::expressions(&formatted, self.config);
                 self.push_str(&formatted);
             }
         }
@@ -432,13 +369,18 @@ mod tests {
         assert_eq!(output, input);
     }
 
-    fn format_with_file_lines(text: &str, file_lines: FileLines) -> String {
-        let snippet = SnippetProvider::new(text.to_string());
-        let config = FormatOptions::default();
-        let (root, _) = syntax::parse_text(text);
-        let mut visitor = FmtVisitor::with_file_lines(&config, &snippet, file_lines);
-        visitor.walk_source_file(&root);
-        visitor.buffer
+    fn format_with_file_lines(text: &str, lines: Option<(usize, usize)>) -> String {
+        let options = FormatOptions::default();
+        let Some((start, end)) = lines else {
+            return super::super::format_text(text, &options).text;
+        };
+        let offset = |line| text.split_inclusive('\n').take(line).map(str::len).sum::<usize>();
+        super::super::format_range(
+            text,
+            &options,
+            base_db::text_range(offset(start), offset(end + 1)),
+        )
+        .text
     }
 
     #[test]

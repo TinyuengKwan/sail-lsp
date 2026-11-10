@@ -80,6 +80,7 @@ fn workspace_symbols(db: &dyn salsa::Database) -> std::collections::HashSet<Stri
 /// Build the per-file ItemTree from a parsed file.
 #[salsa::tracked(returns(ref))]
 pub fn file_item_tree(db: &dyn salsa::Database, input: FileText) -> Option<Arc<ItemTree>> {
+    let _cancellation = syntax::cancellation_scope();
     let parsed: &ParsedFileData = parse_file(db, input);
     let green = parsed.green.as_ref()?;
     let root = syntax::SyntaxNode::new_root(green.as_ref().clone());
@@ -90,10 +91,95 @@ pub fn file_item_tree(db: &dyn salsa::Database, input: FileText) -> Option<Arc<I
 /// Build per-callable Body arenas from a parsed file.
 #[salsa::tracked(returns(ref))]
 pub fn callable_bodies(db: &dyn salsa::Database, input: FileText) -> Option<ArcCallableBodies> {
+    let mut entries = Vec::new();
+    for name in callable_nodes(db, input).keys() {
+        if let Some(group) = callable_bodies_for_name(db, input, name.clone()) {
+            entries.extend(group.0.entries().iter().cloned());
+        }
+    }
+    Some(ArcCallableBodies(Arc::new(CallableBodies::from_callable_entries(entries))))
+}
+
+#[salsa::tracked(returns(ref))]
+fn callable_nodes(
+    db: &dyn salsa::Database,
+    input: FileText,
+) -> std::collections::BTreeMap<String, Vec<syntax::SyntaxNodePtr>> {
+    let Some(root) = parse_file(db, input).syntax_node() else { return Default::default() };
+    let mut names = std::collections::BTreeMap::<String, Vec<_>>::new();
+    for node in CallableBodies::definitions(&root) {
+        let name = CallableBodies::definition_name(&node);
+        if !name.is_empty() {
+            names.entry(name).or_default().push(syntax::SyntaxNodePtr::new(&node));
+        }
+    }
+    names
+}
+
+#[salsa::tracked(returns(ref))]
+fn callable_register_names(
+    db: &dyn salsa::Database,
+    input: FileText,
+) -> std::collections::HashSet<String> {
+    parse_file(db, input)
+        .syntax_node()
+        .map(|root| CallableBodies::register_names(&root))
+        .unwrap_or_default()
+}
+
+#[salsa::tracked(returns(ref), lru = 4294967295)]
+pub fn callable_bodies_for_name(
+    db: &dyn salsa::Database,
+    input: FileText,
+    name: String,
+) -> Option<ArcCallableBodies> {
+    let _cancellation = syntax::cancellation_scope();
     let parsed: &ParsedFileData = parse_file(db, input);
     let green = parsed.green.as_ref()?;
     let root = syntax::SyntaxNode::new_root(green.as_ref().clone());
-    Some(ArcCallableBodies(Arc::new(CallableBodies::from_cst(&root))))
+    let started = std::time::Instant::now();
+    let nodes =
+        callable_nodes(db, input).get(&name)?.iter().map(|ptr| ptr.to_node(&root)).collect();
+    let bodies =
+        CallableBodies::from_definitions(nodes, input.text(db), callable_register_names(db, input))
+            .with_file_id(input.file_id(db));
+    if started.elapsed().as_millis() >= 1 {
+        tracing::debug!(target: "sail_lsp::latency", "lower_bodies file={:?} name={name} bodies={} lower_us={}", input.file_id(db), bodies.entries().len(), started.elapsed().as_micros());
+    }
+    Some(ArcCallableBodies(Arc::new(bodies)))
+}
+
+pub fn callable_bodies_at_offset(
+    db: &dyn salsa::Database,
+    input: FileText,
+    offset: usize,
+) -> Option<&ArcCallableBodies> {
+    let offset = rowan::TextSize::from(u32::try_from(offset).ok()?);
+    let (name, _) = callable_nodes(db, input).iter().find(|(_, nodes)| {
+        nodes
+            .iter()
+            .any(|ptr| ptr.text_range().start() <= offset && offset <= ptr.text_range().end())
+    })?;
+    callable_bodies_for_name(db, input, name.clone()).as_ref()
+}
+
+pub fn callable_bodies_in_range(
+    db: &dyn salsa::Database,
+    input: FileText,
+    range: Option<(usize, usize)>,
+) -> Vec<&ArcCallableBodies> {
+    callable_nodes(db, input)
+        .iter()
+        .filter(|(_, nodes)| {
+            range.is_none_or(|(start, end)| {
+                nodes.iter().any(|ptr| {
+                    usize::from(ptr.text_range().end()) >= start
+                        && usize::from(ptr.text_range().start()) <= end
+                })
+            })
+        })
+        .filter_map(|(name, _)| callable_bodies_for_name(db, input, name.clone()).as_ref())
+        .collect()
 }
 
 /// Newtype wrapper for `Arc<CallGraph>` with pointer-based Eq/Hash.
@@ -230,7 +316,7 @@ use crate::body::{Body, BodySourceMap};
 /// unlike the semantic-only key of `callable_body`. A trivia edit backdates
 /// inference while invalidating IDE queries that consume source locations.
 #[derive(Clone, Debug)]
-pub struct ArcBodyWithSourceMap(pub Arc<(Body, BodySourceMap)>, u64);
+pub struct ArcBodyWithSourceMap(pub (Arc<Body>, Arc<BodySourceMap>), u64);
 
 impl PartialEq for ArcBodyWithSourceMap {
     fn eq(&self, other: &Self) -> bool {
@@ -295,7 +381,7 @@ pub fn callable_body<'db>(
     use std::hash::{Hash, Hasher};
 
     let file = id.file(db);
-    let bodies = callable_bodies(db, file).as_ref()?;
+    let bodies = callable_bodies_for_name(db, file, id.name(db).clone()).as_ref()?;
     let target_name = id.name(db);
     let target_clause = id.clause_index(db);
 
@@ -318,7 +404,7 @@ pub fn callable_body<'db>(
             );
             root.covering_element(range).into_node().filter(|node| node.text_range() == range)
         });
-        if let Some(node) = syntax.filter(|_| parsed.errors.is_none()) {
+        if let Some(node) = syntax.filter(|_| !parsed.has_parse_errors()) {
             // Node boundaries matter: a changed operator fixity can change
             // expression grouping even when all token spellings are equal.
             for event in node.preorder_with_tokens() {
@@ -377,17 +463,18 @@ pub fn body_with_source_map<'db>(
     // The semantic query may be backdated across internal trivia edits.
     // Source positions must instead come from the current lowering.
     if let Some(cb) = callable_body(db, id).as_ref() {
-        let current = callable_bodies(db, file).as_ref().and_then(|bodies| {
-            bodies
-                .0
-                .entries()
-                .iter()
-                .filter(|entry| entry.name == id.name(db))
-                .nth(id.clause_index(db) as usize)
-        });
+        let current =
+            callable_bodies_for_name(db, file, id.name(db).clone()).as_ref().and_then(|bodies| {
+                bodies
+                    .0
+                    .entries()
+                    .iter()
+                    .filter(|entry| entry.name == id.name(db))
+                    .nth(id.clause_index(db) as usize)
+            });
         if let Some(current) = current {
             use std::hash::{Hash, Hasher};
-            let body = (*current.body).clone();
+            let body = current.body.clone();
             let mut source_map = (*current.source_map).clone();
             source_map.file_id = Some(file_id);
             source_map.def_base = current.def_span.start;
@@ -399,13 +486,13 @@ pub fn body_with_source_map<'db>(
             cb.fingerprint().hash(&mut h);
             current.def_span.hash(&mut h);
             text.get(current.def_span.start..current.def_span.end).hash(&mut h);
-            return ArcBodyWithSourceMap(Arc::new((body, source_map)), h.finish());
+            return ArcBodyWithSourceMap((body, Arc::new(source_map)), h.finish());
         }
     }
 
     // No such callable — an empty body, and a fingerprint that says so.
     let fallback_map = BodySourceMap { file_id: Some(file_id), ..Default::default() };
-    ArcBodyWithSourceMap(Arc::new((Body::empty(), fallback_map)), 0)
+    ArcBodyWithSourceMap((Arc::new(Body::empty()), Arc::new(fallback_map)), 0)
 }
 
 /// Salsa-interned identifier for a callable with a body.
@@ -471,6 +558,14 @@ pub fn set_workspace_files(db: &mut dyn salsa::Database, file_texts: Vec<FileTex
 /// Project operator declarations without lowering the rest of the item tree.
 #[salsa::tracked(returns(ref))]
 fn file_fixities(db: &dyn salsa::Database, file: FileText) -> syntax::FixityContext {
+    let source = base_db::preprocess::source_text(db, file.file_id(db)).unwrap_or(file);
+    // Every operator declaration starts with infix/infixl/infixr. Avoid an
+    // eager full parse of generated files that cannot contribute any. The
+    // substring guard is conservative in comments/strings/identifiers; a
+    // possible declaration still uses the authoritative CST implementation.
+    if !source.text(db).contains("infix") {
+        return syntax::FixityContext::default();
+    }
     parse_file(db, file)
         .syntax_node()
         .map(|root| ItemTree::fixity_context_from_cst(&root))
@@ -518,6 +613,7 @@ pub fn update_workspace_fixities(
 pub fn set_body_cache_capacity(db: &mut dyn salsa::Database, capacity: usize) {
     let capacity = if capacity == 0 { usize::MAX } else { capacity };
     callable_body::set_lru_capacity(db, capacity);
+    callable_bodies_for_name::set_lru_capacity(db, capacity);
     body_with_source_map::set_lru_capacity(db, capacity);
 }
 
@@ -525,6 +621,34 @@ pub fn set_body_cache_capacity(db: &mut dyn salsa::Database, capacity: usize) {
 mod tests {
     use super::*;
     use base_db::FileId;
+
+    #[test]
+    fn indexed_declaration_locations_match_the_current_cst_after_edits() {
+        use salsa::Setter;
+        let mut db = TestDb::default();
+        let file = FileText::new(&db, Arc::from(""), FileId::from_raw(0));
+        for source in [
+            "// 茶\nval first : int -> int\nfunction first(x) = x\nfunction second() = 1\n",
+            "// moved\n$[test]\nprivate val renamed : int -> int\nfunction renamed(x) = x\nfunction second() = 22\n",
+            "function incomplete() = (\n",
+            "// no declarations\n",
+        ] {
+            file.set_text(&mut db).to(Arc::from(source));
+            let root = syntax::parse_query::semantic_parse_file(&db, file).syntax_node().unwrap();
+            let nodes: Vec<_> = root.children().collect();
+            for offset in 0..=source.len() {
+                let expected = nodes.iter().position(|node| {
+                    usize::from(node.text_range().start()) <= offset
+                        && offset < usize::from(node.text_range().end())
+                });
+                assert_eq!(crate::source_order::at_offset(&db, file, offset).map(|at| at.index), expected, "offset {offset} in {source}");
+            }
+            for (index, expected) in nodes.iter().enumerate() {
+                let current = crate::source_order::node(&db, crate::source_order::Declaration { file, index }).unwrap();
+                assert_eq!(current, *expected);
+            }
+        }
+    }
 
     #[salsa::db]
     #[derive(Default, Clone)]
@@ -552,6 +676,39 @@ mod tests {
             assert_eq!(file_fixities(&db, file), &expected, "{source}");
             assert_eq!(base_db::WorkspaceFixities::try_get(&db).unwrap().fixities(&db), &expected);
         }
+    }
+
+    #[test]
+    fn fixity_registration_keeps_plain_files_lazy_and_follows_edited_instance_sources() {
+        use salsa::Setter;
+        let mut db = TestDb::default();
+        let physical = FileText::new(
+            &db,
+            Arc::from("function ordinary(x : int) -> int = x\n"),
+            FileId::from_raw(0),
+        );
+        let alias_id = FileId::for_instance(0);
+        let alias = FileText::new(&db, Arc::from(""), alias_id);
+        base_db::preprocess::set_preprocessing(
+            &mut db,
+            Default::default(),
+            [(alias_id, physical)].into(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        );
+        set_workspace_files(&mut db, vec![alias]);
+        assert!(physical.parse_cache(&db).get().is_none(), "plain source was eagerly parsed");
+        assert!(file_fixities(&db, alias).is_empty());
+
+        // The instance's own stored text is still empty: projection must read
+        // its current physical source when a new operator is declared.
+        physical.set_text(&mut db).to(Arc::from("infixl 6 +++\n"));
+        set_workspace_files(&mut db, vec![alias]);
+        assert!(file_fixities(&db, alias).contains_key("+++"));
+        physical.set_text(&mut db).to(Arc::from("function ordinary() = 1\n"));
+        set_workspace_files(&mut db, vec![alias]);
+        assert!(file_fixities(&db, alias).is_empty());
     }
 
     #[test]

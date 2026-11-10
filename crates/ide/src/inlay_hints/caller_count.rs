@@ -11,19 +11,14 @@ pub(super) fn collect_callgraph_caller_hints<'a>(
     end: usize,
     hints: &mut Vec<InlayHint>,
 ) {
-    let workspace_files: Vec<&dyn FileDb> = all_files.iter().map(|(_, f)| *f).collect();
-    let workspace_callgraph =
-        hir::callgraph::cached_workspace_callgraph(workspace_files.iter().copied());
-    // Use ParsedFile callable_heads instead of core_ast.defs
-    let Some(parsed) = current_file.parsed() else {
+    let visible_heads = visible_callable_heads(current_file, begin, end);
+    if visible_heads.is_empty() {
         return;
-    };
-    for head in &parsed.callable_heads {
-        let name_span = head.name_span;
-        if !span_starts_in_range(name_span, begin, end) {
-            continue;
-        }
-        let name = head.name.as_str();
+    }
+    let workspace_callgraph =
+        hir::callgraph::cached_workspace_callgraph(all_files.iter().map(|(_, file)| *file));
+    for (name, name_span) in visible_heads {
+        let name = name.as_str();
         if name.starts_with("Mk_")
             || name.starts_with("_get_")
             || name.starts_with("_update_")
@@ -39,6 +34,7 @@ pub(super) fn collect_callgraph_caller_hints<'a>(
         let label =
             if count == 1 { "(1 caller)".to_string() } else { format!("({count} callers)") };
         hints.push(InlayHint {
+            label_parts: Vec::new(),
             offset: name_span.end,
             label,
             kind: InlayHintKind::Other,

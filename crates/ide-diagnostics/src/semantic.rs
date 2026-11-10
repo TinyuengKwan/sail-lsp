@@ -111,7 +111,11 @@ pub fn compute_semantic_diagnostics_with_names(
     check_type_level_names(&live_defs, workspace, scope.as_ref(), &mut diagnostics);
     check_type_synonym_tyvars(&live_defs, &mut diagnostics);
     check_abstract_type_kind(&live_defs, &mut diagnostics);
-    diagnostics.extend(hir::infer::declaration_constraints::check(file.file_text(), &live_defs));
+    if let Some((db, input)) = file.file_text() {
+        diagnostics.extend(hir::Semantics::new(db).declaration_diagnostics(input).iter().cloned());
+    } else {
+        diagnostics.extend(hir::infer::declaration_constraints::check(None, &live_defs));
+    }
     check_kinded_synonym_bodies(&live_defs, workspace, scope.as_ref(), &mut diagnostics);
     ordered_scope::check_selected_signatures(
         &live_defs,

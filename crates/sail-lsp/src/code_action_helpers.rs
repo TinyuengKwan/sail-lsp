@@ -44,5 +44,5 @@ pub fn sail_source_fix_all_kind() -> CodeActionKind {
 }
 
 pub fn default_code_action_format_options() -> ide_db::ide_types::FormatOptions {
-    ide_db::ide_types::FormatOptions { tab_size: 4, insert_spaces: true, ..Default::default() }
+    ide_db::ide_types::FormatOptions { tab_size: 2, insert_spaces: true, ..Default::default() }
 }

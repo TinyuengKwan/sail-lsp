@@ -9,6 +9,8 @@ publish = false
 [lib]
 
 [dependencies]
+dissimilar.workspace = true
+tracing.workspace = true
 base-db.workspace = true
 paths.workspace = true
 salsa.workspace = true

@@ -51,15 +51,12 @@ pub fn text_edit(line_index: &LineIndex, edit: &IdeTextEdit) -> lsp_types::TextE
     lsp_types::TextEdit { range: range(line_index, edit.range), new_text: edit.new_text.clone() }
 }
 
-/// No caller yet. The module is `pub` for `examples/protocol_check.rs`, so
-/// the compiler no longer flags this and cannot retire the waiver either;
-/// it is here because `text_edit` is, and a caller wanting the plural
-/// should not have to add it back.
+/// Convert a list of source edits to LSP edits.
 pub fn text_edits(line_index: &LineIndex, edits: &[IdeTextEdit]) -> Vec<lsp_types::TextEdit> {
     edits.iter().map(|e| text_edit(line_index, e)).collect()
 }
 
-/// No caller yet; see `text_edits`.
+/// Convert a physical source location to an LSP location.
 pub fn location(loc: &FileLocation, line_index: &LineIndex) -> lsp_types::Location {
     lsp_types::Location::new(loc.url.clone(), range(line_index, loc.range))
 }
@@ -512,26 +509,127 @@ pub fn import_request(
 /// `f(${1:x}, ${2:y})$0` as `f(x, y)`, for a client that would otherwise
 /// insert those braces as text.
 fn strip_snippet_placeholders(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(at) = rest.find('$') {
-        out.push_str(&rest[..at]);
-        rest = &rest[at + 1..];
-        if let Some(inner) = rest.strip_prefix('{') {
-            let Some(close) = inner.find('}') else { break };
-            // `${1:name}` keeps `name`; `${1}` keeps nothing.
-            let body = &inner[..close];
-            if let Some((_, name)) = body.split_once(':') {
-                out.push_str(name);
-            }
-            rest = &inner[close + 1..];
-        } else {
-            // `$0`, `$1`: a tab stop with nothing to insert.
-            rest = rest.trim_start_matches(|c: char| c.is_ascii_digit());
-        }
+    use std::collections::HashMap;
+    fn take(rest: &mut &str) -> Option<char> {
+        let c = rest.chars().next()?;
+        *rest = &rest[c.len_utf8()..];
+        Some(c)
     }
-    out.push_str(rest);
-    out
+    fn render(
+        rest: &mut &str,
+        nested: bool,
+        depth: usize,
+        values: &mut HashMap<String, String>,
+    ) -> String {
+        if depth > 32 {
+            return std::mem::take(rest).to_owned();
+        }
+        let mut out = String::new();
+        while let Some(c) = take(rest) {
+            if nested && c == '}' {
+                break;
+            }
+            if c == '\\' {
+                if rest.starts_with(['\\', '$', '}']) {
+                    out.push(take(rest).unwrap());
+                } else {
+                    out.push(c);
+                }
+                continue;
+            }
+            if c != '$' {
+                out.push(c);
+                continue;
+            }
+            let braced = rest.starts_with('{');
+            if braced {
+                take(rest);
+            }
+            let digits = !braced && rest.starts_with(|c: char| c.is_ascii_digit());
+            let key_len = rest
+                .chars()
+                .take_while(|c| {
+                    if digits {
+                        c.is_ascii_digit()
+                    } else {
+                        c.is_ascii_alphanumeric() || *c == '_'
+                    }
+                })
+                .count();
+            if key_len == 0 {
+                out.push('$');
+                if braced {
+                    out.push('{');
+                }
+                continue;
+            }
+            let key = rest[..key_len].to_owned();
+            *rest = &rest[key_len..];
+            let numeric = key.chars().all(|c| c.is_ascii_digit());
+            let mut value = values.get(&key).cloned().unwrap_or_else(|| {
+                if numeric {
+                    String::new()
+                } else {
+                    key.clone()
+                }
+            });
+            if braced && rest.starts_with(':') {
+                take(rest);
+                value = render(rest, true, depth + 1, values);
+                values.entry(key.clone()).or_insert_with(|| value.clone());
+            } else if braced && rest.starts_with('|') {
+                take(rest);
+                let mut first = true;
+                let mut choice = String::new();
+                while !rest.is_empty() && !rest.starts_with("|}") {
+                    let c = take(rest).unwrap();
+                    if c == '\\' {
+                        if let Some(c) = take(rest) {
+                            if first {
+                                choice.push(c);
+                            }
+                        }
+                    } else if c == ',' {
+                        first = false;
+                    } else if first {
+                        choice.push(c);
+                    }
+                }
+                if rest.starts_with("|}") {
+                    *rest = &rest[2..];
+                }
+                value = choice;
+                values.entry(key.clone()).or_insert_with(|| value.clone());
+            } else if braced && rest.starts_with('/') {
+                // A client without snippets cannot evaluate editor transforms.
+                // Preserve the untransformed default/mirror and consume its syntax.
+                let mut balance = 1;
+                while let Some(c) = take(rest) {
+                    if c == '\\' {
+                        take(rest);
+                    } else if c == '{' {
+                        balance += 1;
+                    } else if c == '}' {
+                        balance -= 1;
+                        if balance == 0 {
+                            break;
+                        }
+                    }
+                }
+            } else if braced && rest.starts_with('}') {
+                take(rest);
+            }
+            if key != "0" {
+                out.push_str(&value);
+            }
+        }
+        out
+    }
+    let mut values = HashMap::new();
+    let mut rest = text;
+    render(&mut rest, false, 0, &mut values);
+    let mut rest = text;
+    render(&mut rest, false, 0, &mut values)
 }
 
 pub fn inlay_hint_kind(kind: InlayHintKind) -> Option<lsp_types::InlayHintKind> {
@@ -689,6 +787,24 @@ mod workspace_edit_tests {
             );
             assert!(edit.changes.is_none());
             assert!(edit.document_changes.is_none());
+        }
+    }
+}
+
+#[cfg(test)]
+mod snippet_fallback_tests {
+    #[test]
+    fn plain_clients_receive_defaults_choices_mirrors_and_escaped_literals() {
+        for (snippet, plain) in [
+            ("$1 ${1:value} $0", "value value "),
+            ("${1:outer(${2:inner})} $2 $0", "outer(inner) inner "),
+            (r"${1|first\,choice,second|} $1", "first,choice first,choice"),
+            (r#"("cost \$1 \} λ")$0"#, r#"("cost $1 } λ")"#),
+            ("$1foo ${1:value}", "valuefoo value"),
+            ("${NAME:default} ${NAME}", "default default"),
+            ("${1:value} ${1/(.*)/${1:/upcase}/}", "value value"),
+        ] {
+            assert_eq!(super::strip_snippet_placeholders(snippet), plain, "{snippet}");
         }
     }
 }

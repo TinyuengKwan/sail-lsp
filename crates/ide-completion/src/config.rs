@@ -27,6 +27,9 @@ pub struct CompletionFieldsToResolve {
 /// Configuration for the completion engine.
 #[derive(Clone, Debug)]
 pub struct CompletionConfig {
+    pub custom_templates: std::sync::Arc<[CompletionTemplate]>,
+    pub term_search: bool,
+    pub term_search_fuel: usize,
     /// Enable postfix completions (e.g., `expr.if`, `expr.match`).
     pub enable_postfix_completions: bool,
     /// Enable keyword completions.
@@ -71,6 +74,9 @@ impl SnippetCap {
 impl Default for CompletionConfig {
     fn default() -> Self {
         Self {
+            custom_templates: Default::default(),
+            term_search: false,
+            term_search_fuel: 1000,
             enable_postfix_completions: true,
             enable_keyword_completions: true,
             enable_snippets: true,
@@ -83,4 +89,14 @@ impl Default for CompletionConfig {
             fields_to_resolve: CompletionFieldsToResolve::default(),
         }
     }
+}
+
+/// An editor-owned template. Expansion changes only the primary completion edit.
+#[derive(Clone, Debug)]
+pub struct CompletionTemplate {
+    pub prefix: Option<String>,
+    pub postfix: Option<String>,
+    pub body: std::sync::Arc<str>,
+    pub description: String,
+    pub scope: crate::SnippetScope,
 }

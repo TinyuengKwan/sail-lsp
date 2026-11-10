@@ -209,7 +209,7 @@ impl InferenceContext<'_> {
 
 /// Type-variable names appearing anywhere in a scheme's parameters or return
 /// type.
-fn scheme_free_params(scheme: &TypeScheme) -> Vec<String> {
+pub(super) fn scheme_free_params(scheme: &TypeScheme) -> Vec<String> {
     fn walk(ty: &Ty, out: &mut Vec<String>) {
         match ty.kind() {
             TyKind::Param(name) => {
@@ -635,6 +635,23 @@ impl<'db> InferenceContext<'db> {
         self.solve_pending_obligations();
         self.check_pending_call_results();
         self.check_pending_implicits();
+        // Resolve actual applications before fallback invents defaults for
+        // unconstrained variables. An unresolved proof cannot justify a
+        // concrete specialization, even when its result width is known.
+        if self.result.unsolved_constraints.is_empty() && self.result.refuted_constraints.is_empty()
+        {
+            self.result.call_instantiations.retain(|_, call| {
+                call.ty = self.table.deep_resolve(&call.ty);
+                for (_, ty) in &mut call.type_arguments { *ty = self.table.deep_resolve(ty); }
+                call.type_arguments.retain(|(_, ty)| ty.is_fully_known() || matches!(ty.kind(), TyKind::Param(value) if value == "true" || value == "false" || {
+                    let digits = value.strip_prefix('-').unwrap_or(value);
+                    !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())
+                }));
+                call.ty.is_fully_known()
+            });
+        } else {
+            self.result.call_instantiations.clear();
+        }
         // Resolve remaining inference variables to defaults.
         self.table.fallback_unsolved();
         self.resolve_recorded_mismatches();
@@ -697,6 +714,9 @@ impl<'db> InferenceContext<'db> {
             }
         }
 
+        self.result.hidden_numeric_witnesses.extend(
+            self.table.rigid_variable_names().map(|name| name.trim_start_matches('\'').to_owned()),
+        );
         self.finish()
     }
 
@@ -2911,7 +2931,7 @@ impl<'db> InferenceContext<'db> {
                                 }
                             })
                             .collect();
-                        let (fresh, _) = self.freshen_scheme(&scheme);
+                        let (fresh, application_freshening) = self.freshen_scheme(&scheme);
                         let params: Vec<Ty> = fresh
                             .params
                             .iter()
@@ -2921,6 +2941,8 @@ impl<'db> InferenceContext<'db> {
                             })
                             .map(|(p, _)| self.table.insert_type_vars(p))
                             .collect();
+                        let mut confirmed =
+                            params.len() == arg_types.len() && !arg_types.iter().any(Ty::is_error);
                         if params.len() == arg_types.len() {
                             for (i, (param, actual)) in
                                 params.iter().zip(arg_types.iter()).enumerate()
@@ -2951,7 +2973,7 @@ impl<'db> InferenceContext<'db> {
                                         }
                                     }
                                 }
-                                let _ = self.table.unify(param, &actual);
+                                confirmed &= self.table.unify(param, &actual);
                             }
                         }
                         // Indices may come from runtime arguments or the result
@@ -2969,6 +2991,23 @@ impl<'db> InferenceContext<'db> {
                         // and disconnect that bound from the argument width.
                         let instantiated = self.table.deep_resolve(&expanded);
                         self.defer_implicit_arguments(callee_id, &fresh, arg_types.len(), locals);
+                        if confirmed && schemes.is_some_and(|schemes| schemes.len() == 1) {
+                            self.result.call_instantiations.insert(
+                                callee_id,
+                                super::CallInstantiation {
+                                    target: callee_name.clone(),
+                                    ty: Ty::function(fresh.params.clone(), fresh.ret.clone()),
+                                    implicit_params: fresh.implicit_params.clone(),
+                                    type_arguments: application_freshening
+                                        .entries
+                                        .iter()
+                                        .map(|entry| {
+                                            (entry.orig_name.clone(), entry.infer_ty.clone())
+                                        })
+                                        .collect(),
+                                },
+                            );
+                        }
                         // Resolve Bidir return types (mapping val specs).
                         if let TyKind::Bidir { lhs, rhs } = instantiated.kind() {
                             if !arg_types.is_empty() {
@@ -2998,12 +3037,15 @@ impl<'db> InferenceContext<'db> {
                         let members = members.clone();
                         let mut cross_candidates: SmallVec<[std::sync::Arc<TypeScheme>; 4]> =
                             SmallVec::new();
+                        let mut cross_targets = Vec::new();
                         for member in &members {
                             if let Some((file, _)) = self.env.symbol_index.get(member) {
                                 let env_data =
                                     super::dependencies::file_symbol(db, file, member.clone());
                                 if let Some(schemes) = env_data.data.functions.get(member.as_str())
                                 {
+                                    cross_targets
+                                        .extend(std::iter::repeat_n(member.clone(), schemes.len()));
                                     cross_candidates.extend(schemes.iter().cloned());
                                 }
                             }
@@ -3064,6 +3106,17 @@ impl<'db> InferenceContext<'db> {
                             .max_by_key(|c| specificity(c))
                             .filter(|c| specificity(c) > 0);
                         if let Some(best) = best_by_specificity.or_else(|| plausible.first()) {
+                            let unique = plausible.len() == 1
+                                || (specificity(best) > 0
+                                    && plausible
+                                        .iter()
+                                        .filter(|other| specificity(other) == specificity(best))
+                                        .count()
+                                        == 1);
+                            let target = cross_candidates
+                                .iter()
+                                .position(|candidate| std::sync::Arc::ptr_eq(candidate, best))
+                                .map(|i| cross_targets[i].clone());
                             // Freshen the whole signature and unify the
                             // arguments against it, the same way the direct
                             // cross-file call does. Instantiating the return
@@ -3072,7 +3125,7 @@ impl<'db> InferenceContext<'db> {
                             // int('n) -> bits('n)` — a bitvector of unknown
                             // width, which agreed with any declared width.
                             let best = (*best).clone();
-                            let (fresh, _) = self.freshen_scheme(&best);
+                            let (fresh, application_freshening) = self.freshen_scheme(&best);
                             let params: Vec<Ty> = fresh
                                 .params
                                 .iter()
@@ -3080,6 +3133,8 @@ impl<'db> InferenceContext<'db> {
                                 .filter(|(_, implicit)| !**implicit)
                                 .map(|(p, _)| self.table.insert_type_vars(p))
                                 .collect();
+                            let mut confirmed = params.len() == arg_types.len()
+                                && !arg_types.iter().any(Ty::is_error);
                             if params.len() == arg_types.len() {
                                 for (i, (param, actual)) in
                                     params.iter().zip(arg_types.iter()).enumerate()
@@ -3092,7 +3147,7 @@ impl<'db> InferenceContext<'db> {
                                         actual,
                                         arg_lits.get(i).copied().flatten(),
                                     );
-                                    let _ = self.table.unify(param, &actual);
+                                    confirmed &= self.table.unify(param, &actual);
                                 }
                             }
                             let expanded = self.table.normalize_alias_ty(&fresh.ret);
@@ -3103,6 +3158,39 @@ impl<'db> InferenceContext<'db> {
                                 arg_types.len(),
                                 locals,
                             );
+                            // The compatibility path does not discharge
+                            // predicates. Only expose an application when its
+                            // choice and complete, unconstrained signature are
+                            // actually confirmed; never specialize a merely
+                            // plausible first overload.
+                            if unique && confirmed && fresh.constraints.is_empty() {
+                                if let Some(target) = target {
+                                    self.result
+                                        .selected_overloads
+                                        .insert(callee_id, target.clone());
+                                    self.result.call_instantiations.insert(
+                                        callee_id,
+                                        super::CallInstantiation {
+                                            target,
+                                            ty: Ty::function(
+                                                fresh.params.clone(),
+                                                fresh.ret.clone(),
+                                            ),
+                                            implicit_params: fresh.implicit_params.clone(),
+                                            type_arguments: application_freshening
+                                                .entries
+                                                .iter()
+                                                .map(|entry| {
+                                                    (
+                                                        entry.orig_name.clone(),
+                                                        entry.infer_ty.clone(),
+                                                    )
+                                                })
+                                                .collect(),
+                                        },
+                                    );
+                                }
+                            }
                             return self.table.deep_resolve(&inserted);
                         }
                         // Every member was found and none of them accepts
@@ -3246,7 +3334,7 @@ impl<'db> InferenceContext<'db> {
         self.fill_assumptions(locals, &mut assumptions);
 
         let mut count_mismatch: Option<(usize, usize)> = None;
-        let mut candidate_errors: Vec<(String, Span, Box<TypeError>)> = Vec::new();
+        let mut candidate_errors: Vec<(usize, Span, Box<TypeError>, FreshenInfo)> = Vec::new();
         // The return type of a candidate dropped *only* for an unresolved
         // quantifier. `forall 'n, 'n >= 0. int('n) -> bool` called with a
         // plain `int` cannot pin `'n`, and the candidate goes — but the
@@ -3468,7 +3556,7 @@ impl<'db> InferenceContext<'db> {
                 let err_span = arg_spans.get(index).copied().unwrap_or(callee_span);
                 let sig_text = format_scheme_signature(&candidate);
                 candidate_errors.push((
-                    callee_name.clone(),
+                    ci,
                     err_span,
                     Box::new(TypeError::FunctionArg {
                         span: err_span,
@@ -3481,6 +3569,7 @@ impl<'db> InferenceContext<'db> {
                             )),
                         }),
                     }),
+                    freshen_info.clone(),
                 ));
                 continue;
             }
@@ -3538,7 +3627,7 @@ impl<'db> InferenceContext<'db> {
                     if !self.table.unify(expected, actual) {
                         let err_span = arg_spans.get(index).copied().unwrap_or(callee_span);
                         candidate_errors.push((
-                            callee_name.clone(),
+                            ci,
                             err_span,
                             Box::new(TypeError::FunctionArg {
                                 span: err_span,
@@ -3551,6 +3640,7 @@ impl<'db> InferenceContext<'db> {
                                     )),
                                 }),
                             }),
+                            freshen_info.clone(),
                         ));
                         break;
                     }
@@ -3636,11 +3726,114 @@ impl<'db> InferenceContext<'db> {
                         quant_only_ret.get_or_insert((normalised, deferred));
                     }
                 }
-                candidate_errors.push((callee_name.clone(), callee_span, Box::new(error)));
+                candidate_errors.push((ci, callee_span, Box::new(error), freshen_info.clone()));
                 continue;
             }
             // Candidate is viable — collect for specificity ranking
             viable.push((ci, ret_ty, subst, deferred, freshen_info));
+        }
+
+        if viable.is_empty() && !arg_types.iter().any(Ty::is_error) {
+            let failures = candidates
+                .iter()
+                .enumerate()
+                .map(|(index, candidate)| {
+                    let target = self
+                        .env
+                        .selected_overload_name(&callee_name, candidate)
+                        .unwrap_or_else(|| callee_name.clone());
+                    let signature = format_scheme_signature(candidate);
+                    let mut arguments = Vec::new();
+                    let reason = if let Some((_, span, error, freshening)) = candidate_errors
+                        .iter()
+                        .find(|(candidate_index, _, _, _)| *candidate_index == index)
+                    {
+                        arguments.extend(
+                            arg_spans
+                                .iter()
+                                .zip(args)
+                                .filter(|(argument, _)| {
+                                    argument.start <= span.start && span.end <= argument.end
+                                })
+                                .map(|(_, expr)| *expr),
+                        );
+                        if let TypeError::FailedConstraint { derived_from, .. } = error.as_ref() {
+                            arguments.extend(
+                                arg_spans
+                                    .iter()
+                                    .zip(args)
+                                    .filter(|(argument, _)| {
+                                        derived_from.iter().any(|origin| {
+                                            argument.start < origin.end
+                                                && origin.start < argument.end
+                                        })
+                                    })
+                                    .map(|(_, expr)| *expr),
+                            );
+                        }
+                        let mut text = error.message().0.plain_text();
+                        let mut replacements = Vec::new();
+                        for (token, span) in parser::tokenize(&text) {
+                            if let parser::Token::TyVal(name) = token {
+                                if let Some(entry) =
+                                    freshening.entries.iter().find(|entry| entry.fresh_name == name)
+                                {
+                                    replacements.push((span, entry.orig_name.clone()));
+                                }
+                            }
+                        }
+                        for (span, original) in replacements.iter().rev() {
+                            text.replace_range(span.start..span.end, original);
+                        }
+                        text
+                    } else {
+                        let required =
+                            candidate.implicit_params.iter().filter(|implicit| !**implicit).count();
+                        if args.len() < required || args.len() > candidate.params.len() {
+                            format!(
+                                "Expected {required}..{} arguments, received {}",
+                                candidate.params.len(),
+                                args.len()
+                            )
+                        } else if !plausible_indices.contains(&index) {
+                            arguments.extend_from_slice(args);
+                            "Argument type shapes do not match this candidate".into()
+                        } else {
+                            "This candidate did not satisfy the argument or result constraints"
+                                .into()
+                        }
+                    };
+                    arguments.sort_unstable();
+                    arguments.dedup();
+                    let status = candidate_errors
+                        .iter()
+                        .find(|(candidate_index, _, _, _)| *candidate_index == index)
+                        .map_or_else(
+                            || {
+                                let required = candidate
+                                    .implicit_params
+                                    .iter()
+                                    .filter(|implicit| !**implicit)
+                                    .count();
+                                if args.len() < required || args.len() > candidate.params.len() {
+                                    "arity"
+                                } else if !plausible_indices.contains(&index) {
+                                    "mismatch"
+                                } else {
+                                    "unknown"
+                                }
+                            },
+                            |(_, _, error, _)| match error.as_ref() {
+                                TypeError::FailedConstraint { proved_false: true, .. } => "refuted",
+                                TypeError::FailedConstraint { .. }
+                                | TypeError::UnresolvedQuants { .. } => "unknown",
+                                _ => "mismatch",
+                            },
+                        );
+                    super::CallCandidateFailure { target, signature, reason, status, arguments }
+                })
+                .collect();
+            self.result.call_failures.insert(callee_id, failures);
         }
 
         if std::env::var("SAIL_DBG_R").is_ok() {
@@ -3654,8 +3847,8 @@ impl<'db> InferenceContext<'db> {
         if !viable.is_empty() {
             // Score each viable candidate: prefer those with more concrete
             // (non-variable) parameter types ("most specific" rule).
-            let best = if viable.len() == 1 {
-                0
+            let (best, unique) = if viable.len() == 1 {
+                (0, true)
             } else {
                 let mut scored: Vec<(usize, usize)> = viable
                     .iter()
@@ -3677,7 +3870,7 @@ impl<'db> InferenceContext<'db> {
                     })
                     .collect();
                 scored.sort_by_key(|b| std::cmp::Reverse(b.1)); // most specific first
-                scored[0].0
+                (scored[0].0, scored[0].1 > scored[1].1)
             };
             let (ci, ret_ty, subst, deferred, freshening) = &viable[best];
             for goal in deferred {
@@ -3757,6 +3950,27 @@ impl<'db> InferenceContext<'db> {
             }
             // Resolve Bidir return types from mapping val specs.
             self.defer_implicit_arguments(callee_id, &winner, arg_types.len(), locals);
+            if unique && !arg_types.iter().any(Ty::is_error) {
+                let target = self
+                    .result
+                    .selected_overloads
+                    .get(&callee_id)
+                    .cloned()
+                    .unwrap_or_else(|| callee_name.clone());
+                self.result.call_instantiations.insert(
+                    callee_id,
+                    super::CallInstantiation {
+                        target,
+                        ty: Ty::function(winner.params.clone(), winner.ret.clone()),
+                        implicit_params: winner.implicit_params.clone(),
+                        type_arguments: confirmed_freshening
+                            .entries
+                            .iter()
+                            .map(|entry| (entry.orig_name.clone(), entry.infer_ty.clone()))
+                            .collect(),
+                    },
+                );
+            }
             if let TyKind::Bidir { lhs, rhs } = ret_ty.kind() {
                 if !arg_types.is_empty() {
                     if self.table.unify(&arg_types[0], lhs) {
@@ -3812,7 +4026,7 @@ impl<'db> InferenceContext<'db> {
             //
             // When all arity-matching candidates fail type checking,
             // the error from the first candidate is propagated.
-            if let Some((_name, err_span, type_error)) = candidate_errors.first() {
+            if let Some((_index, err_span, type_error, _freshening)) = candidate_errors.first() {
                 match type_error.as_ref() {
                     TypeError::FunctionArg { ty: expected_ty, error, .. } => {
                         if let TypeError::Subtype { lhs: actual_ty, .. } = error.as_ref() {

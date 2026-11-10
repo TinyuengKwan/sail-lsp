@@ -1,4 +1,5 @@
-//! Project-scoped discovery. Editors execute explicit tasks; compiler checks
+//! Project-scoped discovery shared by native editor tasks and the standard
+//! LSP command fallback. Compiler checks
 //! go through Flycheck's negotiated protocol, cancellation and diagnostic queue.
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
@@ -173,15 +174,19 @@ pub(crate) fn discover(snap: &GlobalStateSnapshot, source: &Url) -> anyhow::Resu
                 text_document: Some(identifier.clone()),
             }),
         };
+        let config = snap.config_for_uri(
+            &Url::from_directory_path(&project.workspace_root)
+                .unwrap_or_else(|_| identifier.uri.clone()),
+        );
         let mut entries = vec![check];
-        for (index, task) in snap.config.runnables.tasks.iter().enumerate() {
+        for (index, task) in config.runnables.tasks.iter().enumerate() {
             if task.project.as_ref().is_some_and(|filter| {
                 syntax::preprocess::normalize_path(&project.workspace_root.join(filter))
                     != syntax::preprocess::normalize_path(&project.manifest)
             }) {
                 continue;
             }
-            let result = process(project, &snap.config.flycheck.command, task, &roots);
+            let result = process(project, &config.flycheck.command, task, &roots);
             let (command, problem) = match result {
                 Ok(command) => (command, None),
                 Err(reason) => (
@@ -209,7 +214,7 @@ pub(crate) fn discover(snap: &GlobalStateSnapshot, source: &Url) -> anyhow::Resu
             runnable.fingerprint = crate::code_action_helpers::source_fingerprint(
                 &json!({
                     "runnable": runnable, "configuration": project.config,
-                    "compiler": snap.config.flycheck, "manifest": project.manifest_text,
+                    "compiler": config.flycheck, "manifest": project.manifest_text,
                 })
                 .to_string(),
             );

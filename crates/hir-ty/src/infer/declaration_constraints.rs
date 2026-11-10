@@ -255,7 +255,12 @@ fn file_metadata(db: &dyn salsa::Database, file: FileText) -> Vec<Option<Definit
         .into_iter()
         .flat_map(|root| {
             root.children()
-                .map(|node| definition(node, base_db::strict_bitvector(db)))
+                .map(|node| {
+                    definition(
+                        node,
+                        base_db::preprocess::strict_bitvector_for_file(db, file.file_id(db)),
+                    )
+                })
                 .collect::<Vec<_>>()
         })
         .collect()
@@ -392,6 +397,67 @@ impl Checker<'_> {
                     .then_some(Point::Local(i))
             }),
         }
+    }
+
+    /// The same declaration-sensitive projection used by expression inference.
+    /// In particular, imported constraints are evidence and numeric aliases may
+    /// be symbolic conditionals rather than closed integer constants.
+    fn proof_context(
+        &mut self,
+        at: Point,
+        text: &str,
+        facts: &[ConstraintExpr],
+    ) -> (Option<crate::query::ArcTopLevelEnv>, Vec<ConstraintExpr>) {
+        let Point::Ordered(declaration) = at else { return (None, facts.to_vec()) };
+        let Some(db) = self.db else { return (None, facts.to_vec()) };
+        let mut names = dependencies::names_in(text);
+        for fact in facts {
+            names.extend(dependencies::names_in(&fact.to_text()));
+        }
+        let environment = dependencies::ordered::environment(db, declaration, names).clone();
+        let mut assumptions = facts.to_vec();
+        for fact in &environment.0.env.global_constraints {
+            if !assumptions.contains(fact) {
+                assumptions.push(fact.clone());
+            }
+        }
+        let expanded: Vec<_> =
+            assumptions.iter().map(|fact| Self::expand_constraint(fact, &environment)).collect();
+        assumptions.extend(expanded);
+        (Some(environment), assumptions)
+    }
+
+    fn expand_constraint(
+        value: &ConstraintExpr,
+        environment: &crate::query::ArcTopLevelEnv,
+    ) -> ConstraintExpr {
+        let value = constraint::expand_constraint_synonyms(
+            value,
+            &environment.0.env.constraint_synonyms,
+            0,
+        );
+        constraint::numeric_alias_unfoldings(&value, &environment.0.env.alias_schemes)
+            .pop()
+            .unwrap_or(value)
+    }
+
+    fn expand_number(
+        value: NumericExpr,
+        environment: Option<&crate::query::ArcTopLevelEnv>,
+    ) -> NumericExpr {
+        let Some(environment) = environment else { return value };
+        let mut value = value;
+        for _ in 0..4 {
+            let next = constraint::expand_numeric_aliases_in_numeric(
+                &value,
+                &environment.0.env.alias_schemes,
+            );
+            if next == value {
+                break;
+            }
+            value = next;
+        }
+        value
     }
 
     // Evaluate aliases in their own declaration environments. A later alias
@@ -605,6 +671,8 @@ impl Checker<'_> {
         if depth > 64 {
             return None;
         }
+        let (environment, facts) = self.proof_context(at, &ty.display_text(), facts);
+        let facts = facts.as_slice();
         match ty.kind() {
             TyKind::Error | TyKind::Infer(_) => None,
             TyKind::Tuple(types) => all_known(
@@ -635,6 +703,7 @@ impl Checker<'_> {
                         .number(at, &text, 0)
                         .map(NumericExpr::from_integer)
                         .or_else(|| NumericExpr::parse(&text))?;
+                    let width = Self::expand_number(width, environment.as_ref());
                     let goal = ConstraintExpr::Compare {
                         lhs: width,
                         op: CompareOp::Gte,
@@ -723,6 +792,8 @@ impl Checker<'_> {
         if let Some(db) = self.db {
             db.unwind_if_revision_cancelled();
         }
+        let (environment, assumptions) = self.proof_context(at, &ty.display_text(), assumptions);
+        let assumptions = assumptions.as_slice();
         match ty.kind() {
             TyKind::App { name, args, .. } | TyKind::Named(name, args) => {
                 for arg in args {
@@ -749,7 +820,7 @@ impl Checker<'_> {
                         .map(NumericExpr::from_integer)
                         .or_else(|| NumericExpr::parse(&text))?;
                     let goal = ConstraintExpr::Compare {
-                        lhs: width,
+                        lhs: Self::expand_number(width, environment.as_ref()),
                         op: CompareOp::Gte,
                         rhs: NumericExpr::from_integer(0.into()),
                     };
@@ -780,10 +851,17 @@ impl Checker<'_> {
                                 &HashMap::new(),
                             );
                             if definition.kinds.get(param) == Some(&Kind::Int) {
-                                if let Some(n) =
-                                    arg.as_value_str().and_then(|s| self.number(at, &s, 0))
-                                {
-                                    return TyArg::Nexp(NumericExpr::from_integer(n));
+                                if let Some(text) = arg.as_value_str() {
+                                    if let Some(value) = self
+                                        .number(at, &text, 0)
+                                        .map(NumericExpr::from_integer)
+                                        .or_else(|| NumericExpr::parse(&text))
+                                    {
+                                        return TyArg::Nexp(Self::expand_number(
+                                            value,
+                                            environment.as_ref(),
+                                        ));
+                                    }
                                 }
                             }
                             arg
@@ -801,7 +879,11 @@ impl Checker<'_> {
                             substitution::apply_arguments(&wrapper, &definition.params, &args)
                         {
                             if let TyKind::Exist { constraint, .. } = instantiated.kind() {
-                                if solver::solve(constraint, &Subst::default(), assumptions)
+                                let expanded = environment.as_ref().map(|environment| {
+                                    Self::expand_constraint(constraint, environment)
+                                });
+                                let goal = expanded.as_ref().unwrap_or(constraint);
+                                if solver::solve(goal, &Subst::default(), assumptions)
                                     == ConstraintStatus::Failed
                                 {
                                     return Some((selected, constraint.clone()));
@@ -861,6 +943,38 @@ impl Checker<'_> {
 /// Check explicit type applications and declaration RHSs. Default mode reports
 /// refuted constraints; strict bitvector declarations additionally require a
 /// proof of nonnegative width under their declared parameter constraints.
+#[salsa::tracked(returns(ref), lru = 4294967295)]
+pub fn declaration_diagnostics(db: &dyn salsa::Database, file: FileText) -> Vec<Diagnostic> {
+    let _budget = crate::solver_budget::SolverBudget::enter(
+        crate::CancellationToken::never(),
+        Default::default(),
+    );
+    let incomplete_before = crate::solver_budget::SolverBudget::incomplete_count();
+    let Some(root) = syntax::parse_query::semantic_parse_file(db, file).syntax_node() else {
+        return Vec::new();
+    };
+    let mut symbols = syntax::preprocess::default_symbols();
+    let mut conditionals = syntax::preprocess::CondFilter::new();
+    let defs: Vec<_> = root
+        .children()
+        .filter(|node| {
+            conditionals.accept(node, &mut symbols, None)
+                || (node.kind() == SK::DIRECTIVE_DEF && conditionals.taking())
+        })
+        .collect();
+    let diagnostics = check(Some((db, file)), &defs);
+    // A timeout or exhausted request budget is not stable semantic evidence.
+    // Keep normal declaration results cached; retry incomplete proofs after edits.
+    if crate::solver_budget::SolverBudget::incomplete_count() != incomplete_before {
+        db.report_untracked_read();
+    }
+    diagnostics
+}
+
+pub(crate) fn set_cache_capacity(db: &mut dyn salsa::Database, capacity: usize) {
+    declaration_diagnostics::set_lru_capacity(db, capacity);
+}
+
 pub fn check(
     input: Option<(&dyn salsa::Database, FileText)>,
     defs: &[SyntaxNode],
@@ -872,7 +986,9 @@ pub fn check(
         metadata: HashMap::new(),
         table: InferenceTable::new(),
         numbers: HashMap::new(),
-        strict_bitvector: input.is_some_and(|(db, _)| base_db::strict_bitvector(db)),
+        strict_bitvector: input.is_some_and(|(db, file)| {
+            base_db::preprocess::strict_bitvector_for_file(db, file.file_id(db))
+        }),
     };
     for node in defs {
         checker.table.reserve_source_names(&node.text().to_string());
@@ -1084,7 +1200,7 @@ pub fn undefined_error(
         metadata: HashMap::new(),
         table: InferenceTable::new(),
         numbers: HashMap::new(),
-        strict_bitvector: base_db::strict_bitvector(db),
+        strict_bitvector: base_db::preprocess::strict_bitvector_for_file(db, file.file_id(db)),
     };
     if checker.undefined_allowed(at, ty, 0) == Some(false) {
         Some(format!("Type {} cannot be undefined", ty.display_text()))

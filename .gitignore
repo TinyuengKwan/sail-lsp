@@ -5,11 +5,11 @@ Cargo.lock.bak
 .DS_Store
 __pycache__/
 *.pyc
-/sail_smt_cache
+# Sail may write its SMT memo in the working directory, including crate roots.
+sail_smt_cache
 /.claude
 
-# The packaged server binary is a build output — `npm run package:local`
-# writes it. It was tracked, so every rebuild committed a new ~47 MB blob.
+# Packaged server binaries are build outputs.
 editors/code/server/sail-lsp
 editors/code/server/sail-lsp.exe
 

@@ -694,6 +694,7 @@ dependencies = [
  "salsa",
  "smol_str 0.3.6 (registry+https://github.com/rust-lang/crates.io-index)",
  "syntax",
+ "tracing",
  "vfs",
 ]
 
@@ -708,6 +709,7 @@ dependencies = [
  "rustc-hash 2.1.2",
  "salsa",
  "syntax",
+ "tracing",
  "vfs",
 ]
 
@@ -739,6 +741,7 @@ name = "ide"
 version = "0.1.0"
 dependencies = [
  "base-db",
+ "dissimilar",
  "expect-test",
  "hir",
  "ide-assists",
@@ -754,6 +757,7 @@ dependencies = [
  "serde_json",
  "syntax",
  "tempfile",
+ "tracing",
  "url",
  "vfs",
 ]

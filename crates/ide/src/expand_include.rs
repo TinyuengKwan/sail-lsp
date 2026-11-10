@@ -1,114 +1,149 @@
-//! Expand $include — preview included content.
-//!
-//! of a preprocessor directive. For Sail, this means showing what
-//! files are transitively included and their contents.
-//!
-//! Used as a custom LSP command `sail-lsp/expandInclude`.
+//! Read-only preprocessing transcript, from the production walker.
+use base_db::{preprocess::InstanceKey, FileId};
+use hir::preprocess::{TraceKind, TraceStep};
+use syntax::preprocess::Event;
 
-use base_db::FileId;
-use hir::include_graph::IncludeGraph;
-
-/// Result of expanding includes for a file.
 #[derive(Debug, Clone)]
-pub struct ExpandIncludeResult {
-    /// The root file's name/path.
-    pub root: String,
-    /// Combined expansion text showing all included content.
-    pub expansion: String,
+pub struct ExpansionMapping {
+    pub generated: base_db::TextRange,
+    pub original: hir::FileRange,
+    pub kind: &'static str,
 }
 
-/// Expand all $include directives for a file, showing the transitive
-/// closure of included file contents.
-///
-/// `file_text`: callback to get text for a FileId.
-/// `file_name`: callback to get display name for a FileId.
-pub fn expand_includes(
-    graph: &IncludeGraph,
-    root: FileId,
-    file_text: &dyn Fn(FileId) -> Option<String>,
-    file_name: &dyn Fn(FileId) -> String,
+#[derive(Debug, Clone)]
+pub struct ExpandIncludeResult {
+    pub root: String,
+    pub expansion: String,
+    pub context: Option<InstanceKey>,
+    pub mappings: Vec<ExpansionMapping>,
+}
+
+/// Render only the selected visit and its descendants. The incoming environment
+/// already includes effects of earlier project roots and includes. Inactive
+/// source never appears as active code; its directive is retained as evidence.
+pub fn render(
+    selected: &InstanceKey,
+    trace: &[TraceStep],
+    file_text: impl Fn(FileId) -> Option<String>,
+    file_name: impl Fn(FileId) -> String,
 ) -> ExpandIncludeResult {
-    let root_name = file_name(root);
-    let mut expansion = String::new();
-
-    // Show root file content
-    if let Some(text) = file_text(root) {
-        expansion.push_str(&format!("// === {} ===\n", root_name));
-        expansion.push_str(&text);
-        expansion.push('\n');
-    }
-
-    // Show transitively included files
-    let included = graph.transitive_includes(root);
-    if !included.is_empty() {
-        expansion.push_str(&format!("\n// --- {} file(s) included ---\n\n", included.len()));
-
-        // Use topological order if available
-        let ordered: Vec<FileId> = graph
-            .topological_order()
-            .map(|order| order.into_iter().filter(|f| included.contains(f)).collect())
-            .unwrap_or_else(|| included.into_iter().collect());
-
-        for fid in ordered {
-            let name = file_name(fid);
-            if let Some(text) = file_text(fid) {
-                expansion.push_str(&format!("// === $include {} ===\n", name));
-                expansion.push_str(&text);
-                expansion.push_str("\n\n");
+    let mut result = ExpandIncludeResult {
+        root: file_name(selected.root),
+        expansion: String::new(),
+        context: Some(selected.clone()),
+        mappings: Vec::new(),
+    };
+    let mut sources = std::collections::HashMap::new();
+    for step in trace.iter().filter(|step| {
+        step.key.root == selected.root
+            && step.key.occurrence == selected.occurrence
+            && step.key.module == selected.module
+            && step.key.includes.starts_with(&selected.includes)
+    }) {
+        let Some((text, events)) = sources.entry(step.source).or_insert_with(|| {
+            file_text(step.source).map(|text| {
+                let root = syntax::parse_text(&text).0;
+                let events = root
+                    .children()
+                    .filter_map(|node| {
+                        Event::from_node(&node).map(|event| (node.text_range(), event))
+                    })
+                    .collect::<Vec<_>>();
+                (text, events)
+            })
+        }) else {
+            continue;
+        };
+        match &step.kind {
+            TraceKind::Enter { symbols, target } => {
+                result.expansion.push_str(&format!(
+                    "// Enter {} (module {:?}, occurrence {}, includes {:?})\n// Target: {}; symbols: {}\n",
+                    file_name(step.source), step.key.module, step.key.occurrence, step.key.includes,
+                    target.as_deref().unwrap_or("default"), symbols.join(", "),
+                ));
+            }
+            TraceKind::Region { ordinal, active } => {
+                let start = ordinal
+                    .checked_sub(1)
+                    .and_then(|i| events.get(i))
+                    .map_or(0, |(range, _)| base_db::range_end(*range));
+                let end = events
+                    .get(*ordinal)
+                    .map_or(text.len(), |(range, _)| base_db::range_start(*range));
+                if *active && start < end {
+                    append(&mut result, step.source, start, end, &text[start..end], "source");
+                } else if !*active && !text[start..end].trim().is_empty() {
+                    result.expansion.push_str("// Inactive source omitted\n");
+                }
+            }
+            TraceKind::Event {
+                ordinal,
+                active,
+                following_active,
+                symbols_added,
+                include_target,
+            } => {
+                let Some((range, event)) = events.get(*ordinal) else { continue };
+                let start = base_db::range_start(*range);
+                let end = base_db::range_end(*range);
+                let raw = &text[start..end];
+                result.expansion.push_str(if *active { "// Active: " } else { "// Inactive: " });
+                // Keep every line commented; source text is never interpreted as
+                // transcript metadata or an executable command.
+                let label = raw.replace('\n', "\n// ");
+                append(&mut result, step.source, start, end, &label, "directive");
+                result.expansion.push('\n');
+                if matches!(
+                    event,
+                    Event::Ifdef(..) | Event::IfTarget(_) | Event::Else | Event::Endif
+                ) {
+                    result.expansion.push_str(if *following_active {
+                        "// Following region: active\n"
+                    } else {
+                        "// Following region: inactive\n"
+                    });
+                }
+                if let Some(target) = include_target {
+                    result.expansion.push_str(&match target {
+                        Ok(id) => format!("// Include resolved: {}\n", file_name(*id)),
+                        Err(path) => format!("// Include missing: {}\n", path.display()),
+                    });
+                }
+                if !symbols_added.is_empty() {
+                    result.expansion.push_str(&format!(
+                        "// Symbols added after directive: {}\n",
+                        symbols_added.join(", ")
+                    ));
+                }
+                if *active && matches!(event, Event::Order(_) | Event::Other) {
+                    append(&mut result, step.source, start, end, raw, "source");
+                    result.expansion.push('\n');
+                }
+            }
+            TraceKind::Cycle => result
+                .expansion
+                .push_str(&format!("// Include cycle/depth limit: {}\n", file_name(step.source))),
+            TraceKind::Exit => {
+                result.expansion.push_str(&format!("\n// Leave {}\n", file_name(step.source)))
             }
         }
     }
-
-    ExpandIncludeResult { root: root_name, expansion }
+    result
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::HashMap;
-
-    #[test]
-    fn expand_single_include() {
-        let mut graph = IncludeGraph::new();
-        graph.add_edge(FileId::from_raw(0), FileId::from_raw(1));
-
-        let texts: HashMap<FileId, String> = [
-            (
-                FileId::from_raw(0),
-                "// main\n$include \"lib.sail\"\nfunction main() = 1\n".to_string(),
-            ),
-            (FileId::from_raw(1), "val helper : int -> int\n".to_string()),
-        ]
-        .into();
-
-        let names: HashMap<FileId, String> = [
-            (FileId::from_raw(0), "main.sail".to_string()),
-            (FileId::from_raw(1), "lib.sail".to_string()),
-        ]
-        .into();
-
-        let result =
-            expand_includes(&graph, FileId::from_raw(0), &|fid| texts.get(&fid).cloned(), &|fid| {
-                names.get(&fid).cloned().unwrap_or_else(|| format!("{:?}", fid))
-            });
-
-        assert!(result.expansion.contains("main.sail"));
-        assert!(result.expansion.contains("lib.sail"));
-        assert!(result.expansion.contains("val helper"));
-    }
-
-    #[test]
-    fn expand_no_includes() {
-        let graph = IncludeGraph::new();
-
-        let result = expand_includes(
-            &graph,
-            FileId::from_raw(0),
-            &|_| Some("val x : int\n".to_string()),
-            &|_| "file.sail".to_string(),
-        );
-
-        assert!(result.expansion.contains("val x : int"));
-        assert!(!result.expansion.contains("included"));
-    }
+fn append(
+    result: &mut ExpandIncludeResult,
+    file: FileId,
+    start: usize,
+    end: usize,
+    text: &str,
+    kind: &'static str,
+) {
+    let generated = result.expansion.len();
+    result.expansion.push_str(text);
+    result.mappings.push(ExpansionMapping {
+        generated: base_db::text_range(generated, result.expansion.len()),
+        original: hir::FileRange { file_id: file, range: base_db::text_range(start, end) },
+        kind,
+    });
 }

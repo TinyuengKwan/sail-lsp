@@ -18,7 +18,7 @@ all modules, each root, a pair of roots, and direct `requires` edges including
 isolated module nodes. Both dependency-graph evaluators receive the same typed
 variables. RISC-V runs with `RMEM=false` and `RMEM=true`. A small conditional
 dependency fixture and a file path containing a space guard the oracle itself.
-Six monitor tests cover typed CLI limitations, malformed graphs, nonzero graph
+Monitor tests cover typed CLI limitations, malformed graphs, nonzero graph
 process status, missing model sources and timeout handling.
 
 Armv9.4-A is an additional real model, with its devices and no-devices source

@@ -78,15 +78,25 @@ pub struct CallableBody {
 }
 
 impl CallableBodies {
-    /// Build a cache from a CST root node.
+    /// Build all callable groups from one CST.
     pub fn from_cst(root: &syntax::SyntaxNode) -> Self {
-        use parser::SyntaxKind as SK;
-        use syntax::ast::{
-            AstNode as _, CallableDef, CallableSpec, NamedDef, ParamList, ScatteredClauseDef,
-        };
+        Self::from_definitions(
+            Self::definitions(root),
+            &root.text().to_string(),
+            &Self::register_names(root),
+        )
+    }
 
+    pub fn from_callable_entries(mut entries: Vec<CallableBody>) -> Self {
+        entries.sort_by_key(|entry| entry.def_span.start);
+        Self { entries }
+    }
+
+    pub fn register_names(root: &syntax::SyntaxNode) -> std::collections::HashSet<String> {
+        use parser::SyntaxKind as SK;
+        use syntax::ast::{AstNode as _, NamedDef};
         // Collect register names from NAMED_DEF nodes for effect detection.
-        let register_names: std::collections::HashSet<String> = root
+        let names: std::collections::HashSet<String> = root
             .children()
             .filter(|c| NamedDef::can_cast(c.kind()))
             .filter(|c| {
@@ -102,30 +112,13 @@ impl CallableBodies {
             })
             .collect();
 
-        // Collect names of functions declared as `pure` in val specs.
-        // A val spec like `val foo = pure { c: "c_foo" } : ...` or containing
-        // `pure` keyword marks the function as side-effect-free.
-        let _pure_functions: std::collections::HashSet<String> = root
-            .children()
-            .filter(|c| CallableSpec::can_cast(c.kind()))
-            .filter(|c| {
-                let text = c.text().to_string();
-                text.contains(" pure ") || text.contains("= pure")
-            })
-            .filter_map(|c| {
-                c.descendants_with_tokens()
-                    .filter_map(|el| el.into_token())
-                    .find(|t| t.kind() == SK::IDENT)
-                    .map(|t| t.text().to_string())
-            })
-            .collect();
+        names
+    }
 
-        let source = root.text().to_string();
-        let mut entries = Vec::new();
-        // Bodies inside a non-taken `$ifdef` branch must be skipped, exactly
-        // as they are when building the ItemTree and the type environment.
-        // Otherwise a body is inferred against an environment that dropped
-        // the very definitions it calls.
+    /// Body-bearing declarations, retaining preprocessing and outcome order.
+    pub fn definitions(root: &syntax::SyntaxNode) -> Vec<syntax::SyntaxNode> {
+        use parser::SyntaxKind as SK;
+        use syntax::ast::{AstNode as _, CallableDef, ScatteredClauseDef};
         let mut symbols = syntax::preprocess::default_symbols();
         let mut cond = syntax::preprocess::CondFilter::new();
         // `impl emulator(request) = { .. }` inside an `outcome` is a
@@ -135,6 +128,7 @@ impl CallableBodies {
         // checks it like any other funcl (`Impl funcl`, parser.mly:1401).
         let mut defs: Vec<syntax::SyntaxNode> = Vec::new();
         for child in root.children() {
+            syntax::cancellation_checkpoint();
             if !cond.accept(&child, &mut symbols, None) {
                 continue;
             }
@@ -143,7 +137,40 @@ impl CallableBodies {
             }
             defs.push(child);
         }
+        defs.into_iter()
+            .filter(|node| {
+                (CallableDef::can_cast(node.kind())
+                    || ScatteredClauseDef::can_cast(node.kind())
+                    || (node.kind() == SK::NAMED_DEF && Self::is_top_level_binding(node)))
+                    && Self::cst_callable_body_node(node).is_some()
+                    && !(node.kind() == SK::SCATTERED_CLAUSE_DEF
+                        && node
+                            .children_with_tokens()
+                            .any(|t| matches!(t.kind(), SK::KW_ENUM | SK::KW_UNION)))
+            })
+            .collect()
+    }
+
+    pub fn definition_name(node: &syntax::SyntaxNode) -> String {
+        let name = Self::cst_callable_name(node);
+        if name.is_empty() && Self::is_top_level_binding(node) {
+            "_".into()
+        } else {
+            name
+        }
+    }
+
+    pub fn from_definitions(
+        defs: Vec<syntax::SyntaxNode>,
+        source: &str,
+        register_names: &std::collections::HashSet<String>,
+    ) -> Self {
+        syntax::cancellation_checkpoint();
+        use parser::SyntaxKind as SK;
+        use syntax::ast::{AstNode as _, CallableDef, ParamList, ScatteredClauseDef};
+        let mut entries = Vec::new();
         for child in defs {
+            syntax::cancellation_checkpoint();
             // Process CALLABLE_DEF (regular function/mapping) and
             // SCATTERED_CLAUSE_DEF (function clause/mapping clause).
             // Clauses produce separate callable bodies that share the
@@ -160,11 +187,11 @@ impl CallableBodies {
                 let name = Self::cst_callable_name(&child);
                 let range = child.text_range();
                 let (body, source_map) = Body::lower_body(&body_node);
-                let effects = collect_effect_tags(&body, &register_names);
+                let effects = collect_effect_tags(&body, register_names);
                 entries.push(CallableBody {
                     name: if name.is_empty() { "_".to_string() } else { name },
                     def_span: Span::new(usize::from(range.start()), usize::from(range.end())),
-                    body_span: Self::trimmed_span(&body_node, &source),
+                    body_span: Self::trimmed_span(&body_node, source),
                     initializer_type: child
                         .children()
                         .find(|node| node.kind().is_type_node())
@@ -214,20 +241,20 @@ impl CallableBodies {
                 if is_mapping {
                     // Mapping: lower body and extract mapping arms from <-> infix
                     let (mut body, mut source_map) = Body::lower_body(&body_node);
-                    let bs = Self::trimmed_span(&body_node, &source);
+                    let bs = Self::trimmed_span(&body_node, source);
                     // The clauses now come from the CST — `MAPPING_CLAUSE`
                     // carries a real pattern and a real body expression.
                     // The text scrape below is the fallback for the shapes
                     // the grammar still does not reach.
                     if body.mapping_arms.is_empty() {
-                        Self::extract_mapping_arms_from_body(&mut body, &source, bs);
+                        Self::extract_mapping_arms_from_body(&mut body, source, bs);
                     }
                     // A guarded clause never reaches the parser as a `<->`
                     // expression: `I(imm) if e == 0b0 <-> ..` leaves the body
                     // node covering `I(imm)` alone. Rebuild the arm from the
                     // clause's text.
                     if body.mapping_arms.is_empty() {
-                        if let Some(rebuilt) = Self::mapping_arm_from_text(&child, &source) {
+                        if let Some(rebuilt) = Self::mapping_arm_from_text(&child, source) {
                             let (b, sm) = rebuilt;
                             body = b;
                             source_map = sm;
@@ -236,7 +263,7 @@ impl CallableBodies {
                     entries.push(CallableBody {
                         name: name.clone(),
                         def_span,
-                        body_span: Self::trimmed_span(&body_node, &source),
+                        body_span: Self::trimmed_span(&body_node, source),
                         initializer_type: None,
                         body: Arc::new(body),
                         source_map: Arc::new(source_map),
@@ -256,7 +283,7 @@ impl CallableBodies {
                             source_map = sm;
                         }
                     }
-                    let mut effects = collect_effect_tags(&body, &register_names);
+                    let mut effects = collect_effect_tags(&body, register_names);
                     // Mark scattered clause with Scattered effect
                     if is_scattered_clause {
                         effects.insert(EffectTag::Scattered);
@@ -264,7 +291,7 @@ impl CallableBodies {
                     entries.push(CallableBody {
                         name: name.clone(),
                         def_span,
-                        body_span: Self::trimmed_span(&body_node, &source),
+                        body_span: Self::trimmed_span(&body_node, source),
                         initializer_type: None,
                         body: Arc::new(body),
                         source_map: Arc::new(source_map),
@@ -626,6 +653,16 @@ impl CallableBodies {
         &self.entries
     }
 
+    /// Attach the semantic file identity once, when publishing these arenas.
+    /// Consumers can then share the immutable source maps without patching a
+    /// cloned map on every position query. Include views retain their own ID.
+    pub fn with_file_id(mut self, file_id: base_db::FileId) -> Self {
+        for entry in &mut self.entries {
+            Arc::make_mut(&mut entry.source_map).file_id = Some(file_id);
+        }
+        self
+    }
+
     /// Build from pre-computed entries (for testing).
     pub fn from_entries(entries: Vec<(String, Span, BTreeSet<EffectTag>)>) -> Self {
         use crate::body::BodySourceMap;
@@ -641,7 +678,7 @@ impl CallableBodies {
                 let body = Body::new(store, vec![], id);
                 let source_map = BodySourceMap {
                     file_id: None,
-                    store: expr_source_map,
+                    store: Arc::new(expr_source_map),
                     def_base: 0,
                     source_tokens: Vec::new(),
                 };

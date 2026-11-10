@@ -103,10 +103,10 @@ impl FileDb for TestFile {
 
     fn tokens(&self) -> Option<&[(Token, Span)]> {
         let parsed = syntax::parse_query::parse_file(&self.db, self.input);
-        if parsed.tokens.is_empty() {
+        if parsed.tokens().is_empty() {
             None
         } else {
-            Some(parsed.tokens.as_slice())
+            Some(parsed.tokens().as_slice())
         }
     }
 

@@ -58,7 +58,84 @@ pub(crate) fn incremental_reparse_with_fixities(
             old_range,
         ));
     }
+    if let Some(result) = reparse_tokens(node, delete, insert, &errors) {
+        return Some(result);
+    }
     None
+}
+
+/// Several independent name/literal replacements, such as a versioned rename
+/// sent back as one full-text update. Require identical token kinds and trivia;
+/// each replacement must also pass the ordinary token-boundary/error checks.
+/// This never reparses a structurally changed declaration in isolation.
+fn reparse_tokens(
+    root: &SyntaxNode,
+    delete: TextRange,
+    insert: &str,
+    errors: &[SyntaxError],
+) -> Option<(GreenNode, Vec<SyntaxError>, TextRange)> {
+    let first = root.token_at_offset(delete.start()).left_biased()?;
+    let last = root.token_at_offset(delete.end()).left_biased()?;
+    let range = TextRange::new(first.text_range().start(), last.text_range().end());
+    if !range.contains_range(delete) || range == first.text_range() {
+        return None;
+    }
+    // SyntaxText::slice still walks tokens preceding the slice. Start from
+    // the already-located token so a rename near EOF never scans the prefix.
+    let mut before = String::new();
+    let mut token = Some(first.clone());
+    while let Some(current) = token {
+        before.push_str(current.text());
+        if current == last {
+            break;
+        }
+        token = following_token(&current);
+    }
+    if before.len() != usize::from(range.len()) {
+        return None;
+    }
+    let mut after = before.clone();
+    let local = delete - range.start();
+    after.replace_range(usize::from(local.start())..usize::from(local.end()), insert);
+    let old = parser::LexedStr::new(&before);
+    let new = parser::LexedStr::new(&after);
+    if old.len() != new.len() {
+        return None;
+    }
+    let mut offset = range.start();
+    let mut edits = Vec::new();
+    for index in 0..old.len() {
+        let previous = old.text(index);
+        let replacement = new.text(index);
+        let token_range = TextRange::at(offset, TextSize::of(previous));
+        offset = token_range.end();
+        if old.kind(index) != new.kind(index) {
+            return None;
+        }
+        if previous == replacement {
+            continue;
+        }
+        if !is_replaceable_token(old.kind(index))
+            || edits.len() >= 64
+            || errors.iter().any(|e| {
+                e.range().start() <= token_range.end() && e.range().end() >= token_range.start()
+            })
+        {
+            return None;
+        }
+        edits.push((token_range, replacement));
+    }
+    if edits.len() < 2 {
+        return None;
+    }
+    let mut current = root.clone();
+    let mut errors = errors.to_vec();
+    for (delete, insert) in edits.into_iter().rev() {
+        let (green, new_errors, old_range) = reparse_token(&current, delete, insert)?;
+        errors = merge_errors(errors, new_errors, old_range, delete, insert);
+        current = SyntaxNode::new_root(green);
+    }
+    Some((current.green().into_owned(), errors, range))
 }
 
 /// Strategy 1: Token-level reparsing.
@@ -89,7 +166,9 @@ fn reparse_token(
             }
 
             // Check that the edited token is not part of a bigger token.
-            if let Some(next_char) = root.text().char_at(prev_token.text_range().end()) {
+            if let Some(next_char) =
+                following_token(&prev_token).and_then(|token| token.text().chars().next())
+            {
                 new_text.push(next_char);
                 let token_with_next_char = parser::single_token(&new_text);
                 if token_with_next_char.is_some() {
@@ -103,7 +182,7 @@ fn reparse_token(
             Some((prev_token.replace_with(new_token), vec![], prev_token.text_range()))
         }
         // IDENT tokens (Sail identifiers, keywords are separate tokens)
-        k if is_ident_like(k) => {
+        k if is_replaceable_token(k) => {
             let mut new_text = get_text_after_edit(prev_token.clone().into(), delete, insert);
             let (new_token_kind, new_err) = parser::single_token(&new_text)?;
 
@@ -112,7 +191,9 @@ fn reparse_token(
             }
 
             // Check not merging with adjacent token
-            if let Some(next_char) = root.text().char_at(prev_token.text_range().end()) {
+            if let Some(next_char) =
+                following_token(&prev_token).and_then(|token| token.text().chars().next())
+            {
                 new_text.push(next_char);
                 if parser::single_token(&new_text).is_some() {
                     return None;
@@ -140,10 +221,46 @@ fn reparse_token(
     }
 }
 
-/// Check if a SyntaxKind is an identifier-like token eligible for
+/// Rowan's next_token stops at an empty recovery node. A lexical boundary
+/// check must continue past it to the next actual source character.
+fn following_token(token: &crate::SyntaxToken) -> Option<crate::SyntaxToken> {
+    let mut element: SyntaxElement = token.clone().into();
+    loop {
+        if let Some(next) = element.next_sibling_or_token() {
+            match &next {
+                NodeOrToken::Token(token) if !token.text().is_empty() => {
+                    return Some(token.clone())
+                }
+                NodeOrToken::Node(node) => {
+                    if let Some(token) = node
+                        .descendants_with_tokens()
+                        .filter_map(|element| element.into_token())
+                        .find(|token| !token.text().is_empty())
+                    {
+                        return Some(token);
+                    }
+                }
+                _ => {}
+            }
+            element = next;
+        } else {
+            element = element.parent()?.into();
+        }
+    }
+}
+
+/// Check if a SyntaxKind is a name or literal token eligible for
 /// token-level reparsing.
-fn is_ident_like(kind: SyntaxKind) -> bool {
-    matches!(kind, SyntaxKind::IDENT | SyntaxKind::TY_VAR)
+fn is_replaceable_token(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        SyntaxKind::IDENT
+            | SyntaxKind::TY_VAR
+            | SyntaxKind::NUM_LIT
+            | SyntaxKind::HEX_LIT
+            | SyntaxKind::BIN_LIT
+            | SyntaxKind::REAL_LIT
+    )
 }
 
 /// Strategy 2: Block-level reparsing.

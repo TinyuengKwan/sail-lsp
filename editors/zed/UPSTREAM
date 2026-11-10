@@ -1,3 +1,3 @@
 https://github.com/TinyuengKwan/sail-zed
 cf1387225ca4b46d91bb63b47c1063b369a3bced
-Local changes: standalone Cargo workspace; managed/PATH server selection without a second downloader; manifest language registration.
+Local changes: standalone Cargo workspace; managed/PATH server selection without a second downloader; manifest/preview language registration; standard LSP source-action entrypoints.

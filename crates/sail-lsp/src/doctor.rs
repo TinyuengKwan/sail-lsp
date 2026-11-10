@@ -15,12 +15,27 @@ pub(crate) fn run(args: &[String]) -> std::result::Result<(), String> {
 }
 #[allow(clippy::print_stdout)]
 fn diagnose(args: &[String]) -> Result<()> {
-    anyhow::ensure!(
-        args.iter().all(|a| ["--json", "--help", "-h"].contains(&a.as_str())),
-        "Usage: sail-lsp doctor [--json]"
-    );
+    let mut configured_compiler = None;
+    let mut native_stdlib = None;
+    let mut options = args.iter();
+    while let Some(option) = options.next() {
+        match option.as_str() {
+            "--json" | "--help" | "-h" => {}
+            "--compiler" => {
+                configured_compiler =
+                    Some(options.next().context("--compiler needs a path")?.clone())
+            }
+            "--stdlib" => {
+                native_stdlib =
+                    Some(PathBuf::from(options.next().context("--stdlib needs a path")?))
+            }
+            _ => anyhow::bail!(
+                "Usage: sail-lsp doctor [--json] [--compiler PATH] [--stdlib SAIL_DIR]"
+            ),
+        }
+    }
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("sail-lsp doctor [--json]\nCheck executable provenance, standard library, SMT backend, PATH copies and optional Sail compiler.");
+        println!("sail-lsp doctor [--json] [--compiler PATH] [--stdlib SAIL_DIR]\nCheck executable provenance, standard library, SMT backend, PATH copies and optional Sail compiler. Use --compiler to inspect the editor's flycheck.command.");
         return Ok(());
     }
     let executable = std::env::current_exe()?;
@@ -58,18 +73,32 @@ fn diagnose(args: &[String]) -> Result<()> {
     checks.push(
         json!({"name":"pathCopies","status":if paths.len()>1{"warning"}else{"ok"},"paths":paths}),
     );
-    let compiler = std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths)
-            .map(|dir| dir.join(if cfg!(windows) { "sail.exe" } else { "sail" }))
-            .find(|p| p.is_file())
+    let compiler = configured_compiler.map(PathBuf::from).or_else(|| {
+        std::env::var_os("PATH").and_then(|paths| {
+            std::env::split_paths(&paths)
+                .map(|dir| dir.join(if cfg!(windows) { "sail.exe" } else { "sail" }))
+                .find(|p| p.is_file())
+        })
     });
     if let Some(compiler) = compiler {
-        let mut command = Command::new(&compiler);
-        command.arg("--version");
-        match install::probe_command(command) {
-            Ok(output)=>checks.push(json!({"name":"upstreamSail","status":"ok","path":compiler,"version":String::from_utf8_lossy(&output).trim()})),
-            Err(error)=>checks.push(json!({"name":"upstreamSail","status":"warning","path":compiler,"message":error.to_string()})),
-        }
+        let native = native_stdlib
+            .or_else(|| std::env::var_os("SAIL_DIR").map(PathBuf::from))
+            .unwrap_or(embedded);
+        let mut probe = crate::flycheck::toolchain::ProbeCache::default();
+        let report = probe.report(
+            &compiler.to_string_lossy(),
+            &std::env::current_dir()?,
+            Some(&native),
+            &[],
+            |option| {
+                let mut command = Command::new(&compiler);
+                command.arg(option);
+                install::probe_command(command)
+                    .map(|output| String::from_utf8_lossy(&output).into_owned())
+                    .map_err(|e| e.to_string())
+            },
+        );
+        checks.push(json!({"name":"upstreamSail","status":if report.warnings.is_empty(){"ok"}else{"warning"},"path":compiler,"version":report.version,"pairing":report}));
     } else {
         checks.push(json!({"name":"upstreamSail","status":"optional","message":"Native analysis works without the upstream Sail compiler; Flycheck needs it"}));
     }

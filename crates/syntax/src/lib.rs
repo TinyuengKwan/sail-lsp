@@ -65,7 +65,17 @@ pub use rowan::{
     api::Preorder, Direction, GreenNode, NodeOrToken, SyntaxText, TextRange, TextSize,
     TokenAtOffset, WalkEvent,
 };
+
+/// Let long lexer/parser/lowering loops observe the current Salsa revision
+/// without introducing a database dependency into the parser crate.
+pub fn cancellation_scope() -> impl Drop {
+    stdx::cancellation::enter(|| {
+        salsa::with_attached_database(|db| db.unwind_if_revision_cancelled());
+    })
+}
+
 pub use smol_str::{format_smolstr, SmolStr, SmolStrBuilder, ToSmolStr};
+pub use stdx::cancellation::checkpoint as cancellation_checkpoint;
 
 /// Re-export `SourceFile` as the default AST root.
 pub use crate::ast::SourceFile;
@@ -106,6 +116,8 @@ impl<T> Parse<T> {
     pub fn errors(&self) -> Vec<SyntaxError> {
         let mut errors = if let Some(e) = self.errors.as_deref() { e.to_vec() } else { vec![] };
         validation::validate(&self.syntax_node(), &mut errors);
+        let mut seen = std::collections::HashSet::new();
+        errors.retain(|error| seen.insert(error.clone()));
         errors
     }
 }

@@ -2,7 +2,7 @@ mod types;
 pub use types::*;
 pub mod support;
 
-use self::support::{binding_type_hint, infer_call_arg_types_at_position};
+use self::support::binding_type_hint;
 use crate::markdown_remove::remove_markdown;
 
 /// Limit only top-level members; commas in dependent types and tuples do not
@@ -67,12 +67,11 @@ fn truncate_members(text: &str, limit: Option<usize>) -> String {
 pub fn doc_to_plain_text(doc: &str) -> String {
     remove_markdown(doc)
 }
-use crate::signature_help::find_call_at_position;
 use hir::DefKind;
 use ide_db::ide_types::SymbolKind;
 use ide_db::line_index::TextRange;
 use ide_db::token_classify::{token_is_close_bracket, token_is_open_bracket};
-use ide_db::{builtin_docs, find_callable_signature, instantiate_signature, FileDb, LineCol};
+use ide_db::{builtin_docs, find_callable_signature, FileDb, LineCol};
 use parser::Token;
 use syntax::parser_lower::{Decl, DeclKind, DeclRole, Scope};
 use url::Url;
@@ -114,6 +113,7 @@ where
         return Some(markdown_hover(markdown.join("\n\n"), hover_range));
     }
 
+    let resolve_started = std::time::Instant::now();
     let ordered_def = if current_file
         .file_text()
         .is_some_and(|(db, ft)| hir::source_order::declarations_for(db, ft).is_some())
@@ -128,9 +128,11 @@ where
         resolve_decl(files.iter().copied(), current_uri, symbol_key, Some(current_offset))
     };
 
+    let resolve_us = resolve_started.elapsed().as_micros();
     let mut markdown = Vec::new();
 
     if let Some(decl_ref) = decl_ref.as_ref() {
+        let head_started = std::time::Instant::now();
         let label = decl_kind_label(decl_ref.decl.kind);
         let name = &decl_ref.decl.name;
 
@@ -205,52 +207,8 @@ where
                 render_signature(decl_ref, files.iter().copied(), current_uri, symbol_key)
             });
 
-        // Item 2: Generic Substitution / Instantiation
-        if symbol_kind_for_decl(decl_ref.decl.kind) == SymbolKind::Function {
-            let offset = current_file.offset_at(&position);
-            let is_at_definition = decl_ref.decl.role == DeclRole::Definition
-                && decl_ref.decl.span.start <= offset
-                && offset <= decl_ref.decl.span.end;
-
-            if !is_at_definition {
-                let lc_pos = position;
-                if let Some((callee, _)) = find_call_at_position(current_file, lc_pos) {
-                    if callee == *name {
-                        if let Some(sig) = current_file
-                            .file_text()
-                            .and_then(|(db, ft)| {
-                                ide_db::signatures::callable_signatures_at(
-                                    db,
-                                    ft,
-                                    current_offset,
-                                    name,
-                                )
-                            })
-                            .map(|sigs| sigs.into_iter().next())
-                            .unwrap_or_else(|| {
-                                find_callable_signature(files.iter().copied(), current_uri, name)
-                            })
-                        {
-                            if let Some(arg_types) = infer_call_arg_types_at_position(
-                                &files,
-                                current_uri,
-                                current_file,
-                                lc_pos,
-                                name,
-                            ) {
-                                let instantiated = instantiate_signature(&sig, &arg_types);
-                                if instantiated != headline {
-                                    markdown.push("___".to_string());
-                                    markdown.push("*instantiated as:*".to_string());
-                                    headline = instantiated;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
+        let head_us = head_started.elapsed().as_micros();
+        let annotate_started = std::time::Instant::now();
         // For call sites (not definition), supplement headline with val spec
         // type info when the function def lacks type annotations.
         if symbol_kind_for_decl(decl_ref.decl.kind) == SymbolKind::Function {
@@ -274,6 +232,14 @@ where
         markdown.push("___".to_string());
         markdown.push(fenced_sail(&truncate_members(&headline, member_limit)));
 
+        if let Some(call) = current_file
+            .file_text()
+            .and_then(|(db, file)| hir::Semantics::new(db).call_instantiation(file, current_offset))
+        {
+            markdown.push(format!("**call type** (`{}`):", call.target));
+            markdown.push(fenced_sail(&call.ty.display_text()));
+        }
+
         // Show inferred type for local bindings (let/var)
         if matches!(decl_ref.decl.kind, DeclKind::Let | DeclKind::Var) {
             if let Some(ty) = binding_type_hint(&files, current_uri, current_file, &decl_ref.decl) {
@@ -286,7 +252,7 @@ where
             let members = current_file
                 .file_text()
                 .and_then(|(db, file)| {
-                    ide_db::signatures::callable_signatures_at(db, file, current_offset, name)
+                    hir::Semantics::new(db).callable_signatures_at(file, current_offset, name)
                 })
                 .map(|signatures| signatures.into_iter().map(|sig| sig.label).collect::<Vec<_>>())
                 .unwrap_or_else(|| {
@@ -308,37 +274,6 @@ where
                 }
                 if members.len() > limit {
                     markdown.push(format!("… (+{} more)", members.len() - limit));
-                }
-            }
-        }
-
-        // Respect the callable identity visible at this program point.
-        if matches!(decl_ref.decl.kind, DeclKind::Function | DeclKind::Value | DeclKind::Mapping) {
-            let all_sigs = current_file
-                .file_text()
-                .and_then(|(db, file)| {
-                    ide_db::signatures::callable_signatures_at(
-                        db,
-                        file,
-                        current_offset,
-                        &decl_ref.decl.name,
-                    )
-                })
-                .unwrap_or_else(|| {
-                    ide_db::signatures::find_all_callable_signatures(
-                        files.iter().copied(),
-                        &decl_ref.decl.name,
-                    )
-                });
-            if all_sigs.len() > 1 {
-                markdown.push("___".to_string());
-                markdown.push(format!("**{} overloads:**", all_sigs.len()));
-                let limit = config.max_overloads_count.unwrap_or(all_sigs.len());
-                for sig in all_sigs.iter().take(limit) {
-                    markdown.push(fenced_sail(&sig.label));
-                }
-                if all_sigs.len() > limit {
-                    markdown.push(format!("… (+{} more)", all_sigs.len() - limit));
                 }
             }
         }
@@ -424,18 +359,26 @@ where
             }
         }
 
+        let annotate_us = annotate_started.elapsed().as_micros();
+        let effects_started = std::time::Instant::now();
         // Effect tracking: show side effects of functions
         if matches!(decl_ref.decl.kind, DeclKind::Function | DeclKind::Value | DeclKind::Mapping) {
             {
-                let text = decl_ref.file.text();
-                let (cst_root, _) = syntax::parse_text(text);
+                let fallback;
+                let bodies = if let Some(bodies) = decl_ref.file.bodies() {
+                    bodies
+                } else {
+                    let root = decl_ref
+                        .file
+                        .syntax()
+                        .unwrap_or_else(|| syntax::parse_text(decl_ref.file.text()).0);
+                    fallback = hir::CallableBodies::from_cst(&root);
+                    &fallback
+                };
                 // Show declared effects from val spec (if any)
                 let declared = declared_effects_for_def_cst(decl_ref.file, &decl_ref.decl.name);
-                let effects = infer_effects_for_def_with_workspace_cst(
-                    &cst_root,
-                    &decl_ref.decl.name,
-                    &files,
-                );
+                let effects =
+                    infer_effects_for_def_with_workspace_cst(bodies, &decl_ref.decl.name, &files);
                 if !declared.is_empty() || !effects.is_empty() {
                     markdown.push("___".to_string());
                     if !declared.is_empty() {
@@ -453,6 +396,7 @@ where
             }
         }
 
+        tracing::debug!(target: "sail_lsp::latency", "hover_render_phases resolve_us={resolve_us} head_us={head_us} annotate_us={annotate_us} effects_us={}", effects_started.elapsed().as_micros());
         // Show doc comments. Primary path: ItemTree.doc field
         // (extracted from CST during parse → Docs).
         // The doc the item tree recorded. The fallback that stood here
@@ -593,7 +537,6 @@ where
                         base_db::range_start(hover_range),
                         base_db::range_end(hover_range),
                     ),
-                    current_file.bodies(),
                 )
             }) {
                 markdown.push(fenced_sail(symbol_key));
@@ -1168,29 +1111,46 @@ fn enum_info_for_symbol(file: &dyn FileDb, symbol: &str) -> Option<EnumInfo> {
 
 /// CST-native version of `infer_effects_for_def_with_workspace`.
 fn infer_effects_for_def_with_workspace_cst(
-    cst_root: &syntax::SyntaxNode,
+    bodies: &hir::CallableBodies,
     name: &str,
     all_files: &[(&url::Url, &dyn ide_db::FileDb)],
 ) -> Vec<String> {
     use hir::callgraph::{CallGraph, WorkspaceCallGraph};
-    use hir::{CallableBodies, EffectTag};
+    use hir::EffectTag;
 
-    let bodies = CallableBodies::from_cst(cst_root);
-    let local_callgraph = CallGraph::from_callable_bodies(&bodies);
-
-    let ws_callgraph: Option<WorkspaceCallGraph> = if all_files.len() > 1 {
-        Some(WorkspaceCallGraph::from_callgraphs(
-            all_files.iter().filter_map(|(_, f)| f.callgraph()),
-        ))
-    } else {
-        None
-    };
+    // A val-only external has no local body whose effects can be propagated.
+    // Avoid constructing every workspace call graph for that common hover.
+    if !bodies.entries().iter().any(|entry| entry.name == name) {
+        return Vec::new();
+    }
+    let local_callgraph = CallGraph::from_callable_bodies(bodies);
 
     let mut direct: std::collections::HashMap<String, std::collections::BTreeSet<EffectTag>> =
         std::collections::HashMap::new();
     for entry in bodies.entries() {
         direct.entry(entry.name.clone()).or_default().extend(entry.effects.iter().copied());
     }
+
+    let ws_callgraph: Option<WorkspaceCallGraph> = if all_files.len() > 1 {
+        Some(WorkspaceCallGraph::from_callgraphs(
+            all_files
+                .iter()
+                // Propagation below only consults callers in `direct`.
+                // Other files' disjoint caller sets cannot affect the result.
+                // Keep the compatibility fallback for files without bodies.
+                .filter(|(_, file)| {
+                    file.item_tree().is_none_or(|tree| {
+                        tree.top_level_items().iter().any(|item| {
+                            direct.contains_key(item.name(tree).as_str())
+                                || item.def_kind(tree) == hir::DefKind::Outcome
+                        })
+                    })
+                })
+                .filter_map(|(_, f)| f.callgraph()),
+        ))
+    } else {
+        None
+    };
 
     let mut full = direct.clone();
     for _ in 0..full.len() + 1 {
@@ -1224,8 +1184,14 @@ fn infer_effects_for_def_with_workspace_cst(
 pub fn collect_effects_from_body(file: &dyn ide_db::FileDb, name: &str) -> Vec<String> {
     use hir::CallableBodies;
 
-    let (cst_root, _) = syntax::parse_text(file.text());
-    let bodies = CallableBodies::from_cst(&cst_root);
+    let fallback;
+    let bodies = if let Some(bodies) = file.bodies() {
+        bodies
+    } else {
+        let root = file.syntax().unwrap_or_else(|| syntax::parse_text(file.text()).0);
+        fallback = CallableBodies::from_cst(&root);
+        &fallback
+    };
 
     let mut effects = Vec::new();
     for entry in bodies.entries() {
@@ -1295,7 +1261,17 @@ pub fn hover_resolve_field_or_method(
     offset: usize,
 ) -> Option<String> {
     let sema = hir::Semantics::new(db);
-    let source = file_text.text(db);
+    let root = sema.parse(file_text)?;
+    let token = root.token_at_offset((offset as u32).into()).right_biased()?;
+    // Ordinary named callees are already described by the structural hover.
+    // A field/method supplement can only add information in dot syntax. Do
+    // not infer every hovered function's enclosing body just to return None.
+    if !token.parent_ancestors().any(|node| node.kind() == syntax::SyntaxKind::FIELD_ACCESS_EXPR) {
+        return None;
+    }
+    let source_file =
+        base_db::preprocess::source_text(db, file_text.file_id(db)).unwrap_or(file_text);
+    let source = source_file.text(db);
 
     // Extract the identifier at offset for display
     let token_name = extract_hover_identifier(source, offset)?;
@@ -1382,6 +1358,30 @@ mod tests {
 
     fn hover_markdown(hover: HoverResult) -> String {
         hover.markup
+    }
+
+    #[test]
+    fn effect_lookup_keeps_other_files_contributing_the_same_caller() {
+        let local = TestFile::new(
+            "function caller() -> unit = ()\nfunction helper() -> unit = assert(false)\n",
+        );
+        let additional = TestFile::new("function caller() -> unit = helper()\n");
+        let unrelated = TestFile::new("function unrelated() -> unit = caller()\n");
+        let a = Url::parse("file:///tmp/effects-local.sail").unwrap();
+        let b = Url::parse("file:///tmp/effects-additional.sail").unwrap();
+        let c = Url::parse("file:///tmp/effects-unrelated.sail").unwrap();
+        let effects = infer_effects_for_def_with_workspace_cst(
+            local.bodies().unwrap(),
+            "caller",
+            &[(&a, &local), (&b, &additional), (&c, &unrelated)],
+        );
+        assert_eq!(effects, ["assert"]);
+        assert!(infer_effects_for_def_with_workspace_cst(
+            local.bodies().unwrap(),
+            "val_only",
+            &[(&a, &local), (&b, &additional)],
+        )
+        .is_empty());
     }
 
     #[test]
@@ -1650,7 +1650,7 @@ overload op = {add, sub}
     }
 
     #[test]
-    fn shows_instantiated_signature_in_hover() {
+    fn shows_generic_declaration_signature_in_hover() {
         let source =
             "val f : bits('n) -> bits('n)\nfunction f(x) = x\nlet _ = f(0xDEADBEEF)\n".to_string();
         let file = TestFile::new(&source);
@@ -1669,15 +1669,54 @@ overload op = {add, sub}
         )
         .expect("hover");
         let markdown = hover_markdown(hover);
-        // Instantiation requires type checker (not available in TestFile).
-        // When type check is wired into TestFile, the full assertion holds.
-        // For now, verify that at least the base signature is shown.
-        let has_instantiation = markdown.contains("instantiated as");
-        let has_base_sig = markdown.contains("bits('n) -> bits('n)");
-        assert!(
-            has_instantiation || has_base_sig,
-            "expected either instantiated or base signature, got: {markdown}"
-        );
+        assert!(markdown.contains("bits('n) -> bits('n)"), "{markdown}");
+        assert!(!markdown.contains("instantiated as"), "{markdown}");
+    }
+
+    #[test]
+    fn implicit_arguments_do_not_rewrite_quantified_binders_in_hover() {
+        let source = "default Order dec\nval widen : forall 'n 'm, 'm >= 'n. (implicit('m), bits('n)) -> bits('m)\nfunction demo(x : bits(4)) -> bits(8) = widen(x)\n";
+        let file = TestFile::new(source);
+        let uri = Url::parse("file:///tmp/implicit-hover.sail").unwrap();
+        let offset = source.rfind("widen(x)").unwrap();
+        let hover = hover_for_symbol(
+            [(&uri, &file)],
+            &uri,
+            &file,
+            file.position_at(offset + 1),
+            base_db::text_range(offset, offset + 5),
+            "widen",
+            &crate::hover::HoverConfig::default(),
+        )
+        .unwrap();
+        assert!(hover.markup.contains("forall 'n 'm"), "{}", hover.markup);
+        assert!(hover.markup.contains("implicit('m)"), "{}", hover.markup);
+        assert!(!hover.markup.contains("instantiated as"), "{}", hover.markup);
+    }
+
+    #[test]
+    fn semantic_call_hover_preserves_scheme_and_displays_concrete_implicit_arguments() {
+        let source = "default Order dec\nval widen : forall 'n 'm, 'm >= 'n. (implicit('m), bits('n)) -> bits('m)\nfunction demo(x : bits(4)) -> bits(8) = widen(x)\n";
+        let (analysis, files) = crate::fixture::analysis(source);
+        let offset = source.rfind("widen(x)").unwrap();
+        let before = &source[..offset + 1];
+        let hover = analysis
+            .hover(
+                files[0].0,
+                ide_db::LineCol {
+                    line: before.bytes().filter(|b| *b == b'\n').count() as u32,
+                    col: before.rsplit('\n').next().unwrap().len() as u32,
+                },
+                &HoverConfig::default(),
+            )
+            .unwrap()
+            .unwrap();
+        assert!(hover.markup.contains("forall 'n 'm"), "{}", hover.markup);
+        assert!(hover.markup.contains("implicit('m)"), "{}", hover.markup);
+        assert!(hover.markup.contains("**call type** (`widen`)"), "{}", hover.markup);
+        assert!(hover.markup.contains("(implicit(8), bits(4)) -> bits(8)"), "{}", hover.markup);
+        assert!(!hover.markup.contains("forall 'n 4"), "{}", hover.markup);
+        assert!(!hover.markup.contains("'_fv"), "{}", hover.markup);
     }
 
     #[test]

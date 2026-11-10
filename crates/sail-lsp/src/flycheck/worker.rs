@@ -20,6 +20,7 @@ pub(crate) enum Status {
     Running,
     Passed,
     Diagnostics { count: usize },
+    UnlocatedDiagnostics { count: usize, message: String },
     Failed { message: String },
     Skipped { message: String },
     Cancelled,
@@ -31,7 +32,13 @@ impl Status {
         matches!(self, Self::Queued | Self::Running)
     }
     pub(crate) fn problem(&self) -> bool {
-        matches!(self, Self::Failed { .. } | Self::Skipped { .. } | Self::TimedOut)
+        matches!(
+            self,
+            Self::Failed { .. }
+                | Self::Skipped { .. }
+                | Self::TimedOut
+                | Self::UnlocatedDiagnostics { .. }
+        )
     }
 }
 
@@ -42,6 +49,9 @@ impl std::fmt::Display for Status {
             Self::Running => f.write_str("Running"),
             Self::Passed => f.write_str("Passed"),
             Self::Diagnostics { count } => write!(f, "Diagnostics: {count} reported"),
+            Self::UnlocatedDiagnostics { count, message } => {
+                write!(f, "Diagnostics: {count} reported; {message}")
+            }
             Self::Failed { message } => write!(f, "Failed: {message}"),
             Self::Skipped { message } => write!(f, "Skipped: {message}"),
             Self::Cancelled => f.write_str("Cancelled"),
@@ -54,12 +64,10 @@ impl std::fmt::Display for Status {
 }
 
 struct Job {
+    config: crate::config::FlycheckConfig,
     generation: u64,
-    command: String,
     args: Vec<String>,
     cwd: PathBuf,
-    timeout: Duration,
-    debounce: Duration,
     cancel: Arc<AtomicBool>,
 }
 pub(crate) struct Worker {
@@ -72,32 +80,91 @@ impl Worker {
     pub(crate) fn new(
         target: CheckTarget,
         sender: crossbeam_channel::Sender<Task>,
+        native_stdlib: Option<PathBuf>,
     ) -> std::io::Result<Self> {
         let pending: Arc<Mutex<Option<Job>>> = Arc::default();
         let (wake, events) = crossbeam_channel::bounded(1);
         let queue = pending.clone();
         let join = thread::Builder::new().name("sail-flycheck".into()).spawn(move || {
+            let mut capabilities = CapabilityCache::default();
+            let mut toolchain = super::toolchain::ProbeCache::default();
             while events.recv().is_ok() {
                 let job = queue.lock().unwrap().take();
                 let Some(job) = job else { continue };
-                let until = Instant::now() + job.debounce;
+                let until = Instant::now() + Duration::from_millis(job.config.debounce_ms);
                 while Instant::now() < until && !job.cancel.load(Ordering::Acquire) {
                     thread::sleep(Duration::from_millis(10));
                 }
                 if job.cancel.load(Ordering::Acquire) {
                     continue;
                 }
+                let started = Instant::now();
+                let timeout = Duration::from_millis(job.config.timeout_ms.max(1));
+                let mut cache =
+                    super::cache::PreparedCache::prepare(&job.config, &job.args, &job.cwd);
                 let _ = sender.send(Task::FlycheckStarted {
                     target: target.clone(),
                     generation: job.generation,
+                    cache: cache.info.clone(),
                 });
-                let (found, status) =
-                    run(&job.command, &job.args, &job.cwd, job.timeout, &job.cancel);
+                let pairing = toolchain.report(
+                    &job.config.command,
+                    &job.cwd,
+                    native_stdlib.as_deref(),
+                    &job.args,
+                    |option| {
+                        let remaining =
+                            timeout.saturating_sub(started.elapsed()).min(Duration::from_secs(2));
+                        let output = run_process(
+                            &job.config.command,
+                            &[option.into()],
+                            &job.cwd,
+                            remaining,
+                            &job.cancel,
+                        )
+                        .map_err(|e| e.to_string())?;
+                        if output.exit.success() && !output.truncated {
+                            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+                        } else {
+                            Err(output.text())
+                        }
+                    },
+                );
+                let (found, status) = run_with_format(
+                    &job.config.command,
+                    &cache.args,
+                    &job.cwd,
+                    timeout.saturating_sub(started.elapsed()),
+                    &job.cancel,
+                    job.config.diagnostic_format,
+                    &mut capabilities,
+                );
+                let completed = matches!(
+                    status,
+                    Status::Passed
+                        | Status::Diagnostics { .. }
+                        | Status::UnlocatedDiagnostics { .. }
+                );
+                cache.finish(completed && !job.cancel.load(Ordering::Acquire));
+                let success = matches!(status, Status::Passed | Status::Diagnostics { .. })
+                    && !found.iter().any(|(_, diagnostic)| {
+                        diagnostic.severity == Some(lsp_types::DiagnosticSeverity::ERROR)
+                    });
+                let mut report =
+                    super::RunReport::new(started.elapsed(), cache.info.clone(), success);
+                report.toolchain = Some(pairing);
+                report.diagnostics_reported = match status {
+                    Status::Diagnostics { count } | Status::UnlocatedDiagnostics { count, .. } => {
+                        count
+                    }
+                    _ => found.len(),
+                };
                 let _ = sender.send(Task::Flycheck {
                     target: target.clone(),
                     generation: job.generation,
                     found,
                     status,
+                    run: report,
                 });
             }
         })?;
@@ -113,12 +180,10 @@ impl Worker {
         self.cancel();
         self.cancel = Arc::default();
         *self.pending.lock().unwrap() = Some(Job {
+            config: config.clone(),
             generation,
-            command: config.command.clone(),
             args,
             cwd,
-            timeout: Duration::from_millis(config.timeout_ms.max(1)),
-            debounce: Duration::from_millis(config.debounce_ms),
             cancel: self.cancel.clone(),
         });
         let _ = self.wake.as_ref().unwrap().try_send(());
@@ -178,18 +243,83 @@ fn terminate(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
+struct ProcessOutput {
+    exit: std::process::ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    truncated: bool,
+}
+impl ProcessOutput {
+    fn text(&self) -> String {
+        format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&self.stderr),
+            String::from_utf8_lossy(&self.stdout)
+        )
+    }
+}
+#[derive(Default)]
+struct CapabilityCache {
+    key: Option<CompilerKey>,
+    json_v1: bool,
+}
+#[derive(PartialEq, Eq, Hash)]
+pub(super) struct CompilerKey {
+    command: String,
+    cwd: PathBuf,
+    executable: Option<(PathBuf, u64, Option<std::time::SystemTime>)>,
+}
+impl CompilerKey {
+    pub(super) fn executable_path(&self) -> Option<PathBuf> {
+        self.executable.as_ref().map(|(path, _, _)| path.clone())
+    }
+    pub(super) fn new(command: &str, cwd: &std::path::Path) -> Self {
+        let candidates: Vec<_> = if std::path::Path::new(command).components().count() > 1
+            || std::path::Path::new(command).is_absolute()
+        {
+            vec![cwd.join(command)]
+        } else {
+            std::env::var_os("PATH")
+                .map(|path| std::env::split_paths(&path).map(|root| root.join(command)).collect())
+                .unwrap_or_default()
+        };
+        let executable = candidates.into_iter().find_map(|path| {
+            let path = if cfg!(windows) && !path.is_file() && path.extension().is_none() {
+                path.with_extension("exe")
+            } else {
+                path
+            };
+            let metadata = std::fs::metadata(&path).ok()?;
+            metadata.is_file().then(|| (path, metadata.len(), metadata.modified().ok()))
+        });
+        Self { command: command.into(), cwd: cwd.into(), executable }
+    }
+}
+
 fn run_process(
     command: &str,
     args: &[String],
     cwd: &std::path::Path,
     timeout: Duration,
     cancel: &AtomicBool,
-) -> Result<(std::process::ExitStatus, String, bool), Status> {
+) -> Result<ProcessOutput, Status> {
+    run_process_with_environment(command, args, cwd, timeout, cancel, &Default::default())
+}
+
+fn run_process_with_environment(
+    command: &str,
+    args: &[String],
+    cwd: &std::path::Path,
+    timeout: Duration,
+    cancel: &AtomicBool,
+    environment: &std::collections::BTreeMap<String, String>,
+) -> Result<ProcessOutput, Status> {
     if cancel.load(Ordering::Acquire) {
         return Err(Status::Cancelled);
     }
     let mut cmd = Command::new(command);
     cmd.args(args)
+        .envs(environment)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -232,11 +362,35 @@ fn run_process(
     let (Some((stdout, out_cut)), Some((stderr, err_cut))) = (stdout, stderr) else {
         return Err(Status::Failed { message: "Could not read compiler output".into() });
     };
-    let text =
-        format!("{}\n{}", String::from_utf8_lossy(&stderr), String::from_utf8_lossy(&stdout));
-    Ok((exit, text, out_cut || err_cut))
+    Ok(ProcessOutput { exit, stdout, stderr, truncated: out_cut || err_cut })
 }
 
+/// Editor fallback for clients without a task API. Same bounded pipe capture,
+/// process-group termination and cancellation as compiler checks; no shell.
+pub(crate) fn run_task(
+    task: &crate::lsp_ext::ProcessRunnableArgs,
+    timeout: Duration,
+    cancel: &AtomicBool,
+) -> String {
+    match run_process_with_environment(
+        &task.program,
+        &task.args,
+        &task.cwd,
+        timeout,
+        cancel,
+        &task.environment,
+    ) {
+        Ok(output) => format!(
+            "Exit: {}\n{}{}",
+            output.exit,
+            if output.truncated { "Output truncated to 1 MiB per stream\n" } else { "" },
+            output.text()
+        ),
+        Err(status) => format!("Task: {status}\n"),
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn run(
     command: &str,
     args: &[String],
@@ -244,31 +398,157 @@ pub(crate) fn run(
     timeout: Duration,
     cancel: &AtomicBool,
 ) -> (FlycheckResult, Status) {
+    run_with_format(
+        command,
+        args,
+        cwd,
+        timeout,
+        cancel,
+        crate::config::CompilerDiagnosticFormat::Text,
+        &mut CapabilityCache::default(),
+    )
+}
+
+fn run_with_format(
+    command: &str,
+    args: &[String],
+    cwd: &std::path::Path,
+    timeout: Duration,
+    cancel: &AtomicBool,
+    format: crate::config::CompilerDiagnosticFormat,
+    capabilities: &mut CapabilityCache,
+) -> (FlycheckResult, Status) {
+    use crate::config::CompilerDiagnosticFormat as Format;
     let started = Instant::now();
+    let remaining =
+        |started: Instant| timeout.checked_sub(started.elapsed()).ok_or(Status::TimedOut);
+    if args.iter().any(|arg| {
+        arg.starts_with("--diagnostics-format") || arg.starts_with("-diagnostics_format")
+    }) {
+        return (vec![],Status::Skipped{message:"Set flycheck.diagnosticFormat instead of supplying diagnostic protocol flags in flycheck.extraArgs".into()});
+    }
     if args.iter().any(|arg| arg == "--check-context") {
-        match run_process(command, &["--check-context-version".into()], cwd, timeout.min(Duration::from_secs(5)), cancel) {
-            Ok((exit, output, false)) if exit.success() && output.trim() == "1" => {}
-            Ok(_) => return (vec![], Status::Skipped { message: "This configuration requires Sail check-context protocol v1 (target/includePaths/generatedFiles/typed variables). Install a compiler with the supplied check-context patch, then retry.".into() }),
-            Err(status) => return (vec![], status),
+        match run_process(command,&["--check-context-version".into()],cwd,timeout.min(Duration::from_secs(5)),cancel) {
+            Ok(output) if output.exit.success() && !output.truncated && String::from_utf8_lossy(&output.stdout).trim()=="1" => {},
+            Ok(_) => return (vec![],Status::Skipped{message:"This configuration requires Sail check-context protocol v1 (target/includePaths/generatedFiles/typed variables). Install a compiler with the supplied check-context patch, then retry.".into()}),
+            Err(status) => return (vec![],status),
         }
     }
-    let Some(remaining) = timeout.checked_sub(started.elapsed()) else {
-        return (vec![], Status::TimedOut);
-    };
-    let (exit, text, truncated) = match run_process(command, args, cwd, remaining, cancel) {
-        Ok(result) => result,
+    let mut json = false;
+    if format != Format::Text {
+        let key = CompilerKey::new(command, cwd);
+        if capabilities.key.as_ref() != Some(&key) {
+            let budget = match remaining(started) {
+                Ok(value) => value,
+                Err(status) => return (vec![], status),
+            };
+            match run_process(
+                command,
+                &["--diagnostics-format-version".into()],
+                cwd,
+                budget.min(Duration::from_secs(5)),
+                cancel,
+            ) {
+                Ok(output) if !output.truncated => {
+                    capabilities.json_v1 = output.exit.success()
+                        && String::from_utf8_lossy(&output.stdout).trim() == "1";
+                    capabilities.key = Some(key);
+                }
+                Ok(_) => {
+                    return (
+                        vec![],
+                        Status::Failed {
+                            message: "Compiler diagnostic capability output exceeded 1 MiB".into(),
+                        },
+                    )
+                }
+                Err(status) => return (vec![], status),
+            }
+        }
+        json = capabilities.json_v1;
+        if format == Format::Json && !json {
+            return(vec![],Status::Skipped{message:"flycheck.diagnosticFormat=json requires Sail editor diagnostic protocol v1; the selected compiler does not advertise it".into()});
+        }
+    }
+    let mut args = args.to_vec();
+    if json {
+        args.extend(["--diagnostics-format".into(), "json-v1".into()]);
+    }
+    let budget = match remaining(started) {
+        Ok(value) => value,
         Err(status) => return (vec![], status),
     };
+    let output = match run_process(command, &args, cwd, budget, cancel) {
+        Ok(output) => output,
+        Err(status) => return (vec![], status),
+    };
+    if output.truncated {
+        return (
+            vec![],
+            Status::Failed {
+                message: "Compiler output exceeded 1 MiB; diagnostics may be incomplete".into(),
+            },
+        );
+    }
+    if json {
+        let stdout = match std::str::from_utf8(&output.stdout) {
+            Ok(text) => text,
+            Err(error) => {
+                return (
+                    vec![],
+                    Status::Failed {
+                        message: format!("Compiler JSON output is not UTF-8: {error}"),
+                    },
+                )
+            }
+        };
+        return match super::structured::parse(stdout, output.exit.success()) {
+            Ok(report) => {
+                let count = report.found.len() + report.unlocated.len();
+                let status = if !report.success && report.errors == 0 {
+                    Status::Failed {
+                        message: format!(
+                            "Compiler check failed without an error diagnostic: {}",
+                            String::from_utf8_lossy(&output.stderr).trim()
+                        ),
+                    }
+                } else if !report.unlocated.is_empty() {
+                    Status::UnlocatedDiagnostics { count, message: report.unlocated.join("\n") }
+                } else if count == 0 {
+                    Status::Passed
+                } else {
+                    Status::Diagnostics { count }
+                };
+                (report.found, status)
+            }
+            Err(super::structured::Error::Stale(message)) => {
+                log::warn!("{message}");
+                (vec![], Status::Stale)
+            }
+            Err(error) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let detail: String = stderr.trim().chars().take(2048).collect();
+                (
+                    vec![],
+                    Status::Failed {
+                        message: if detail.is_empty() {
+                            error.to_string()
+                        } else {
+                            format!("{error}. Compiler stderr: {detail}")
+                        },
+                    },
+                )
+            }
+        };
+    }
+    let text = output.text();
     let found = super::parse(&text, cwd);
-    let status = if truncated {
-        Status::Failed {
-            message: "Compiler output exceeded 1 MiB; diagnostics may be incomplete".into(),
-        }
-    } else if !exit.success() && found.is_empty() {
-        let detail: String = text.trim().chars().take(2048).collect();
+    let status = if !output.exit.success() && found.is_empty() {
         Status::Failed {
             message: format!(
-                "{command:?} exited with {exit} without readable diagnostics: {detail}"
+                "{command:?} exited with {} without readable diagnostics: {}",
+                output.exit,
+                text.trim().chars().take(2048).collect::<String>()
             ),
         }
     } else if found.is_empty() {
@@ -346,6 +626,44 @@ mod tests {
         assert!(
             matches!(status, Status::Failed { message } if message.contains("Could not start"))
         );
+    }
+    #[test]
+    #[ignore = "requires SAIL_ORACLE_BIN and SAIL_ORACLE_SRC; reads and writes real Sail memo files"]
+    fn managed_cache_round_trips_the_real_compiler_memo_format() {
+        let _environment =
+            crate::server_check::ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+        let root = tempfile::tempdir().unwrap();
+        let compiler = std::env::var("SAIL_ORACLE_BIN").expect("SAIL_ORACLE_BIN required");
+        let library = std::env::var("SAIL_ORACLE_SRC").expect("SAIL_ORACLE_SRC required");
+        std::fs::write(
+            root.path().join("main.sail"),
+            "default Order dec\n$include <prelude.sail>\nfunction identity(x : int) -> int = x\n",
+        )
+        .unwrap();
+        let config = crate::config::FlycheckConfig {
+            command: compiler.clone(),
+            cache_directory: Some("memo-cache".into()),
+            ..Default::default()
+        };
+        let args = vec!["--just-check".into(), "main.sail".into()];
+        for warm in [false, true] {
+            let mut cache =
+                super::super::cache::PreparedCache::prepare(&config, &args, root.path());
+            assert_eq!(cache.info.existing_at_start, warm);
+            let result = run_process_with_environment(
+                &compiler,
+                &cache.args,
+                root.path(),
+                Duration::from_secs(30),
+                &AtomicBool::new(false),
+                &[("SAIL_DIR".into(), library.clone())].into_iter().collect(),
+            )
+            .unwrap_or_else(|error| panic!("{error}"));
+            assert!(result.exit.success(), "{}", result.text());
+            cache.finish(true);
+            assert!(cache.info.bytes_after_check > 0);
+            assert!(cache.info.warning.is_none(), "{:?}", cache.info);
+        }
     }
     #[cfg(unix)]
     #[test]
@@ -432,7 +750,7 @@ mod tests {
         let log = dir.join("runs");
         let _ = std::fs::remove_file(&log);
         let (sender, events) = crossbeam_channel::unbounded();
-        let mut worker = Worker::new(CheckTarget::File(dir.join("a.sail")), sender).unwrap();
+        let mut worker = Worker::new(CheckTarget::File(dir.join("a.sail")), sender, None).unwrap();
         let mut config = crate::config::FlycheckConfig {
             command: "/bin/sh".into(),
             debounce_ms: 100,
@@ -500,5 +818,79 @@ mod tests {
         drop(worker);
         assert!(start.elapsed() < Duration::from_secs(3));
         std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(all(test, unix))]
+mod structured_worker_tests {
+    use super::*;
+    use crate::config::CompilerDiagnosticFormat as Format;
+    use std::os::unix::fs::PermissionsExt;
+    fn install(directory: &std::path::Path, supported: bool) -> PathBuf {
+        let path = directory.join("sail");
+        let script = format!(
+            r#"#!/bin/sh
+if [ "$1" = --diagnostics-format-version ]; then
+  printf p >> probes
+  {}
+fi
+printf r >> runs
+{}
+"#,
+            if supported { "echo 1; exit 0" } else { "exit 2" },
+            if supported {
+                r#"printf '%s\n' '{"protocol":"sail-editor-diagnostics","version":1,"event":"summary","success":true,"diagnostics":0}'"#
+            } else {
+                "exit 0"
+            }
+        );
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        path
+    }
+    fn check(
+        path: &std::path::Path,
+        format: Format,
+        cache: &mut CapabilityCache,
+    ) -> (FlycheckResult, Status) {
+        let start = Instant::now();
+        loop {
+            let result = run_with_format(
+                path.to_str().unwrap(),
+                &["--just-check".into()],
+                path.parent().unwrap(),
+                Duration::from_secs(3),
+                &AtomicBool::new(false),
+                format,
+                cache,
+            );
+            if matches!(&result.1,Status::Failed{message} if message.contains("os error 26"))
+                && start.elapsed() < Duration::from_secs(3)
+            {
+                thread::sleep(Duration::from_millis(5));
+                continue;
+            }
+            return result;
+        }
+    }
+    #[test]
+    fn negotiation_is_cached_and_binary_changes_require_a_new_probe() {
+        let directory =
+            std::env::temp_dir().join(format!("sail-format-cache-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = install(&directory, true);
+        let mut cache = CapabilityCache::default();
+        assert_eq!(check(&path, Format::Auto, &mut cache).1, Status::Passed);
+        assert_eq!(check(&path, Format::Json, &mut cache).1, Status::Passed);
+        assert_eq!(std::fs::read_to_string(directory.join("probes")).unwrap(), "p");
+        let path = install(&directory, false);
+        assert!(matches!(check(&path, Format::Json, &mut cache).1, Status::Skipped { .. }));
+        assert_eq!(std::fs::read_to_string(directory.join("runs")).unwrap(), "rr");
+        assert_eq!(check(&path, Format::Auto, &mut cache).1, Status::Passed);
+        assert_eq!(std::fs::read_to_string(directory.join("probes")).unwrap(), "pp");
+        assert_eq!(std::fs::read_to_string(directory.join("runs")).unwrap(), "rrr");
+        assert_eq!(check(&path, Format::Text, &mut CapabilityCache::default()).1, Status::Passed);
+        assert_eq!(std::fs::read_to_string(directory.join("probes")).unwrap(), "pp");
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

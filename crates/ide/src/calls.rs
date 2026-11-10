@@ -24,7 +24,16 @@ pub fn call_arg_count(call: &syntax::parser_lower::CallSite) -> usize {
 }
 
 pub(crate) fn fallback_call_at_offset(file: &dyn FileDb, offset: usize) -> Option<CallInfo> {
-    let parsed = file.parsed()?;
+    let selected;
+    let parsed = if let Some((db, ft)) = file.file_text() {
+        let root = syntax::parse_query::semantic_parse_file(db, ft).syntax_node()?;
+        let token = root.token_at_offset((offset as u32).into()).left_biased()?;
+        let node = token.parent_ancestors().find(|node| node.parent().as_ref() == Some(&root))?;
+        selected = syntax::cst_lower::parsed_definition_from_cst(&node, ft.text(db));
+        &selected
+    } else {
+        file.parsed()?
+    };
     let mut candidate = None::<syntax::parser_lower::CallSite>;
     for call in &parsed.call_sites {
         if call.callee_span.start > offset {

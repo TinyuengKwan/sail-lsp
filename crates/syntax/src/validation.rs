@@ -12,6 +12,24 @@ use crate::syntax_node::SyntaxNode;
 use parser::SyntaxKind as SK;
 use rowan::TextRange;
 
+fn checked_elements(root: &SyntaxNode) -> impl Iterator<Item = crate::SyntaxElement> + '_ {
+    root.descendants_with_tokens().enumerate().map(|(index, element)| {
+        if index.is_multiple_of(1024) {
+            crate::cancellation_checkpoint();
+        }
+        element
+    })
+}
+
+fn checked_nodes(root: &SyntaxNode) -> impl Iterator<Item = SyntaxNode> + '_ {
+    root.descendants().enumerate().map(|(index, node)| {
+        if index.is_multiple_of(1024) {
+            crate::cancellation_checkpoint();
+        }
+        node
+    })
+}
+
 /// Validate a parsed syntax tree, appending to `errors`.
 pub(crate) fn validate(root: &SyntaxNode, errors: &mut Vec<SyntaxError>) {
     validate_brackets(root, errors);
@@ -39,7 +57,7 @@ pub(crate) fn validate(root: &SyntaxNode, errors: &mut Vec<SyntaxError>) {
 /// layer had only two checks in it (bracket balance, `$ifdef` balance) while
 /// rust-analyzer's has a dozen.
 fn validate_if_has_then(root: &SyntaxNode, errors: &mut Vec<SyntaxError>) {
-    for node in root.descendants().filter(|n| n.kind() == SK::IF_EXPR) {
+    for node in checked_nodes(root).filter(|n| n.kind() == SK::IF_EXPR) {
         let mut children = node.children_with_tokens();
         // `if`
         children.next();
@@ -94,7 +112,7 @@ fn validate_doc_comments(root: &SyntaxNode, errors: &mut Vec<SyntaxError>) {
     let mut attr_depth = 0i32;
     let mut after_dollar = false;
 
-    for el in root.descendants_with_tokens() {
+    for el in checked_elements(root) {
         let Some(token) = el.into_token() else { continue };
         let kind = token.kind();
 
@@ -193,7 +211,7 @@ fn multiple_docs_message(token: &syntax_node::SyntaxToken) -> String {
 /// second declaration. Keep recovery permissive and report at the duplicate.
 fn validate_visibility_modifiers(root: &SyntaxNode, errors: &mut Vec<SyntaxError>) {
     let mut private = false;
-    for token in root.descendants_with_tokens().filter_map(|el| el.into_token()) {
+    for token in checked_elements(root).filter_map(|el| el.into_token()) {
         if token.kind().is_trivia() || token.kind() == SK::DOC_COMMENT {
             continue;
         }
@@ -271,7 +289,7 @@ fn validate_brackets(root: &SyntaxNode, errors: &mut Vec<SyntaxError>) {
     let mut stack: Vec<BracketKind> = Vec::new();
     let mut last_end = root.text_range().start();
 
-    for token in root.descendants_with_tokens().filter_map(|el| el.into_token()) {
+    for token in checked_elements(root).filter_map(|el| el.into_token()) {
         let range: TextRange = token.text_range();
         last_end = range.end();
         if let Some(kind) = BracketKind::opening(token.kind()) {
@@ -446,5 +464,23 @@ mod tests {
     fn a_repeated_include_is_not_an_error() {
         // Include guards make it idempotent; upstream accepts it.
         assert!(messages("$include <option.sail>\n$include <option.sail>\n").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod editing_noise_tests {
+    #[test]
+    fn parser_and_validation_report_each_missing_delimiter_once() {
+        for (source, message) in
+            [("function f() = g(", "expected ')'"), ("function f() = { g()", "expected '}'")]
+        {
+            let parsed = crate::ast::SourceFile::parse(source);
+            let errors = parsed.errors();
+            assert_eq!(
+                errors.iter().filter(|error| error.message() == message).count(),
+                1,
+                "{errors:?}"
+            );
+        }
     }
 }

@@ -1,6 +1,7 @@
 # Spelling policy for maintained source; vendored sources keep upstream bytes.
 [files]
 extend-exclude = [
+    ".git/",
     "crates/syntax/src/ast/generated/",
     "crates/*/src/tests/",
     "crates/sail-lsp/data/sail-lib/",
@@ -50,3 +51,5 @@ pn = "pn"
 
 [default.extend-identifiers]
 NTO = "NTO"
+# Intentional unknown formatter key in configuration-error fixtures.
+line_wdth = "line_wdth"

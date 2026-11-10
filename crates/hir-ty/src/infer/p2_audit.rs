@@ -320,3 +320,15 @@ fn square_proof_survives_an_exhausted_request_budget() {
     );
     assert_eq!(crate::solver_budget::SolverBudget::budget_exhaustion_count(), 0);
 }
+#[test]
+fn predicate_application_ignores_token_spacing() {
+    for (compact, spaced) in [
+        ("mode('n)", " mode ( 'n ) "),
+        ("mode(2 * 'n)", "mode ( 2 * 'n )"),
+        ("mode('n) & mode('m)", "mode ( 'n ) & mode ( 'm )"),
+        ("outer(mode('n), true)", "outer ( mode ( 'n ) , true )"),
+    ] {
+        assert_eq!(parse_constraint_text(compact), parse_constraint_text(spaced), "{spaced}");
+        assert!(!matches!(parse_constraint_text(spaced), ConstraintExpr::Unsupported));
+    }
+}

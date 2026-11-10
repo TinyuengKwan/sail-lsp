@@ -487,4 +487,133 @@ suite("sail-lsp extension", () => {
         assert.equal(document.version, version);
         assert.deepEqual(await vscode.commands.executeCommand("sail-lsp.structuralSearch", ""), []);
     });
+    test("formatting uses actual typing options and opens a read-only explanation", async () => {
+        const extension = vscode.extensions.getExtension<ExtensionApi>("Lunarwwww.sail-lsp")!;
+        const api = await extension.activate();
+        await eventually("server ready", () => api.test.status()?.quiescent === true);
+        const uri = vscode.Uri.joinPath(vscode.workspace.workspaceFolders![0].uri, "sample.sail");
+        const document = await vscode.workspace.openTextDocument(uri);
+        const original = document.getText();
+        const editor = await vscode.window.showTextDocument(document);
+        const oldOptions = { ...editor.options };
+        const config = vscode.workspace.getConfiguration("editor", document);
+        const keys = ["formatOnType", "autoIndent"];
+        const saved = keys.map((key) => config.inspect(key)?.workspaceValue);
+        const source = "function f() = {\n  1\n}\n";
+        const replace = async (text: string) => {
+            const edit = new vscode.WorkspaceEdit();
+            edit.replace(
+                uri,
+                new vscode.Range(
+                    document.positionAt(0),
+                    document.positionAt(document.getText().length),
+                ),
+                text,
+            );
+            assert.ok(await vscode.workspace.applyEdit(edit));
+        };
+        try {
+            await config.update("formatOnType", true, vscode.ConfigurationTarget.Workspace);
+            await config.update("autoIndent", "none", vscode.ConfigurationTarget.Workspace);
+            for (const spaces of [true, false]) {
+                await replace(source);
+                editor.options = { tabSize: 4, insertSpaces: spaces };
+                editor.selection = new vscode.Selection(
+                    0,
+                    "function f() = {".length,
+                    0,
+                    "function f() = {".length,
+                );
+                await vscode.commands.executeCommand("type", { text: "\n" });
+                await eventually(
+                    "on-type indentation must use the editor options",
+                    () => document.lineAt(1).text === (spaces ? "    " : "\t"),
+                );
+                assert.equal(document.lineAt(2).text, "  1", "typing changed another line");
+            }
+            editor.selection = new vscode.Selection(0, 0, 1, 0);
+            await vscode.commands.executeCommand("sail-lsp.explainFormatting");
+            const preview = vscode.window.activeTextEditor!.document;
+            assert.equal(preview.uri.scheme, "sail-preview");
+            const report = JSON.parse(preview.getText());
+            assert.equal(report.options.tabSize, 4);
+            assert.equal(report.options.insertSpaces, false);
+            assert.equal(report.styleVersion, 1);
+            assert.equal(report.status, "range_boundary");
+        } finally {
+            await replace(original);
+            await vscode.window.showTextDocument(document);
+            editor.options = oldOptions;
+            for (let index = 0; index < keys.length; index++)
+                await config.update(
+                    keys[index],
+                    saved[index],
+                    vscode.ConfigurationTarget.Workspace,
+                );
+        }
+    });
+
+    test("analysis explanations and read-only preprocessing previews expose actual source links", async () => {
+        const extension = vscode.extensions.getExtension<ExtensionApi>("Lunarwwww.sail-lsp")!;
+        const api = await extension.activate();
+        await eventually("server ready", () => api.test.status()?.quiescent === true);
+        const root = vscode.workspace.workspaceFolders![0].uri;
+        const uri = vscode.Uri.joinPath(root, "sample.sail");
+        const document = await vscode.workspace.openTextDocument(uri);
+        const original = document.getText();
+        const source = "val identity : int -> int\nfunction use() -> int = identity(true)\n";
+        const replace = async (text: string) => {
+            const edit = new vscode.WorkspaceEdit();
+            edit.replace(
+                uri,
+                new vscode.Range(
+                    document.positionAt(0),
+                    document.positionAt(document.getText().length),
+                ),
+                text,
+            );
+            assert.ok(await vscode.workspace.applyEdit(edit));
+        };
+        try {
+            await replace(source);
+            let editor = await vscode.window.showTextDocument(document);
+            const at = document.positionAt(source.indexOf("true"));
+            editor.selection = new vscode.Selection(at, at);
+            await vscode.commands.executeCommand("sail-lsp.explainAnalysis");
+            const explanation = vscode.window.activeTextEditor!.document;
+            assert.equal(explanation.uri.scheme, "sail-preview");
+            assert.ok(explanation.getText().includes("Expected: int"), explanation.getText());
+            assert.ok(explanation.getText().includes("Actual: bool"), explanation.getText());
+            const links = await vscode.commands.executeCommand<vscode.DocumentLink[]>(
+                "vscode.executeLinkProvider",
+                explanation.uri,
+            );
+            assert.ok(
+                links?.some(
+                    (link) => link.target?.with({ fragment: "" }).toString() === uri.toString(),
+                ),
+                JSON.stringify(links),
+            );
+            editor = await vscode.window.showTextDocument(document);
+            editor.selection = new vscode.Selection(at, at);
+            await vscode.commands.executeCommand("sail-lsp.expandInclude");
+            const preview = vscode.window.activeTextEditor!.document;
+            assert.equal(preview.uri.scheme, "sail-preview");
+            assert.ok(preview.getText().includes(source), preview.getText());
+            const sourceLinks = await vscode.commands.executeCommand<vscode.DocumentLink[]>(
+                "vscode.executeLinkProvider",
+                preview.uri,
+            );
+            assert.ok(
+                sourceLinks?.some(
+                    (link) => link.target?.with({ fragment: "" }).toString() === uri.toString(),
+                ),
+                JSON.stringify(sourceLinks),
+            );
+            assert.equal(vscode.workspace.fs.isWritableFileSystem(preview.uri.scheme), undefined);
+        } finally {
+            await replace(original);
+            await vscode.window.showTextDocument(document);
+        }
+    });
 });
