@@ -502,6 +502,20 @@ suite("sail-lsp extension", () => {
         const extension = vscode.extensions.getExtension<ExtensionApi>("Lunarwwww.sail-lsp")!;
         const api = await extension.activate();
         await eventually("server ready", () => api.test.status()?.quiescent === true);
+        assert.deepEqual(
+            vscode.workspace.textDocuments
+                .filter((doc) => doc.isDirty)
+                .map((doc) => doc.uri.toString()),
+            [],
+            "preceding tests must restore their documents before closing their editors",
+        );
+        // Dispose the previous tests' editors, including their embedded Peek
+        // editors, before exercising a command routed through DOM focus.
+        await vscode.commands.executeCommand("workbench.action.closeAllEditors");
+        await eventually(
+            "preceding editors did not close",
+            () => vscode.window.visibleTextEditors.length === 0,
+        );
         const uri = vscode.Uri.joinPath(vscode.workspace.workspaceFolders![0].uri, "sample.sail");
         const document = await vscode.workspace.openTextDocument(uri);
         const original = document.getText();
@@ -576,7 +590,15 @@ suite("sail-lsp extension", () => {
                     () => document.version > version,
                 );
                 assert.equal(document.lineCount, 5, "typing must insert one newline");
-                assert.equal(document.lineAt(3).text, "}", "typing targeted the wrong line");
+                assert.equal(
+                    document.lineAt(3).text,
+                    "}",
+                    `typing targeted the wrong line: ${JSON.stringify({
+                        selection: editor.selection,
+                        activeSelection: vscode.window.activeTextEditor?.selection,
+                        text: document.getText(),
+                    })}`,
+                );
                 await eventually(
                     () =>
                         `on-type indentation must use the editor options: ${JSON.stringify({
