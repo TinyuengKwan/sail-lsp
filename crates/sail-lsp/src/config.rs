@@ -233,6 +233,8 @@ pub struct InlayHintsConfig {
     pub chaining_hints: bool,
     /// Values of automatically generated Sail enum conversions.
     pub enum_value_hints: bool,
+    /// The inferred value of an `implicit('n)` argument at a call site.
+    pub implicit_argument_hints: bool,
     /// Maximum length of inlay hint text before truncation.
     pub max_length: Option<usize>,
     /// Minimum lines for closing brace hints.
@@ -559,6 +561,7 @@ impl Default for InlayHintsConfig {
             effect_hints: true,
             chaining_hints: true,
             enum_value_hints: false,
+            implicit_argument_hints: true,
             max_length: Some(25),
             closing_brace_hints_min_lines: Some(6),
         }
@@ -577,7 +580,7 @@ impl InlayHintsConfig {
             effect_hints: self.effect_hints,
             chaining_hints: self.chaining_hints,
             discriminant_hints: self.enum_value_hints,
-            implicit_argument_hints: true,
+            implicit_argument_hints: self.implicit_argument_hints,
         }
     }
 }

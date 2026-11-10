@@ -312,6 +312,12 @@
           "default": false,
           "description": "Show numeric enum values when Sail generates an enum-to-number conversion."
         },
+        "sail-lsp.inlayHints.implicitArgumentHints": {
+          "scope": "resource",
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Show the inferred value of an `implicit('n)` argument at the call site, e.g. `widen(8, x)`."
+        },
         "sail-lsp.inlayHints.effectHints": {
           "scope": "resource",
           "type": "boolean",

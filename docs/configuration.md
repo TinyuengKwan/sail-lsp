@@ -121,6 +121,8 @@ vim.lsp.config("sail_lsp_managed", {
 `enumValueHints` (default `false`) shows the zero-based values of generated
 Sail enum-to-number conversions. Renamed conversion attributes are respected;
 manual or suppressed conversions do not produce guessed values.
+`implicitArgumentHints` (default `true`) shows the inferred value of an
+`implicit('n)` argument at the call site, as in `widen(8, x)`.
 
 A parameter hint's tooltip is what `inlayHint/resolve` adds: a client that
 declares `inlayHint.resolveSupport` for `tooltip` receives the hint without it

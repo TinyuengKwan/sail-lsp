@@ -6,6 +6,8 @@
 - Added `Join Lines` (`Ctrl+Shift+J`), `Find Matching Brace`, `Move Item Up`/`Down` and an `Enter` key that continues comments and indents opened blocks through the server.
 - Reference and implementation lenses run the extension's `sail-lsp.showReferences` command, which the client declares to the server; a lens arrives with protocol arguments the command converts.
 - Added `View Include Graph`, the file-level counterpart of the module dependencies view.
+- Hovers show the server's action links (`N implementations`, `N references`) under the popup; the client declares `hoverActions`.
+- Added `sail-lsp.inlayHints.implicitArgumentHints` (default on): the inferred value of an `implicit('n)` argument at the call site.
 - Typing `'` no longer inserts a closing quote (`forall 'n` is a type variable), and Enter inside a `/* */` comment continues it.
 
 ## 0.2.0
