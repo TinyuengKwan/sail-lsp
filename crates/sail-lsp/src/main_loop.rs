@@ -2180,6 +2180,81 @@ mod project_reload_tests {
         assert_eq!(edit.changes.unwrap()[&url].len(), 2);
     }
 
+    /// `project:` names a project — its manifest file, with or without the
+    /// extension, or the directory holding it — rather than matching a
+    /// substring anywhere in the manifest's path, where `project:riscv`
+    /// also selected every project living under a `riscv/` tree.
+    #[test]
+    fn workspace_symbol_project_filter_names_a_project() {
+        let (sender, _messages) = crossbeam_channel::unbounded();
+        let (tasks, _receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender, tasks);
+        let root =
+            std::env::temp_dir().join(format!("symbol-project-filter-{}", std::process::id()));
+        let core = root.join("riscv").join("sail.proj");
+        let ext = root.join("riscv").join("vendor").join("ext.sail_project");
+        let a = root.join("riscv").join("a.sail");
+        let b = root.join("riscv").join("vendor").join("b.sail");
+        let mut urls = Vec::new();
+        for (path, text) in
+            [(&a, "function f_core() -> int = 1\n"), (&b, "function f_ext() -> int = 2\n")]
+        {
+            let url = Url::from_file_path(path).unwrap();
+            crate::handlers::notification::handle_did_open_text_document(
+                &mut state,
+                lsp_types::DidOpenTextDocumentParams {
+                    text_document: lsp_types::TextDocumentItem {
+                        uri: url.clone(),
+                        language_id: "sail".into(),
+                        version: 1,
+                        text: text.into(),
+                    },
+                },
+            )
+            .unwrap();
+            urls.push(url);
+        }
+        state.process_changes();
+        let ids = urls.iter().map(|url| state.vfs.file_id_for_url(url)).collect();
+        state.ensure_workspace_files(ids);
+        let projects = std::sync::Arc::make_mut(&mut state.projects);
+        projects.insert(
+            Url::from_directory_path(root.join("riscv")).unwrap(),
+            crate::reload::FolderProject {
+                manifest: core,
+                discovered_files: vec![(urls[0].clone(), a)],
+                ..Default::default()
+            },
+        );
+        projects.insert(
+            Url::from_directory_path(root.join("riscv").join("vendor")).unwrap(),
+            crate::reload::FolderProject {
+                manifest: ext,
+                discovered_files: vec![(urls[1].clone(), b)],
+                ..Default::default()
+            },
+        );
+        let names = |state: &mut GlobalState, query: &str| -> Vec<String> {
+            let found = crate::handlers::request::handle_workspace_symbol(
+                state.snapshot(),
+                lsp_types::WorkspaceSymbolParams { query: query.into(), ..Default::default() },
+            )
+            .unwrap();
+            match found {
+                Some(lsp_types::WorkspaceSymbolResponse::Flat(symbols)) => {
+                    symbols.into_iter().map(|s| s.name).collect()
+                }
+                _ => Vec::new(),
+            }
+        };
+        assert_eq!(names(&mut state, "f_"), ["f_core", "f_ext"], "both projects are indexed");
+        assert_eq!(names(&mut state, "f_ project:riscv"), ["f_core"]);
+        assert_eq!(names(&mut state, "f_ project:ext"), ["f_ext"]);
+        assert_eq!(names(&mut state, "f_ project:ext.sail_project"), ["f_ext"]);
+        assert_eq!(names(&mut state, "f_ project:vendor"), ["f_ext"]);
+        assert!(names(&mut state, "f_ project:ris").is_empty(), "a name, not a substring");
+    }
+
     #[test]
     fn cache_collection_waits_for_retained_snapshots_and_applies_live_configuration() {
         let (sender, _receiver) = crossbeam_channel::unbounded();

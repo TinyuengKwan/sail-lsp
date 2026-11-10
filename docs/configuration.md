@@ -659,7 +659,9 @@ is 128, with an explicit maximum of 1024. Optional whitespace-separated filters:
 - `mr kind:function`: filter by `function`, `val`, `struct`, `enum`, `union`,
   `type`, `mapping` or `register`.
 - `mr scope:workspace` / `scope:library` / `scope:all`: select the source scope.
-- `mr project:riscv`: restrict to projects whose manifest path contains `riscv`.
+- `mr project:riscv`: restrict to the project named `riscv` — a manifest
+  `riscv.sail_project` (with or without the extension), a `sail.proj` in a
+  `riscv/` directory, or that manifest's full path. The name must match exactly.
 - `mr limit:20`: limit results after scope filtering and physical deduplication.
 
 Results point at the declared identifier and show the owning module/manifest

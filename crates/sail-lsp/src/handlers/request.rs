@@ -1491,31 +1491,22 @@ pub(crate) fn handle_workspace_symbol(
         ["all", "workspace", "library"].contains(&scope),
         "Unknown symbol scope: {scope}"
     );
-    let allowed: std::collections::HashSet<_> = snap
-        .analysis
-        .all_salsa_files()
-        .into_iter()
-        .filter_map(|(uri, _)| {
-            let id = snap.analysis.file_id(&uri)?;
-            let library = snap.is_library(id);
-            if (scope == "workspace" && library) || (scope == "library" && !library) {
-                return None;
-            }
-            if let Some(filter) = project_filter {
-                if !snap.projects.values().any(|p| {
-                    p.manifest.to_string_lossy().contains(filter)
-                        && p.discovered_files.iter().any(|(u, _)| u == &uri)
-                }) {
-                    return None;
-                }
-            }
-            Some(uri)
+    // The projects `project:` names, or none to accept every file.
+    let projects: Option<Vec<&crate::reload::FolderProject>> =
+        project_filter.map(|name| snap.projects.values().filter(|p| p.is_named(name)).collect());
+    let in_scope = |uri: &Url, file_id: base_db::FileId| {
+        let library = snap.is_library(file_id);
+        if (scope == "workspace" && library) || (scope == "library" && !library) {
+            return false;
+        }
+        projects.as_ref().is_none_or(|projects| {
+            projects.iter().any(|p| p.discovered_files.iter().any(|(u, _)| u == uri))
         })
-        .collect();
+    };
     let mut seen = std::collections::HashSet::new();
     let results: Vec<SymbolInformation> = snap
         .analysis
-        .workspace_symbols(&query, Some(&allowed))?
+        .workspace_symbols(&query, &in_scope)?
         .into_iter()
         .filter_map(|nav| {
             if !seen.insert((nav.url.clone(), nav.focus_range, nav.name.clone())) {

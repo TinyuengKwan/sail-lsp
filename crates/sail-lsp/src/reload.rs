@@ -219,6 +219,21 @@ pub(crate) struct FolderProject {
     pub manifest_diagnostics: Vec<lsp_types::Diagnostic>,
 }
 
+impl FolderProject {
+    /// Whether `name` names this project: its manifest file with or without
+    /// the extension (`riscv.sail_project`, `riscv`), the directory the
+    /// manifest sits in (`riscv` for `riscv/sail.proj`), or the manifest's
+    /// full path. A name, not a substring: `project:riscv` used to select
+    /// every project anywhere under a `riscv/` tree.
+    pub(crate) fn is_named(&self, name: &str) -> bool {
+        let part = |p: Option<&std::ffi::OsStr>| p.is_some_and(|p| p == name);
+        part(self.manifest.file_name())
+            || part(self.manifest.file_stem())
+            || part(self.manifest.parent().and_then(std::path::Path::file_name))
+            || self.manifest.as_os_str() == name
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) enum ReloadScope {
     /// Folder/configuration/discovery changes can add or remove projects.

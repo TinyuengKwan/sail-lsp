@@ -2088,18 +2088,25 @@ impl Analysis {
     /// table of its own. The two tables disagreed — a `union` was a struct
     /// here and an enum there — which is what a decision made in two
     /// places looks like from the outside.
+    ///
+    /// `accept` sees each candidate's URL and physical file, and decides
+    /// whether it is in scope — the server's library/workspace split and
+    /// its `project:` filter live there. The server used to build the set
+    /// of allowed URLs itself, which took a `file_id` lookup per file in
+    /// the workspace before the one call that answered the question.
     pub fn workspace_symbols(
         &self,
         query: &ide_db::symbol_index::Query,
-        files: Option<&std::collections::HashSet<url::Url>>,
+        accept: &dyn Fn(&url::Url, FileId) -> bool,
     ) -> crate::Cancellable<Vec<crate::navigation_target::NavigationTarget>> {
-        self.with_db(|a| a.workspace_symbols_inner(query, files))
+        let accept = std::panic::AssertUnwindSafe(accept);
+        self.with_db(move |a| a.workspace_symbols_inner(query, *accept))
     }
 
     fn workspace_symbols_inner(
         &self,
         query: &ide_db::symbol_index::Query,
-        files: Option<&std::collections::HashSet<url::Url>>,
+        accept: &dyn Fn(&url::Url, FileId) -> bool,
     ) -> Vec<crate::navigation_target::NavigationTarget> {
         // Through `symbol_index`, which falls back to the salsa query. Read
         // straight off the field, this answered *nothing* in the server: only
@@ -2113,7 +2120,7 @@ impl Analysis {
                 let Some(uri) = self.url_for_file_id(e.file_id) else {
                     return false;
                 };
-                files.is_none_or(|files| files.contains(uri))
+                accept(uri, base_db::preprocess::physical_file(&self.db, e.file_id))
                     && seen.insert((
                         uri.clone(),
                         e.name_span.start,
@@ -3235,11 +3242,15 @@ mod tests {
             assert!(refs.iter().all(|r| !r.references.contains_key(&inactive_id)
                 && r.declarations.iter().all(|d| d.file_id != inactive_id)));
             assert!(analysis
-                .workspace_symbols(&ide_db::symbol_index::Query::new(hidden.to_owned()), None)
+                .workspace_symbols(&ide_db::symbol_index::Query::new(hidden.to_owned()), &|_, _| {
+                    true
+                })
                 .unwrap()
                 .is_empty());
             assert!(!analysis
-                .workspace_symbols(&ide_db::symbol_index::Query::new(unique.to_owned()), None)
+                .workspace_symbols(&ide_db::symbol_index::Query::new(unique.to_owned()), &|_, _| {
+                    true
+                })
                 .unwrap()
                 .is_empty());
         }
