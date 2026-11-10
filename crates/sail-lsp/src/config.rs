@@ -764,6 +764,55 @@ mod tests {
         assert!(!config.flycheck.enable);
     }
 
+    /// Settings the VS Code extension consumes itself and never reads on
+    /// the server: how to start the server, how to trace it, and whether
+    /// the extension's own task-lens provider shows its lenses.
+    const CLIENT_ONLY_SETTINGS: &[&str] =
+        &["server.path", "server.extraEnv", "trace.server", "runnables.showCodeLens"];
+
+    /// `package.json` and the server's config name the same settings with
+    /// the same defaults, in both directions.
+    ///
+    /// The test above reads the extension's defaults without complaint,
+    /// which a misspelt key also passes — an unknown key is ignored, not
+    /// refused, because a folder's settings arrive as partial objects. So
+    /// the two lists are compared instead: a key the extension offers and
+    /// the server does not know is a setting that silently does nothing,
+    /// and a server field the extension does not offer cannot be set from
+    /// the settings UI. `runnables.showCodeLens` was declared on both sides
+    /// and read by neither on the server.
+    #[test]
+    fn the_extension_settings_and_the_server_config_agree() {
+        let package: serde_json::Value =
+            serde_json::from_str(include_str!("../../../editors/code/package.json")).unwrap();
+        let properties = package["contributes"]["configuration"]["properties"].as_object().unwrap();
+        let server = serde_json::to_value(SailLspConfig::default()).unwrap();
+        let mut server_keys = std::collections::BTreeSet::new();
+        for (section, fields) in server.as_object().unwrap() {
+            for field in fields.as_object().unwrap().keys() {
+                server_keys.insert(format!("{section}.{field}"));
+            }
+        }
+        let mut extension_keys = std::collections::BTreeSet::new();
+        for (key, schema) in properties {
+            let key = key.strip_prefix("sail-lsp.").unwrap();
+            if CLIENT_ONLY_SETTINGS.contains(&key) {
+                continue;
+            }
+            let (section, field) = key.split_once('.').unwrap();
+            let default =
+                server.get(section).and_then(|fields| fields.get(field)).unwrap_or_else(|| {
+                    panic!(
+                        "`sail-lsp.{key}` is offered by package.json and is not a server setting; \
+                         name it in CLIENT_ONLY_SETTINGS if the extension consumes it"
+                    )
+                });
+            assert_eq!(&schema["default"], default, "`sail-lsp.{key}`: the defaults differ");
+            extension_keys.insert(key.to_owned());
+        }
+        assert_eq!(server_keys, extension_keys, "a server setting has no package.json entry");
+    }
+
     #[test]
     fn default_config() {
         let config = SailLspConfig::default();
