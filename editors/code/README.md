@@ -74,6 +74,7 @@ Full configuration reference: [`docs/configuration.md`](../../docs/configuration
 - `Sail: Show Syntax Tree`
 - `Sail: View HIR`
 - `Sail: View Item Tree`
+- `Sail: View Include Graph` — the `$include` edges of the loaded workspace as text
 - `Sail: Show Server Version`
 - `Sail: Toggle Inlay Hints`
 - `Sail: Explain Formatting` — show effective options, project style and no-op reasons in a read-only view
@@ -89,7 +90,7 @@ Enable `editor.formatOnType` for input-triggered formatting and
 `editor.formatOnSave` for formatting on save. If several Sail formatters are
 installed, choose `Lunarwwww.sail-lsp` as `editor.defaultFormatter` for `[sail]`.
 
-The syntax tree, HIR, and item tree commands are debugging aids intended for inspecting parser and semantic state for the active file.
+The syntax tree, HIR, item tree and include graph commands are debugging aids intended for inspecting parser and semantic state for the active file.
 
 Project tasks also appear as CodeLens links. Configure `sail-lsp.runnables.tasks`
 for tests/exports and `sail-lsp.runnables.showCodeLens` to control the links.

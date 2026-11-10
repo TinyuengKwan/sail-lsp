@@ -5,6 +5,7 @@
 - Code actions apply the server's snippet edits, so an assist can leave the cursor where you type next; the client declares `snippetTextEdit` and `serverStatusNotification`.
 - Added `Join Lines` (`Ctrl+Shift+J`), `Find Matching Brace`, `Move Item Up`/`Down` and an `Enter` key that continues comments and indents opened blocks through the server.
 - Reference and implementation lenses run the extension's `sail-lsp.showReferences` command, which the client declares to the server; a lens arrives with protocol arguments the command converts.
+- Added `View Include Graph`, the file-level counterpart of the module dependencies view.
 
 ## 0.2.0
 

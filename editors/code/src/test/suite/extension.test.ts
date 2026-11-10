@@ -421,6 +421,7 @@ suite("sail-lsp extension", () => {
             "sail-lsp.recheckProject",
             "sail-lsp.cancelFlycheck",
             "sail-lsp.clearFlycheck",
+            "sail-lsp.viewIncludeGraph",
         ]) {
             assert.ok(commands.includes(command), `${command} should be registered`);
         }
@@ -485,6 +486,23 @@ suite("sail-lsp extension", () => {
         await vscode.commands.executeCommand("sail-lsp.recheckProject");
         await vscode.commands.executeCommand("sail-lsp.cancelFlycheck");
         await vscode.commands.executeCommand("sail-lsp.clearFlycheck");
+
+        await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(sampleUri));
+        await vscode.commands.executeCommand("sail-lsp.viewIncludeGraph");
+        // Shown beside the source without taking focus; the fixture has no
+        // `$include`, which the renderer says in so many words.
+        const isGraph = (editor: vscode.TextEditor) =>
+            editor.document.languageId === "plaintext" &&
+            editor.document.getText().startsWith("(no include relationships)");
+        await eventually("include graph was not shown", () =>
+            vscode.window.visibleTextEditors.some(isGraph),
+        );
+        // An untitled document with content counts as dirty; later tests
+        // expect none left behind.
+        await vscode.window.showTextDocument(
+            vscode.window.visibleTextEditors.find(isGraph)!.document,
+        );
+        await vscode.commands.executeCommand("workbench.action.revertAndCloseActiveEditor");
     });
     test("structural search shows real locations without changing the source", async () => {
         await closeRestoredEditors();

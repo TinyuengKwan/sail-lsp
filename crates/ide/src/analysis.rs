@@ -550,22 +550,6 @@ impl Analysis {
         crate::folding_ranges::folding_ranges(&sf)
     }
 
-    /// Per-callable effect annotations, for the code lens.
-    pub fn effect_annotations(
-        &self,
-        url: &url::Url,
-    ) -> crate::Cancellable<Vec<crate::effect_annotations::EffectAnnotation>> {
-        self.with_db(|a| a.effect_annotations_inner(url))
-    }
-
-    fn effect_annotations_inner(
-        &self,
-        url: &url::Url,
-    ) -> Vec<crate::effect_annotations::EffectAnnotation> {
-        let Some(sf) = self.file(url) else { return Vec::new() };
-        crate::effect_annotations::effect_annotations(&sf)
-    }
-
     /// Semantic tokens for one range.
     pub fn semantic_tokens_range(
         &self,

@@ -257,37 +257,6 @@ impl lsp_types::request::Request for ExpandInclude {
     const METHOD: &'static str = "sail-lsp/expandInclude";
 }
 
-/// Parameters for `sail-lsp/effectAnnotations`.
-///
-/// Sail-specific: returns per-function effect annotations for the
-/// given file, used for the effect code lens overlay.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EffectAnnotationsParams {
-    pub text_document: lsp_types::TextDocumentIdentifier,
-}
-
-/// A single effect annotation for a callable.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EffectAnnotationItem {
-    pub name: String,
-    pub range: lsp_types::Range,
-    pub effects: Vec<String>,
-}
-
-/// Custom request: `sail-lsp/effectAnnotations`.
-///
-/// Returns effect annotations (inferred effects: throw, wreg, etc.)
-/// for all callables in a file.
-pub enum EffectAnnotations {}
-
-impl lsp_types::request::Request for EffectAnnotations {
-    type Params = EffectAnnotationsParams;
-    type Result = Vec<EffectAnnotationItem>;
-    const METHOD: &'static str = "sail-lsp/effectAnnotations";
-}
-
 /// Custom request: `sail-lsp/analyzerStatus`.
 ///
 /// Returns a human-readable status string with server internals

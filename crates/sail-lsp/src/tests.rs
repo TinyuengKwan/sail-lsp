@@ -3569,6 +3569,43 @@ fn the_vscode_client_declares_what_the_server_reads() {
     }
 }
 
+/// Every protocol extension the server answers has a client.
+///
+/// `sail-lsp/effectAnnotations` and `sail-lsp/viewIncludeGraph` each had a
+/// handler, a dispatch entry and a type, and nothing anywhere sent them —
+/// one duplicated what the effect inlay hints show and went; the other
+/// became a command. A method named in `ext.rs` is now either sent by the
+/// VS Code client or it does not exist.
+#[test]
+fn every_protocol_extension_has_a_client() {
+    let ext = include_str!("lsp/ext.rs");
+    let client = [
+        include_str!("../../../editors/code/src/main.ts"),
+        include_str!("../../../editors/code/src/client.ts"),
+        include_str!("../../../editors/code/src/editing.ts"),
+        include_str!("../../../editors/code/src/ssr.ts"),
+        include_str!("../../../editors/code/src/runnables.ts"),
+        include_str!("../../../editors/code/src/diagnosticReport.ts"),
+    ]
+    .concat();
+    let methods: Vec<&str> = ext
+        .match_indices("const METHOD: &'static str = \"")
+        .map(|(i, m)| {
+            let rest = &ext[i + m.len()..];
+            &rest[..rest.find('"').unwrap()]
+        })
+        .filter(|method| method.starts_with("sail-lsp/") || method.starts_with("experimental/"))
+        .collect();
+    assert!(methods.len() > 20, "{methods:?}");
+    for method in methods {
+        assert!(
+            client.contains(&format!("\"{method}\"")),
+            "`{method}` is answered by the server and sent by no client: wire it into \
+             editors/code or remove the handler, the dispatch entry and the type"
+        );
+    }
+}
+
 /// What the server asks the client, it can hear the answer to.
 ///
 /// The main loop matched `Message::Response(_) => {}` — every response the

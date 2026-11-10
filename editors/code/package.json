@@ -844,6 +844,11 @@
         "category": "Sail"
       },
       {
+        "command": "sail-lsp.viewIncludeGraph",
+        "title": "View Include Graph",
+        "category": "Sail"
+      },
+      {
         "command": "sail-lsp.serverVersion",
         "title": "Show Server Version",
         "category": "Sail"

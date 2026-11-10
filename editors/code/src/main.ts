@@ -68,6 +68,9 @@ const ViewHirRequest = new RequestType<
 const ViewItemTreeRequest = new RequestType<TextDocumentParams, string, void>(
     "sail-lsp/viewItemTree",
 );
+const ViewIncludeGraphRequest = new RequestType<TextDocumentParams, string, void>(
+    "sail-lsp/viewIncludeGraph",
+);
 interface ExpansionPreview {
     root: string;
     expansion: string;
@@ -1002,6 +1005,21 @@ function registerCommands(context: vscode.ExtensionContext): void {
             if (!editor) return;
 
             const content = await client.sendRequest(ViewItemTreeRequest, {
+                textDocument: {
+                    uri: editor.document.uri.toString(),
+                },
+            });
+            await showVirtualTextDocument(content);
+        }),
+
+        // The `$include` graph of the loaded workspace, as text — the file
+        // level below the module dependencies view.
+        vscode.commands.registerCommand("sail-lsp.viewIncludeGraph", async () => {
+            if (!client) return;
+            const editor = vscode.window.activeTextEditor;
+            if (!editor) return;
+
+            const content = await client.sendRequest(ViewIncludeGraphRequest, {
                 textDocument: {
                     uri: editor.document.uri.toString(),
                 },

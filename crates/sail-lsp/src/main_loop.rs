@@ -1985,7 +1985,6 @@ fn on_request(state: &mut GlobalState, req: Request) {
         .on::<false, crate::lsp_ext::ViewHir>(handlers::handle_view_hir)
         .on::<false, crate::lsp_ext::ViewItemTree>(handlers::handle_view_item_tree)
         .on::<true, crate::lsp_ext::ExpandInclude>(handlers::handle_expand_include)
-        .on::<false, crate::lsp_ext::EffectAnnotations>(handlers::handle_effect_annotations)
         .on::<false, crate::lsp_ext::SailLspStatus>(handlers::handle_sail_lsp_status)
         .on::<false, crate::lsp_ext::DiagnosticReport>(handlers::handle_diagnostic_report)
         .on::<false, crate::lsp_ext::OpenProjectManifest>(handlers::handle_open_project_manifest)

@@ -18,7 +18,6 @@
 //!
 //! **CUSTOM** — Sail-only modules with no RA counterpart:
 //! `bitfield_layout` (field-offset hover table),
-//! `effect_annotations` (per-callable effect code lens),
 //! `expand_include` (`$include` inline expansion),
 //! `include_graph_view` (`$include` dependency graph renderer),
 //! `formatting` (consolidated Sail formatting + join_lines + linked_editing),
@@ -33,7 +32,6 @@ pub mod call_hierarchy;
 pub mod calls;
 pub mod completion;
 pub mod doc_links;
-pub mod effect_annotations;
 pub mod expand_include;
 pub mod extend_selection;
 pub mod file_structure;

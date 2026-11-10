@@ -1949,34 +1949,6 @@ pub(crate) fn handle_expand_include(
     }))
 }
 
-/// Effect annotations for all callables in a file.
-/// Sail-specific: returns per-function inferred effects.
-/// Registered as `sail-lsp/effectAnnotations`.
-pub(crate) fn handle_effect_annotations(
-    snap: GlobalStateSnapshot,
-    params: crate::lsp_ext::EffectAnnotationsParams,
-) -> anyhow::Result<Vec<crate::lsp_ext::EffectAnnotationItem>> {
-    let uri = &params.text_document.uri;
-    let Some(sf) = snap.analysis.file(uri) else {
-        return Ok(Vec::new());
-    };
-    let annotations = snap.analysis.effect_annotations(uri)?;
-    let line_index = ide_db::line_index::LineIndex::new(sf.text());
-    let items: Vec<_> = annotations
-        .into_iter()
-        .map(|a| {
-            let range =
-                crate::to_proto::range(&line_index, base_db::text_range(a.span.start, a.span.end));
-            crate::lsp_ext::EffectAnnotationItem {
-                name: a.name,
-                range,
-                effects: a.effects.iter().map(|e| format!("{:?}", e)).collect(),
-            }
-        })
-        .collect();
-    Ok(items)
-}
-
 /// The manifest entry that lists the file, else the entry of the file that
 /// `$include`s it.
 pub(crate) fn handle_open_project_manifest(
