@@ -1325,10 +1325,19 @@ impl GlobalState {
             }
             if is_project_file(path.as_ref() as &std::path::Path) {
                 if changed {
-                    self.request_workspace_reload(
-                        "project file changed",
-                        ReloadScope::project((path.as_ref() as &std::path::Path).to_path_buf()),
-                    );
+                    // A loaded manifest's change is that project's alone. A
+                    // manifest no project owns is new, and a new manifest can
+                    // change which one a folder loads, so the folder is
+                    // rediscovered — the line the client-watcher path
+                    // (`handle_did_change_watched_files`) draws too.
+                    let manifest =
+                        syntax::preprocess::normalize_path(path.as_ref() as &std::path::Path);
+                    let scope = if self.projects.values().any(|p| p.manifest == manifest) {
+                        ReloadScope::project(manifest)
+                    } else {
+                        ReloadScope::All
+                    };
+                    self.request_workspace_reload("project file changed", scope);
                 }
                 continue;
             }
@@ -1467,6 +1476,79 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// A manifest the native watcher reports that no loaded project owns is
+    /// new, and a new manifest can change which one a folder loads:
+    /// discovery prefers `sail.proj` to `model.sail_project`. The
+    /// client-watcher path reloads everything for an unknown manifest; the
+    /// native path reloaded only "that manifest's project", which reused the
+    /// folder's previous project — its manifest was not in scope — and the
+    /// new manifest was ignored until the next full reload.
+    #[test]
+    fn a_new_manifest_from_the_native_watcher_reloads_the_whole_folder() {
+        let fixture = Fixture::new();
+        fixture.write("model.sail_project", "Main { files main.sail }");
+        fixture.write("main.sail", "");
+        let root = Url::from_directory_path(&fixture.0).unwrap();
+        let old = fixture.0.join("model.sail_project");
+        let new = fixture.0.join("sail.proj");
+        let previous: std::collections::BTreeMap<_, _> = [(
+            root.clone(),
+            FolderProject {
+                manifest: old.clone(),
+                workspace_root: fixture.0.clone(),
+                ..Default::default()
+            },
+        )]
+        .into_iter()
+        .collect();
+        fixture.write("sail.proj", "Main { files main.sail }");
+        let loaded = |scope: &ReloadScope| {
+            let mut inputs = DiscoveryInputs::default();
+            scan_workspace_project_scoped(
+                &HashSet::from([root.clone()]),
+                None,
+                &Default::default(),
+                &Default::default(),
+                &mut Vec::new(),
+                &mut Vec::new(),
+                &Default::default(),
+                &previous,
+                scope,
+                &mut inputs,
+            )
+            .unwrap();
+            inputs.projects[&root].manifest.clone()
+        };
+        // Why the scope matters: scoped to the new manifest, the folder's
+        // previous project is reused; only a full scan switches.
+        assert_eq!(loaded(&ReloadScope::project(new.clone())), old);
+        assert_eq!(loaded(&ReloadScope::All), new);
+
+        let (sender, _messages) = crossbeam_channel::unbounded();
+        let (tasks, _receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender, tasks);
+        state.workspace_folders.insert(root.clone());
+        state.projects = std::sync::Arc::new(previous);
+        let event = |path: &std::path::Path| vfs::loader::Message::Changed {
+            files: vec![(
+                paths::AbsPathBuf::assert_utf8(path.to_path_buf()),
+                Some(b"Main { files main.sail }".to_vec()),
+            )],
+        };
+        state.handle_vfs_msg(event(&old));
+        assert_eq!(
+            state.take_reload_scope(),
+            ReloadScope::project(old.clone()),
+            "a loaded manifest's change is that project's alone"
+        );
+        state.handle_vfs_msg(event(&new));
+        assert_eq!(
+            state.take_reload_scope(),
+            ReloadScope::All,
+            "a manifest no project loaded is new: the folder is rediscovered"
+        );
     }
 
     #[test]
