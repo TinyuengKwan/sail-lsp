@@ -431,6 +431,13 @@ pub(crate) fn diagnostic_fixes(
     diagnostics: &[lsp_types::Diagnostic],
 ) -> Vec<crate::lsp::ext::CodeAction> {
     let Some(text) = text(snap, uri) else { return Vec::new() };
+    // Computed against the open buffer, so the edit names its version — and
+    // a client that cannot apply a versioned edit is not sent one, as
+    // `add_to_project` decides too.
+    let version = snap.document_versions.get(uri).copied();
+    if version.is_some() && !snap.client_caps.versioned_edit_support() {
+        return Vec::new();
+    }
     let index = ide_db::line_index::LineIndex::new(&text);
     let mut actions = Vec::new();
     for diagnostic in diagnostics {
@@ -513,7 +520,7 @@ pub(crate) fn diagnostic_fixes(
             edit: Some(workspace_edit(
                 snap.client_caps.change_annotation_support(),
                 uri.clone(),
-                snap.document_versions.get(uri).copied(),
+                version,
                 edit,
                 "Changes the Sail project manifest".into(),
             )),
@@ -584,6 +591,52 @@ mod tests {
         let id = json["documentChanges"][0]["edits"][0]["annotationId"].as_str().unwrap();
         assert_eq!(json["changeAnnotations"][id]["needsConfirmation"], true);
         assert_eq!(json["documentChanges"][0]["edits"][0]["newText"], ", x.sail");
+    }
+
+    /// A fix computed against an open manifest buffer names the buffer's
+    /// version, and a client that cannot apply a versioned edit is not sent
+    /// one. `add_to_project` already stepped aside for such a client; the
+    /// diagnostic fixes sent the versioned `documentChanges` regardless, and
+    /// the client applied nothing.
+    #[test]
+    fn diagnostic_fixes_step_aside_for_clients_without_versioned_edits() {
+        let (sender, _messages) = crossbeam_channel::unbounded();
+        let (tasks, _receiver) = crossbeam_channel::unbounded();
+        let mut state = crate::global_state::GlobalState::new(sender, tasks);
+        let uri =
+            Url::from_file_path(std::env::temp_dir().join("versioned-fixes/sail.proj")).unwrap();
+        let text = "Main {\n  requires Other\n  files a.sail\n}\n";
+        std::sync::Arc::make_mut(&mut state.manifest_texts)
+            .insert(uri.clone(), crate::mem_docs::DocumentData::new(3, text.into()));
+        let diagnostic = lsp_types::Diagnostic {
+            range: Range::new(Position::new(1, 11), Position::new(1, 16)),
+            code: Some(lsp_types::NumberOrString::String("unknown-module".into())),
+            message: "unknown module `Other`".into(),
+            ..Default::default()
+        };
+
+        let snap = state.snapshot();
+        assert!(!snap.client_caps.versioned_edit_support());
+        assert!(
+            diagnostic_fixes(&snap, &uri, std::slice::from_ref(&diagnostic)).is_empty(),
+            "a versioned edit was offered to a client that cannot apply one"
+        );
+
+        state.client_caps =
+            crate::lsp::capabilities::ClientCapabilities(lsp_types::ClientCapabilities {
+                workspace: Some(lsp_types::WorkspaceClientCapabilities {
+                    workspace_edit: Some(lsp_types::WorkspaceEditClientCapabilities {
+                        document_changes: Some(true),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            });
+        let fixes = diagnostic_fixes(&state.snapshot(), &uri, &[diagnostic]);
+        assert_eq!(fixes.len(), 1, "the same fix is offered where the client can take it");
+        let json = serde_json::to_value(fixes[0].edit.as_ref().unwrap()).unwrap();
+        assert_eq!(json["documentChanges"][0]["textDocument"]["version"], 3);
     }
 
     #[test]
