@@ -421,9 +421,17 @@ impl Checker<'_> {
                 assumptions.push(fact.clone());
             }
         }
+        // `check_type` and `inhabited` call this again at every nesting
+        // level with the list it returned for the level above. Expansions
+        // already in the list are not appended again; otherwise each level
+        // doubled the assumptions the solver has to walk.
         let expanded: Vec<_> =
             assumptions.iter().map(|fact| Self::expand_constraint(fact, &environment)).collect();
-        assumptions.extend(expanded);
+        for fact in expanded {
+            if !assumptions.contains(&fact) {
+                assumptions.push(fact);
+            }
+        }
         (Some(environment), assumptions)
     }
 
@@ -1272,4 +1280,65 @@ pub fn instantiated_signature_mismatch(
     };
     let actual = normalize(db, actual_at, actual);
     InferenceTable::new().check_compatibility(&expected, &actual) == unify::Compatibility::Mismatch
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[salsa::db]
+    #[derive(Default, Clone)]
+    struct TestDb {
+        storage: salsa::Storage<Self>,
+    }
+    #[salsa::db]
+    impl salsa::Database for TestDb {}
+
+    /// `check_type` and `inhabited` rebuild the proof context at every
+    /// nesting level from the level above's assumptions. Rebuilding a
+    /// complete list must hand it back unchanged: appending a fresh
+    /// expansion of every fact doubled the list per level, so a tuple
+    /// nested twelve deep sent 4096 copies of each fact to the solver.
+    #[test]
+    fn proof_context_does_not_grow_across_nesting_levels() {
+        let mut nested = "bits('n)".to_owned();
+        for _ in 0..12 {
+            nested = format!("(bits('n), {nested})");
+        }
+        let source = format!(
+            "type w : Int = 64\nconstraint w >= 0\nconstraint w <= 64\nval f : forall 'n, 'n >= 0 & 'n <= w. {nested} -> unit\n"
+        );
+        let mut db = TestDb::default();
+        let file =
+            FileText::new(&db, std::sync::Arc::from(source.as_str()), base_db::FileId::from_raw(0));
+        hir_def::def_query::set_workspace_files(&mut db, vec![file]);
+        let root = syntax::parse_query::semantic_parse_file(&db, file).syntax_node().unwrap();
+        let defs: Vec<_> = root.children().collect();
+        assert!(check(Some((&db, file)), &defs).is_empty());
+
+        let val = defs.last().unwrap();
+        let at = Point::Ordered(
+            source_order::at_offset(&db, file, usize::from(val.text_range().start())).unwrap(),
+        );
+        let mut checker = Checker {
+            db: Some(&db),
+            defs: &defs,
+            metadata: HashMap::new(),
+            table: InferenceTable::new(),
+            numbers: HashMap::new(),
+            strict_bitvector: false,
+        };
+        // The facts `check` hands the top level: the preceding `constraint`
+        // declarations and the signature's own quantifier constraint.
+        let facts: Vec<_> = ["w >= 0", "w <= 64", "'n >= 0 & 'n <= w"]
+            .into_iter()
+            .map(parse_constraint_text)
+            .collect();
+        let (_, top) = checker.proof_context(at, &nested, &facts);
+        let mut assumptions = top.clone();
+        for _ in 0..12 {
+            assumptions = checker.proof_context(at, &nested, &assumptions).1;
+        }
+        assert_eq!(assumptions.len(), top.len());
+    }
 }
