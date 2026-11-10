@@ -123,6 +123,21 @@ impl Options {
             }
             i += 1;
         }
+        // Both values are passed to git and spliced into release URLs; refuse
+        // anything that is not a plain ref or tag before either happens.
+        let reference = |value: &str| {
+            !value.is_empty()
+                && !value.starts_with('-')
+                && value.chars().all(|c| c.is_ascii_alphanumeric() || "._/-".contains(c))
+        };
+        anyhow::ensure!(
+            o.version == "latest" || (reference(&o.version) && !o.version.contains('/')),
+            "Invalid version: {}",
+            o.version
+        );
+        if let Some(revision) = &o.revision {
+            anyhow::ensure!(reference(revision), "Invalid revision: {revision}");
+        }
         anyhow::ensure!(!o.from_source || o.archive.is_none(), "Choose --from-source or --archive");
         anyhow::ensure!(
             [o.uninstall, o.rollback, o.list].into_iter().filter(|v| *v).count() <= 1,
@@ -298,9 +313,35 @@ fn checked(command: Command, timeout: Duration) -> Result<Output> {
     );
     Ok(result)
 }
+/// The local path a `file://` URL names, or `None` for any other URL. The
+/// standard spelling of a Windows path is `file:///C:/dir`; `file://C:\dir`,
+/// a native path behind the scheme, is accepted as well.
+fn file_url_path(url: &str) -> Result<Option<PathBuf>> {
+    let Some(rest) = url.strip_prefix("file://") else { return Ok(None) };
+    let raw = rest.as_bytes();
+    let mut bytes = Vec::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() {
+        if raw[i] == b'%' {
+            let escape = rest.get(i + 1..i + 3).and_then(|hex| u8::from_str_radix(hex, 16).ok());
+            bytes.push(escape.with_context(|| format!("Invalid percent escape in {url}"))?);
+            i += 3;
+        } else {
+            bytes.push(raw[i]);
+            i += 1;
+        }
+    }
+    let decoded = String::from_utf8(bytes).with_context(|| format!("Non-UTF-8 path in {url}"))?;
+    let path = match decoded.as_bytes() {
+        [b'/', drive, b':', ..] if drive.is_ascii_alphabetic() => &decoded[1..],
+        _ => &decoded,
+    };
+    Ok(Some(PathBuf::from(path)))
+}
 fn download(url: &str, path: &Path) -> Result<()> {
-    if let Some(local) = url.strip_prefix("file://") {
-        std::fs::copy(Path::new(local), path)?;
+    if let Some(local) = file_url_path(url)? {
+        std::fs::copy(&local, path)
+            .with_context(|| format!("Cannot copy {} from the file:// mirror", local.display()))?;
         return Ok(());
     }
     anyhow::ensure!(
@@ -345,4 +386,45 @@ fn release_url(base: &str, version: &str, asset: &str) -> Result<String> {
 
 pub(crate) fn probe_command(command: Command) -> Result<Vec<u8>> {
     Ok(checked(command, Duration::from_secs(5))?.stdout)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Options> {
+        Options::parse(&args.iter().map(|a| a.to_string()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn source_references_are_validated_before_they_reach_git() {
+        // `git fetch origin <value>` must never see an option.
+        assert!(parse(&["--rev", "--upload-pack=touch pwned"]).is_err());
+        assert!(parse(&["--from-source", "--version", "--upload-pack=touch pwned"]).is_err());
+        assert!(parse(&["--rev", "a b"]).is_err());
+        assert!(parse(&["--version", "v1 .0"]).is_err());
+        assert!(parse(&["--version", "tags/v1.0"]).is_err(), "a version is not a ref path");
+        for (rev, version) in
+            [("main", "latest"), ("refs/tags/v0.2.0", "v0.2.0"), ("4e1f2a", "0.2")]
+        {
+            let options = parse(&["--rev", rev, "--version", version]).unwrap();
+            assert_eq!(
+                (options.revision.as_deref(), options.version.as_str()),
+                (Some(rev), version)
+            );
+            assert!(options.from_source);
+        }
+    }
+
+    #[test]
+    fn file_urls_name_local_paths_on_every_platform() {
+        let local = |url: &str| file_url_path(url).unwrap().unwrap();
+        assert_eq!(local("file:///home/u/x.zip"), PathBuf::from("/home/u/x.zip"));
+        assert_eq!(local("file:///C:/a/b.zip"), PathBuf::from("C:/a/b.zip"));
+        // scripts/test-install.py joins `file://` and a native path.
+        assert_eq!(local("file://C:\\a\\b.zip"), PathBuf::from("C:\\a\\b.zip"));
+        assert_eq!(local("file:///tmp/my%20mirror/x.zip"), PathBuf::from("/tmp/my mirror/x.zip"));
+        assert!(file_url_path("file:///tmp/%zz").is_err());
+        assert!(file_url_path("https://example.invalid/x.zip").unwrap().is_none());
+    }
 }

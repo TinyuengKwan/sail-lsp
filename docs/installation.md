@@ -209,7 +209,9 @@ Windows uses the corresponding `.zip`. Include `--vsix FILE --editor vscode` for
 an offline VS Code integration. `--release-base-url https://mirror.example/releases`
 (or `SAIL_LSP_RELEASE_BASE_URL`) supports a mirror with the same
 `download/TAG/ASSET` and `latest/download/ASSET` layout. An explicitly selected
-`file://` mirror is supported for offline/testing; HTTP is rejected. The native
+`file://` mirror is supported for offline/testing; HTTP is rejected. A Windows
+mirror is written `file:///C:/mirror` (a native path behind the scheme,
+`file://C:\mirror`, also works); percent-escapes such as `%20` are decoded. The native
 CLI's online downloader uses curl, including when invoked directly on Windows;
 the PowerShell bootstrap downloads through Windows APIs instead.
 

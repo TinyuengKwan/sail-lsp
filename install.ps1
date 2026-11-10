@@ -38,7 +38,12 @@ function Invoke-Checked([string]$Program,[string[]]$Arguments) {
     if ($LASTEXITCODE -ne 0) { throw "$Program failed with exit code $LASTEXITCODE" }
 }
 function Get-Asset([string]$Url,[string]$Destination) {
-    if ($Url.StartsWith('file://')) { Copy-Item -LiteralPath $Url.Substring(7) -Destination $Destination; return }
+    if ($Url.StartsWith('file://')) {
+        # file:///C:/mirror is the standard spelling; file://C:\mirror is a native path behind the scheme.
+        $local = [Uri]::UnescapeDataString($Url.Substring(7))
+        if ($local -match '^/[A-Za-z]:') { $local = $local.Substring(1) }
+        Copy-Item -LiteralPath $local -Destination $Destination; return
+    }
     if (-not $Url.StartsWith('https://')) { throw 'Release URLs must use HTTPS or an explicit file:// offline mirror' }
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Destination -TimeoutSec 300
