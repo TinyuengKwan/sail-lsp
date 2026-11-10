@@ -758,19 +758,24 @@ impl GlobalState {
         {
             return;
         }
+        // A document is dirty when its buffer is not what is on disk, decided
+        // against disk now, when a compiler run is actually being requested.
         // Editors can restore unsaved buffers directly in didOpen, without a
-        // didChange. A disk compiler must not report those contents as checked.
-        // Only inspect disk when a compiler run is actually being requested.
+        // didChange, and a disk compiler must not report those as checked;
+        // and an edit that was undone leaves a buffer equal to disk, which it
+        // may check. `didChange` only ever added to this set, so one undone
+        // keystroke held the project's checks back until the file was saved.
         for uri in self.mem_docs.iter() {
-            if !self.dirty_documents.contains(uri)
-                && self.mem_docs.get(uri).is_some_and(|document| {
-                    uri.to_file_path()
-                        .ok()
-                        .and_then(|path| std::fs::read_to_string(path).ok())
-                        .is_none_or(|disk| disk != document.data)
-                })
-            {
+            let Some(document) = self.mem_docs.get(uri) else { continue };
+            let dirty = uri
+                .to_file_path()
+                .ok()
+                .and_then(|path| std::fs::read_to_string(path).ok())
+                .is_none_or(|disk| disk != document.data);
+            if dirty {
                 self.dirty_documents.insert(uri.clone());
+            } else {
+                self.dirty_documents.remove(uri);
             }
         }
         for target in targets {
@@ -2569,6 +2574,83 @@ mod project_reload_tests {
         assert_eq!(state.flycheck_latest.len(), 2);
         assert!(state.flycheck_latest.contains_key(&CheckTarget::Project(manifest)));
         assert!(state.flycheck_latest.contains_key(&CheckTarget::File(standalone)));
+        state.invalidate_flycheck();
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A document edited and then undone is not dirty: its buffer is the
+    /// disk text, which is what a disk compiler checks. The dirty set only
+    /// ever grew — `didChange` marked the document and nothing compared it
+    /// to disk again — so saving another file of the project reported
+    /// `Stale` and ran nothing until the undone file was saved or closed.
+    #[test]
+    fn an_edit_undone_does_not_hold_the_project_check_back() {
+        use crate::flycheck::CheckTarget;
+        let (sender, _messages) = crossbeam_channel::unbounded();
+        let (task_sender, _tasks) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender, task_sender);
+        state.config.flycheck.enable = true;
+        // Keep the worker pending: scheduling is what is under test.
+        state.config.flycheck.debounce_ms = 60_000;
+        let root = std::env::temp_dir().join(format!("flycheck-undo-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let manifest = root.join("sail.proj");
+        let a = root.join("a.sail");
+        let b = root.join("b.sail");
+        let text = "function f() -> int = 1\n";
+        for path in [&a, &b] {
+            std::fs::write(path, text).unwrap();
+        }
+        let a_uri = Url::from_file_path(&a).unwrap();
+        std::sync::Arc::make_mut(&mut state.projects).insert(
+            Url::from_directory_path(&root).unwrap(),
+            crate::reload::FolderProject {
+                manifest: manifest.clone(),
+                files: vec![
+                    (a_uri.clone(), a.clone()),
+                    (Url::from_file_path(&b).unwrap(), b.clone()),
+                ],
+                ..Default::default()
+            },
+        );
+        crate::handlers::notification::handle_did_open_text_document(
+            &mut state,
+            lsp_types::DidOpenTextDocumentParams {
+                text_document: lsp_types::TextDocumentItem {
+                    uri: a_uri.clone(),
+                    language_id: "sail".into(),
+                    version: 1,
+                    text: text.into(),
+                },
+            },
+        )
+        .unwrap();
+        // Type a character, then undo it: the buffer is the disk text again.
+        for (version, buffer) in [(2, format!("x{text}")), (3, text.to_owned())] {
+            crate::handlers::notification::handle_did_change_text_document(
+                &mut state,
+                lsp_types::DidChangeTextDocumentParams {
+                    text_document: lsp_types::VersionedTextDocumentIdentifier {
+                        uri: a_uri.clone(),
+                        version,
+                    },
+                    content_changes: vec![lsp_types::TextDocumentContentChangeEvent {
+                        range: None,
+                        range_length: None,
+                        text: buffer,
+                    }],
+                },
+            )
+            .unwrap();
+        }
+        state.request_flycheck(&b);
+        let target = CheckTarget::Project(manifest);
+        assert!(
+            matches!(state.flycheck_status.get(&target), Some(crate::flycheck::Status::Queued)),
+            "a buffer equal to disk holds nothing back: {:?}",
+            state.flycheck_status.get(&target)
+        );
         state.invalidate_flycheck();
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
