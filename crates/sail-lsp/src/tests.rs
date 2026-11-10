@@ -4664,6 +4664,40 @@ fn a_secondary_location_is_sent_as_a_location() {
     assert_eq!(related[0].message, "constraint from here");
 }
 
+/// A request advertised under `experimental` has a handler behind it.
+///
+/// `ssr` was advertised while its handler parsed the rule and returned an
+/// empty edit, so a client that offered structural search-replace would
+/// have reported success and changed nothing. The requests live under two
+/// prefixes — rust-analyzer's `experimental/` for the ones it also has,
+/// `sail-lsp/` for this server's own — and a flag is honoured under either.
+#[test]
+fn every_experimental_capability_has_a_handler() {
+    let caps = crate::lsp::capabilities::server_capabilities(
+        &crate::lsp::capabilities::ClientCapabilities::default(),
+    );
+    let ext = include_str!("lsp/ext.rs");
+    let main_loop = include_str!("main_loop.rs");
+    let experimental = caps.experimental.expect("experimental capabilities");
+    for (name, on) in experimental.as_object().expect("an object") {
+        // `false` is not an offer; a list (`ssrKinds`) describes another
+        // request's parameters rather than naming one.
+        if on == &serde_json::Value::Bool(false) || on.is_array() {
+            continue;
+        }
+        let at = ["experimental", "sail-lsp"]
+            .iter()
+            .find_map(|prefix| ext.find(&format!("METHOD: &'static str = \"{prefix}/{name}\";")))
+            .unwrap_or_else(|| panic!("no request type for `{name}`"));
+        let ty = ext[..at].rsplit("pub enum ").next().unwrap().split_whitespace().next().unwrap();
+        assert!(
+            main_loop.contains(&format!("crate::lsp_ext::{ty}>"))
+                || main_loop.contains(&format!("crate::lsp::ext::{ty}>")),
+            "`{name}` is advertised and `{ty}` has no handler"
+        );
+    }
+}
+
 #[test]
 fn internal_trivia_reuses_inference_and_refreshes_source_locations() {
     use ide::analysis::AnalysisHost;
