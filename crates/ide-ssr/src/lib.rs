@@ -189,12 +189,21 @@ impl<'db> MatchFinder<'db> {
                 continue;
             }
             let expected = rule.template.resolved_paths.get(&(name.to_owned(), ty));
-            let found = self.resolve_reference(
-                file,
-                usize::from(m.matched_node.text_range().start()),
-                name,
-                ty,
-            );
+            // The template's text does not exist at the match yet, so there
+            // is no token for `resolve_reference` to see a parameter or `let`
+            // through. Ask the scope at the match site directly: a local of
+            // that name would capture the rewritten text.
+            let offset = usize::from(m.matched_node.text_range().start());
+            let local = (!ty)
+                .then(|| {
+                    self.sema
+                        .locals_in_scope(file, offset)
+                        .into_iter()
+                        .find(|local| local.name.as_str() == name)
+                        .map(hir::PathResolution::Local)
+                })
+                .flatten();
+            let found = local.or_else(|| self.resolve_reference(file, offset, name, ty));
             if expected.is_none() || expected != found.as_ref() {
                 return false;
             }

@@ -3795,3 +3795,41 @@ fn span_type_queries_lower_only_the_owning_callable() {
         "offscreen inference: {executed:?}"
     );
 }
+
+#[test]
+fn ssr_skips_matches_where_a_template_name_is_captured_by_a_local() {
+    // `r` in the template is the global `let r : int = 5` where the rule is
+    // invoked. Inside `g` and `h` a local `r` is in scope at the match, so
+    // the rewritten text would bind to the local instead. Those sites must
+    // be left alone.
+    let source = "val foo : int -> int\nlet r : int = 5\nfunction f(x : int) -> int = foo(x)\nfunction g() -> int = let r = 2 in foo(1)\nfunction h(r : int) -> int = foo(1)\n";
+    let (host, map, urls) = setup(&[("main.sail", source)], &[0], vec![]);
+    let analysis = snapshot(&host, &map);
+    let file = analysis.file(&urls[0]).unwrap();
+    let at = source.find("foo(x)").unwrap();
+    let change = analysis
+        .structural_search_replace(
+            FileId::from_raw(0),
+            file.position_at(at),
+            "foo($a) ==>> $a + r",
+            false,
+            &[],
+            &Default::default(),
+        )
+        .unwrap()
+        .unwrap();
+    let edits = &change.source_file_edits[&FileId::from_raw(0)];
+    assert_eq!(edits.len(), 1, "{edits:?}");
+    assert_eq!(edits[0].range, base_db::text_range(at, at + "foo(x)".len()));
+    let found = analysis
+        .structural_search(
+            FileId::from_raw(0),
+            file.position_at(at),
+            "foo($a)",
+            &[],
+            &Default::default(),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.len(), 3, "search without the template still reports every call: {found:?}");
+}
