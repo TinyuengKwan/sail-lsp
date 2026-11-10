@@ -190,7 +190,9 @@ Use `eprintln!` only in CLI entry points. For debug logging, use `tracing`.
 cargo test --workspace --locked
 cargo test --workspace --no-default-features --locked
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo clippy --workspace --all-targets --locked -- -D warnings \
+  -D clippy::dbg_macro -D clippy::todo \
+  -D clippy::print_stdout -D clippy::print_stderr
 git diff --check
 ```
 

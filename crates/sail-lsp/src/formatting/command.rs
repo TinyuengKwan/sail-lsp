@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 pub(crate) fn run(args: &[String]) -> Result<(), String> {
     cli_inner(args).map_err(|error| format!("{error:#}"))
 }
+#[allow(clippy::print_stdout, clippy::print_stderr)]
 fn cli_inner(args: &[String]) -> anyhow::Result<()> {
     use std::io::{Read, Write};
     let mut check = false;

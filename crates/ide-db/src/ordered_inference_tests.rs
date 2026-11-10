@@ -998,7 +998,6 @@ fn declaration_projections_reuse_unchanged_contributions_after_body_edits() {
     queries.lock().unwrap().clear();
     let mut change = Change::new();
     change.change_file(id, source.replace("= 0", "= 1"));
-    let started = std::time::Instant::now();
     db.apply_change(change);
     let after = infer(&db, id, "target");
     clean(&after);
@@ -1006,9 +1005,5 @@ fn declaration_projections_reuse_unchanged_contributions_after_body_edits() {
     let executed = queries.lock().unwrap();
     let rebuilt =
         executed.iter().filter(|key| key.starts_with("declaration_contributions(")).count();
-    eprintln!(
-        "ABLATION declaration projections: elapsed_us={} rebuilt={rebuilt}",
-        started.elapsed().as_micros()
-    );
     assert_eq!(rebuilt, 0, "unchanged declaration projections should backdate independently");
 }

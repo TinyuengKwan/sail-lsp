@@ -40,14 +40,19 @@ jobs:
         with:
           components: rustfmt
 
-      - name: Cache cargo registry + target
-        uses: Swatinem/rust-cache@v2
-
       - name: Install Z3 (macOS)
         if: runner.os == 'macOS'
         run: |
           brew install z3
-          echo "Z3_SYS_Z3_HEADER=$(brew --prefix z3)/include/z3.h" >> $GITHUB_ENV
+          sail_z3_prefix=$(brew --prefix z3)
+          echo "Z3_LIBRARY_PATH_OVERRIDE=$sail_z3_prefix/lib" >> "$GITHUB_ENV"
+          echo "SAIL_LSP_Z3_CACHE_KEY=system-$(z3 --version)" >> "$GITHUB_ENV"
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Cached z3-sys build output contains versioned Homebrew library paths.
+          key: ${{ env.SAIL_LSP_Z3_CACHE_KEY }}
 
       - name: Set MSVC encoding flags (Windows)
         if: runner.os == 'Windows'
@@ -141,12 +146,18 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo registry + target
-        uses: Swatinem/rust-cache@v2
-
       - name: Install Z3 (macOS)
         if: runner.os == 'macOS'
-        run: brew install z3
+        run: |
+          brew install z3
+          sail_z3_prefix=$(brew --prefix z3)
+          echo "Z3_LIBRARY_PATH_OVERRIDE=$sail_z3_prefix/lib" >> "$GITHUB_ENV"
+          echo "SAIL_LSP_Z3_CACHE_KEY=system-$(z3 --version)" >> "$GITHUB_ENV"
+
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ env.SAIL_LSP_Z3_CACHE_KEY }}
 
       - name: Build extension-host test server
         if: runner.os != 'Windows'
