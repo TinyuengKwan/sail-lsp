@@ -824,16 +824,34 @@ pub(super) fn build_source_vsix(
     checked(c, Duration::from_secs(300))?;
     Ok(())
 }
+/// PowerShell that adds `$env:SAIL_LSP_MANAGED_BIN` to the user Path, or
+/// removes it. The value is read unexpanded and written back with its own
+/// registry type (REG_EXPAND_SZ when new), so `%USERPROFILE%\.cargo\bin`
+/// entries stay variable; .NET's Get/SetEnvironmentVariable would expand
+/// them and store the result as REG_SZ. Explorer and new consoles learn of
+/// the change from WM_SETTINGCHANGE, which .NET broadcast on our behalf and
+/// a plain registry write does not; the P/Invoke signature arrives in
+/// `$env:SAIL_LSP_SETTINGCHANGE` so the script holds no double quotes.
+#[cfg(any(windows, test))]
+fn windows_path_script(add: bool) -> String {
+    const OPEN: &str = "$k=[Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment'); $p=[string]$k.GetValue('Path','',[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames); $kind=if($k.GetValueNames() -contains 'Path'){$k.GetValueKind('Path')}else{[Microsoft.Win32.RegistryValueKind]::ExpandString};";
+    const CLOSE: &str = "$k.Close(); try { $n=Add-Type -Namespace SailLsp -Name Native -PassThru -MemberDefinition $env:SAIL_LSP_SETTINGCHANGE; $r=[UIntPtr]::Zero; [void]$n::SendMessageTimeout([IntPtr]0xffff,0x1A,[UIntPtr]::Zero,'Environment',2,5000,[ref]$r) } catch {}";
+    let edit = if add {
+        "$a=@($p -split ';' | Where-Object { $_ }); if($a -notcontains $env:SAIL_LSP_MANAGED_BIN){ $k.SetValue('Path',(($a + $env:SAIL_LSP_MANAGED_BIN) -join ';'),$kind); Write-Output 'added' };"
+    } else {
+        "$k.SetValue('Path',(($p -split ';' | Where-Object { $_ -and $_ -ine $env:SAIL_LSP_MANAGED_BIN }) -join ';'),$kind);"
+    };
+    format!("{OPEN} {edit} {CLOSE}")
+}
 #[cfg(windows)]
 pub(super) fn windows_path(bin: &Path, add: bool) -> Result<bool> {
-    let script = if add {
-        "$p=[Environment]::GetEnvironmentVariable('Path','User'); $a=@($p -split ';' | Where-Object { $_ }); if($a -notcontains $env:SAIL_LSP_MANAGED_BIN){[Environment]::SetEnvironmentVariable('Path',(($a + $env:SAIL_LSP_MANAGED_BIN) -join ';'),'User'); Write-Output 'added'}"
-    } else {
-        "$p=[Environment]::GetEnvironmentVariable('Path','User'); [Environment]::SetEnvironmentVariable('Path',(($p -split ';' | Where-Object { $_ -and $_ -ine $env:SAIL_LSP_MANAGED_BIN }) -join ';'),'User')"
-    };
+    const SETTINGCHANGE: &str = "[DllImport(\"user32.dll\", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, UIntPtr wParam, string lParam, uint flags, uint timeout, out UIntPtr result);";
     let mut c = Command::new("powershell.exe");
-    c.args(["-NoProfile", "-NonInteractive", "-Command", script]).env("SAIL_LSP_MANAGED_BIN", bin);
-    Ok(String::from_utf8_lossy(&checked(c, Duration::from_secs(15))?.stdout).contains("added"))
+    c.args(["-NoProfile", "-NonInteractive", "-Command", &windows_path_script(add)])
+        .env("SAIL_LSP_MANAGED_BIN", bin)
+        .env("SAIL_LSP_SETTINGCHANGE", SETTINGCHANGE);
+    // Add-Type compiles the broadcast helper; allow for a cold compiler.
+    Ok(String::from_utf8_lossy(&checked(c, Duration::from_secs(60))?.stdout).contains("added"))
 }
 
 #[cfg(test)]
@@ -969,5 +987,17 @@ mod tests {
         assert_eq!(installs(&before), 2);
         vsix.unwrap().undo();
         assert_eq!(log(&code_log), before);
+    }
+
+    #[test]
+    fn the_user_path_is_edited_without_expanding_or_retyping_it() {
+        for add in [true, false] {
+            let script = windows_path_script(add);
+            assert!(
+                script.contains("DoNotExpandEnvironmentNames") && script.contains("ExpandString"),
+                "{script}"
+            );
+            assert!(!script.contains("EnvironmentVariable"), "{script}");
+        }
     }
 }
