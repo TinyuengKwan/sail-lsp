@@ -86,7 +86,7 @@
     "test": "npm run typecheck && npm run build && node ./out/src/test/runTest.js",
     "format": "prettier --write src/",
     "format:check": "prettier --check src/",
-    "test:graph": "npm run typecheck && node --test ./out/src/test/projectGraph.test.js ./out/src/test/analysisContext.test.js ./out/src/test/installation.test.js ./out/src/test/diagnosticReport.test.js ./out/src/test/taskInvocations.test.js ./out/src/test/configuration.test.js ./out/src/test/snippets.test.js ./out/src/test/onEnterRules.test.js"
+    "test:graph": "npm run typecheck && node --test ./out/src/test/projectGraph.test.js ./out/src/test/analysisContext.test.js ./out/src/test/installation.test.js ./out/src/test/diagnosticReport.test.js ./out/src/test/taskInvocations.test.js ./out/src/test/configuration.test.js ./out/src/test/snippets.test.js ./out/src/test/onEnterRules.test.js ./out/src/test/hoverActions.test.js"
   },
   "contributes": {
     "languages": [
@@ -890,6 +890,11 @@
         "category": "Sail"
       },
       {
+        "command": "sail-lsp.hoverRefCommandProxy",
+        "title": "Run Hover Action",
+        "category": "Sail"
+      },
+      {
         "command": "sail-lsp.selectIncludeContext",
         "title": "Sail: Select Include Context"
       },
@@ -943,6 +948,12 @@
       }
     ],
     "menus": {
+      "commandPalette": [
+        {
+          "command": "sail-lsp.hoverRefCommandProxy",
+          "when": "false"
+        }
+      ],
       "view/title": [
         {
           "command": "sail-lsp.showProjectGraph",

@@ -152,12 +152,7 @@ impl ClientCapabilities {
     /// Whether the client renders hover actions — rust-analyzer's
     /// `experimental.hoverActions`. Read by `hover_actions::hover`.
     pub(crate) fn hover_actions_support(&self) -> bool {
-        self.0
-            .experimental
-            .as_ref()
-            .and_then(|it| it.get("hoverActions"))
-            .and_then(serde_json::Value::as_bool)
-            == Some(true)
+        self.experimental_bool("hoverActions")
     }
 
     /// Whether the client takes Markdown in a hover.

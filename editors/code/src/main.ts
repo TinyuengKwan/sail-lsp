@@ -10,7 +10,12 @@ import * as path from "path";
 import * as os from "os";
 import * as fs from "fs";
 import { explicitSettings } from "./configuration";
-import { ExperimentalFeatures, codeActionMiddleware } from "./client";
+import {
+    ExperimentalFeatures,
+    codeActionMiddleware,
+    hoverMiddleware,
+    registerHoverCommandProxy,
+} from "./client";
 import { managedServerPath } from "./installation";
 import { registerDiagnosticReport } from "./diagnosticReport";
 import { registerRunnables } from "./runnables";
@@ -214,6 +219,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
                 },
             },
             ...codeActionMiddleware(() => client),
+            ...hoverMiddleware(() => client),
         },
         initializationOptions: getInitializationOptions(context),
         synchronize: { configurationSection: "sail-lsp" },
@@ -237,6 +243,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     const ssr = registerStructuralReplace(context, () => client);
     registerCommands(context);
     registerEditingCommands(context, () => client);
+    registerHoverCommandProxy(context);
 
     // Start the client (and server)
     try {

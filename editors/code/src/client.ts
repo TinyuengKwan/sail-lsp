@@ -10,6 +10,7 @@ import {
     isSnippetEdit,
     unindentSnippet,
 } from "./snippets";
+import { CommandLink, HoverWithActions, renderHoverActions } from "./hoverActions";
 
 /**
  * The `experimental` client capabilities. The server reads each key in
@@ -19,6 +20,7 @@ import {
 export const EXPERIMENTAL_CAPABILITIES = {
     snippetTextEdit: true,
     serverStatusNotification: true,
+    hoverActions: true,
     // The client-side commands a code lens may run; each is registered in
     // main.ts with the protocol arguments the server sends.
     commands: { commands: ["sail-lsp.showReferences"] },
@@ -133,4 +135,62 @@ export function codeActionMiddleware(
                 );
         },
     };
+}
+
+/** The commands behind the current hover's action links, by index. */
+let hoverCommands: CommandLink[] = [];
+const HOVER_COMMAND_PROXY = "sail-lsp.hoverRefCommandProxy";
+
+/**
+ * Hovers with the server's action links rendered under them. The client's
+ * converter drops the `actions` the server adds (`hover_actions::Hover`),
+ * so the request is sent here and the links appended as trusted Markdown.
+ */
+export function hoverMiddleware(
+    getClient: () => lc.LanguageClient | undefined,
+): Pick<lc.Middleware, "provideHover"> {
+    return {
+        async provideHover(document, position, token, next) {
+            const client = getClient();
+            if (!client) return next(document, position, token);
+            const params: lc.HoverParams = {
+                textDocument: client.code2ProtocolConverter.asTextDocumentIdentifier(document),
+                position: client.code2ProtocolConverter.asPosition(position),
+            };
+            return client
+                .sendRequest(lc.HoverRequest.type, params, token)
+                .then(async (result: HoverWithActions | null) => {
+                    if (!result) return null;
+                    const hover = await client.protocol2CodeConverter.asHover(result);
+                    if (result.actions?.length) {
+                        const { markdown, commands } = renderHoverActions(
+                            result.actions,
+                            HOVER_COMMAND_PROXY,
+                        );
+                        hoverCommands = commands;
+                        const links = new vscode.MarkdownString(markdown);
+                        links.isTrusted = true;
+                        hover.contents.push(links);
+                    }
+                    return hover;
+                })
+                .catch((error) =>
+                    client.handleFailedRequest(lc.HoverRequest.type, token, error, null),
+                );
+        },
+    };
+}
+
+/**
+ * The command a hover action link runs — rust-analyzer's
+ * `hoverRefCommandProxy`: a `showReferences` carries every location, far
+ * too long for a command URI, so the link names an index instead.
+ */
+export function registerHoverCommandProxy(context: vscode.ExtensionContext): void {
+    context.subscriptions.push(
+        vscode.commands.registerCommand(HOVER_COMMAND_PROXY, async (index: number) => {
+            const link = hoverCommands[index];
+            if (link) await vscode.commands.executeCommand(link.command, ...(link.arguments ?? []));
+        }),
+    );
 }

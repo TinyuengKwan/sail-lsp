@@ -961,6 +961,61 @@ suite("sail-lsp extension", () => {
         }
     });
 
+    test("hovering a val shows its implementation as an action link", async () => {
+        const extension = vscode.extensions.getExtension<ExtensionApi>("Lunarwwww.sail-lsp")!;
+        const api = await extension.activate();
+        await eventually("server ready", () => api.test.status()?.quiescent === true);
+        const uri = vscode.Uri.joinPath(vscode.workspace.workspaceFolders![0].uri, "sample.sail");
+        const document = await vscode.workspace.openTextDocument(uri);
+        const original = document.getText();
+        const source = "val f : int -> int\nfunction f(x) = x\n";
+        const replace = async (text: string) => {
+            const edit = new vscode.WorkspaceEdit();
+            edit.replace(
+                uri,
+                new vscode.Range(
+                    document.positionAt(0),
+                    document.positionAt(document.getText().length),
+                ),
+                text,
+            );
+            assert.ok(await vscode.workspace.applyEdit(edit));
+        };
+        const rendered = async () => {
+            const hovers = await vscode.commands.executeCommand<vscode.Hover[]>(
+                "vscode.executeHoverProvider",
+                uri,
+                new vscode.Position(0, "val ".length),
+            );
+            return (hovers ?? [])
+                .flatMap((hover) => hover.contents)
+                .map((content) => (typeof content === "string" ? content : content.value))
+                .join("\n");
+        };
+        try {
+            await replace(source);
+            await vscode.window.showTextDocument(document);
+            let text = "";
+            const deadline = Date.now() + 20_000;
+            while (!text.includes("hoverRefCommandProxy") && Date.now() < deadline) {
+                text = await rendered();
+                if (!text.includes("hoverRefCommandProxy"))
+                    await new Promise((resolve) => setTimeout(resolve, 50));
+            }
+            assert.match(
+                text,
+                /\[1 implementation\]\(command:sail-lsp\.hoverRefCommandProxy\?0 'Go to implementations'\)/,
+                text,
+            );
+            // The link's command runs the stored `showReferences`.
+            await vscode.commands.executeCommand("sail-lsp.hoverRefCommandProxy", 0);
+            await vscode.commands.executeCommand("closeReferenceSearch");
+        } finally {
+            await replace(original);
+            await vscode.window.showTextDocument(document);
+        }
+    });
+
     test("analysis explanations and read-only preprocessing previews expose actual source links", async () => {
         const extension = vscode.extensions.getExtension<ExtensionApi>("Lunarwwww.sail-lsp")!;
         const api = await extension.activate();
