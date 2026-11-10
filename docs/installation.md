@@ -121,8 +121,11 @@ nonstandard layouts; it is a configuration root, not an editor executable.
   Server selection is explicit `sail-lsp.server.path`, then the managed registration,
   then the bundled server, then PATH. A stale or malformed managed registration
   produces a visible startup error. An old installed extension must be upgraded
-  before it can read the new registration. Uninstall removes the registration but
-  leaves the extension installed; remove it with the editor's extension UI/CLI.
+  before it can read the new registration. The extension is installed after every
+  other editor change has been written; an installation that then fails removes
+  the extension again only when none was installed before it ran. Uninstall
+  removes the registration but leaves the extension installed; remove it with
+  the editor's extension UI/CLI.
 * **Zed**: prepares pinned, MIT-licensed development-extension sources under
   `<root>/editors/zed` and sets `lsp.sail_lsp.binary.path` in Zed's settings. Run
   **zed: install dev extension** and select that directory. This is the official

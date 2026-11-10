@@ -189,20 +189,23 @@ fn shell_quote(path: &Path) -> Result<String> {
         path.to_str().context("Non-UTF-8 installation path")?.replace('\'', "'\\''")
     ))
 }
+/// The editor changes to make, and the verified VS Code extension package
+/// that `apply` installs once they are all in place. Planning only reads.
 pub(super) fn plan(
     options: &Options,
     payload: &Path,
     manifest: &distribution::Manifest,
     old: &[Change],
-) -> Result<Vec<Change>> {
+) -> Result<(Vec<Change>, Option<Vsix>)> {
     let mut changes = Vec::new();
+    let mut vsix = None;
     let server = options.prefix.join("bin").join(executable_name());
     let root = editor_root(options)?;
     let server_json = serde_json::to_string(server.to_str().context("Non-UTF-8 server path")?)?;
     for editor in &options.editors {
         match editor.as_str() {
             "vscode" => {
-                install_vsix(options, payload, manifest)?;
+                vsix = Some(Vsix::prepare(options, payload, manifest)?);
                 changes.push(file_change(
                     options.config_home.join("vscode.json"),
                     format!(
@@ -337,7 +340,7 @@ pub(super) fn plan(
             }
         }
     }
-    Ok(changes)
+    Ok((changes, vsix))
 }
 fn files(root: &Path) -> Result<Vec<PathBuf>> {
     fn visit(root: &Path, path: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
@@ -425,7 +428,7 @@ fn helix_change(path: PathBuf, server: &Path, old: &[Change]) -> Result<Change> 
     language["language-servers"] = value(servers);
     Change::new(path, doc.to_string(), Kind::Helix { prior: original }, old)
 }
-pub(super) fn apply(changes: &mut [Change]) -> Result<Vec<Change>> {
+pub(super) fn apply(changes: &mut [Change], vsix: Option<&mut Vsix>) -> Result<Vec<Change>> {
     let mut applied = Vec::new();
     for change in changes {
         let current = read(&change.path)?;
@@ -438,6 +441,13 @@ pub(super) fn apply(changes: &mut [Change]) -> Result<Vec<Change>> {
             return Err(error);
         }
         applied.push(change.clone());
+    }
+    // The extension goes in last: it is the one change another process owns.
+    if let Some(vsix) = vsix {
+        if let Err(error) = vsix.install() {
+            restore(&applied);
+            return Err(error);
+        }
     }
     Ok(applied)
 }
@@ -629,68 +639,130 @@ fn undo_one(change: &Change) -> Result<()> {
     }
     Ok(())
 }
-fn install_vsix(
-    options: &Options,
-    payload: &Path,
-    manifest: &distribution::Manifest,
-) -> Result<()> {
-    let temp = tempfile::tempdir()?;
-    let asset = format!("sail-lsp-{}.vsix", manifest.target);
-    let bundled = payload.join(&asset);
-    let vsix = if let Some(vsix) = &options.vsix {
-        vsix.clone()
-    } else if bundled.is_file() {
-        bundled
-    } else {
-        let target = temp.path().join(&asset);
-        let checksum = temp.path().join("checksum");
-        download(&release_url(&options.release_base, &manifest.tag, &asset)?, &target)?;
-        download(
-            &release_url(&options.release_base, &manifest.tag, &format!("{asset}.sha256"))?,
-            &checksum,
-        )?;
+const EXTENSION_ID: &str = "Lunarwwww.sail-lsp";
+/// A verified VS Code extension package waiting to be installed.
+pub(super) struct Vsix {
+    path: PathBuf,
+    code: PathBuf,
+    /// Keeps a downloaded package until it is installed.
+    _download: tempfile::TempDir,
+    /// The extension was absent before this run, so removing it on rollback
+    /// undoes only this installer's work.
+    fresh: bool,
+    installed: bool,
+}
+impl Vsix {
+    fn prepare(
+        options: &Options,
+        payload: &Path,
+        manifest: &distribution::Manifest,
+    ) -> Result<Self> {
+        let temp = tempfile::tempdir()?;
+        let asset = format!("sail-lsp-{}.vsix", manifest.target);
+        let bundled = payload.join(&asset);
+        let vsix = if let Some(vsix) = &options.vsix {
+            vsix.clone()
+        } else if bundled.is_file() {
+            // The payload drops its package before it is stored; keep a copy.
+            let target = temp.path().join(&asset);
+            fs::copy(bundled, &target)?;
+            target
+        } else {
+            let target = temp.path().join(&asset);
+            let checksum = temp.path().join("checksum");
+            download(&release_url(&options.release_base, &manifest.tag, &asset)?, &target)?;
+            download(
+                &release_url(&options.release_base, &manifest.tag, &format!("{asset}.sha256"))?,
+                &checksum,
+            )?;
+            anyhow::ensure!(
+                sha256(&target)?
+                    == fs::read_to_string(checksum)?
+                        .split_whitespace()
+                        .next()
+                        .context("Empty VSIX checksum")?,
+                "VSIX checksum mismatch"
+            );
+            target
+        };
+        let mut zip = zip::ZipArchive::new(fs::File::open(&vsix)?)?;
+        let package: Value = serde_json::from_reader(zip.by_name("extension/package.json")?)?;
         anyhow::ensure!(
-            sha256(&target)?
-                == fs::read_to_string(checksum)?
-                    .split_whitespace()
-                    .next()
-                    .context("Empty VSIX checksum")?,
-            "VSIX checksum mismatch"
+            package["name"] == "sail-lsp"
+                && package["publisher"] == "Lunarwwww"
+                && package["version"] == manifest.version,
+            "VSIX identity/version does not match the server release"
         );
-        target
-    };
-    let mut zip = zip::ZipArchive::new(fs::File::open(&vsix)?)?;
-    let package: Value = serde_json::from_reader(zip.by_name("extension/package.json")?)?;
-    anyhow::ensure!(
-        package["name"] == "sail-lsp"
-            && package["publisher"] == "Lunarwwww"
-            && package["version"] == manifest.version,
-        "VSIX identity/version does not match the server release"
-    );
-    use sha2::{Digest, Sha256};
-    use std::io::Read;
-    let mut server = zip.by_name(&format!("extension/server/{}", executable_name()))?;
-    let mut bytes = Vec::new();
-    server.read_to_end(&mut bytes)?;
-    anyhow::ensure!(
-        format!("{:x}", Sha256::digest(bytes)) == manifest.binary_sha256,
-        "VSIX contains a different server binary"
-    );
+        use sha2::{Digest, Sha256};
+        use std::io::Read;
+        let mut server = zip.by_name(&format!("extension/server/{}", executable_name()))?;
+        let mut bytes = Vec::new();
+        server.read_to_end(&mut bytes)?;
+        anyhow::ensure!(
+            format!("{:x}", Sha256::digest(bytes)) == manifest.binary_sha256,
+            "VSIX contains a different server binary"
+        );
+        let listed = checked(
+            code_command(&options.code, &["--list-extensions".as_ref()]),
+            Duration::from_secs(60),
+        )
+        .context(
+            "Cannot list VS Code extensions; install the `code` command or specify --code-command",
+        )?;
+        let fresh = !String::from_utf8_lossy(&listed.stdout)
+            .lines()
+            .any(|line| line.trim().eq_ignore_ascii_case(EXTENSION_ID));
+        Ok(Self {
+            path: vsix,
+            code: options.code.clone(),
+            _download: temp,
+            fresh,
+            installed: false,
+        })
+    }
+    fn install(&mut self) -> Result<()> {
+        let command = code_command(
+            &self.code,
+            &["--install-extension".as_ref(), self.path.as_os_str(), "--force".as_ref()],
+        );
+        checked(command,Duration::from_secs(180)).context("VS Code extension installation failed; install the `code` command or specify --code-command")?;
+        self.installed = true;
+        Ok(())
+    }
+    /// Remove the extension if this run installed it where there was none.
+    /// An upgraded extension stays: its predecessor cannot be put back.
+    pub(super) fn undo(&self) {
+        if self.installed && self.fresh {
+            let command = code_command(
+                &self.code,
+                &["--uninstall-extension".as_ref(), EXTENSION_ID.as_ref()],
+            );
+            let _ = checked(command, Duration::from_secs(180));
+        }
+    }
+}
+/// `code <args>`; on Windows the CLI is a .cmd that needs a shell.
+fn code_command(code: &Path, args: &[&std::ffi::OsStr]) -> Command {
     #[cfg(not(windows))]
-    let command = {
-        let mut c = Command::new(&options.code);
-        c.args(["--install-extension"]).arg(&vsix).arg("--force");
+    {
+        let mut c = Command::new(code);
+        c.args(args);
         c
-    };
+    }
     #[cfg(windows)]
-    let command = {
+    {
         let mut c = Command::new("powershell.exe");
-        c.args(["-NoProfile","-NonInteractive","-Command","& $env:SAIL_LSP_CODE_COMMAND '--install-extension' $env:SAIL_LSP_VSIX '--force'; exit $LASTEXITCODE"]);
-        c.env("SAIL_LSP_CODE_COMMAND", &options.code).env("SAIL_LSP_VSIX", &vsix);
+        let mut script = String::from("& $env:SAIL_LSP_CODE_COMMAND");
+        for (i, arg) in args.iter().enumerate() {
+            let key = format!("SAIL_LSP_CODE_ARG{i}");
+            script.push_str(&format!(" $env:{key}"));
+            c.env(key, arg);
+        }
+        script.push_str("; exit $LASTEXITCODE");
+        c.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+        c.env("SAIL_LSP_CODE_COMMAND", code);
         c
-    };
-    checked(command,Duration::from_secs(180)).context("VS Code extension installation failed; install the `code` command or specify --code-command")?;
-    Ok(())
+    }
 }
 pub(super) fn build_source_vsix(
     root: &Path,
@@ -762,4 +834,140 @@ pub(super) fn windows_path(bin: &Path, add: bool) -> Result<bool> {
     let mut c = Command::new("powershell.exe");
     c.args(["-NoProfile", "-NonInteractive", "-Command", script]).env("SAIL_LSP_MANAGED_BIN", bin);
     Ok(String::from_utf8_lossy(&checked(c, Duration::from_secs(15))?.stdout).contains("added"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[cfg(unix)]
+    use sha2::Digest;
+    #[cfg(unix)]
+    use std::io::Write;
+
+    /// A `code` CLI that records its arguments and lists what `listing` holds.
+    #[cfg(unix)]
+    fn fake_code(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let (code, log, listing) = (dir.join("code"), dir.join("code.log"), dir.join("listing"));
+        fs::write(&listing, "").unwrap();
+        fs::write(
+            &code,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n[ \"$1\" = --list-extensions ] && cat '{}'\nexit 0\n",
+                log.display(),
+                listing.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&code, fs::Permissions::from_mode(0o755)).unwrap();
+        (code, log, listing)
+    }
+    #[cfg(unix)]
+    fn fake_vsix(dir: &Path, manifest: &distribution::Manifest, server: &[u8]) -> PathBuf {
+        let path = dir.join("sail-lsp.vsix");
+        let mut zip = zip::ZipWriter::new(fs::File::create(&path).unwrap());
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("extension/package.json", options).unwrap();
+        zip.write_all(
+            json!({"name":"sail-lsp","publisher":"Lunarwwww","version":manifest.version})
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap();
+        zip.start_file(format!("extension/server/{}", executable_name()), options).unwrap();
+        zip.write_all(server).unwrap();
+        zip.finish().unwrap();
+        path
+    }
+    #[cfg(unix)]
+    fn manifest(server: &[u8]) -> distribution::Manifest {
+        distribution::Manifest {
+            schema_version: 1,
+            version: "0.0.1".into(),
+            tag: "v0.0.1".into(),
+            revision: "0000000".into(),
+            target: env!("SAIL_LSP_BUILD_TARGET").into(),
+            stdlib_revision: "0000000".into(),
+            solver: "z3-vendored".into(),
+            binary: executable_name().into(),
+            binary_sha256: format!("{:x}", sha2::Sha256::digest(server)),
+            crt_static: false,
+            requirements: json!({}),
+        }
+    }
+    #[cfg(unix)]
+    fn log(path: &Path) -> String {
+        fs::read_to_string(path).unwrap_or_default()
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_extension_is_installed_only_once_every_editor_change_is_in_place() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let (code, code_log, listing) = fake_code(root);
+        let server = b"not really a server";
+        let manifest = manifest(server);
+        let vsix = fake_vsix(root, &manifest, server);
+        let args: Vec<String> = [
+            "--prefix",
+            "prefix",
+            "--config-home",
+            "config",
+            "--editor-root",
+            "editors",
+            "--editor",
+            "vscode,helix",
+            "--no-modify-path",
+            "--vsix",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .chain([vsix.display().to_string(), "--code-command".into(), code.display().to_string()])
+        .collect();
+        let args: Vec<String> = args
+            .into_iter()
+            .map(|a| match a.as_str() {
+                "prefix" | "config" | "editors" => root.join(a).display().to_string(),
+                _ => a,
+            })
+            .collect();
+        let options = Options::parse(&args).unwrap();
+        let payload = root.join("payload");
+        fs::create_dir(&payload).unwrap();
+
+        // Helix refuses the plan; VS Code, planned first, must not have acted.
+        let languages = root.join("editors/helix/languages.toml");
+        fs::create_dir_all(languages.parent().unwrap()).unwrap();
+        fs::write(&languages, "[language-server.sail-lsp-managed]\ncommand = \"theirs\"\n")
+            .unwrap();
+        let error = plan(&options, &payload, &manifest, &[]).err().expect("Helix conflict");
+        assert!(error.to_string().contains("Helix already defines"), "{error:#}");
+        assert!(!log(&code_log).contains("--install-extension"), "{}", log(&code_log));
+
+        // With the conflict gone, planning still only reads; applying writes
+        // every file and installs the extension last.
+        fs::remove_file(&languages).unwrap();
+        let (mut changes, mut vsix) = plan(&options, &payload, &manifest, &[]).unwrap();
+        assert!(!log(&code_log).contains("--install-extension"), "{}", log(&code_log));
+        let applied = apply(&mut changes, vsix.as_mut()).unwrap();
+        assert_eq!(applied.len(), 2);
+        assert!(root.join("config/vscode.json").is_file() && languages.is_file());
+        let installs =
+            |log: &str| log.lines().filter(|line| line.starts_with("--install-extension ")).count();
+        assert_eq!(installs(&log(&code_log)), 1, "{}", log(&code_log));
+        // Rolling back removes an extension nobody had before this run...
+        vsix.unwrap().undo();
+        assert!(log(&code_log).contains("--uninstall-extension Lunarwwww.sail-lsp"));
+        restore(&applied);
+        // ...and keeps one that was already there: its predecessor is gone.
+        fs::write(&listing, "lunarwwww.sail-lsp\n").unwrap();
+        let (mut changes, mut vsix) = plan(&options, &payload, &manifest, &[]).unwrap();
+        apply(&mut changes, vsix.as_mut()).unwrap();
+        let before = log(&code_log);
+        assert_eq!(installs(&before), 2);
+        vsix.unwrap().undo();
+        assert_eq!(log(&code_log), before);
+    }
 }

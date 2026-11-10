@@ -243,7 +243,7 @@ pub(super) fn run(options: Options) -> Result<()> {
         return Ok(());
     }
     let payload = distribution::acquire(&options)?;
-    let mut changes = editors::plan(
+    let (mut changes, mut vsix) = editors::plan(
         &options,
         payload.directory.path(),
         &payload.manifest,
@@ -251,9 +251,9 @@ pub(super) fn run(options: Options) -> Result<()> {
     )?;
     // A source-built VSIX is only an input to the external editor installer.
     // Do not retain its timestamp-dependent ZIP bytes as a separate version.
-    let vsix = payload.directory.path().join(format!("sail-lsp-{}.vsix", payload.manifest.target));
-    if vsix.is_file() {
-        fs::remove_file(vsix)?;
+    let built = payload.directory.path().join(format!("sail-lsp-{}.vsix", payload.manifest.target));
+    if built.is_file() {
+        fs::remove_file(built)?;
     }
     use sha2::{Digest, Sha256};
     let content_hash =
@@ -283,11 +283,16 @@ pub(super) fn run(options: Options) -> Result<()> {
     }
     state.active = id.clone();
     state.versions.insert(id.clone(), installed.clone());
-    let applied = match editors::apply(&mut changes) {
+    let applied = match editors::apply(&mut changes, vsix.as_mut()) {
         Ok(applied) => applied,
         Err(error) => {
             cleanup();
             return Err(error);
+        }
+    };
+    let undo_vsix = || {
+        if let Some(vsix) = &vsix {
+            vsix.undo();
         }
     };
     let activation = if cancelled() {
@@ -297,6 +302,7 @@ pub(super) fn run(options: Options) -> Result<()> {
     };
     if let Err(error) = activation {
         editors::restore(&applied);
+        undo_vsix();
         cleanup();
         return Err(error);
     }
@@ -332,6 +338,7 @@ pub(super) fn run(options: Options) -> Result<()> {
             let _ = editors::windows_path(&prefix.join("bin"), false);
         }
         editors::restore(&changes);
+        undo_vsix();
         cleanup();
         return Err(error);
     }
