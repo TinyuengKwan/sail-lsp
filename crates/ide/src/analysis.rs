@@ -20,6 +20,8 @@ mod context;
 mod hierarchy;
 #[cfg(test)]
 mod imports_tests;
+#[cfg(test)]
+mod inactive_code_tests;
 mod inlay_links;
 #[cfg(test)]
 mod kind_oracle_tests;

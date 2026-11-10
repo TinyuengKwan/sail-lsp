@@ -70,6 +70,103 @@ pub enum AnyDiagnostic {
     NonContiguousSubrange(NonContiguousSubrange),
     VectorSubrangeOrder(VectorSubrangeOrder),
     MappingBindingMismatch(MappingBindingMismatch),
+    InactiveCode(InactiveCode),
+}
+
+/// Code inside an `$ifdef`/`$ifndef`/`$iftarget`/`$else` region the
+/// preprocessor did not take (`preprocess.ml`). Not a node: the region is
+/// the lines between two directives, whatever they parse as.
+pub struct InactiveCode {
+    /// The directive that decided it, as written: `$ifdef FOO`.
+    pub directive: String,
+    /// Whether this is the `$else` side of that directive.
+    pub in_else: bool,
+    /// The lines inside the region, without the directive lines.
+    pub range: crate::FileRange,
+}
+
+impl AnyDiagnostic {
+    /// One diagnostic per contiguous inactive region of `file`.
+    ///
+    /// `base_db::preprocess::file_regions` is the preprocessor's own
+    /// answer — one flag per directive event, for the region that
+    /// follows it — so this walks the top-level directives of the raw
+    /// parse and reports every run of regions that is off. A conditional
+    /// nested inside an inactive region is inside that one run.
+    pub fn inactive_code(db: &dyn salsa::Database, file: base_db::FileText) -> Vec<AnyDiagnostic> {
+        use syntax::preprocess::Event;
+        let file_id = file.file_id(db);
+        let Some(regions) = base_db::preprocess::file_regions(db, file_id) else {
+            return Vec::new();
+        };
+        let Some(root) = syntax::parse_query::parse_file(db, file).syntax_node() else {
+            return Vec::new();
+        };
+        let text = root.text().to_string();
+        let region = |start: usize, end: usize| {
+            // The region starts on the line after its directive and ends
+            // before the line of the one that closes it.
+            let start = start
+                + if text[start..].starts_with("\r\n") {
+                    2
+                } else {
+                    usize::from(text[start..].starts_with('\n'))
+                };
+            let end = text[..end].trim_end().len();
+            (end > start)
+                .then(|| crate::FileRange { file_id, range: base_db::text_range(start, end) })
+        };
+        let directive_text = |node: &syntax::SyntaxNode| {
+            node.text().to_string().lines().next().unwrap_or_default().trim().to_owned()
+        };
+
+        let mut out = Vec::new();
+        let mut index = 0;
+        let mut open_conditions: Vec<String> = Vec::new();
+        // The directive that switched the current run off, and where it ends.
+        let mut inactive_since: Option<(String, bool, usize)> = None;
+        for node in root.children() {
+            let Some(event) = Event::from_node(&node) else { continue };
+            let before = regions.get(index).copied().unwrap_or(true);
+            index += 1;
+            let after = regions.get(index).copied().unwrap_or(true);
+            match &event {
+                Event::Ifdef(..) | Event::IfTarget(_) => {
+                    open_conditions.push(directive_text(&node))
+                }
+                Event::Endif => {
+                    open_conditions.pop();
+                }
+                _ => {}
+            }
+            if before && !after {
+                let directive =
+                    open_conditions.last().cloned().unwrap_or_else(|| directive_text(&node));
+                inactive_since = Some((
+                    directive,
+                    matches!(event, Event::Else),
+                    usize::from(node.text_range().end()),
+                ));
+            } else if !before && after {
+                if let Some((directive, in_else, start)) = inactive_since.take() {
+                    if let Some(range) = region(start, usize::from(node.text_range().start())) {
+                        out.push(AnyDiagnostic::InactiveCode(InactiveCode {
+                            directive,
+                            in_else,
+                            range,
+                        }));
+                    }
+                }
+            }
+        }
+        // Never closed: inactive to the end of the file.
+        if let Some((directive, in_else, start)) = inactive_since {
+            if let Some(range) = region(start, text.len()) {
+                out.push(AnyDiagnostic::InactiveCode(InactiveCode { directive, in_else, range }));
+            }
+        }
+        out
+    }
 }
 
 pub struct UnresolvedIdent {

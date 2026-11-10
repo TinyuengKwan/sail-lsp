@@ -18,6 +18,7 @@ mod handlers {
     pub(crate) mod effect_violation;
     pub(crate) mod expected_function;
     pub(crate) mod impossible_constraint;
+    pub(crate) mod inactive_code;
     pub(crate) mod incomplete_scattered;
     pub(crate) mod inconsistent_hex_casing;
     pub(crate) mod invalid_list_pattern;
@@ -66,14 +67,14 @@ mod types;
 use hir::diagnostics::{
     AnyDiagnostic, CircularInclude, ConcatTypeMismatch, DeprecatedSyntax, DuplicateBindingDiag,
     DuplicateDefinition, EffectMismatchInOverride, EffectViolation, ExpectedFunction,
-    ImpossibleConstraint, IncompleteMatch, IncompleteScattered, InconsistentHexCasing,
-    InvalidListPattern, InvalidSliceAssign, InvalidStringPattern, InvalidVectorConcat,
-    MappingBindingMismatch, MismatchedArgCount, MismatchedParamCount, MissingEffectAnnotation,
-    MissingFields, NoOverloading, NonContiguousSubrange, NotAFunction, RedundantMatchArm,
-    RedundantTypeAnnotation, RemoveTrailingReturn, RemoveUnnecessaryElse, ReturnOutsideFunction,
-    ShadowedBinding, TypeMismatch, UndeclaredEffect, UndeclaredMappingType, UnnecessaryMutability,
-    UnreachableCode, UnresolvedField, UnresolvedIdent, UnresolvedInclude, UnresolvedQuants,
-    UnsolvedConstraint, UnusedImport, UnusedVariable, VectorSubrangeOrder,
+    ImpossibleConstraint, InactiveCode, IncompleteMatch, IncompleteScattered,
+    InconsistentHexCasing, InvalidListPattern, InvalidSliceAssign, InvalidStringPattern,
+    InvalidVectorConcat, MappingBindingMismatch, MismatchedArgCount, MismatchedParamCount,
+    MissingEffectAnnotation, MissingFields, NoOverloading, NonContiguousSubrange, NotAFunction,
+    RedundantMatchArm, RedundantTypeAnnotation, RemoveTrailingReturn, RemoveUnnecessaryElse,
+    ReturnOutsideFunction, ShadowedBinding, TypeMismatch, UndeclaredEffect, UndeclaredMappingType,
+    UnnecessaryMutability, UnreachableCode, UnresolvedField, UnresolvedIdent, UnresolvedInclude,
+    UnresolvedQuants, UnsolvedConstraint, UnusedImport, UnusedVariable, VectorSubrangeOrder,
 };
 use ide_db::assists::{Assist, AssistId, AssistKind, AssistResolveStrategy, Label, SnippetCap};
 use ide_db::line_index::TextRange;
@@ -475,6 +476,8 @@ pub fn semantic_diagnostics(
     ) {
         any_from_defs = AnyDiagnostic::from_def_map(&dm.0, tree, ft.file_id(db));
     }
+    // The `$ifdef` regions the preprocessor did not take.
+    any_from_defs.extend(AnyDiagnostic::inactive_code(db, ft));
 
     // Repeated unguarded includes are distinct declarations, not one
     // deduplicated physical file. Sail rejects repeated bodies and type definitions.
@@ -785,6 +788,8 @@ pub fn semantic_diagnostics(
                 handlers::undeclared_effect::undeclared_effect(&ctx, d),
             AnyDiagnostic::EffectMismatchInOverride(d) =>
                 handlers::effect_mismatch_in_override::effect_mismatch_in_override(&ctx, d),
+            AnyDiagnostic::InactiveCode(d) =>
+                handlers::inactive_code::inactive_code(&ctx, d),
         };
         res.push(d);
     }
@@ -1051,6 +1056,7 @@ pub(crate) fn dispatch_one(ctx: &DiagnosticsContext<'_>, d: &AnyDiagnostic) -> O
         AnyDiagnostic::EffectMismatchInOverride(d) => {
             handlers::effect_mismatch_in_override::effect_mismatch_in_override(ctx, d)
         }
+        AnyDiagnostic::InactiveCode(d) => handlers::inactive_code::inactive_code(ctx, d),
     })
 }
 

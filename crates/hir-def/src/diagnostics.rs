@@ -143,6 +143,7 @@ impl DiagnosticCode {
             "unreachable-after-escape" => {
                 DiagnosticCode::SailLint("unreachable-after-escape", Severity::Hint)
             }
+            "inactive-code" => DiagnosticCode::SailLint("inactive-code", Severity::Hint),
             _ => DiagnosticCode::SyntaxError,
         }
     }
