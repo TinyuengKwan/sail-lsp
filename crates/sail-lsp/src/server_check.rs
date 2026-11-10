@@ -325,15 +325,50 @@ impl ServerFixture {
         imports: Option<bool>,
         initialization_options: serde_json::Value,
     ) -> ServerFixture {
-        Self::open_with_client(name, files, kind, imports, initialization_options, false, false)
+        Self::open_with_client(
+            name,
+            files,
+            kind,
+            imports,
+            initialization_options,
+            false,
+            false,
+            false,
+        )
     }
 
     /// A workspace whose client pulls diagnostics, as VS Code's does, and
     /// accepts `workspace/diagnostic/refresh`.
     fn new_pulling(name: &str, files: &[(&str, &str)]) -> ServerFixture {
-        Self::open_with_client(name, files, Root::Real, None, serde_json::Value::Null, false, true)
+        Self::open_with_client(
+            name,
+            files,
+            Root::Real,
+            None,
+            serde_json::Value::Null,
+            false,
+            true,
+            false,
+        )
     }
 
+    /// A workspace whose client registers no file watcher, so the server
+    /// watches the folder itself — the path a client without
+    /// `didChangeWatchedFiles.dynamicRegistration` takes.
+    fn new_native_watching(name: &str, files: &[(&str, &str)]) -> ServerFixture {
+        Self::open_with_client(
+            name,
+            files,
+            Root::Real,
+            None,
+            serde_json::Value::Null,
+            false,
+            false,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn open_with_client(
         name: &str,
         files: &[(&str, &str)],
@@ -342,6 +377,7 @@ impl ServerFixture {
         initialization_options: serde_json::Value,
         snippets: bool,
         pull: bool,
+        native_watch: bool,
     ) -> ServerFixture {
         let guard = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -398,7 +434,7 @@ impl ServerFixture {
             capabilities: serde_json::Value::Null,
             _guard: guard,
         };
-        fixture.initialize(imports, kind, initialization_options, snippets, pull);
+        fixture.initialize(imports, kind, initialization_options, snippets, pull, native_watch);
         fixture
     }
 
@@ -409,6 +445,7 @@ impl ServerFixture {
         initialization_options: serde_json::Value,
         snippets: bool,
         pull: bool,
+        native_watch: bool,
     ) {
         let root_url = Url::from_directory_path(&self.root).expect("root url");
         let has_workspace = kind != Root::Detached;
@@ -440,7 +477,7 @@ impl ServerFixture {
             // Dynamic registration, so the server does not start
             // its own watcher: a scenario that wants the watcher
             // path says so by not asking for this.
-            "didChangeWatchedFiles": { "dynamicRegistration": true },
+            "didChangeWatchedFiles": { "dynamicRegistration": !native_watch },
         });
         if pull {
             text_document["diagnostic"] = serde_json::json!({ "dynamicRegistration": false });
@@ -763,13 +800,57 @@ impl ServerFixture {
     /// `.expect` corpora.
     #[cfg(unix)]
     pub(crate) fn fake_checker(&self, prints: &str) -> PathBuf {
+        self.fake_checker_for(None, Duration::ZERO, prints)
+    }
+
+    /// The same stand-in, answering only when asked about `file` (every run,
+    /// for `None`) and taking `delay` to do so — a real `sail` run takes
+    /// seconds, and what the server does meanwhile is part of what it owns.
+    /// Every invocation's arguments are recorded for [`Self::fake_checker_runs`].
+    #[cfg(unix)]
+    pub(crate) fn fake_checker_for(
+        &self,
+        file: Option<&str>,
+        delay: Duration,
+        prints: &str,
+    ) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let path = self.base.join("fake-sail");
-        let script = format!("#!/bin/sh\ncat >&2 <<'UPSTREAM'\n{prints}\nUPSTREAM\nexit 1\n");
+        let runs = self.base.join("fake-sail-runs");
+        let only = file.map_or("*".to_owned(), |file| format!("*{file}*"));
+        let script = format!(
+            "#!/bin/sh\necho \"$*\" >> '{}'\ncase \"$*\" in\n{only}) sleep {}\ncat >&2 <<'UPSTREAM'\n{prints}\nUPSTREAM\nexit 1;;\nesac\nexit 0\n",
+            runs.display(),
+            delay.as_secs_f64()
+        );
         std::fs::write(&path, script).expect("fake checker");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
             .expect("make it runnable");
         path
+    }
+
+    /// The arguments of every run of the fake checker so far, one per run.
+    #[cfg(unix)]
+    pub(crate) fn fake_checker_runs(&self) -> Vec<String> {
+        std::fs::read_to_string(self.base.join("fake-sail-runs"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// Pump until no workspace scan is pending or running — the one
+    /// synchronisation point a client has, since settings changes can scan.
+    fn wait_until_scans_settle(&mut self) {
+        let deadline = Instant::now() + PATIENCE;
+        while Instant::now() < deadline {
+            let status = self.ask("sail-lsp/analyzerStatus", serde_json::Value::Null);
+            if status.as_str().is_some_and(|s| s.contains("reload pending:   false")) {
+                return;
+            }
+            self.pump(Duration::from_millis(50));
+        }
+        panic!("waited {PATIENCE:?} for scans to settle; log so far: {:?}", self.log);
     }
 }
 
@@ -2744,6 +2825,61 @@ fn what_upstream_says_reaches_the_panel() {
     });
 }
 
+/// A file no project lists is checked alone when it is saved. On the native
+/// watcher path the save also makes the server rescan the workspace, and the
+/// scan began by forgetting every check in flight — the one just started
+/// included. With the file open, the check was started over once the scan
+/// was done; closed, nothing ran it again, and what upstream said about the
+/// file never arrived. A file's own check owes nothing to the project model,
+/// so it now runs through the scan and its answer is kept.
+#[cfg(unix)]
+#[test]
+fn a_check_of_an_unlisted_file_survives_the_reload_its_save_triggers() {
+    let clean = "default Order dec\n\nfunction f(x : bits(8)) -> bits(8) = x\n";
+    let mut server = ServerFixture::new_native_watching(
+        "flycheck-unlisted-reload",
+        &[("sail.proj", "Main { files a.sail }"), ("a.sail", clean), ("b.sail", clean)],
+    );
+    // Slow enough for the scan the save triggers to land while it runs, and
+    // deaf to the project's own check, which must not be what answers.
+    let checker = server.fake_checker_for(
+        Some("b.sail"),
+        Duration::from_secs(1),
+        "Type error:\n\
+         b.sail:3.10-11:\n\
+         3 |function f(x : bits(8)) -> bits(8) = x\n  \
+           |          ^\n  \
+           | int(3) is not a subtype of range(0, 2)",
+    );
+    server.configure(serde_json::json!({
+        "flycheck": { "enable": true, "command": checker.to_string_lossy(), "debounceMs": 0 }
+    }));
+    server.did_open("b.sail", clean);
+    server.wait_for_diagnostics("b.sail", "the unlisted file to be analysed", |d| {
+        mentions(d, "not part of a loaded Sail project")
+    });
+    server.wait_until_scans_settle();
+
+    server.save("b.sail", clean);
+    server.wait_for_diagnostics("b.sail", "what upstream said about the unlisted file", |d| {
+        d.iter().any(|it| it.source.as_deref() == Some("sail"))
+    });
+    let runs = |server: &ServerFixture| {
+        server.fake_checker_runs().into_iter().filter(|run| run.contains("b.sail")).count()
+    };
+    assert_eq!(runs(&server), 1, "the one run the save started is the one that answered");
+
+    // Closed, the file has nobody to restart its check after the scan.
+    server.did_close("b.sail");
+    server.wait_until_scans_settle();
+    server.published.remove(&server.url("b.sail"));
+    server.save("b.sail", clean);
+    server.wait_for_diagnostics("b.sail", "upstream's answer about the closed file", |d| {
+        d.iter().any(|it| it.source.as_deref() == Some("sail"))
+    });
+    assert_eq!(runs(&server), 2);
+}
+
 /// Push and pull expose the same current compiler findings; edits invalidate
 /// disk-based findings until saved sources can be checked again.
 #[cfg(unix)]
@@ -3412,6 +3548,7 @@ fn function_completion_snippet_applies_with_its_argument_default() {
         None,
         serde_json::Value::Null,
         true,
+        false,
         false,
     );
     server.did_open("a.sail", source);
@@ -5683,6 +5820,7 @@ fn custom_postfix_templates_preserve_literal_receivers_on_both_client_kinds() {
             json!({"completion":{"customTemplates":[{"postfix":"literal","body":"(${receiver})$0","description":"parenthesize"}]}}),
             snippets,
             true,
+            false,
         );
         server.did_open("a.sail", source);
         let index = ide_db::line_index::LineIndex::new(source);
@@ -5759,6 +5897,7 @@ fn structured_compiler_fix_applies_rechecks_and_rejects_stale_actions() {
         json!({"flycheck":{"enable":true,"command":compiler,"diagnosticFormat":"json","debounceMs":0}}),
         false,
         true,
+        false,
     );
     server.did_open("a.sail", source);
     let uri = server.url("a.sail");

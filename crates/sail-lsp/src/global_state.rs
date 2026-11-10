@@ -132,6 +132,9 @@ pub(crate) struct GlobalState {
         std::collections::BTreeMap<crate::flycheck::CheckTarget, crate::flycheck::Status>,
     pub(crate) flycheck_history:
         std::collections::BTreeMap<crate::flycheck::CheckTarget, crate::flycheck::CheckHistory>,
+    /// Checks asked for while a workspace scan was pending; the scan's end
+    /// requests them, so a save that lands during a scan is not lost.
+    pub(crate) deferred_flycheck_targets: std::collections::BTreeSet<crate::flycheck::CheckTarget>,
     pub(crate) loading_module_graph: Option<base_db::module_graph::ModuleGraph>,
     pub(crate) loading_source_project: Option<base_db::preprocess::SourceProject>,
     /// At most one independent preprocessing worker; newer loads replace
@@ -257,6 +260,7 @@ impl GlobalState {
             flycheck_workers: Default::default(),
             flycheck_status: Default::default(),
             flycheck_history: Default::default(),
+            deferred_flycheck_targets: Default::default(),
             module_contexts: Default::default(),
             loading_module_graph: None,
             loading_source_project: None,

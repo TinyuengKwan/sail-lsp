@@ -545,7 +545,16 @@ impl GlobalState {
     /// results back via `Task::WorkspaceScan`.
     pub(crate) fn fetch_workspaces(&mut self, cause: String, scope: ReloadScope) {
         log::info!("fetching workspaces: {cause}");
-        self.invalidate_flycheck();
+        // The projects about to be rescanned may come back different, so
+        // their checks are forgotten now. A file no project lists is checked
+        // on its own and owes nothing to the model: its run goes on, and its
+        // answer is still believed when it lands. This used to forget every
+        // target, and the save of an unlisted file — which triggers a scan
+        // on the native watcher path — discarded the very check it started.
+        self.invalidate_flycheck_targets(|target| match target {
+            crate::flycheck::CheckTarget::Project(manifest) => scope.includes(manifest),
+            crate::flycheck::CheckTarget::File(_) => false,
+        });
 
         // Ask the client to tell us when a file changes on disk. Without
         // this it never sends `didChangeWatchedFiles`, and the handler for

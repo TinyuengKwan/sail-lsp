@@ -417,15 +417,22 @@ impl GlobalState {
         self.send_notification::<crate::lsp_ext::ProjectGraphChanged>(());
         self.module_contexts =
             std::sync::Arc::new(crate::reload::loaded_module_contexts(&self.projects));
-        // An unloaded project's last check no longer describes anything.
+        // An unloaded project's last check no longer describes anything, and
+        // a file a project now lists is checked as part of that project.
         let manifests: std::collections::HashSet<_> =
             self.projects.values().map(|p| p.manifest.clone()).collect();
+        let listed: std::collections::HashSet<_> = self
+            .projects
+            .values()
+            .flat_map(|p| p.files.iter().map(|(_, f)| syntax::preprocess::normalize_path(f)))
+            .collect();
         let keep = |t: &crate::flycheck::CheckTarget| match t {
             crate::flycheck::CheckTarget::Project(manifest) => manifests.contains(manifest),
-            crate::flycheck::CheckTarget::File(_) => true,
+            crate::flycheck::CheckTarget::File(path) => {
+                !listed.contains(&syntax::preprocess::normalize_path(path))
+            }
         };
-        self.diagnostics.retain_check_targets(keep);
-        self.flycheck_latest.retain(|t, _| keep(t));
+        self.invalidate_flycheck_targets(|t| !keep(t));
         self.flycheck_history.retain(|t, _| keep(t));
         if self.projects.is_empty() {
             self.log_message(MessageType::WARNING,
@@ -551,16 +558,36 @@ impl GlobalState {
     }
     /// Forget published results and tickets; generations remain monotonic.
     pub(crate) fn invalidate_flycheck(&mut self) {
-        for worker in self.flycheck_workers.values() {
-            worker.cancel();
+        self.invalidate_flycheck_targets(|_| true);
+    }
+
+    /// Forget the published results and tickets of the targets `drop`
+    /// selects, and stop their runs; the others keep running and their
+    /// answers are still believed.
+    pub(crate) fn invalidate_flycheck_targets(
+        &mut self,
+        drop: impl Fn(&crate::flycheck::CheckTarget) -> bool,
+    ) {
+        let dropped: std::collections::BTreeSet<_> = self
+            .flycheck_workers
+            .keys()
+            .chain(self.flycheck_status.keys())
+            .chain(self.flycheck_history.keys())
+            .chain(self.flycheck_latest.keys())
+            .filter(|target| drop(target))
+            .cloned()
+            .collect();
+        for target in &dropped {
+            if let Some(worker) = self.flycheck_workers.remove(target) {
+                worker.cancel();
+            }
+            self.flycheck_status.remove(target);
+            if let Some(history) = self.flycheck_history.get_mut(target) {
+                history.invalidate();
+            }
+            self.flycheck_latest.remove(target);
         }
-        self.flycheck_workers.clear();
-        self.flycheck_status.clear();
-        for history in self.flycheck_history.values_mut() {
-            history.invalidate();
-        }
-        self.flycheck_latest.clear();
-        self.diagnostics.retain_check_targets(|_| false);
+        self.diagnostics.retain_check_targets(|target| !drop(target));
     }
 
     /// Ask upstream Sail what it thinks of the program `saved` belongs to,
@@ -573,12 +600,6 @@ impl GlobalState {
     /// file, with that project's manifest, variables and roots; a file no
     /// project knows is checked alone.
     pub(crate) fn request_flycheck(&mut self, saved: &std::path::Path) {
-        if self.fetch_workspaces_queue.op_requested()
-            || self.fetch_workspaces_queue.op_in_progress()
-            || self.loading_project_config.is_some()
-        {
-            return;
-        }
         self.request_flycheck_targets(self.flycheck_targets_for_file(saved), false);
     }
 
@@ -640,6 +661,24 @@ impl GlobalState {
                 }
             }
         }
+        // What was asked for while the scan ran — a closed file's save has
+        // no other way back in.
+        for target in std::mem::take(&mut self.deferred_flycheck_targets) {
+            if !targets.contains(&target) {
+                targets.push(target);
+            }
+        }
+        // A run still in flight with a ticket is left to finish: a reload
+        // that did not touch a target must not start its check over. The
+        // targets a reload or a settings change did touch were invalidated
+        // first and have no ticket here.
+        targets.retain(|target| {
+            !(self.flycheck_latest.contains_key(target)
+                && matches!(
+                    self.flycheck_status.get(target),
+                    Some(crate::flycheck::Status::Queued | crate::flycheck::Status::Running)
+                ))
+        });
         self.request_flycheck_targets(targets, false);
     }
 
@@ -752,10 +791,16 @@ impl GlobalState {
         targets: Vec<crate::flycheck::CheckTarget>,
         manual: bool,
     ) {
+        // A scan is reshaping the projects a check would run against. The
+        // request waits for it: `recheck_flycheck` at the scan's end asks
+        // for these too. It used to be dropped, so a save racing the scan
+        // its own watcher event triggers — every save of an unlisted file on
+        // the native watcher path — was checked only if the file was open.
         if self.fetch_workspaces_queue.op_requested()
             || self.fetch_workspaces_queue.op_in_progress()
             || self.loading_project_config.is_some()
         {
+            self.deferred_flycheck_targets.extend(targets);
             return;
         }
         // A document is dirty when its buffer is not what is on disk, decided
@@ -1623,11 +1668,12 @@ fn on_task(state: &mut GlobalState, task: Task) {
             }
         }
         Task::Flycheck { target, generation, found, status, run } => {
-            if state.flycheck_latest.get(&target) != Some(&generation)
-                || state.fetch_workspaces_queue.op_requested()
-                || state.fetch_workspaces_queue.op_in_progress()
-                || state.loading_project_config.is_some()
-            {
+            // The ticket decides. A scan takes the tickets of the projects it
+            // rescans when it starts (`fetch_workspaces`); a target that kept
+            // its ticket through a scan was not touched by it, and its
+            // answer stands. Dropping every answer that landed during a scan
+            // left the target `Running` forever, with nothing to re-run it.
+            if state.flycheck_latest.get(&target) != Some(&generation) {
                 return;
             }
             if found.iter().any(|(path, diagnostic)| {
