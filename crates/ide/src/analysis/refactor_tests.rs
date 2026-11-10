@@ -351,6 +351,51 @@ fn rename_type_variables_preserves_quantifier_identity_and_rejects_capture() {
 }
 
 #[test]
+fn rename_type_variable_from_the_quantifier_or_the_implementation_renames_both() {
+    // The val's `forall 'n` binds the implementation's annotations and the
+    // `'n` written in its body, so the rename must reach the same tokens
+    // whichever one the cursor is on — with a source order (project setup)
+    // and without one (plain workspace files).
+    let source = "val f : forall 'n. int('n) -> int\nfunction f(x : int('n)) -> int = { let z : int('n) = x; z }\n";
+    let expected: Vec<_> = source.match_indices("'n").map(|(at, _)| at).collect();
+    for needle in ["'n.", "'n))", "'n) = x"] {
+        let starts = |change: SourceChange| {
+            let mut edits = change.source_file_edits[&FileId::from_raw(0)].clone();
+            edits.sort_by_key(|edit| edit.range.start());
+            edits.iter().map(|edit| base_db::range_start(edit.range)).collect::<Vec<_>>()
+        };
+        let ordered = rename_result(source, needle, "'q").unwrap().unwrap();
+        assert_eq!(starts(ordered), expected, "ordered, from {needle}");
+        let (analysis, files) = crate::fixture::analysis(&format!("//- /main.sail\n{source}"));
+        let url = analysis.url_for_file_id(files[0].0).unwrap();
+        let file = analysis.file_by_id(files[0].0).unwrap();
+        let unordered = analysis
+            .rename(url, file.position_at(source.find(needle).unwrap()), "'q")
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(starts(unordered), expected, "unordered, from {needle}");
+    }
+    // The implementation in another file finds the signature there too.
+    let spec = "val f : forall 'n. int('n) -> int\n";
+    let body = "function f(x : int('n)) -> int = x\n";
+    let (analysis, files) =
+        crate::fixture::analysis(&format!("//- /spec.sail\n{spec}//- /body.sail\n{body}"));
+    for (index, needle) in [(0, "'n."), (1, "'n))")] {
+        let url = analysis.url_for_file_id(files[index].0).unwrap();
+        let file = analysis.file_by_id(files[index].0).unwrap();
+        let text = if index == 0 { spec } else { body };
+        let change = analysis
+            .rename(url, file.position_at(text.find(needle).unwrap()), "'q")
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(change.source_file_edits[&files[0].0].len(), 2, "from {needle}: {change:?}");
+        assert_eq!(change.source_file_edits[&files[1].0].len(), 1, "from {needle}: {change:?}");
+    }
+}
+
+#[test]
 fn rename_type_variable_reaches_the_implementation_without_touching_inner_binders() {
     let sources = [
         ("spec.sail", "val f : forall ('n : Int). int('n) -> int('n)\n"),

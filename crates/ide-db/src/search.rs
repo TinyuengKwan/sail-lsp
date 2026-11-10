@@ -306,6 +306,13 @@ impl<'a> FindUsages<'a> {
     pub fn spans_in_file(&self, file: &dyn FileDb) -> Vec<(parser::Span, bool)> {
         if let crate::defs::Definition::TypeVar(var) = &self.def {
             if var.binding.is_some() {
+                // A binder is not a local, so the search leaves its file —
+                // but it is referenced only by its declaration and that
+                // callable's implementations. Every other file's tree was
+                // walked token by token; most do not even spell the name.
+                if self.name.is_empty() || !file.text().contains(&self.name) {
+                    return Vec::new();
+                }
                 let Some(root) = file
                     .file_text()
                     .and_then(|(db, input)| {
@@ -578,6 +585,72 @@ mod tests {
         let scope = SearchScope::single_file(FileId::from_raw(0));
         assert!(scope.contains(FileId::from_raw(0)));
         assert!(!scope.contains(FileId::from_raw(1)));
+    }
+
+    /// A bound type variable's search parses no file that does not spell it.
+    #[test]
+    fn bound_type_variable_search_skips_files_without_the_name() {
+        use crate::test_utils::TestFile;
+        use hir::callgraph::{CallGraph, SourceFileInfo, WorkspaceFile};
+        use std::cell::Cell;
+
+        struct Counting<'a> {
+            inner: &'a TestFile,
+            trees: Cell<usize>,
+        }
+        impl WorkspaceFile for Counting<'_> {
+            fn content_hash(&self) -> u64 {
+                self.inner.content_hash()
+            }
+            fn callgraph(&self) -> Option<&CallGraph> {
+                self.inner.callgraph()
+            }
+        }
+        impl SourceFileInfo for Counting<'_> {
+            fn text(&self) -> &str {
+                self.inner.text()
+            }
+            fn item_tree(&self) -> Option<&hir::ItemTree> {
+                self.inner.item_tree()
+            }
+        }
+        // `file_text` stays `None`, so the search reaches the tree only
+        // through `syntax`, where it is counted.
+        impl FileDb for Counting<'_> {
+            fn position_at(&self, offset: usize) -> crate::LineCol {
+                self.inner.position_at(offset)
+            }
+            fn offset_at(&self, position: &crate::LineCol) -> usize {
+                self.inner.offset_at(position)
+            }
+            fn tokens(&self) -> Option<&[(parser::Token, parser::Span)]> {
+                self.inner.tokens()
+            }
+            fn token_at(&self, position: crate::LineCol) -> Option<&(parser::Token, parser::Span)> {
+                self.inner.token_at(position)
+            }
+            fn parsed(&self) -> Option<&syntax::parser_lower::ParsedFile> {
+                self.inner.parsed()
+            }
+            fn syntax(&self) -> Option<syntax::SyntaxNode> {
+                self.trees.set(self.trees.get() + 1);
+                self.inner.syntax()
+            }
+        }
+
+        let spec = TestFile::new("val f : forall 'n. int('n) -> int\n");
+        let other = TestFile::new("val g : forall 'm. int('m) -> int\n");
+        let def = crate::defs::Definition::TypeVar(hir::TypeVar {
+            name: hir::Name::new("'n"),
+            binding: Some((FileId::from_raw(0), parser::Span::new(15, 17))),
+        });
+        let usages = FindUsages::new(def, "'n");
+        let spec = Counting { inner: &spec, trees: Cell::new(0) };
+        let other = Counting { inner: &other, trees: Cell::new(0) };
+        usages.spans_in_file(&spec);
+        usages.spans_in_file(&other);
+        assert!(spec.trees.get() >= 1, "the declaring file is searched");
+        assert_eq!(other.trees.get(), 0, "a file without the name is not parsed");
     }
 
     #[test]

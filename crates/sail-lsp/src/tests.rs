@@ -3982,6 +3982,7 @@ fn the_ide_layer_asks_the_hir() {
         ("ide-db/src/lib.rs", 1, "the FileDb::parsed accessor itself"),
         ("ide-db/src/root_database.rs", 1, "implements FileDb::parsed"),
         ("ide-db/src/test_utils.rs", 1, "implements FileDb::parsed"),
+        ("ide-db/src/search.rs", 1, "a test fixture implementing FileDb"),
         ("ide-db/src/db_query.rs", 1, "the salsa query that produces it"),
         ("ide/src/calls.rs", 2, "syntax: argument separator spans"),
         ("ide/src/hover/mod.rs", 2, "Decl as a record, filled from the item tree"),
