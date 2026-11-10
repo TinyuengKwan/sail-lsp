@@ -156,6 +156,10 @@ pub(crate) struct GlobalState {
     /// Per-file diagnostic state with generation tracking.
     pub(crate) diagnostics: crate::diagnostics::DiagnosticCollection,
     pub(crate) analysis_health: Arc<crate::analysis_health::AnalysisHealth>,
+    /// Undecided-proof reasons by file, from the latest pull report of each;
+    /// `analysis_health.reported_unknowns` is their sum for a pulling client.
+    pub(crate) pull_unknowns:
+        std::collections::HashMap<Url, std::collections::BTreeMap<String, usize>>,
     /// Per-file semantic token cache for delta requests.
     pub(crate) semantic_tokens_cache: crate::lsp::semantic_tokens::SemanticTokensCache,
 
@@ -277,6 +281,7 @@ impl GlobalState {
             last_status: None,
             diagnostics: crate::diagnostics::DiagnosticCollection::default(),
             analysis_health: Default::default(),
+            pull_unknowns: Default::default(),
             semantic_tokens_cache: crate::lsp::semantic_tokens::SemanticTokensCache::new(),
             fetch_workspaces_queue: crate::op_queue::OpQueue::default(),
             pending_reload_scope: None,

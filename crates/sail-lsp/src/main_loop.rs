@@ -28,6 +28,8 @@ pub(crate) enum Task {
     },
     /// Async request handler completed — response ready to send.
     Response(lsp_server::Response),
+    /// What a `textDocument/diagnostic` answer said about a file's health.
+    PullDiagnosticsHealth(crate::analysis_health::PullReport),
     /// Async request handler was cancelled and should be retried.
     Retry(lsp_server::Request),
     /// Prime caches progress/completion.
@@ -556,6 +558,34 @@ impl GlobalState {
         }
         self.recheck_flycheck();
     }
+    /// Record what a pull report said about its file, the way the push
+    /// path's `Task::Diagnostics` arm records a wave. `update_diagnostics`
+    /// does not run for a pulling client, so without this the health report
+    /// and the exported diagnostic report showed no undecided proofs and no
+    /// failures in VS Code, whatever the analysis had met.
+    pub(crate) fn record_pull_report(&mut self, report: crate::analysis_health::PullReport) {
+        let generation = self.diagnostics.generation();
+        if let Some(message) = &report.failure {
+            self.log_message(MessageType::ERROR, format!("semanticDiagnostics failed: {message}"));
+        }
+        // Reasons on the latest report of each file, summed: a pulling
+        // client has no wave to read them off.
+        if report.reported_unknowns.is_empty() {
+            self.pull_unknowns.remove(&report.uri);
+        } else {
+            self.pull_unknowns.insert(report.uri, report.reported_unknowns);
+        }
+        let health = std::sync::Arc::make_mut(&mut self.analysis_health);
+        match report.failure {
+            Some(message) => health.failed("semanticDiagnostics", generation, message),
+            None => health.recovered("semanticDiagnostics"),
+        }
+        health.reported_unknowns.clear();
+        for (reason, count) in self.pull_unknowns.values().flatten() {
+            *health.reported_unknowns.entry(reason.clone()).or_default() += count;
+        }
+    }
+
     /// Forget published results and tickets; generations remain monotonic.
     pub(crate) fn invalidate_flycheck(&mut self) {
         self.invalidate_flycheck_targets(|_| true);
@@ -1719,6 +1749,7 @@ fn on_task(state: &mut GlobalState, task: Task) {
             state.diagnostics.set_check_diagnostics(&target, by_file.into_iter().collect());
             state.apply_compiler_diagnostic_policies();
         }
+        Task::PullDiagnosticsHealth(report) => state.record_pull_report(report),
         Task::PrimeCaches(progress) => match progress {
             PrimeCachesProgress::Begin => {
                 if state.supports_progress {
@@ -1921,7 +1952,9 @@ fn on_request(state: &mut GlobalState, req: Request) {
             handlers::handle_code_action_resolve,
         )
         .on::<false, request::DocumentSymbolRequest>(handlers::handle_document_symbol)
-        .on::<false, request::DocumentDiagnosticRequest>(handlers::handle_document_diagnostic)
+        .on_reporting::<false, request::DocumentDiagnosticRequest>(
+            handlers::handle_document_diagnostic,
+        )
         .on::<false, request::DocumentHighlightRequest>(handlers::handle_document_highlight)
         .on::<false, crate::lsp::ext::CodeActionRequest>(handlers::handle_code_action)
         .on::<false, request::Formatting>(handlers::handle_formatting)
@@ -2189,6 +2222,109 @@ mod project_reload_tests {
                 .any(|d| d.severity == Some(lsp_types::DiagnosticSeverity::ERROR)),
             "collection must leave the following diagnostics wave operational"
         );
+        assert!(state.analysis_health.failures.is_empty());
+    }
+
+    /// A pulling client gets the same health record as a pushing one.
+    ///
+    /// `reported_unknowns` and the `semanticDiagnostics` failure entry were
+    /// written only by the push wave's task, and `update_diagnostics` does
+    /// not run for a client that pulls, so "native analysis health" and the
+    /// exported report were always empty in VS Code. The pull handler now
+    /// returns the facts beside its report, the dispatcher sends them as a
+    /// task ahead of the response, and the main loop records them.
+    #[test]
+    fn a_pull_report_records_analysis_health() {
+        let (sender, messages) = crossbeam_channel::unbounded();
+        let (task_sender, tasks) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender, task_sender);
+        let dir = tempfile::tempdir().unwrap();
+        let url = Url::from_file_path(dir.path().join("fine.sail")).unwrap();
+        crate::handlers::notification::handle_did_open_text_document(
+            &mut state,
+            lsp_types::DidOpenTextDocumentParams {
+                text_document: lsp_types::TextDocumentItem {
+                    uri: url.clone(),
+                    language_id: "sail".into(),
+                    version: 1,
+                    text: "function fine() -> int = 1\n".into(),
+                },
+            },
+        )
+        .unwrap();
+        state.process_changes();
+        let file = state.vfs.file_id_for_url(&url);
+        state.ensure_workspace_files(vec![file]);
+        // A failure on record, which a successful semantic pass clears — on
+        // the push path through its wave, here through the pull.
+        std::sync::Arc::make_mut(&mut state.analysis_health).failed(
+            "semanticDiagnostics",
+            0,
+            "inference fault".into(),
+        );
+
+        let request = lsp_server::Request::new(
+            1.into(),
+            "textDocument/diagnostic".into(),
+            serde_json::json!({ "textDocument": { "uri": url } }),
+        );
+        state.register_request(&request);
+        on_request(&mut state, request);
+        let mut answered = false;
+        while !answered {
+            let task = tasks.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+            answered = matches!(task, Task::Response(_));
+            on_task(&mut state, task);
+        }
+        assert!(
+            state.analysis_health.failures.is_empty(),
+            "a successful pull is a successful semantic pass: {:?}",
+            state.analysis_health.failures
+        );
+        assert!(state.analysis_health.reported_unknowns.is_empty());
+
+        // The reasons are summed over the latest report of each file.
+        let other = Url::parse("file:///w/other.sail").unwrap();
+        let report = |uri: &Url, reasons: &[(&str, usize)], failure: Option<&str>| {
+            Task::PullDiagnosticsHealth(crate::analysis_health::PullReport {
+                uri: uri.clone(),
+                reported_unknowns: reasons.iter().map(|(r, n)| (r.to_string(), *n)).collect(),
+                failure: failure.map(str::to_owned),
+            })
+        };
+        on_task(&mut state, report(&url, &[("not_established", 2)], None));
+        on_task(
+            &mut state,
+            report(&other, &[("not_established", 1), ("budget_exhausted", 1)], None),
+        );
+        let unknowns = |state: &GlobalState| {
+            serde_json::to_value(&state.analysis_health.reported_unknowns).unwrap()
+        };
+        assert_eq!(
+            unknowns(&state),
+            serde_json::json!({ "not_established": 3, "budget_exhausted": 1 })
+        );
+        // A later report of a file replaces that file's share.
+        on_task(&mut state, report(&url, &[], None));
+        assert_eq!(
+            unknowns(&state),
+            serde_json::json!({ "not_established": 1, "budget_exhausted": 1 })
+        );
+
+        // A failed pass is recorded and logged, as the push path does.
+        on_task(&mut state, report(&other, &[], Some("inference fault")));
+        assert_eq!(
+            state.analysis_health.failures["semanticDiagnostics"].message,
+            "inference fault"
+        );
+        let logged = messages.try_iter().map(|m| serde_json::to_value(m).unwrap()).any(|m| {
+            m["method"] == "window/logMessage"
+                && m["params"]["message"]
+                    .as_str()
+                    .is_some_and(|s| s.contains("semanticDiagnostics failed: inference fault"))
+        });
+        assert!(logged, "the failure reaches the client's log");
+        on_task(&mut state, report(&other, &[], None));
         assert!(state.analysis_health.failures.is_empty());
     }
 

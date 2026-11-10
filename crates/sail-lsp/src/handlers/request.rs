@@ -381,11 +381,15 @@ pub(crate) fn handle_semantic_tokens_full(
 /// When `types.sail` changes, dependents like `main.sail` may get new
 /// type errors — those appear in related_documents so the client can
 /// update them without a separate request.
+/// The report, and what computing it said about the file's analysis health
+/// — the facts the push path reads off its wave, which a pulling client has
+/// no wave to supply.
 pub(crate) fn handle_document_diagnostic(
     snap: GlobalStateSnapshot,
     params: DocumentDiagnosticParams,
-) -> anyhow::Result<DocumentDiagnosticReportResult> {
+) -> anyhow::Result<(DocumentDiagnosticReportResult, crate::analysis_health::PullReport)> {
     let uri = &params.text_document.uri;
+    let mut health = crate::analysis_health::PullReport::clean(uri.clone());
     let empty_report = || -> DocumentDiagnosticReportResult {
         DocumentDiagnosticReport::Full(RelatedFullDocumentDiagnosticReport {
             related_documents: None,
@@ -398,19 +402,40 @@ pub(crate) fn handle_document_diagnostic(
     };
 
     let Some(file_id) = snap.analysis.file_id(uri) else {
-        return Ok(empty_report());
+        return Ok((empty_report(), health));
     };
     // Not for the bundled library: the user cannot fix those files, and a
     // false positive there would sit in the problems panel forever.
     if snap.is_library(file_id) {
-        return Ok(empty_report());
+        return Ok((empty_report(), health));
     }
     let diag_config = snap.config.diagnostics.to_ide_config();
 
-    // Main file diagnostics
-    let ide_diags = snap.analysis.file_diagnostics(file_id, &diag_config)?;
+    // Main file diagnostics. A fault in the semantic pass is a fact about
+    // the file — the push path's wave records it and shows nothing for the
+    // file — rather than an error answer with no record behind it. A
+    // cancellation is still the caller's to retry.
+    let computed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        snap.analysis.file_diagnostics(file_id, &diag_config)
+    }));
+    let ide_diags = match computed {
+        Ok(Ok(diags)) => diags,
+        Ok(Err(ide_db::ide_types::CancelledError::PropagatedPanic)) => {
+            health.failure = Some("dependent query panicked".into());
+            Vec::new()
+        }
+        Ok(Err(cancelled)) => return Err(cancelled.into()),
+        Err(payload) if payload.is::<salsa::Cancelled>() => std::panic::resume_unwind(payload),
+        Err(payload) => {
+            health.failure = Some(crate::analysis_health::panic_message(payload.as_ref()));
+            Vec::new()
+        }
+    };
+    for reason in ide_diags.iter().filter_map(|d| d.unknown_reason) {
+        *health.reported_unknowns.entry(reason.to_owned()).or_default() += 1;
+    }
     let Some(sf) = snap.analysis.file(uri) else {
-        return Ok(empty_report());
+        return Ok((empty_report(), health));
     };
     let line_index = ide_db::line_index::LineIndex::new(sf.text());
     let mut items: Vec<Diagnostic> = ide_diags
@@ -476,22 +501,21 @@ pub(crate) fn handle_document_diagnostic(
 
     let related = if related_documents.is_empty() { None } else { Some(related_documents) };
 
-    if params.previous_result_id.as_deref() == Some(result_id.as_str()) {
-        Ok(DocumentDiagnosticReport::Unchanged(RelatedUnchangedDocumentDiagnosticReport {
+    let report = if params.previous_result_id.as_deref() == Some(result_id.as_str()) {
+        DocumentDiagnosticReport::Unchanged(RelatedUnchangedDocumentDiagnosticReport {
             related_documents: related,
             unchanged_document_diagnostic_report: UnchangedDocumentDiagnosticReport { result_id },
         })
-        .into())
     } else {
-        Ok(DocumentDiagnosticReport::Full(RelatedFullDocumentDiagnosticReport {
+        DocumentDiagnosticReport::Full(RelatedFullDocumentDiagnosticReport {
             related_documents: related,
             full_document_diagnostic_report: FullDocumentDiagnosticReport {
                 result_id: Some(result_id),
                 items,
             },
         })
-        .into())
-    }
+    };
+    Ok((report.into(), health))
 }
 
 pub(crate) fn handle_range_formatting(

@@ -84,6 +84,10 @@ impl DiagnosticCollection {
         self.generation == generation
     }
 
+    pub(crate) fn generation(&self) -> DiagnosticsGeneration {
+        self.generation
+    }
+
     /// Clear native diagnostics for a specific file.
     ///
     /// Called when a file *outside the workspace* is closed. A workspace

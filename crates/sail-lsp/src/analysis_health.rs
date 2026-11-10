@@ -17,6 +17,26 @@ pub(crate) struct SlowRequest {
     pub error_code: Option<i32>,
 }
 
+/// What one `textDocument/diagnostic` answer says about the health of the
+/// file it describes. The push path reads these facts off its diagnostics
+/// wave; a pulling client has no wave, so the handler returns them beside
+/// the report and the main loop records them.
+#[derive(Debug)]
+pub(crate) struct PullReport {
+    pub uri: lsp_types::Url,
+    /// Undecided-proof reasons among the file's findings.
+    pub reported_unknowns: BTreeMap<String, usize>,
+    /// The semantic pass failed for this file, and the report has no findings.
+    pub failure: Option<String>,
+}
+
+impl PullReport {
+    /// Nothing undecided, nothing failed.
+    pub(crate) fn clean(uri: lsp_types::Url) -> Self {
+        Self { uri, reported_unknowns: BTreeMap::new(), failure: None }
+    }
+}
+
 #[derive(Clone, Debug, Default, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AnalysisHealth {

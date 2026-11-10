@@ -37,6 +37,14 @@ pub(crate) struct RequestDispatcher<'a> {
     pub(crate) global_state: &'a mut GlobalState,
 }
 
+/// A handler whose answer comes with facts about the analysis that produced
+/// it; see [`RequestDispatcher::on_reporting`].
+type ReportingHandler<R> =
+    fn(
+        GlobalStateSnapshot,
+        <R as LspRequest>::Params,
+    ) -> anyhow::Result<(<R as LspRequest>::Result, crate::analysis_health::PullReport)>;
+
 impl RequestDispatcher<'_> {
     /// Handle request synchronously on the main thread with mutable state.
     /// Use for state-modifying requests (workspace reload, config change).
@@ -131,7 +139,11 @@ impl RequestDispatcher<'_> {
         R::Params: for<'de> serde::Deserialize<'de> + Send + 'static,
         R::Result: serde::Serialize + 'static,
     {
-        self.on_with_thread_intent::<ALLOW_RETRYING, R>(stdx::thread::ThreadIntent::Worker, f)
+        self.on_with_thread_intent::<ALLOW_RETRYING, R, R::Result>(
+            stdx::thread::ThreadIntent::Worker,
+            f,
+            |result| (result, None),
+        )
     }
 
     /// Dispatch interactive work, including requests which must not be retried.
@@ -144,21 +156,49 @@ impl RequestDispatcher<'_> {
         R::Params: for<'de> serde::Deserialize<'de> + Send + 'static,
         R::Result: serde::Serialize + 'static,
     {
-        self.on_with_thread_intent::<ALLOW_RETRYING, R>(
+        self.on_with_thread_intent::<ALLOW_RETRYING, R, R::Result>(
             stdx::thread::ThreadIntent::LatencySensitive,
             f,
+            |result| (result, None),
         )
     }
 
-    fn on_with_thread_intent<const ALLOW_RETRYING: bool, R>(
+    /// Background work whose answer also carries facts about the analysis
+    /// that produced it. The facts reach the main loop as a task of their
+    /// own, ahead of the response — the way a diagnostics wave reports what
+    /// it saw — so a handler holding a read-only snapshot still records
+    /// what a pushing client's wave would have.
+    pub(crate) fn on_reporting<const ALLOW_RETRYING: bool, R>(
+        &mut self,
+        f: ReportingHandler<R>,
+    ) -> &mut Self
+    where
+        R: LspRequest,
+        R::Params: for<'de> serde::Deserialize<'de> + Send + 'static,
+        R::Result: serde::Serialize + Send + 'static,
+    {
+        self.on_with_thread_intent::<ALLOW_RETRYING, R, (R::Result, crate::analysis_health::PullReport)>(
+            stdx::thread::ThreadIntent::Worker,
+            f,
+            |(result, report)| {
+                (result, Some(crate::main_loop::Task::PullDiagnosticsHealth(report)))
+            },
+        )
+    }
+
+    /// `finish` splits what the handler computed into the answer and, for
+    /// `on_reporting`, the task carrying its side facts.
+    fn on_with_thread_intent<const ALLOW_RETRYING: bool, R, T>(
         &mut self,
         intent: stdx::thread::ThreadIntent,
-        f: fn(GlobalStateSnapshot, R::Params) -> anyhow::Result<R::Result>,
+        f: fn(GlobalStateSnapshot, R::Params) -> anyhow::Result<T>,
+        finish: fn(T) -> (R::Result, Option<crate::main_loop::Task>),
     ) -> &mut Self
     where
         R: LspRequest,
         R::Params: for<'de> serde::Deserialize<'de> + Send + 'static,
         R::Result: serde::Serialize + 'static,
+        T: 'static,
     {
         let req = match self.req.as_ref() {
             Some(req) if req.method == R::METHOD => self.req.take().unwrap(),
@@ -181,7 +221,7 @@ impl RequestDispatcher<'_> {
         let snap = self.global_state.snapshot_for_uri(uri.as_ref());
         let snapshot_us = snapshot_started.elapsed().as_micros();
         let queued = std::time::Instant::now();
-        self.global_state.task_pool.spawn(intent, move || {
+        self.global_state.task_pool.spawn_with_sender(intent, move |sender| {
             let queue_us = queued.elapsed().as_micros();
             let handler_started = std::time::Instant::now();
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -192,7 +232,18 @@ impl RequestDispatcher<'_> {
             tracing::debug!(target: "sail_lsp::latency",
                 "request_worker id={id} method={} snapshot_us={snapshot_us} queue_us={queue_us} handler_us={handler_us} panicked={}",
                 R::METHOD, result.is_err());
-            match thread_result_to_response::<R>(id.clone(), result) {
+            let (result, facts) = match result {
+                Ok(Ok(computed)) => {
+                    let (result, facts) = finish(computed);
+                    (Ok(Ok(result)), facts)
+                }
+                Ok(Err(error)) => (Ok(Err(error)), None),
+                Err(payload) => (Err(payload), None),
+            };
+            if let Some(facts) = facts {
+                let _ = sender.send(facts);
+            }
+            let task = match thread_result_to_response::<R>(id.clone(), result) {
                 Ok(response) => crate::main_loop::Task::Response(response),
                 // (dispatch.rs:268): retry on cancellation if allowed.
                 Err(_cancelled) if ALLOW_RETRYING => crate::main_loop::Task::Retry(req),
@@ -204,7 +255,8 @@ impl RequestDispatcher<'_> {
                         error: Some(error),
                     })
                 }
-            }
+            };
+            let _ = sender.send(task);
         });
         self
     }
