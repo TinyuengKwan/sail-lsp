@@ -505,7 +505,7 @@ suite("sail-lsp extension", () => {
         const uri = vscode.Uri.joinPath(vscode.workspace.workspaceFolders![0].uri, "sample.sail");
         const document = await vscode.workspace.openTextDocument(uri);
         const original = document.getText();
-        const editor = await vscode.window.showTextDocument(document);
+        let editor = await vscode.window.showTextDocument(document);
         const oldOptions = { ...editor.options };
         const config = vscode.workspace.getConfiguration("editor", document);
         const workspaceConfig = vscode.workspace.getConfiguration();
@@ -539,13 +539,29 @@ suite("sail-lsp extension", () => {
                     () => `editor options did not settle: ${JSON.stringify(editor.options)}`,
                     () => editor.options.tabSize === 4 && editor.options.insertSpaces === spaces,
                 );
-                await vscode.commands.executeCommand("workbench.action.focusActiveEditorGroup");
-                // Move in the workbench and observe its selection notification;
-                // assigning editor.selection only updates an optimistic API value.
-                await vscode.commands.executeCommand("cursorTop");
-                await vscode.commands.executeCommand("cursorEnd");
+                // Activate this document and set its selection in one awaited
+                // workbench operation, rather than targeting whichever editor
+                // currently has DOM focus after the preceding Peek test.
+                editor = await vscode.window.showTextDocument(document, {
+                    viewColumn: editor.viewColumn,
+                    preserveFocus: false,
+                    preview: false,
+                    selection: new vscode.Range(
+                        0,
+                        "function f() = {".length,
+                        0,
+                        "function f() = {".length,
+                    ),
+                });
                 await eventually(
-                    () => `typing cursor did not settle: ${JSON.stringify(editor.selection)}`,
+                    () =>
+                        `typing cursor did not settle: ${JSON.stringify({
+                            selection: editor.selection,
+                            activeEditor: vscode.window.activeTextEditor?.document.uri.toString(),
+                            activeSelection: vscode.window.activeTextEditor?.selection,
+                            activeMatches: vscode.window.activeTextEditor === editor,
+                            text: document.getText(),
+                        })}`,
                     () =>
                         vscode.window.activeTextEditor === editor &&
                         editor.selection.isEmpty &&
