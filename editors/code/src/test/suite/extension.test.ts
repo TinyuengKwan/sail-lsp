@@ -480,16 +480,23 @@ suite("sail-lsp extension", () => {
         const version = document.version;
         const position = document.positionAt(before.indexOf("42"));
         editor.selection = new vscode.Selection(position, position);
-        const found = await vscode.commands.executeCommand<vscode.Location[]>(
-            "sail-lsp.structuralSearch",
-            "42",
-        );
-        assert.equal(found.length, 1);
-        assert.equal(found[0].uri.toString(), uri.toString());
-        assert.equal(document.getText(found[0].range), "42");
-        assert.equal(document.getText(), before);
-        assert.equal(document.version, version);
-        assert.deepEqual(await vscode.commands.executeCommand("sail-lsp.structuralSearch", ""), []);
+        try {
+            const found = await vscode.commands.executeCommand<vscode.Location[]>(
+                "sail-lsp.structuralSearch",
+                "42",
+            );
+            assert.equal(found.length, 1);
+            assert.equal(found[0].uri.toString(), uri.toString());
+            assert.equal(document.getText(found[0].range), "42");
+            assert.equal(document.getText(), before);
+            assert.equal(document.version, version);
+            assert.deepEqual(
+                await vscode.commands.executeCommand("sail-lsp.structuralSearch", ""),
+                [],
+            );
+        } finally {
+            await vscode.commands.executeCommand("closeReferenceSearch");
+        }
     });
     test("formatting uses actual typing options and opens a read-only explanation", async () => {
         const extension = vscode.extensions.getExtension<ExtensionApi>("Lunarwwww.sail-lsp")!;
@@ -501,8 +508,8 @@ suite("sail-lsp extension", () => {
         const editor = await vscode.window.showTextDocument(document);
         const oldOptions = { ...editor.options };
         const config = vscode.workspace.getConfiguration("editor", document);
-        const keys = ["formatOnType", "autoIndent", "detectIndentation", "tabSize", "insertSpaces"];
-        const saved = keys.map((key) => config.inspect(key)?.workspaceLanguageValue);
+        const workspaceConfig = vscode.workspace.getConfiguration();
+        const originalLanguageSettings = workspaceConfig.inspect("[sail]")?.workspaceValue;
         const configure = (key: string, value: unknown) =>
             config.update(key, value, vscode.ConfigurationTarget.Workspace, true);
         const source = "function f() = {\n  1\n}\n";
@@ -532,14 +539,28 @@ suite("sail-lsp extension", () => {
                     () => `editor options did not settle: ${JSON.stringify(editor.options)}`,
                     () => editor.options.tabSize === 4 && editor.options.insertSpaces === spaces,
                 );
-                editor.selection = new vscode.Selection(
-                    0,
-                    "function f() = {".length,
-                    0,
-                    "function f() = {".length,
-                );
                 await vscode.commands.executeCommand("workbench.action.focusActiveEditorGroup");
+                // Move in the workbench and observe its selection notification;
+                // assigning editor.selection only updates an optimistic API value.
+                await vscode.commands.executeCommand("cursorTop");
+                await vscode.commands.executeCommand("cursorEnd");
+                await eventually(
+                    () => `typing cursor did not settle: ${JSON.stringify(editor.selection)}`,
+                    () =>
+                        vscode.window.activeTextEditor === editor &&
+                        editor.selection.isEmpty &&
+                        editor.selection.active.isEqual(
+                            new vscode.Position(0, "function f() = {".length),
+                        ),
+                );
+                const version = document.version;
                 await vscode.commands.executeCommand("type", { text: "\n" });
+                await eventually(
+                    "typing did not change the document",
+                    () => document.version > version,
+                );
+                assert.equal(document.lineCount, 5, "typing must insert one newline");
+                assert.equal(document.lineAt(3).text, "}", "typing targeted the wrong line");
                 await eventually(
                     () =>
                         `on-type indentation must use the editor options: ${JSON.stringify({
@@ -565,9 +586,12 @@ suite("sail-lsp extension", () => {
         } finally {
             await replace(original);
             await vscode.window.showTextDocument(document);
+            await workspaceConfig.update(
+                "[sail]",
+                originalLanguageSettings,
+                vscode.ConfigurationTarget.Workspace,
+            );
             editor.options = oldOptions;
-            for (let index = 0; index < keys.length; index++)
-                await configure(keys[index], saved[index]);
         }
     });
 

@@ -127,18 +127,16 @@ fn preview_exposes_active_missing_includes_and_cycles_without_expanding_inactive
     let (host, map, urls) =
         setup(&[("main.sail", main), ("cycle.sail", "$include \"main.sail\"\n")], &[0], vec![]);
     let preview = snapshot(&host, &map).expand_includes(&urls[0]).unwrap().unwrap();
-    let source_path = urls[0].to_file_path().unwrap();
+    let project_root = std::path::Path::new(std::path::MAIN_SEPARATOR_STR).join("project");
     assert!(
-        preview.expansion.contains(&format!(
-            "Include missing: {}",
-            source_path.with_file_name("missing.sail").display()
-        )),
+        preview
+            .expansion
+            .contains(&format!("Include missing: {}", project_root.join("missing.sail").display())),
         "{}",
         preview.expansion
     );
-    assert!(!preview.expansion.contains(&format!(
-        "Include missing: {}",
-        source_path.with_file_name("inactive.sail").display()
-    )));
+    assert!(!preview
+        .expansion
+        .contains(&format!("Include missing: {}", project_root.join("inactive.sail").display())));
     assert!(preview.expansion.contains("Include cycle/depth limit:"));
 }
