@@ -191,6 +191,13 @@ still pay the initial catalog cost.
 | `references` | `bool` | `true` | Show reference counts |
 | `implementations` | `bool` | `true` | Show implementation counts |
 
+A resolved lens runs the client's `sail-lsp.showReferences` command with the
+protocol `uri`, `position` and `locations` — rust-analyzer's shape — when the
+client lists that command under `experimental.commands.commands` in its
+capabilities, as the VS Code extension does. A client that lists nothing gets
+the count as a title without a command. Project task lenses are produced by the
+VS Code extension itself; `runnables.showCodeLens` is its setting alone.
+
 ### `hover`
 
 | Key | Type | Default | Description |

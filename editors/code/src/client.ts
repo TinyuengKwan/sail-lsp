@@ -19,6 +19,9 @@ import {
 export const EXPERIMENTAL_CAPABILITIES = {
     snippetTextEdit: true,
     serverStatusNotification: true,
+    // The client-side commands a code lens may run; each is registered in
+    // main.ts with the protocol arguments the server sends.
+    commands: { commands: ["sail-lsp.showReferences"] },
 };
 
 export class ExperimentalFeatures implements lc.StaticFeature {

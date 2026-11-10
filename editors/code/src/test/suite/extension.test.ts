@@ -797,6 +797,84 @@ suite("sail-lsp extension", () => {
         }
     });
 
+    test("reference lenses run the client's showReferences command and task lenses obey their setting", async () => {
+        const extension = vscode.extensions.getExtension<ExtensionApi>("Lunarwwww.sail-lsp")!;
+        const api = await extension.activate();
+        await eventually("server ready", () => api.test.status()?.quiescent === true);
+        const uri = vscode.Uri.joinPath(vscode.workspace.workspaceFolders![0].uri, "sample.sail");
+        const document = await vscode.workspace.openTextDocument(uri);
+        const original = document.getText();
+        const source =
+            "val helper : int -> int\nfunction helper(value) = value\nfunction main() -> int = helper(1)\n";
+        const replace = async (text: string) => {
+            const edit = new vscode.WorkspaceEdit();
+            edit.replace(
+                uri,
+                new vscode.Range(
+                    document.positionAt(0),
+                    document.positionAt(document.getText().length),
+                ),
+                text,
+            );
+            assert.ok(await vscode.workspace.applyEdit(edit));
+        };
+        const config = vscode.workspace.getConfiguration("sail-lsp");
+        const savedShowCodeLens = config.inspect("runnables.showCodeLens")?.workspaceValue;
+        const lenses = async () =>
+            (await vscode.commands.executeCommand<vscode.CodeLens[]>(
+                "vscode.executeCodeLensProvider",
+                uri,
+                50,
+            )) ?? [];
+        try {
+            await replace(source);
+            await vscode.window.showTextDocument(document);
+            let references: vscode.CodeLens | undefined;
+            const deadline = Date.now() + 20_000;
+            while (!references && Date.now() < deadline) {
+                references = (await lenses()).find(
+                    (lens) =>
+                        lens.command?.command === "sail-lsp.showReferences" &&
+                        lens.command.title === "1 reference",
+                );
+                if (!references) await new Promise((resolve) => setTimeout(resolve, 50));
+            }
+            assert.ok(references?.command, "a resolved reference lens should carry the command");
+            // The arguments are protocol values; the command converts them.
+            assert.equal(typeof references.command.arguments?.[0], "string");
+            await vscode.commands.executeCommand(
+                references.command.command,
+                ...references.command.arguments!,
+            );
+            await vscode.commands.executeCommand("closeReferenceSearch");
+            assert.ok(
+                (await lenses()).some(
+                    (lens) => lens.command?.command === "sail-lsp.runProjectTask",
+                ),
+                "task lenses are shown by default",
+            );
+            await config.update(
+                "runnables.showCodeLens",
+                false,
+                vscode.ConfigurationTarget.Workspace,
+            );
+            assert.ok(
+                (await lenses()).every(
+                    (lens) => lens.command?.command !== "sail-lsp.runProjectTask",
+                ),
+                "runnables.showCodeLens=false hides the task lenses",
+            );
+        } finally {
+            await config.update(
+                "runnables.showCodeLens",
+                savedShowCodeLens,
+                vscode.ConfigurationTarget.Workspace,
+            );
+            await replace(original);
+            await vscode.window.showTextDocument(document);
+        }
+    });
+
     test("analysis explanations and read-only preprocessing previews expose actual source links", async () => {
         const extension = vscode.extensions.getExtension<ExtensionApi>("Lunarwwww.sail-lsp")!;
         const api = await extension.activate();

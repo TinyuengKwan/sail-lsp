@@ -276,8 +276,9 @@ struct ClientProfile {
     /// Registers no file watcher, so the server watches the folder itself.
     native_watch: bool,
     /// The `experimental` section, where rust-analyzer's protocol extensions
-    /// are negotiated. The VS Code client's set by default; a scenario about
-    /// a client without one says so here.
+    /// are negotiated. The VS Code client's set by default, less
+    /// `snippetTextEdit`, which the scenarios about snippets declare; a
+    /// scenario about a client without one says so here.
     experimental: serde_json::Value,
 }
 
@@ -287,7 +288,10 @@ impl Default for ClientProfile {
             completion_snippets: false,
             pull_diagnostics: false,
             native_watch: false,
-            experimental: serde_json::json!({ "serverStatusNotification": true }),
+            experimental: serde_json::json!({
+                "serverStatusNotification": true,
+                "commands": { "commands": ["sail-lsp.showReferences"] },
+            }),
         }
     }
 }
@@ -2049,7 +2053,7 @@ fn shared_token_lenses_merge_contexts_without_duplicate_locations() {
     let resolved = server.ask("codeLens/resolve", lens.clone());
     assert_eq!(resolved["command"]["title"], "2 references", "{resolved}");
     // Clicking shows what the title counted: it sent an empty list.
-    assert_eq!(resolved["command"]["command"], "editor.action.showReferences", "{resolved}");
+    assert_eq!(resolved["command"]["command"], "sail-lsp.showReferences", "{resolved}");
     let shown: Vec<String> = resolved["command"]["arguments"][2]
         .as_array()
         .expect("locations")
@@ -6479,5 +6483,51 @@ fn server_status_is_sent_only_to_a_client_that_asked_for_it() {
         // Loading and the diagnostics wave each move the status; a client
         // that asked has heard about it by now.
         assert_eq!(!server.statuses.is_empty(), declared, "{:?}", server.statuses);
+    }
+}
+
+/// A reference lens runs the client's `sail-lsp.showReferences`, with the
+/// protocol arguments, when the client listed that command under
+/// `experimental.commands`; a client that did not gets the count alone.
+#[test]
+fn lens_commands_are_the_clients_or_nothing() {
+    use serde_json::json;
+    let source = "val helper : int -> int\nfunction helper(value) = value\nfunction main() -> int = helper(1)\n";
+    for listed in [true, false] {
+        let commands: Vec<&str> = if listed { vec!["sail-lsp.showReferences"] } else { vec![] };
+        let mut server = ServerFixture::open_with_client(
+            "lens-client-commands",
+            &[("sail.proj", "Main { files main.sail }"), ("main.sail", source)],
+            Root::Real,
+            None,
+            serde_json::Value::Null,
+            ClientProfile {
+                experimental: json!({ "commands": { "commands": commands } }),
+                ..Default::default()
+            },
+        );
+        server.did_open("main.sail", source);
+        let lenses = server.ask(
+            "textDocument/codeLens",
+            json!({"textDocument": {"uri": server.url("main.sail")}}),
+        );
+        let lens = lenses
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|lens| lens["data"]["kind"] == "refs" && lens["range"]["start"]["line"] == 1)
+            .unwrap_or_else(|| panic!("{lenses}"));
+        let resolved = server.ask("codeLens/resolve", lens.clone());
+        assert_eq!(resolved["command"]["title"], "1 reference", "{resolved}");
+        if listed {
+            assert_eq!(resolved["command"]["command"], "sail-lsp.showReferences", "{resolved}");
+            let arguments = resolved["command"]["arguments"].as_array().unwrap();
+            assert_eq!(arguments[0], json!(server.url("main.sail")));
+            assert_eq!(arguments[1], lens["range"]["start"]);
+            assert_eq!(arguments[2].as_array().unwrap().len(), 1, "{resolved}");
+        } else {
+            assert_eq!(resolved["command"]["command"], "", "{resolved}");
+            assert!(resolved["command"]["arguments"].is_null(), "{resolved}");
+        }
     }
 }

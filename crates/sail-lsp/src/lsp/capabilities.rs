@@ -106,12 +106,30 @@ impl ClientCapabilities {
         self.experimental_bool("serverStatusNotification")
     }
 
-    /// A boolean flag in the client's `experimental` section — the place
+    /// Whether the client registers `sail-lsp.showReferences`, the command
+    /// a reference or implementation lens runs — rust-analyzer's
+    /// `experimental.commands.commands`, which lists the client-side
+    /// commands a server may put in a lens.
+    ///
+    /// The lens used to name `editor.action.showReferences` with raw
+    /// protocol arguments, which only an editor that happens to convert
+    /// them can run. A client that lists nothing gets the count alone.
+    pub(crate) fn show_references_command(&self) -> bool {
+        self.experimental("commands")
+            .and_then(|it| it.get("commands")?.as_array())
+            .is_some_and(|commands| commands.iter().any(|it| it == "sail-lsp.showReferences"))
+    }
+
+    /// A boolean flag in the client's `experimental` section.
+    fn experimental_bool(&self, key: &str) -> bool {
+        self.experimental(key).and_then(serde_json::Value::as_bool) == Some(true)
+    }
+
+    /// An entry of the client's `experimental` section — the place
     /// rust-analyzer's protocol extensions are negotiated, and where the
     /// VS Code client (`editors/code/src/client.ts`) declares its own.
-    fn experimental_bool(&self, key: &str) -> bool {
-        self.0.experimental.as_ref().and_then(|it| it.get(key)).and_then(serde_json::Value::as_bool)
-            == Some(true)
+    fn experimental(&self, key: &str) -> Option<&serde_json::Value> {
+        self.0.experimental.as_ref()?.get(key)
     }
 
     /// Whether the client renders hover actions — rust-analyzer's

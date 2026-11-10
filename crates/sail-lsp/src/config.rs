@@ -48,11 +48,10 @@ pub struct RunnablesConfig {
     /// Timeout for the standard LSP task fallback (native clients own their tasks).
     pub timeout_ms: u64,
     pub tasks: Vec<ProjectTaskConfig>,
-    pub show_code_lens: bool,
 }
 impl Default for RunnablesConfig {
     fn default() -> Self {
-        Self { tasks: Vec::new(), show_code_lens: true, timeout_ms: 300_000 }
+        Self { tasks: Vec::new(), timeout_ms: 300_000 }
     }
 }
 

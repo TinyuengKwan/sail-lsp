@@ -26,6 +26,7 @@ import {
 import {
     LanguageClient,
     Location as ProtocolLocation,
+    Position as ProtocolPosition,
     LanguageClientOptions,
     NotificationType,
     NotificationType0,
@@ -923,6 +924,23 @@ function registerCommands(context: vscode.ExtensionContext): void {
                 },
             );
         }),
+
+        // What a reference or implementation lens runs, with the protocol
+        // arguments the server put in it; rust-analyzer's `showReferences`.
+        vscode.commands.registerCommand(
+            "sail-lsp.showReferences",
+            async (uri: string, position: ProtocolPosition, locations: ProtocolLocation[]) => {
+                if (!client) return;
+                await vscode.commands.executeCommand(
+                    "editor.action.showReferences",
+                    vscode.Uri.parse(uri),
+                    client.protocol2CodeConverter.asPosition(position),
+                    locations.map((location) =>
+                        client!.protocol2CodeConverter.asLocation(location),
+                    ),
+                );
+            },
+        ),
 
         vscode.commands.registerCommand("sail-lsp.parentModule", async () => {
             const editor = vscode.window.activeTextEditor;

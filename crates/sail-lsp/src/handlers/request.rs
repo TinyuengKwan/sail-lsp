@@ -662,9 +662,12 @@ pub(crate) fn handle_folding_range(
 }
 
 /// Resolve a code lens — fill in the command with actual data.
-/// into commands like `showReferences` / `showImplementations`.
-/// Uses `editor.action.showReferences` — a standard LSP command
-/// supported by VS Code, neovim, and other LSP clients.
+///
+/// The command is the client's `sail-lsp.showReferences`, taking the
+/// protocol `(uri, position, locations)` — rust-analyzer's shape — and
+/// only for a client that listed it under `experimental.commands`. Nothing
+/// in the protocol runs `editor.action.showReferences` with protocol
+/// arguments; an editor that cannot run the command shows the count.
 pub(crate) fn handle_code_lens_resolve(
     snap: GlobalStateSnapshot,
     mut params: CodeLens,
@@ -683,17 +686,19 @@ pub(crate) fn handle_code_lens_resolve(
         })
         .collect();
     // `showReferences` with the sites the title counted; a lens with nothing
-    // to show is a title alone.
+    // to show, or a client with nothing to show it in, is a title alone.
     params.command = Some(match uri {
-        Some(uri) if !locations.is_empty() => Command {
-            title,
-            command: "editor.action.showReferences".to_string(),
-            arguments: Some(vec![
-                serde_json::to_value(&uri)?,
-                serde_json::to_value(params.range.start)?,
-                serde_json::to_value(locations)?,
-            ]),
-        },
+        Some(uri) if !locations.is_empty() && snap.client_caps.show_references_command() => {
+            Command {
+                title,
+                command: "sail-lsp.showReferences".to_string(),
+                arguments: Some(vec![
+                    serde_json::to_value(&uri)?,
+                    serde_json::to_value(params.range.start)?,
+                    serde_json::to_value(locations)?,
+                ]),
+            }
+        }
         _ => Command { title, command: String::new(), arguments: None },
     });
     Ok(params)
