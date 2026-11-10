@@ -582,6 +582,60 @@ where
     Some(HoverResult { markup, range: hover_range, actions })
 }
 
+/// Hover on a keyword: its one-line documentation, when `builtin_docs` has
+/// one. rust-analyzer's `hover::render::keyword`.
+///
+/// The lexer emits a keyword token, and `token_symbol_key` answers nothing
+/// for it — rightly, since goto, references and rename must not treat a
+/// keyword as a symbol. So hover asks this before it asks for a symbol.
+pub fn keyword(token: &Token, range: TextRange, config: &HoverConfig) -> Option<HoverResult> {
+    if !config.documentation || !parser::SyntaxKind::from_token(token).is_keyword() {
+        return None;
+    }
+    let text = token.to_string();
+    let doc = builtin_docs(&text)?;
+    Some(markdown_hover(format!("**keyword** **{text}**\n\n___\n\n{doc}"), range))
+}
+
+/// Hover on a literal: its value in decimal, hex and binary, and for a
+/// bitvector literal its width. rust-analyzer's `hover::render::literal`.
+/// A string literal says nothing worth a popup.
+pub fn literal(token: &Token, range: TextRange) -> Option<HoverResult> {
+    // The payload keeps the `0x`/`0b` prefix (its comment in `lexer.rs`
+    // says otherwise). Upstream `lexer.mll` lets `_` separate the digits,
+    // and a separator is not a bit of width.
+    let digits = |text: &str, prefix: &str| -> String {
+        text.strip_prefix(prefix).unwrap_or(text).chars().filter(|&c| c != '_').collect()
+    };
+    let (shown, width, value) = match token {
+        Token::Hex(text) => {
+            let digits = digits(text, "0x");
+            (text.clone(), Some(digits.len() * 4), u128::from_str_radix(&digits, 16).ok())
+        }
+        Token::Bin(text) => {
+            let digits = digits(text, "0b");
+            (text.clone(), Some(digits.len()), u128::from_str_radix(&digits, 2).ok())
+        }
+        Token::Num(text) => (text.clone(), None, text.parse::<u128>().ok()),
+        _ => return None,
+    };
+    let mut markdown = vec![fenced_sail(&shown)];
+    if let Some(width) = width {
+        markdown.push(format!("**type:** `bits({width})`"));
+    }
+    let rendered = match (value, width) {
+        // Pad to the literal's own width so the digits line up with it.
+        (Some(value), Some(width)) => {
+            format!("{value} (0x{value:0>hex$X}|0b{value:0>width$b})", hex = width.div_ceil(4))
+        }
+        (Some(value), None) => format!("{value} (0x{value:X}|0b{value:b})"),
+        // Negative or wider than 128 bits: the text is the value.
+        (None, _) => shown,
+    };
+    markdown.push(format!("value of literal: {rendered}"));
+    Some(markdown_hover(markdown.join("\n\n"), range))
+}
+
 fn overload_members(file: &dyn FileDb, decl: &Decl) -> Vec<String> {
     let Some(tokens) = file.tokens() else {
         return Vec::new();
@@ -1942,5 +1996,66 @@ function f(x) = match x { Shared => (), OnlyA => () }
             .unwrap_or_default();
         assert!(!markup.contains("A::Shared"), "guessed: {markup}");
         assert!(!markup.contains("B::Shared"), "guessed: {markup}");
+    }
+}
+
+#[cfg(test)]
+mod keyword_and_literal_hover_tests {
+    use crate::fixture;
+
+    fn hover_at(source: &str, needle: &str) -> Option<String> {
+        let (analysis, files) = fixture::analysis(source);
+        let at = source.find(needle).expect("fixture");
+        let li = ide_db::line_index::LineIndex::new(source);
+        analysis
+            .hover(files[0].0, li.line_col(at), &crate::hover::HoverConfig::default())
+            .expect("no cancellation")
+            .map(|r| r.markup)
+    }
+
+    /// The lexer emits a keyword token, and `token_symbol_key` answers
+    /// nothing for it — so the keyword docs in `builtin_docs` were never
+    /// reached. Hover asks about the keyword before it asks for a symbol.
+    #[test]
+    fn a_keyword_hovers_with_its_documentation() {
+        let markup = hover_at("val f : forall 'n. int('n) -> int\n", "forall").expect("no hover");
+        assert!(markup.contains("**keyword** **forall**"), "{markup}");
+        assert!(markup.contains("introduce type variables"), "{markup}");
+        let markup = hover_at("scattered union ast\n", "scattered").expect("no hover");
+        assert!(markup.contains("**keyword** **scattered**"), "{markup}");
+    }
+
+    /// A keyword is not a symbol: goto, references and rename keep seeing
+    /// nothing through the shared key.
+    #[test]
+    fn a_keyword_is_still_not_a_symbol() {
+        assert_eq!(ide_db::token_symbol_key(&parser::Token::KwForall), None);
+        assert_eq!(ide_db::token_symbol_key(&parser::Token::KwRegister), None);
+    }
+
+    #[test]
+    fn a_hex_literal_hovers_with_its_width_and_values() {
+        let markup = hover_at("let x : bits(8) = 0x0F\n", "0x0F").expect("no hover");
+        assert!(markup.contains("bits(8)"), "{markup}");
+        assert!(markup.contains("15 (0x0F|0b00001111)"), "{markup}");
+    }
+
+    #[test]
+    fn a_binary_literal_hovers_with_its_width_and_values() {
+        let markup = hover_at("let x : bits(4) = 0b1010\n", "0b1010").expect("no hover");
+        assert!(markup.contains("bits(4)"), "{markup}");
+        assert!(markup.contains("10 (0xA|0b1010)"), "{markup}");
+    }
+
+    #[test]
+    fn a_decimal_literal_hovers_with_hex_and_binary() {
+        let markup = hover_at("let x : int = 42\n", "42").expect("no hover");
+        assert!(markup.contains("42 (0x2A|0b101010)"), "{markup}");
+        assert!(!markup.contains("bits("), "{markup}");
+    }
+
+    #[test]
+    fn a_string_literal_has_no_hover() {
+        assert_eq!(hover_at("let s : string = \"hello\"\n", "\"hello\""), None);
     }
 }

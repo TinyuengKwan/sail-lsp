@@ -179,6 +179,11 @@ impl SyntaxKind {
         }
     }
 
+    /// True for a keyword token. The `KW_*` kinds are one contiguous block.
+    pub fn is_keyword(self) -> bool {
+        (SyntaxKind::KW_AND..=SyntaxKind::KW_WREG).contains(&self)
+    }
+
     /// True for whitespace, comments — nodes that carry no semantic meaning.
     pub fn is_trivia(self) -> bool {
         matches!(

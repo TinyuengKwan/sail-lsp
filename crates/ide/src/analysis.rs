@@ -2418,11 +2418,18 @@ impl Analysis {
             Some(t) => t,
             None => return Ok(None),
         };
+        let range = base_db::text_range(token_span.start, token_span.end);
+        // A keyword or a literal is not a symbol — nothing to resolve, and
+        // nothing for goto or rename — but hover still has something to say.
+        if let Some(hover) = crate::hover::keyword(token, range, config)
+            .or_else(|| crate::hover::literal(token, range))
+        {
+            return Ok(Some(hover));
+        }
         let symbol_key = match ide_db::token_symbol_key(token) {
             Some(k) => k,
             None => return Ok(None),
         };
-        let range = base_db::text_range(token_span.start, token_span.end);
         let visibility_started = std::time::Instant::now();
         let owned: Vec<_> = self
             .visible_salsa_files(file_id)
