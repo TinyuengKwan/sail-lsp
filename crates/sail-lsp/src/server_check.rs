@@ -265,6 +265,33 @@ pub(crate) struct ServerFixture {
     _guard: std::sync::MutexGuard<'static, ()>,
 }
 
+/// What a client says it can take, beyond what every fixture declares.
+#[derive(Clone, Debug)]
+struct ClientProfile {
+    /// `completion.completionItem.snippetSupport`: `${1:x}` expands.
+    completion_snippets: bool,
+    /// Pulls diagnostics, as VS Code does, and accepts
+    /// `workspace/diagnostic/refresh`.
+    pull_diagnostics: bool,
+    /// Registers no file watcher, so the server watches the folder itself.
+    native_watch: bool,
+    /// The `experimental` section, where rust-analyzer's protocol extensions
+    /// are negotiated. The VS Code client's set by default; a scenario about
+    /// a client without one says so here.
+    experimental: serde_json::Value,
+}
+
+impl Default for ClientProfile {
+    fn default() -> Self {
+        Self {
+            completion_snippets: false,
+            pull_diagnostics: false,
+            native_watch: false,
+            experimental: serde_json::json!({ "serverStatusNotification": true }),
+        }
+    }
+}
+
 impl ServerFixture {
     /// A workspace on disk with these `(relative path, contents)` files, a
     /// server running on it, and `initialize`/`initialized` exchanged.
@@ -331,9 +358,7 @@ impl ServerFixture {
             kind,
             imports,
             initialization_options,
-            false,
-            false,
-            false,
+            Default::default(),
         )
     }
 
@@ -346,9 +371,7 @@ impl ServerFixture {
             Root::Real,
             None,
             serde_json::Value::Null,
-            false,
-            true,
-            false,
+            ClientProfile { pull_diagnostics: true, ..Default::default() },
         )
     }
 
@@ -362,22 +385,17 @@ impl ServerFixture {
             Root::Real,
             None,
             serde_json::Value::Null,
-            false,
-            false,
-            true,
+            ClientProfile { native_watch: true, ..Default::default() },
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn open_with_client(
         name: &str,
         files: &[(&str, &str)],
         kind: Root,
         imports: Option<bool>,
         initialization_options: serde_json::Value,
-        snippets: bool,
-        pull: bool,
-        native_watch: bool,
+        profile: ClientProfile,
     ) -> ServerFixture {
         let guard = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -434,7 +452,7 @@ impl ServerFixture {
             capabilities: serde_json::Value::Null,
             _guard: guard,
         };
-        fixture.initialize(imports, kind, initialization_options, snippets, pull, native_watch);
+        fixture.initialize(imports, kind, initialization_options, profile);
         fixture
     }
 
@@ -443,10 +461,14 @@ impl ServerFixture {
         imports: Option<bool>,
         kind: Root,
         initialization_options: serde_json::Value,
-        snippets: bool,
-        pull: bool,
-        native_watch: bool,
+        profile: ClientProfile,
     ) {
+        let ClientProfile {
+            completion_snippets: snippets,
+            pull_diagnostics: pull,
+            native_watch,
+            experimental,
+        } = profile;
         let root_url = Url::from_directory_path(&self.root).expect("root url");
         let has_workspace = kind != Root::Detached;
         let folders = match kind {
@@ -494,6 +516,7 @@ impl ServerFixture {
                     "window": { "workDoneProgress": true, "showDocument": {"support":true} },
                     "textDocument": text_document,
                     "workspace": workspace,
+                    "experimental": experimental,
                 },
             }),
         );
@@ -3547,9 +3570,7 @@ fn function_completion_snippet_applies_with_its_argument_default() {
         Root::Real,
         None,
         serde_json::Value::Null,
-        true,
-        false,
-        false,
+        ClientProfile { completion_snippets: true, ..Default::default() },
     );
     server.did_open("a.sail", source);
     let answer = server.ask(
@@ -5818,9 +5839,11 @@ fn custom_postfix_templates_preserve_literal_receivers_on_both_client_kinds() {
             Root::Real,
             None,
             json!({"completion":{"customTemplates":[{"postfix":"literal","body":"(${receiver})$0","description":"parenthesize"}]}}),
-            snippets,
-            true,
-            false,
+            ClientProfile {
+                completion_snippets: snippets,
+                pull_diagnostics: true,
+                ..Default::default()
+            },
         );
         server.did_open("a.sail", source);
         let index = ide_db::line_index::LineIndex::new(source);
@@ -5895,9 +5918,7 @@ fn structured_compiler_fix_applies_rechecks_and_rejects_stale_actions() {
         Root::Real,
         None,
         json!({"flycheck":{"enable":true,"command":compiler,"diagnosticFormat":"json","debounceMs":0}}),
-        false,
-        true,
-        false,
+        ClientProfile { pull_diagnostics: true, ..Default::default() },
     );
     server.did_open("a.sail", source);
     let uri = server.url("a.sail");
@@ -6379,5 +6400,84 @@ fn inlay_settings_reach_chain_types_and_generated_enum_values_over_the_wire() {
             assert_eq!(enum_values[1]["label"], "= 1");
             assert_eq!(inlay_label(chaining[0]), ": Address");
         }
+    }
+}
+
+/// An assist leaves the cursor where the user types next — for a client
+/// that said it can take a snippet in a workspace edit. One that did not
+/// gets the same stub as plain text, with nothing left to expand.
+#[test]
+fn an_assist_places_the_cursor_only_for_a_client_that_takes_snippets() {
+    use serde_json::json;
+    let source = "val f : int -> int\nfunction f(x) = helper(x)\n";
+    for snippets in [false, true] {
+        let mut server = ServerFixture::open_with_client(
+            "assist-snippet-clients",
+            &[("sail.proj", "Main { files a.sail }"), ("a.sail", source)],
+            Root::Real,
+            Some(false),
+            serde_json::Value::Null,
+            ClientProfile {
+                experimental: json!({ "snippetTextEdit": snippets, "serverStatusNotification": true }),
+                ..Default::default()
+            },
+        );
+        server.did_open("a.sail", source);
+        let at = source.find("helper").unwrap() - source.find("function").unwrap();
+        let actions = server.ask("textDocument/codeAction", json!({
+            "textDocument": {"uri": server.url("a.sail")},
+            "range": {"start": {"line": 1, "character": at}, "end": {"line": 1, "character": at}},
+            "context": {"diagnostics": []},
+        }));
+        let action = actions
+            .as_array()
+            .and_then(|actions| {
+                actions.iter().find(|action| action["title"] == "Generate function `helper`")
+            })
+            .unwrap_or_else(|| panic!("{actions}"));
+        assert!(action["edit"].is_null(), "the edit is resolved lazily: {action}");
+        let resolved = server.ask("codeAction/resolve", action.clone());
+        let edit: crate::lsp_ext::SnippetWorkspaceEdit =
+            serde_json::from_value(resolved["edit"].clone()).unwrap();
+        let edits = &edit.changes.unwrap()[&server.url("a.sail")];
+        assert_eq!(edits.len(), 1, "{edits:?}");
+        if snippets {
+            assert_eq!(edits[0].insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET));
+            assert_eq!(
+                edits[0].new_text,
+                "\n\nval helper : _ -> ${1:_}\nfunction helper(arg1) = $0\n"
+            );
+        } else {
+            assert_eq!(edits[0].insert_text_format, Some(lsp_types::InsertTextFormat::PLAIN_TEXT));
+            assert_eq!(edits[0].new_text, "\n\nval helper : _ -> _\nfunction helper(arg1) = ()\n");
+        }
+    }
+}
+
+/// `sail-lsp/serverStatus` goes to a client that declared
+/// `experimental.serverStatusNotification`, and to no other.
+#[test]
+fn server_status_is_sent_only_to_a_client_that_asked_for_it() {
+    for declared in [true, false] {
+        let mut server = ServerFixture::open_with_client(
+            "server-status-capability",
+            &[("sail.proj", "Main { files main.sail }"), ("main.sail", A_FILE_WITH_ONE_ERROR)],
+            Root::Real,
+            None,
+            serde_json::Value::Null,
+            ClientProfile {
+                experimental: if declared {
+                    serde_json::json!({ "serverStatusNotification": true })
+                } else {
+                    serde_json::json!({})
+                },
+                ..Default::default()
+            },
+        );
+        server.did_open("main.sail", A_FILE_WITH_ONE_ERROR);
+        server.wait_for_diagnostics("main.sail", "the error", |d| errors(d) == 1);
+        // Loading and the diagnostics wave each move the status; a client
+        // that asked has heard about it by now.
+        assert_eq!(!server.statuses.is_empty(), declared, "{:?}", server.statuses);
     }
 }

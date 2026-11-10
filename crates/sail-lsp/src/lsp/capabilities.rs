@@ -93,11 +93,24 @@ impl ClientCapabilities {
     /// completion capability: a client can expand `${1:x}` in a completion
     /// and still take only plain edits from a code action.
     pub(crate) fn snippet_text_edit_support(&self) -> bool {
-        self.0
-            .experimental
-            .as_ref()
-            .and_then(|it| it.get("snippetTextEdit"))
-            .and_then(serde_json::Value::as_bool)
+        self.experimental_bool("snippetTextEdit")
+    }
+
+    /// Whether the client takes `sail-lsp/serverStatus` — rust-analyzer's
+    /// `experimental.serverStatusNotification`.
+    ///
+    /// The notification fires on every change of health or quiescence, so
+    /// a client without a status item to show it in was sent a stream it
+    /// could only drop; this used to go out regardless.
+    pub(crate) fn server_status_notification(&self) -> bool {
+        self.experimental_bool("serverStatusNotification")
+    }
+
+    /// A boolean flag in the client's `experimental` section — the place
+    /// rust-analyzer's protocol extensions are negotiated, and where the
+    /// VS Code client (`editors/code/src/client.ts`) declares its own.
+    fn experimental_bool(&self, key: &str) -> bool {
+        self.0.experimental.as_ref().and_then(|it| it.get(key)).and_then(serde_json::Value::as_bool)
             == Some(true)
     }
 

@@ -461,8 +461,11 @@ impl GlobalState {
     }
 
     /// Compute current server health status.
-    /// Send status notification if changed.
+    /// Send status notification if changed, to a client that asked for it.
     pub(crate) fn update_status_or_notify(&mut self) {
+        if !self.client_caps.server_status_notification() {
+            return;
+        }
         let status = self.current_status();
         if self.last_status.as_ref() != Some(&status) {
             self.last_status = Some(status.clone());

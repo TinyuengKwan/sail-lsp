@@ -3537,6 +3537,38 @@ fn the_server_reads_the_client_capabilities_first() {
     );
 }
 
+/// The VS Code client declares every `experimental` capability the server
+/// reads.
+///
+/// Both sides name these keys as strings, so a key one side spells
+/// differently is a feature that silently does not exist: every snippet is
+/// stripped, or the status bar never hears from the server. The server's
+/// list is what `ClientCapabilities` looks up; the client's is
+/// `EXPERIMENTAL_CAPABILITIES` in `client.ts`.
+#[test]
+fn the_vscode_client_declares_what_the_server_reads() {
+    let server = include_str!("lsp/capabilities.rs");
+    let client = include_str!("../../../editors/code/src/client.ts");
+    let mut read: Vec<&str> = ["experimental_bool(\"", "experimental(\""]
+        .iter()
+        .flat_map(|prefix| {
+            server.match_indices(prefix).map(|(i, _)| {
+                let rest = &server[i + prefix.len()..];
+                &rest[..rest.find('"').unwrap()]
+            })
+        })
+        .collect();
+    read.sort_unstable();
+    read.dedup();
+    assert!(read.contains(&"snippetTextEdit"), "{read:?}");
+    for key in read {
+        assert!(
+            client.contains(&format!("    {key}: ")),
+            "the server reads `experimental.{key}`, which the VS Code client never declares"
+        );
+    }
+}
+
 /// What the server asks the client, it can hear the answer to.
 ///
 /// The main loop matched `Message::Response(_) => {}` — every response the

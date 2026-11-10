@@ -647,6 +647,66 @@ suite("sail-lsp extension", () => {
         }
     });
 
+    test("a generate-function assist arrives as a snippet that selects the stub's placeholder", async () => {
+        const extension = vscode.extensions.getExtension<ExtensionApi>("Lunarwwww.sail-lsp")!;
+        const api = await extension.activate();
+        await eventually("server ready", () => api.test.status()?.quiescent === true);
+        const uri = vscode.Uri.joinPath(vscode.workspace.workspaceFolders![0].uri, "sample.sail");
+        const document = await vscode.workspace.openTextDocument(uri);
+        const original = document.getText();
+        const source = "val f : int -> int\nfunction f(x) = helper(x)\n";
+        const replace = async (text: string) => {
+            const edit = new vscode.WorkspaceEdit();
+            edit.replace(
+                uri,
+                new vscode.Range(
+                    document.positionAt(0),
+                    document.positionAt(document.getText().length),
+                ),
+                text,
+            );
+            assert.ok(await vscode.workspace.applyEdit(edit));
+        };
+        try {
+            await replace(source);
+            const editor = await vscode.window.showTextDocument(document);
+            const at = document.positionAt(source.indexOf("helper"));
+            editor.selection = new vscode.Selection(at, at);
+            // Resolved through the client, so the edit reaches VS Code as a
+            // `SnippetTextEdit` rather than as text with a literal `$0`.
+            let generate: vscode.CodeAction | undefined;
+            const deadline = Date.now() + 20_000;
+            while (!generate?.edit && Date.now() < deadline) {
+                const actions = await vscode.commands.executeCommand<
+                    (vscode.CodeAction | vscode.Command)[]
+                >("vscode.executeCodeActionProvider", uri, new vscode.Range(at, at), undefined, 20);
+                generate = actions.find(
+                    (action): action is vscode.CodeAction =>
+                        "kind" in action && action.title === "Generate function `helper`",
+                );
+                if (!generate?.edit) await new Promise((resolve) => setTimeout(resolve, 50));
+            }
+            assert.ok(generate?.edit, "the assist should be offered with a resolved edit");
+            assert.ok(await vscode.workspace.applyEdit(generate.edit));
+            await eventually(
+                () => `stub not inserted: ${document.getText()}`,
+                () => document.getText().includes("val helper : _ -> _"),
+            );
+            assert.ok(!document.getText().includes("$"), document.getText());
+            // `${1:_}`, the return type, is what the user types over first.
+            await eventually(
+                () => `placeholder not selected: ${JSON.stringify(editor.selection)}`,
+                () =>
+                    editor.selection.start.line === 4 &&
+                    document.getText(editor.selection) === "_" &&
+                    document.lineAt(4).text.startsWith("val helper : _ -> "),
+            );
+        } finally {
+            await replace(original);
+            await vscode.window.showTextDocument(document);
+        }
+    });
+
     test("analysis explanations and read-only preprocessing previews expose actual source links", async () => {
         const extension = vscode.extensions.getExtension<ExtensionApi>("Lunarwwww.sail-lsp")!;
         const api = await extension.activate();

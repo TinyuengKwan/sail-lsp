@@ -10,6 +10,7 @@ import * as path from "path";
 import * as os from "os";
 import * as fs from "fs";
 import { explicitSettings } from "./configuration";
+import { ExperimentalFeatures, codeActionMiddleware } from "./client";
 import { managedServerPath } from "./installation";
 import { registerDiagnosticReport } from "./diagnosticReport";
 import { registerRunnables } from "./runnables";
@@ -205,12 +206,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
                     );
                 },
             },
+            ...codeActionMiddleware(() => client),
         },
         initializationOptions: getInitializationOptions(context),
         synchronize: { configurationSection: "sail-lsp" },
     };
 
     client = new LanguageClient("sail-lsp", "Sail Language Server", serverOptions, clientOptions);
+    client.registerFeature(new ExperimentalFeatures());
     const runnables = registerRunnables(context, () => client, getExtraEnv);
     client.onNotification("sail-lsp/serverStatus", (status: ServerStatus) => showStatus(status));
     client.onNotification("sail-lsp/projectGraphChanged", () => {
