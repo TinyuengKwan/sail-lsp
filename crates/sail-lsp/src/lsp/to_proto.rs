@@ -640,13 +640,32 @@ pub fn inlay_hint_kind(kind: InlayHintKind) -> Option<lsp_types::InlayHintKind> 
     }
 }
 
-pub fn inlay_hint(line_index: &LineIndex, hint: &InlayHint) -> lsp_types::InlayHint {
+/// A hint as the protocol wants it.
+///
+/// `resolve_tooltip` is the client's `inlayHint.resolveSupport` for
+/// `tooltip`. What `inlayHint/resolve` would add — the same resolver, run
+/// on the same value — is left for that request when the client asks for
+/// tooltips that way, and put in the first answer when it does not; a hint
+/// whose provider already wrote a tooltip keeps it either way. This is
+/// rust-analyzer's `InlayFieldsToResolve`, for the one field that is lazy
+/// here.
+pub fn inlay_hint(
+    line_index: &LineIndex,
+    hint: &InlayHint,
+    resolve_tooltip: bool,
+) -> lsp_types::InlayHint {
+    let mut resolved = InlayHint { tooltip: None, ..hint.clone() };
+    ide::inlay_hints::resolve_inlay_hint(&mut resolved);
+    let tooltip = match (resolve_tooltip, resolved.tooltip) {
+        (true, Some(_)) => None,
+        (_, lazy) => hint.tooltip.clone().or(lazy),
+    };
     lsp_types::InlayHint {
         position: position_in(line_index, hint.offset),
         label: lsp_types::InlayHintLabel::String(hint.label.clone()),
         kind: inlay_hint_kind(hint.kind),
         text_edits: None,
-        tooltip: hint.tooltip.as_ref().map(|t| lsp_types::InlayHintTooltip::String(t.clone())),
+        tooltip: tooltip.map(lsp_types::InlayHintTooltip::String),
         padding_left: hint.padding_left,
         padding_right: hint.padding_right,
         data: hint.data.clone(),

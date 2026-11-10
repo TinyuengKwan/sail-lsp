@@ -8,15 +8,16 @@
 //! and `completion_snippet_support` (code actions and `${1:x}` sent
 //! whatever the client said). All six decide something now.
 //!
-//! Three more were deleted rather than wired, because each guarded
+//! Two more were deleted rather than wired, because each guarded
 //! nothing: `semantic_tokens_delta_support` and `will_rename_support` —
 //! rust-analyzer advertises both capabilities unconditionally and has no
 //! such client check, since a client that cannot take them simply does
-//! not ask — and `inlay_hint_resolve_support`, because every provider
-//! here fills its hint's tooltip when it builds it, so there is nothing
-//! left for a resolve to add. RA's use of `will_rename()` is to suppress
-//! the double edit a `file_system_edits` rename causes, and Sail has no
-//! definition whose rename moves a file.
+//! not ask. RA's use of `will_rename()` is to suppress the double edit a
+//! `file_system_edits` rename causes, and Sail has no definition whose
+//! rename moves a file. `inlay_hint_tooltip_resolve_support` was deleted
+//! on the same grounds and is back: a parameter hint's tooltip is what
+//! `inlayHint/resolve` adds, and it was computed for nobody while the
+//! resolve was never advertised.
 //!
 //! - `pub fn server_capabilities(config: &Config) -> ServerCapabilities`
 //! - `impl ClientCapabilities` — client capability queries
@@ -104,6 +105,22 @@ impl ClientCapabilities {
     /// could only drop; this used to go out regardless.
     pub(crate) fn server_status_notification(&self) -> bool {
         self.experimental_bool("serverStatusNotification")
+    }
+
+    /// Whether the client asks for an inlay hint's `tooltip` through
+    /// `inlayHint/resolve` — `textDocument.inlayHint.resolveSupport`, as
+    /// rust-analyzer's `inlay_hint_resolve_support_properties` reads it.
+    ///
+    /// Only the tooltip is asked about, because it is all the resolve can
+    /// add: label parts and their locations are built with the hint, and
+    /// no hint carries a text edit. A client that does not ask gets the
+    /// tooltip in the first answer.
+    pub(crate) fn inlay_hint_tooltip_resolve_support(&self) -> bool {
+        (|| -> Option<bool> {
+            let resolve =
+                self.0.text_document.as_ref()?.inlay_hint.as_ref()?.resolve_support.as_ref()?;
+            Some(resolve.properties.iter().any(|property| property == "tooltip"))
+        })() == Some(true)
     }
 
     /// Whether the client registers `sail-lsp.showReferences`, the command
@@ -331,7 +348,12 @@ pub(crate) fn server_capabilities(client: &ClientCapabilities) -> ServerCapabili
             first_trigger_character: "}".to_string(),
             more_trigger_character: Some(vec![">".to_string(), "\n".to_string()]),
         }),
-        inlay_hint_provider: Some(OneOf::Left(true)),
+        inlay_hint_provider: Some(OneOf::Right(InlayHintServerCapabilities::Options(
+            InlayHintOptions {
+                work_done_progress_options: Default::default(),
+                resolve_provider: Some(client.inlay_hint_tooltip_resolve_support()),
+            },
+        ))),
         signature_help_provider: Some(SignatureHelpOptions {
             trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
             ..Default::default()

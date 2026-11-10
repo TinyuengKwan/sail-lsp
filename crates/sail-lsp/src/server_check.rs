@@ -275,6 +275,8 @@ struct ClientProfile {
     pull_diagnostics: bool,
     /// Registers no file watcher, so the server watches the folder itself.
     native_watch: bool,
+    /// `inlayHint.resolveSupport` for the properties VS Code resolves lazily.
+    inlay_hint_resolve: bool,
     /// The `experimental` section, where rust-analyzer's protocol extensions
     /// are negotiated. The VS Code client's set by default, less
     /// `snippetTextEdit`, which the scenarios about snippets declare; a
@@ -288,6 +290,7 @@ impl Default for ClientProfile {
             completion_snippets: false,
             pull_diagnostics: false,
             native_watch: false,
+            inlay_hint_resolve: false,
             experimental: serde_json::json!({
                 "serverStatusNotification": true,
                 "commands": { "commands": ["sail-lsp.showReferences"] },
@@ -471,6 +474,7 @@ impl ServerFixture {
             completion_snippets: snippets,
             pull_diagnostics: pull,
             native_watch,
+            inlay_hint_resolve,
             experimental,
         } = profile;
         let root_url = Url::from_directory_path(&self.root).expect("root url");
@@ -496,6 +500,11 @@ impl ServerFixture {
         if snippets {
             text_document["completion"]["completionItem"]["snippetSupport"] =
                 serde_json::json!(true);
+        }
+        if inlay_hint_resolve {
+            text_document["inlayHint"] = serde_json::json!({ "resolveSupport": { "properties": [
+                "tooltip", "textEdits", "label.tooltip", "label.location", "label.command",
+            ] } });
         }
         let mut workspace = serde_json::json!({
             "workspaceFolders": true,
@@ -6528,6 +6537,49 @@ fn lens_commands_are_the_clients_or_nothing() {
         } else {
             assert_eq!(resolved["command"]["command"], "", "{resolved}");
             assert!(resolved["command"]["arguments"].is_null(), "{resolved}");
+        }
+    }
+}
+
+/// A client that resolves tooltips lazily gets a parameter hint without one
+/// and `inlayHint/resolve` fills it in; a client that cannot gets the hint
+/// complete. The server advertises `resolveProvider` to match.
+#[test]
+fn inlay_tooltips_are_resolved_lazily_only_for_a_client_that_asks() {
+    use serde_json::json;
+    let source = "val helper : int -> int\nfunction helper(value) = value\nfunction main() -> int = helper(1)\n";
+    for lazy in [true, false] {
+        let mut server = ServerFixture::open_with_client(
+            "inlay-resolve-clients",
+            &[("sail.proj", "Main { files main.sail }"), ("main.sail", source)],
+            Root::Real,
+            None,
+            serde_json::Value::Null,
+            ClientProfile { inlay_hint_resolve: lazy, ..Default::default() },
+        );
+        assert_eq!(server.capabilities["inlayHintProvider"]["resolveProvider"], json!(lazy));
+        server.did_open("main.sail", source);
+        let hints = server.ask(
+            "textDocument/inlayHint",
+            json!({
+                "textDocument": {"uri": server.url("main.sail")},
+                "range": {"start": {"line": 0, "character": 0}, "end": {"line": 3, "character": 0}},
+            }),
+        );
+        let parameter = hints
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|hint| inlay_label(hint) == "value:")
+            .unwrap_or_else(|| panic!("{hints}"));
+        let tooltip = json!("Parameter hint for `value`");
+        if lazy {
+            assert!(parameter["tooltip"].is_null(), "{parameter}");
+            let resolved = server.ask("inlayHint/resolve", parameter.clone());
+            assert_eq!(resolved["tooltip"], tooltip, "{resolved}");
+            assert_eq!(resolved["label"], parameter["label"]);
+        } else {
+            assert_eq!(parameter["tooltip"], tooltip, "{parameter}");
         }
     }
 }

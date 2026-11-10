@@ -1116,7 +1116,11 @@ pub(crate) fn handle_inlay_hint(
     let mut indices = std::collections::HashMap::new();
     let mut output = Vec::with_capacity(hints.len());
     for hint in &hints {
-        let mut converted = crate::to_proto::inlay_hint(&line_index, hint);
+        let mut converted = crate::to_proto::inlay_hint(
+            &line_index,
+            hint,
+            snap.client_caps.inlay_hint_tooltip_resolve_support(),
+        );
         if !hint.label_parts.is_empty() {
             let mut parts = Vec::new();
             for part in &hint.label_parts {

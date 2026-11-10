@@ -122,6 +122,11 @@ vim.lsp.config("sail_lsp_managed", {
 Sail enum-to-number conversions. Renamed conversion attributes are respected;
 manual or suppressed conversions do not produce guessed values.
 
+A parameter hint's tooltip is what `inlayHint/resolve` adds: a client that
+declares `inlayHint.resolveSupport` for `tooltip` receives the hint without it
+and resolves it on hover, as VS Code does; any other client receives it in the
+first answer. Labels and their locations always arrive complete.
+
 Type names in hints and parameter names with a unique source declaration are
 clickable. Links follow the current project and include context. Agreeing labels
 from different declarations do not acquire an arbitrary target. Truncated type
