@@ -389,6 +389,12 @@ impl lsp_types::request::Request for JoinLines {
 ///
 /// What to insert when Enter is pressed: continue a doc comment, keep the
 /// indentation of the block just opened.
+///
+/// Asked *after* the newline is in the buffer, with the cursor on the fresh
+/// line — the same question the `"\n"` on-type formatting trigger asks,
+/// answered by the same code. rust-analyzer's is asked before, and its
+/// edits carry the newline; a client written against that shape gets
+/// `null` here, since the line before the cursor is not empty.
 pub enum OnEnter {}
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]

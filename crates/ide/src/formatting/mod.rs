@@ -634,16 +634,24 @@ pub fn on_enter_edits_with_options(
     }) {
         return None;
     }
+    // A `///` comment is `DOC_COMMENT`, which the parser attaches to its
+    // item and so is not trivia; a comment is a comment here regardless.
+    let is_comment = |kind: syntax::SyntaxKind| {
+        matches!(
+            kind,
+            syntax::SyntaxKind::LINE_COMMENT
+                | syntax::SyntaxKind::BLOCK_COMMENT
+                | syntax::SyntaxKind::DOC_COMMENT
+        )
+    };
     let comment = tokens.iter().any(|t| {
-        t.kind().is_trivia()
-            && t.kind() != syntax::SyntaxKind::WHITESPACE
+        is_comment(t.kind())
             && usize::from(t.text_range().start())
                 == prev_start + prev_trimmed.len() - stripped.len()
             && t.text().starts_with("//")
     });
     if tokens.iter().any(|t| {
-        t.kind().is_trivia()
-            && t.kind() != syntax::SyntaxKind::WHITESPACE
+        is_comment(t.kind())
             && usize::from(t.text_range().start()) < current_offset
             && usize::from(t.text_range().end()) > current_offset
     }) {

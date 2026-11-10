@@ -77,6 +77,10 @@ Full configuration reference: [`docs/configuration.md`](../../docs/configuration
 - `Sail: Show Server Version`
 - `Sail: Toggle Inlay Hints`
 - `Sail: Explain Formatting` — show effective options, project style and no-op reasons in a read-only view
+- `Sail: Join Lines` (`Ctrl+Shift+J`) — join the selected lines into one, fixing up the whitespace between them
+- `Sail: Find Matching Brace` — move each cursor to the bracket matching the one under it
+- `Sail: Move Item Up` / `Sail: Move Item Down` — swap the definition under the cursor with its neighbour
+- `Sail: Enhanced Enter Key` (`Enter`) — after the newline, continue a `//` or `///` comment and indent an opened block; the server decides, as it does for `editor.formatOnType`
 
 Formatting uses local text edits and respects a project's `.sailfmt.toml`.
 Use `sail-lsp fmt --check <file-or-directory>` in CI to check the same style;

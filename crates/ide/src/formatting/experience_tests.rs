@@ -101,6 +101,25 @@ fn enter_obeys_spaces_tabs_and_never_replaces_code_before_the_cursor() {
     .is_none());
 }
 
+/// A `///` comment continues like a `//` one. It lexes as `DOC_COMMENT`,
+/// which is not trivia, and the comment check used to ask for trivia — so
+/// Enter after a doc line gave a bare line while Enter after `//` gave `// `.
+#[test]
+fn enter_continues_doc_comments_as_well_as_line_comments() {
+    let options = FormatOptions::default();
+    for (source, expected) in [
+        ("/// doc\n\nval y : int\n", "/// "),
+        ("  /// doc\n\nval y : int\n", "  /// "),
+        ("// plain\n\nval y : int\n", "// "),
+    ] {
+        let file = TestFile::new(source);
+        let edits =
+            on_enter_edits_with_options(&file, ide_db::LineCol { line: 1, col: 0 }, &options)
+                .unwrap_or_else(|| panic!("{source:?}"));
+        assert_eq!(edits[0].new_text, expected, "{source:?}");
+    }
+}
+
 #[test]
 fn enter_uses_lexical_context_while_code_is_incomplete() {
     let options = FormatOptions { tab_size: 4, ..Default::default() };

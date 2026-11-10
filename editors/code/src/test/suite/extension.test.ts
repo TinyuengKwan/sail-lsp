@@ -707,6 +707,96 @@ suite("sail-lsp extension", () => {
         }
     });
 
+    test("editing commands find the matching brace, move items, join lines and complete Enter", async () => {
+        const extension = vscode.extensions.getExtension<ExtensionApi>("Lunarwwww.sail-lsp")!;
+        const api = await extension.activate();
+        await eventually("server ready", () => api.test.status()?.quiescent === true);
+        const uri = vscode.Uri.joinPath(vscode.workspace.workspaceFolders![0].uri, "sample.sail");
+        const document = await vscode.workspace.openTextDocument(uri);
+        const original = document.getText();
+        const source = "function a() -> int = {\n  1\n}\nfunction b() -> int = 2\n/// doc\n";
+        const replace = async (text: string) => {
+            const edit = new vscode.WorkspaceEdit();
+            edit.replace(
+                uri,
+                new vscode.Range(
+                    document.positionAt(0),
+                    document.positionAt(document.getText().length),
+                ),
+                text,
+            );
+            assert.ok(await vscode.workspace.applyEdit(edit));
+        };
+        const select = (position: vscode.Position) => {
+            editor.selection = new vscode.Selection(position, position);
+        };
+        let editor: vscode.TextEditor;
+        try {
+            await replace(source);
+            editor = await vscode.window.showTextDocument(document);
+            select(document.positionAt(source.indexOf("{")));
+            await vscode.commands.executeCommand("sail-lsp.matchingBrace");
+            assert.deepEqual(
+                [editor.selection.active.line, editor.selection.active.character],
+                [2, 0],
+                "the cursor moves to the closing brace",
+            );
+            const lineOf = (text: string) => {
+                const lines = document.getText().split("\n");
+                const line = lines.indexOf(text);
+                assert.notEqual(line, -1, `${JSON.stringify(text)} is not a line of ${lines}`);
+                return line;
+            };
+            select(new vscode.Position(0, 0));
+            await vscode.commands.executeCommand("sail-lsp.moveItemDown");
+            await eventually(
+                () => `item not moved: ${document.getText()}`,
+                () => {
+                    const text = document.getText();
+                    return (
+                        text.indexOf("function b()") < text.indexOf("function a()") &&
+                        text.split("\n").sort().join("\n") === source.split("\n").sort().join("\n")
+                    );
+                },
+            );
+            const opening = lineOf("function a() -> int = {");
+            select(new vscode.Position(opening, 0));
+            await vscode.commands.executeCommand("sail-lsp.joinLines");
+            await eventually(
+                () => `lines not joined: ${document.getText()}`,
+                () =>
+                    document.lineCount === 5 &&
+                    document.lineAt(opening).text.startsWith("function a() -> int = {") &&
+                    document.lineAt(opening).text.endsWith("1"),
+            );
+            // Enter after a doc comment continues it; after plain code it is
+            // a newline and nothing else.
+            const doc = lineOf("/// doc");
+            select(document.lineAt(doc).range.end);
+            await vscode.commands.executeCommand("sail-lsp.onEnter");
+            await eventually(
+                () => `doc comment not continued: ${JSON.stringify(document.getText())}`,
+                () =>
+                    document.lineAt(doc).text === "/// doc" &&
+                    document.lineAt(doc + 1).text === "/// " &&
+                    editor.selection.active.isEqual(new vscode.Position(doc + 1, 4)),
+            );
+            const before = document.lineCount;
+            const plain = lineOf("function b() -> int = 2");
+            select(document.lineAt(plain).range.end);
+            await vscode.commands.executeCommand("sail-lsp.onEnter");
+            await eventually(
+                () => `newline not typed: ${JSON.stringify(document.getText())}`,
+                () => document.lineCount === before + 1 && document.lineAt(plain + 1).text === "",
+            );
+            await new Promise((resolve) => setTimeout(resolve, 300));
+            assert.equal(document.lineAt(plain + 1).text, "", "plain code gained a continuation");
+        } finally {
+            await replace(original);
+            await vscode.window.showTextDocument(document);
+        }
+    });
+
     test("analysis explanations and read-only preprocessing previews expose actual source links", async () => {
         const extension = vscode.extensions.getExtension<ExtensionApi>("Lunarwwww.sail-lsp")!;
         const api = await extension.activate();

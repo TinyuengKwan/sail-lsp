@@ -14,6 +14,7 @@ import { ExperimentalFeatures, codeActionMiddleware } from "./client";
 import { managedServerPath } from "./installation";
 import { registerDiagnosticReport } from "./diagnosticReport";
 import { registerRunnables } from "./runnables";
+import { registerEditingCommands } from "./editing";
 import { ProjectGraphEntry, GraphNode, graphChildren, isCycle } from "./projectGraph";
 import { registerStructuralReplace } from "./ssr";
 import {
@@ -229,6 +230,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     // Register commands
     const ssr = registerStructuralReplace(context, () => client);
     registerCommands(context);
+    registerEditingCommands(context, () => client);
 
     // Start the client (and server)
     try {

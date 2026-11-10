@@ -854,6 +854,31 @@
         "category": "Sail"
       },
       {
+        "command": "sail-lsp.matchingBrace",
+        "title": "Find Matching Brace",
+        "category": "Sail"
+      },
+      {
+        "command": "sail-lsp.joinLines",
+        "title": "Join Lines",
+        "category": "Sail"
+      },
+      {
+        "command": "sail-lsp.onEnter",
+        "title": "Enhanced Enter Key",
+        "category": "Sail"
+      },
+      {
+        "command": "sail-lsp.moveItemUp",
+        "title": "Move Item Up",
+        "category": "Sail"
+      },
+      {
+        "command": "sail-lsp.moveItemDown",
+        "title": "Move Item Down",
+        "category": "Sail"
+      },
+      {
         "command": "sail-lsp.selectIncludeContext",
         "title": "Sail: Select Include Context"
       },
@@ -878,6 +903,18 @@
         "command": "sail-lsp.cancelProjectTasks",
         "title": "Cancel All Sail Tasks",
         "category": "Sail"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "sail-lsp.joinLines",
+        "key": "ctrl+shift+j",
+        "when": "editorTextFocus && editorLangId == sail"
+      },
+      {
+        "command": "sail-lsp.onEnter",
+        "key": "enter",
+        "when": "editorTextFocus && !suggestWidgetVisible && editorLangId == sail"
       }
     ],
     "views": {

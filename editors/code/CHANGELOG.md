@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Code actions apply the server's snippet edits, so an assist can leave the cursor where you type next; the client declares `snippetTextEdit` and `serverStatusNotification`.
+- Added `Join Lines` (`Ctrl+Shift+J`), `Find Matching Brace`, `Move Item Up`/`Down` and an `Enter` key that continues comments and indents opened blocks through the server.
+
 ## 0.2.0
 
 - Added Marketplace-ready extension metadata, support links, and release notes.
