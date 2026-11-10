@@ -303,12 +303,16 @@ impl ProjectManifest {
         let tokens = super::lex_for_editor(source);
         let mut parser = Parser { tokens, pos: 0, end: source.len(), recover: true };
         let Ok(declarations) = parser.declarations(None) else { return Vec::new() };
+        // The cursor just after an entry is on it, as `editing::symbol_at` has it.
+        fn covers(range: &Range<usize>, offset: usize) -> bool {
+            range.start <= offset && offset <= range.end
+        }
         fn focused<'a>(
             expr: &'a Expr,
             offset: usize,
             vars: &BTreeMap<String, ProjectValue>,
         ) -> Option<&'a Expr> {
-            if !expr.range.contains(&offset) {
+            if !covers(&expr.range, offset) {
                 return None;
             }
             match &expr.kind {
@@ -340,7 +344,7 @@ impl ProjectManifest {
                         }
                     }
                     Decl::Files(exprs) => {
-                        if let Some(expr) = exprs.iter().find(|e| e.range.contains(&offset)) {
+                        if let Some(expr) = exprs.iter().find(|e| covers(&e.range, offset)) {
                             let paths = focused(expr, offset, vars)
                                 .and_then(|e| eval(e, vars).ok())
                                 .into_iter()
@@ -486,11 +490,14 @@ impl Parser {
             }
             let at = self.pos;
             if self.eat(&Tok::RCurly) {
-                return if nested {
-                    Ok(out)
-                } else {
-                    Err(self.error_at(at, "Unexpected `}` outside a module".into()))
-                };
+                if nested {
+                    return Ok(out);
+                }
+                if self.recover {
+                    // A stray `}` is nobody's; what was parsed before it stands.
+                    continue;
+                }
+                return Err(self.error_at(at, "Unexpected `}` outside a module".into()));
             }
             let parsed = (|| -> Result<Option<Decl>> {
                 Ok(Some(match self.take() {
@@ -1064,6 +1071,42 @@ B { requires "#;
         );
     }
     use super::*;
+
+    #[test]
+    fn navigation_reaches_a_file_entry_from_just_after_it() {
+        // `symbol_at` accepts the cursor at a token's end; resolution must too.
+        let options = ProjectOptions::default();
+        for source in ["A { files \"x.sail\" }", "A { files x.sail }"] {
+            let after = source.find(" }").unwrap();
+            assert_eq!(
+                ProjectManifest::file_paths_at(source, after, &options),
+                vec![PathBuf::from("x.sail")],
+                "{source}"
+            );
+        }
+    }
+    #[test]
+    fn navigation_survives_a_stray_closing_brace_and_an_unfinished_declaration() {
+        let options = ProjectOptions::default();
+        let stray = "A { files \"x.sail\" }\n}\n";
+        assert!(ProjectManifest::parse(stray).is_err());
+        assert_eq!(
+            ProjectManifest::file_paths_at(stray, stray.find("x.sail").unwrap(), &options),
+            vec![PathBuf::from("x.sail")]
+        );
+        let unfinished = "A { files \"x.sail\" requires }\nB { files \"b.sail\" }";
+        assert!(ProjectManifest::parse(unfinished).is_err());
+        for name in ["x.sail", "b.sail"] {
+            assert_eq!(
+                ProjectManifest::file_paths_at(
+                    unfinished,
+                    unfinished.find(name).unwrap(),
+                    &options
+                ),
+                vec![PathBuf::from(name)]
+            );
+        }
+    }
 
     #[test]
     fn virtual_files_use_registered_sources_and_preserve_value_kind() {
