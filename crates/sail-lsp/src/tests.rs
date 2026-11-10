@@ -3023,8 +3023,7 @@ fn handlers_do_not_accumulate_logic() {
                         "file"
                             | "file_id"
                             | "url_for_file_id"
-                            | "files_ref"
-                            | "db"
+                            | "file_line_index"
                             | "include_graph"
                     );
                     if is_call && !is_conversion {
@@ -3145,18 +3144,27 @@ fn walk_rs(root: std::path::PathBuf) -> Vec<std::path::PathBuf> {
 /// is a method that answers the whole question.
 #[test]
 fn the_server_goes_through_analysis() {
-    const SOURCES: &[&str] = &[
-        include_str!("handlers/request.rs"),
-        include_str!("formatting.rs"),
-        include_str!("handlers/notification.rs"),
-        include_str!("handlers/dispatch.rs"),
-        include_str!("main_loop.rs"),
-        include_str!("global_state.rs"),
-        include_str!("diagnostics.rs"),
+    const SOURCES: &[(&str, &str)] = &[
+        ("handlers/request.rs", include_str!("handlers/request.rs")),
+        ("formatting.rs", include_str!("formatting.rs")),
+        ("handlers/notification.rs", include_str!("handlers/notification.rs")),
+        ("handlers/dispatch.rs", include_str!("handlers/dispatch.rs")),
+        ("main_loop.rs", include_str!("main_loop.rs")),
+        ("global_state.rs", include_str!("global_state.rs")),
+        ("diagnostics.rs", include_str!("diagnostics.rs")),
     ];
 
     let mut found: std::collections::BTreeSet<String> = Default::default();
-    for src in SOURCES {
+    for (name, src) in SOURCES {
+        // The two accessors that hand out the database and the file store
+        // themselves. A handler that reads a file's text through them has
+        // reached past `Analysis` just as surely as one calling an `ide`
+        // module function, and the path scan below cannot see it.
+        for door in [".db()", "files_ref()"] {
+            if src.contains(door) {
+                found.insert(format!("{name}: `{door}`"));
+            }
+        }
         let mut rest = *src;
         while let Some(i) = rest.find("ide::") {
             let tail = &rest[i + "ide::".len()..];
@@ -3623,6 +3631,7 @@ fn a_feature_answers_through_with_db() {
         "db",
         "file",
         "file_by_id",
+        "file_line_index",
         "file_id",
         "files_ref",
         "url_for_file_id",

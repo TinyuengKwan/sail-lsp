@@ -2238,6 +2238,15 @@ impl Analysis {
         Some(SalsaFile::new(&self.db, ft))
     }
 
+    /// The line index of a file, for placing a range that points into it —
+    /// rust-analyzer's `Analysis::file_line_index`. An inlay hint's label
+    /// can link into another file, and the server used to read that file's
+    /// text off the database itself to build this.
+    pub fn file_line_index(&self, id: FileId) -> Option<ide_db::line_index::LineIndex> {
+        let file = self.file_by_id(id)?;
+        Some(ide_db::line_index::LineIndex::new(file.text()))
+    }
+
     /// Resolve URL to FileId. Called at handler layer (not inside Analysis methods).
     /// Analogous to RA's `GlobalStateSnapshot::file_id()`.
     pub fn file_id(&self, url: &url::Url) -> Option<FileId> {

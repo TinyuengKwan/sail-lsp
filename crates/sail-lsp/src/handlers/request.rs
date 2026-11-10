@@ -1097,11 +1097,8 @@ pub(crate) fn handle_inlay_hint(
                         if let std::collections::hash_map::Entry::Vacant(entry) =
                             indices.entry(target.file_id)
                         {
-                            if let Some(file) = snap.analysis.files_ref().file_text(target.file_id)
-                            {
-                                entry.insert(ide_db::line_index::LineIndex::new(
-                                    file.text(snap.analysis.db()),
-                                ));
+                            if let Some(index) = snap.analysis.file_line_index(target.file_id) {
+                                entry.insert(index);
                             }
                         }
                         if let Some(index) = indices.get(&target.file_id) {
