@@ -1061,8 +1061,8 @@ impl Analysis {
                     is_fix_all: false,
                 });
             }
-            // The fixes the diagnostic's own handler built. A stub with no
-            // edit (`unresolved_fix`) offers nothing to apply.
+            // The fixes the diagnostic's own handler built. A fix whose
+            // edit the resolve strategy dropped offers nothing to apply.
             for fix in current.fixes.iter().flatten() {
                 let Some(source_change) = &fix.source_change else { continue };
                 out.push(CodeAction {

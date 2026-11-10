@@ -1087,19 +1087,16 @@ pub use parse::compute_parse_diagnostics;
 pub use semantic::compute_semantic_diagnostics;
 
 /// Create an `Assist` (fix) with a source change.
+///
+/// Every fix carries its edit: `Analysis::code_actions` drops a fix with
+/// no `SourceChange`, so a stub built "for lazy resolution" was a label
+/// the editor never showed.
 pub fn fix(
     id: &'static str,
     label: &str,
     source_change: SourceChange,
     target: TextRange,
 ) -> Assist {
-    let mut res = unresolved_fix(id, label, target);
-    res.source_change = Some(source_change);
-    res
-}
-
-/// Create an `Assist` stub without a source change (for lazy resolution).
-pub fn unresolved_fix(id: &'static str, label: &str, target: TextRange) -> Assist {
     assert!(!id.contains(' '));
     Assist {
         import: None,
@@ -1107,7 +1104,7 @@ pub fn unresolved_fix(id: &'static str, label: &str, target: TextRange) -> Assis
         label: Label::new(label.to_owned()),
         group: None,
         target,
-        source_change: None,
+        source_change: Some(source_change),
         command: None,
     }
 }

@@ -1,7 +1,7 @@
 //! Handler for `AnyDiagnostic::UnnecessaryMutability`.
 //!
-//! Warning: mutable variable is never modified.
-//! Fix: change `var` to `let` keyword.
+//! Warning: mutable variable is never modified. The `var` → `let` fix is
+//! `ide_assists::quick_fix::var_to_let_fix`, keyed on the diagnostic code.
 //!
 //! ## Future enhancement: mutable variable lifetime optimization
 //!
@@ -12,7 +12,6 @@
 
 use crate::Diagnostic;
 use hir::diagnostics::{DiagnosticCode, Severity};
-use ide_db::assists::Assist;
 
 use crate::{DiagnosticsContext, UnnecessaryMutability};
 
@@ -25,19 +24,6 @@ pub(crate) fn unnecessary_mutability(
         format!("variable `{}` is declared mutable but never modified", d.name),
         crate::node_file_range(&d.node),
     )
-    .with_fixes(fixes(d))
-}
-
-/// Unresolved fix: change `var` to `let`.
-///
-/// mutability keyword.
-fn fixes(d: &UnnecessaryMutability) -> Option<Vec<Assist>> {
-    let range: ide_db::line_index::TextRange = d.node.value.text_range();
-    Some(vec![crate::unresolved_fix(
-        "make_immutable",
-        &format!("Change `{}` to immutable (`let`)", d.name),
-        range,
-    )])
 }
 
 #[cfg(test)]

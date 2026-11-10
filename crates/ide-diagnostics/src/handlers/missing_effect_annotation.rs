@@ -2,11 +2,11 @@
 //!
 //! Warning: function has side effects but no effect annotation.
 //!
-//! Fix: add effect annotation to the function signature.
+//! No fix: `effect { ... }` annotations are deprecated syntax in upstream
+//! Sail (`deprecated-effect-annotation`), so there is nothing to add.
 
 use crate::Diagnostic;
 use hir::diagnostics::{DiagnosticCode, Severity};
-use ide_db::assists::Assist;
 
 use crate::{DiagnosticsContext, MissingEffectAnnotation};
 
@@ -19,17 +19,6 @@ pub(crate) fn missing_effect_annotation(
         format!("function `{}` has effects ({}) but no effect annotation", d.name, d.effects),
         crate::node_file_range(&d.node),
     )
-    .with_fixes(fixes(d))
-}
-
-/// Unresolved fix: add effect annotation to the val spec.
-fn fixes(d: &MissingEffectAnnotation) -> Option<Vec<Assist>> {
-    let range: ide_db::line_index::TextRange = d.node.value.text_range();
-    Some(vec![crate::unresolved_fix(
-        "add_effect_annotation",
-        &format!("Add effect annotation `{}`", d.effects),
-        range,
-    )])
 }
 
 #[cfg(test)]

@@ -136,22 +136,76 @@ pub(crate) fn full_diagnostics_vec(source: &str) -> Vec<crate::Diagnostic> {
         .collect()
 }
 
-/// Check that a diagnostic with the given code is produced and has at least one fix.
-#[expect(dead_code)]
-pub(crate) fn check_has_fix(source: &str, diag_code: &str) {
-    let result = check_diagnostics(source);
-    assert!(result.contains(diag_code), "expected diagnostic `{diag_code}`, got:\n{result}");
-    // Fix presence is verified via dispatch for AnyDiagnostic variants
+/// Semantic diagnostics for `source`, with every fix resolved.
+fn resolved_diagnostics(source: &str) -> (TestFile, Vec<crate::Diagnostic>) {
+    let file = TestFile::new(source);
+    let diagnostics = crate::semantic_diagnostics(
+        file.db(),
+        &DiagnosticsConfig::new(),
+        &ide_db::assists::AssistResolveStrategy::All,
+        &file,
+        file.input(),
+        None,
+    );
+    (file, diagnostics)
 }
 
-/// Check that a diagnostic has no fix attached.
-#[expect(dead_code)]
-pub(crate) fn check_no_fix(source: &str, diag_code: &str) {
-    // For now, just verify the diagnostic exists
-    let result = check_diagnostics(source);
+fn diagnostic_with_code<'a>(
+    diagnostics: &'a [crate::Diagnostic],
+    code: &str,
+) -> &'a crate::Diagnostic {
+    diagnostics.iter().find(|d| d.code.as_str() == code).unwrap_or_else(|| {
+        panic!(
+            "expected diagnostic `{code}`, got: {:?}",
+            diagnostics
+                .iter()
+                .map(|d| format!("{}: {}", d.code.as_str(), d.message))
+                .collect::<Vec<_>>()
+        )
+    })
+}
+
+/// Apply the fix `fix_id` of the diagnostic `code` to `before` and compare
+/// the result with `after`. The fixed text must still parse, and the
+/// diagnostic must be gone from it.
+pub(crate) fn check_fix(before: &str, code: &str, fix_id: &str, after: &str) {
+    let (_, diagnostics) = resolved_diagnostics(before);
+    let diagnostic = diagnostic_with_code(&diagnostics, code);
+    let fixes = diagnostic.fixes.as_deref().unwrap_or_default();
+    let fix = fixes.iter().find(|fix| fix.id.0 == fix_id).unwrap_or_else(|| {
+        panic!(
+            "no fix `{fix_id}` on `{code}`, got: {:?}",
+            fixes.iter().map(|fix| fix.id.0).collect::<Vec<_>>()
+        )
+    });
+    let source_change = fix.source_change.as_ref().expect("the fix carries an edit");
+    let mut edits: Vec<_> = source_change.source_file_edits.values().flatten().collect();
+    edits.sort_by_key(|edit| std::cmp::Reverse(edit.range.start()));
+    let mut result = before.to_owned();
+    for edit in edits {
+        result.replace_range(
+            usize::from(edit.range.start())..usize::from(edit.range.end()),
+            &edit.new_text,
+        );
+    }
+    assert_eq!(result, after);
+    assert!(syntax::parse_text(&result).1.is_empty(), "{result}");
+    let (_, remaining) = resolved_diagnostics(&result);
     assert!(
-        result.contains(diag_code),
-        "expected diagnostic `{diag_code}` to verify no-fix, got:\n{result}"
+        !remaining.iter().any(|d| d.code.as_str() == code),
+        "`{code}` survives its own fix:\n{result}"
+    );
+}
+
+/// Check that the diagnostic `code` is produced and offers no fix.
+pub(crate) fn check_no_fix(source: &str, code: &str) {
+    let (_, diagnostics) = resolved_diagnostics(source);
+    let diagnostic = diagnostic_with_code(&diagnostics, code);
+    let fixes = diagnostic.fixes.as_deref().unwrap_or_default();
+    assert!(
+        fixes.is_empty(),
+        "`{code}` offers fixes: {:?}",
+        fixes.iter().map(|fix| fix.label.0.as_str()).collect::<Vec<_>>()
     );
 }
 

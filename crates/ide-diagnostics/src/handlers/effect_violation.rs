@@ -2,11 +2,11 @@
 //!
 //! Sail-specific (no RA counterpart).
 //!
-//! Fix: add effect annotation to the enclosing function signature.
+//! No fix: `effect { ... }` annotations are deprecated syntax in upstream
+//! Sail (`deprecated-effect-annotation`), so there is nothing to add.
 
 use crate::Diagnostic;
 use hir::diagnostics::DiagnosticCode;
-use ide_db::assists::Assist;
 
 use crate::{DiagnosticsContext, EffectViolation};
 
@@ -25,17 +25,6 @@ pub(crate) fn effect_violation(_ctx: &DiagnosticsContext<'_>, d: &EffectViolatio
         format!("effect `{:?}` not allowed in {}{}", d.effect, d.context, outcome_note),
         crate::node_file_range(&d.node),
     )
-    .with_fixes(fixes(d))
-}
-
-/// Unresolved fix: add the missing effect annotation to the function.
-fn fixes(d: &EffectViolation) -> Option<Vec<Assist>> {
-    let range: ide_db::line_index::TextRange = d.node.value.text_range();
-    Some(vec![crate::unresolved_fix(
-        "add_effect_annotation",
-        &format!("Add `{:?}` effect annotation", d.effect),
-        range,
-    )])
 }
 
 #[cfg(test)]
@@ -54,4 +43,12 @@ mod tests {
         assert!(d.is_some());
         assert!(d.unwrap().message.contains("Throw"));
     }
+}
+
+#[test]
+fn offers_no_fix_because_effect_annotations_are_deprecated_syntax() {
+    crate::tests::check_no_fix(
+        "register R : int\nval f : int -> int effect pure\nfunction f(x) = { R = x; x }\n",
+        "effect-violation",
+    );
 }

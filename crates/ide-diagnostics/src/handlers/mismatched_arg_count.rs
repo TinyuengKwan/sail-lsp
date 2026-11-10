@@ -1,9 +1,10 @@
 //! Handler for `AnyDiagnostic::MismatchedArgCount`.
-//! Fix : unresolved fix to adjust argument count.
+//!
+//! No fix: which argument to add or remove is not known here, so there is
+//! no edit that is right.
 
 use crate::Diagnostic;
 use hir::diagnostics::DiagnosticCode;
-use ide_db::assists::Assist;
 
 use crate::{DiagnosticsContext, MismatchedArgCount};
 
@@ -21,21 +22,6 @@ pub(crate) fn mismatched_arg_count(
         ),
         crate::node_file_range(&d.node),
     )
-    .with_fixes(fixes(d))
-}
-
-/// Unresolved fix: adjust argument count at the call site.
-///
-/// When too few args: suggest adding placeholder `()` arguments.
-/// When too many args: suggest removing extra arguments.
-fn fixes(d: &MismatchedArgCount) -> Option<Vec<Assist>> {
-    let range: ide_db::line_index::TextRange = d.node.value.text_range();
-    let label = if d.found < d.expected {
-        format!("Add {} missing argument(s)", d.expected - d.found)
-    } else {
-        format!("Remove {} extra argument(s)", d.found - d.expected)
-    };
-    Some(vec![crate::unresolved_fix("fix_arg_count", &label, range)])
 }
 
 #[cfg(test)]
@@ -66,4 +52,12 @@ mod tests {
         assert!(d.is_some());
         assert!(d.unwrap().message.contains("expected 1 argument,"));
     }
+}
+
+#[test]
+fn offers_no_fix_because_the_missing_argument_is_unknown() {
+    crate::tests::check_no_fix(
+        "val takes_two : (int, int) -> int\nfunction takes_two(x, y) = x\nfunction test() -> int = takes_two(1)\n",
+        "mismatched-arg-count",
+    );
 }

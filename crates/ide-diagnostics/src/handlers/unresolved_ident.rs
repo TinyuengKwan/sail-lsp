@@ -1,9 +1,10 @@
 //! Handler for `AnyDiagnostic::UnresolvedIdent`.
-//! Fix: suggest similar names from workspace index (Levenshtein distance).
+//!
+//! No fix: nothing here computes a candidate name, and a fix with no
+//! edit is a label the editor cannot apply.
 
 use crate::Diagnostic;
 use hir::diagnostics::DiagnosticCode;
-use ide_db::assists::Assist;
 
 use crate::{DiagnosticsContext, UnresolvedIdent};
 
@@ -14,19 +15,6 @@ pub(crate) fn unresolved_ident(_ctx: &DiagnosticsContext<'_>, d: &UnresolvedIden
         format!("unresolved identifier `{}`", d.name),
         crate::node_file_range(&d.node),
     )
-    .with_fixes(fixes(d))
-}
-
-/// Unresolved fix: suggest similar identifier names.
-///
-/// via lazy resolution. Here we suggest a rename based on edit distance.
-fn fixes(d: &UnresolvedIdent) -> Option<Vec<Assist>> {
-    let range: ide_db::line_index::TextRange = d.node.value.text_range();
-    Some(vec![crate::unresolved_fix(
-        "unresolved_ident",
-        &format!("Find similar name for `{}`", d.name),
-        range,
-    )])
 }
 
 #[cfg(test)]
@@ -44,4 +32,9 @@ mod tests {
         assert!(d.is_some());
         assert!(d.unwrap().message.contains("unresolved identifier `foo`"));
     }
+}
+
+#[test]
+fn offers_no_fix_without_a_candidate_name() {
+    crate::tests::check_no_fix("function f() -> int = absent\n", "unresolved-ident");
 }
