@@ -1180,8 +1180,10 @@ fn check_type_argument_kinds(
         }
         // A bare result variable provides no kind evidence by itself. In a
         // tuple/arrow it is Type, but an identity synonym also could denote
-        // an Int/Bool/Order synonym. Upstream requires a binder annotation.
-        if def.kind() == SK::TYPE_ALIAS_DEF {
+        // an Int/Bool/Order synonym. Upstream requires a binder annotation
+        // or a written result kind: `check_bind` (`initial_check.ml`) only
+        // infers when `-> K` is absent, so `type K('n) -> Int = 'n` is fine.
+        if def.kind() == SK::TYPE_ALIAS_DEF && declared_type_kind(def).is_none() {
             let body: Vec<_> = def
                 .descendants_with_tokens()
                 .filter_map(|el| el.into_token())
