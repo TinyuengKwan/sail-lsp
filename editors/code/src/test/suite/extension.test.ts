@@ -893,6 +893,74 @@ suite("sail-lsp extension", () => {
         }
     });
 
+    test("language configuration leaves a type variable's quote alone and continues block comments", async () => {
+        const extension = vscode.extensions.getExtension<ExtensionApi>("Lunarwwww.sail-lsp")!;
+        const api = await extension.activate();
+        await eventually("server ready", () => api.test.status()?.quiescent === true);
+        // A document first opened now: VS Code applies Enter rules registered
+        // at activation to models created after it.
+        const uri = vscode.Uri.joinPath(vscode.workspace.workspaceFolders![0].uri, "nested.sail");
+        const document = await vscode.workspace.openTextDocument(uri);
+        const original = document.getText();
+        // The comment opener last: everything below an unterminated `/*` is
+        // a comment, where no pair auto-closes.
+        const source = "val x : forall \n/* note\n";
+        const replace = async (text: string) => {
+            const edit = new vscode.WorkspaceEdit();
+            edit.replace(
+                uri,
+                new vscode.Range(
+                    document.positionAt(0),
+                    document.positionAt(document.getText().length),
+                ),
+                text,
+            );
+            assert.ok(await vscode.workspace.applyEdit(edit));
+        };
+        const typeAt = async (position: vscode.Position, text: string) => {
+            const editor = await vscode.window.showTextDocument(document, {
+                preserveFocus: false,
+                preview: false,
+                selection: new vscode.Range(position, position),
+            });
+            await eventually(
+                () => `cursor did not settle: ${JSON.stringify(editor.selection)}`,
+                () =>
+                    vscode.window.activeTextEditor === editor &&
+                    editor.selection.isEmpty &&
+                    editor.selection.active.isEqual(position),
+            );
+            const version = document.version;
+            await vscode.commands.executeCommand("type", { text });
+            await eventually(
+                "typing did not change the document",
+                () => document.version > version,
+            );
+        };
+        try {
+            await replace(source);
+            // A pair that does auto-close first, so a bare quote below means
+            // the configuration is in effect rather than absent.
+            await typeAt(document.lineAt(0).range.end, "(");
+            assert.equal(
+                document.lineAt(0).text,
+                "val x : forall ()",
+                "the pairs are not in effect",
+            );
+            await typeAt(new vscode.Position(0, "val x : forall ".length), "'");
+            assert.equal(
+                document.lineAt(0).text,
+                "val x : forall '()",
+                "a closing quote was inserted",
+            );
+            await typeAt(document.lineAt(1).range.end, "\n");
+            assert.equal(document.lineAt(2).text, " * ", "the block comment was not continued");
+        } finally {
+            await replace(original);
+            await vscode.window.showTextDocument(document);
+        }
+    });
+
     test("analysis explanations and read-only preprocessing previews expose actual source links", async () => {
         const extension = vscode.extensions.getExtension<ExtensionApi>("Lunarwwww.sail-lsp")!;
         const api = await extension.activate();

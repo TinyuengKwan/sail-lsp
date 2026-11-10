@@ -15,6 +15,7 @@ import { managedServerPath } from "./installation";
 import { registerDiagnosticReport } from "./diagnosticReport";
 import { registerRunnables } from "./runnables";
 import { registerEditingCommands } from "./editing";
+import { configureLanguage } from "./languageConfiguration";
 import { ProjectGraphEntry, GraphNode, graphChildren, isCycle } from "./projectGraph";
 import { registerStructuralReplace } from "./ssr";
 import {
@@ -120,6 +121,7 @@ export interface ExtensionApi {
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<ExtensionApi | void> {
+    configureLanguage(context);
     outputChannel = vscode.window.createOutputChannel("Sail Language Server");
     context.subscriptions.push(outputChannel);
     context.subscriptions.push(

@@ -8,25 +8,29 @@
     ["[", "]"],
     ["(", ")"]
   ],
+  // No `'` pair: Sail spells type variables `'n`, so a typed quote is the
+  // start of a name, not of a literal — rust-analyzer leaves it out for
+  // lifetimes on the same grounds.
   "autoClosingPairs": [
     { "open": "{", "close": "}", "notIn": ["string", "comment"] },
     { "open": "[", "close": "]", "notIn": ["string", "comment"] },
     { "open": "(", "close": ")", "notIn": ["string", "comment"] },
     { "open": "\"", "close": "\"", "notIn": ["string"] },
-    { "open": "'", "close": "'", "notIn": ["string", "comment"] },
     { "open": "/*", "close": "*/", "notIn": ["string"] }
   ],
   "surroundingPairs": [
     ["{", "}"],
     ["[", "]"],
     ["(", ")"],
-    ["\"", "\""],
-    ["'", "'"]
+    ["\"", "\""]
   ],
   "indentationRules": {
     "increaseIndentPattern": "^.*\\{[^}\"']*$|^.*\\([^\\)\"']*$",
     "decreaseIndentPattern": "^\\s*(\\s*\\/[*].*[*]\\/\\s*)*[})]"
   },
+  // Enter rules are set at runtime (src/languageConfiguration.ts): rules
+  // read from this file reach VS Code's Enter handling only after a later
+  // registration, as rust-analyzer found before it moved its own there.
   "folding": {
     "markers": {
       "start": "^\\s*//\\s*region\\b",
