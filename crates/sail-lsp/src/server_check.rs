@@ -2649,8 +2649,23 @@ exit 0
     wait_state(&mut server, "Passed");
 
     std::fs::write(&mode, "slow").unwrap();
+    server.statuses.clear();
     server.configure(serde_json::json!({"flycheck": {"enable": true, "command": checker, "debounceMs": 0, "timeoutMs": 3000}}));
-    wait_state(&mut server, "Running for 1s"); // No requests or compiler output drive this update.
+    // A loaded runner may skip a displayed second, or deliver several
+    // notifications in one pump. No requests or compiler output drive this
+    // update; require elapsed progress rather than one exact timestamp.
+    server.wait_until("elapsed-time update for a silent compiler", |s| {
+        s.statuses.iter().any(|status| {
+            !status.quiescent
+                && status
+                    .message
+                    .as_deref()
+                    .and_then(|message| message.split_once("Running for "))
+                    .and_then(|(_, elapsed)| elapsed.split_once("s."))
+                    .and_then(|(seconds, _)| seconds.parse::<u64>().ok())
+                    .is_some_and(|seconds| seconds >= 1)
+        })
+    });
     server.configure(serde_json::json!({"flycheck": {"enable": true, "command": checker, "debounceMs": 0, "timeoutMs": 100}}));
     wait_state(&mut server, "Timed out");
     let assert_reaped = |pid: i32| {

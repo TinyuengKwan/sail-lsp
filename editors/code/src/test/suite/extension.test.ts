@@ -32,6 +32,22 @@ async function eventually(
     assert.fail(typeof message === "function" ? message() : message);
 }
 
+async function closeRestoredEditors() {
+    assert.deepEqual(
+        vscode.workspace.textDocuments
+            .filter((doc) => doc.isDirty)
+            .map((doc) => doc.uri.toString()),
+        [],
+        "preceding tests must restore their documents before closing their editors",
+    );
+    // Dispose embedded Peek editors as well as their owning editor views.
+    await vscode.commands.executeCommand("workbench.action.closeAllEditors");
+    await eventually(
+        "preceding editors did not close",
+        () => vscode.window.visibleTextEditors.length === 0,
+    );
+}
+
 suite("sail-lsp extension", () => {
     test("project tasks execute argv/context, expose failure, cancel and reject stale or dirty runs", async () => {
         const extension = vscode.extensions.getExtension<ExtensionApi>("Lunarwwww.sail-lsp")!;
@@ -471,15 +487,26 @@ suite("sail-lsp extension", () => {
         await vscode.commands.executeCommand("sail-lsp.clearFlycheck");
     });
     test("structural search shows real locations without changing the source", async () => {
+        await closeRestoredEditors();
         const root = vscode.workspace.workspaceFolders?.[0]?.uri;
         assert.ok(root);
         const uri = vscode.Uri.joinPath(root, "sample.sail");
         const document = await vscode.workspace.openTextDocument(uri);
-        const editor = await vscode.window.showTextDocument(document);
         const before = document.getText();
         const version = document.version;
         const position = document.positionAt(before.indexOf("42"));
-        editor.selection = new vscode.Selection(position, position);
+        const editor = await vscode.window.showTextDocument(document, {
+            preserveFocus: false,
+            preview: false,
+            selection: new vscode.Range(position, position),
+        });
+        await eventually(
+            "structural search editor did not activate",
+            () =>
+                vscode.window.activeTextEditor === editor &&
+                editor.selection.isEmpty &&
+                editor.selection.active.isEqual(position),
+        );
         try {
             const found = await vscode.commands.executeCommand<vscode.Location[]>(
                 "sail-lsp.structuralSearch",
@@ -502,20 +529,7 @@ suite("sail-lsp extension", () => {
         const extension = vscode.extensions.getExtension<ExtensionApi>("Lunarwwww.sail-lsp")!;
         const api = await extension.activate();
         await eventually("server ready", () => api.test.status()?.quiescent === true);
-        assert.deepEqual(
-            vscode.workspace.textDocuments
-                .filter((doc) => doc.isDirty)
-                .map((doc) => doc.uri.toString()),
-            [],
-            "preceding tests must restore their documents before closing their editors",
-        );
-        // Dispose the previous tests' editors, including their embedded Peek
-        // editors, before exercising a command routed through DOM focus.
-        await vscode.commands.executeCommand("workbench.action.closeAllEditors");
-        await eventually(
-            "preceding editors did not close",
-            () => vscode.window.visibleTextEditors.length === 0,
-        );
+        await closeRestoredEditors();
         const uri = vscode.Uri.joinPath(vscode.workspace.workspaceFolders![0].uri, "sample.sail");
         const document = await vscode.workspace.openTextDocument(uri);
         const original = document.getText();
