@@ -163,15 +163,20 @@ const RESERVED: &[&str] = &[
 /// Editor queries may use the complete token prefix before a lexical error.
 /// Never repair string contents into invented paths. Loading always uses `lex`.
 fn lex_for_editor(source: &str) -> Vec<Token> {
+    lex_prefix(source).0
+}
+
+/// The tokens of the longest prefix of `source` that lexes, and its end.
+fn lex_prefix(source: &str) -> (Vec<Token>, usize) {
     let mut end = source.len();
     loop {
         match lex(&source[..end]) {
-            Ok(tokens) => return tokens,
+            Ok(tokens) => return (tokens, end),
             Err(error) => match error.range {
                 Some(range) if range.start < end && source.is_char_boundary(range.start) => {
                     end = range.start
                 }
-                _ => return Vec::new(),
+                _ => return (Vec::new(), 0),
             },
         }
     }

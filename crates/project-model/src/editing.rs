@@ -3,7 +3,7 @@
 //! working while the manifest is half-written and does not evaluate.
 use std::ops::Range;
 
-use super::{lex, lex_for_editor, Tok, Token, RESERVED};
+use super::{lex, lex_for_editor, lex_prefix, Tok, Token, RESERVED};
 
 /// What a position in a manifest refers to.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -293,54 +293,89 @@ pub fn completions_at(source: &str, offset: usize) -> Option<ManifestCompletion>
 
 /// Conservative manifest formatting: normalize indentation and trailing
 /// whitespace while retaining comments, expressions and spelling verbatim.
-/// This is intentionally token-light; formatting must never rewrite project
-/// semantics merely because an editor opened a half-written manifest.
+/// Structure comes from the lexer's brace tokens, so a brace inside a string
+/// or comment is text, and a line that continues a string, a comment or text
+/// the lexer rejects is kept as written. Formatting must never rewrite
+/// project semantics merely because an editor opened a half-written manifest.
 pub fn format(source: &str) -> String {
-    let mut depth = 0usize;
-    let mut out = String::with_capacity(source.len() + 1);
-    for raw in source.lines() {
-        let content = raw.trim();
-        if content.is_empty() {
-            out.push('\n');
-            continue;
+    let (tokens, lexed) = lex_prefix(source);
+    // Where the text is not layout: strings, comments and the unlexable rest.
+    let mut opaque = Vec::new();
+    let mut gap = 0;
+    for token in &tokens {
+        comment_ranges(source, gap..token.range.start, &mut opaque);
+        if matches!(token.tok, Tok::Str(_)) {
+            opaque.push(token.range.clone());
         }
-        let closes = content.chars().take_while(|&ch| ch == '}').count();
-        depth = depth.saturating_sub(closes);
-        out.push_str(&"  ".repeat(depth));
-        out.push_str(content);
-        out.push('\n');
+        gap = token.range.end;
+    }
+    comment_ranges(source, gap..lexed, &mut opaque);
+    if lexed < source.len() {
+        opaque.push(lexed..source.len());
+    }
+    let inside = |offset: usize| opaque.iter().any(|r| r.start < offset && offset < r.end);
 
-        let mut in_string = false;
-        let mut escaped = false;
-        let mut delta = 0isize;
-        let mut chars = content.chars().peekable();
-        while let Some(ch) = chars.next() {
-            if !in_string && ch == '/' && chars.peek() == Some(&'/') {
-                break;
-            }
-            if ch == '"' && !escaped {
-                in_string = !in_string;
-            }
-            if !in_string {
-                delta += match ch {
-                    '{' => 1,
-                    '}' => -1,
-                    _ => 0,
-                };
-            }
-            escaped = ch == '\\' && !escaped;
-            if ch != '\\' {
-                escaped = false;
+    let mut depth = 0usize;
+    let mut next = 0;
+    let mut at = 0;
+    let mut lines = Vec::new();
+    for line in source.split('\n') {
+        let end = at + line.len();
+        let first = next;
+        while tokens.get(next).is_some_and(|t| t.range.start < end) {
+            next += 1;
+        }
+        let on_line = &tokens[first..next];
+        let closes = on_line.iter().filter(|t| t.tok == Tok::RCurly).count();
+        let opens = on_line.iter().filter(|t| t.tok == Tok::LCurly).count();
+        let content = if inside(end) { line } else { line.trim_end() };
+        if inside(at) {
+            lines.push(content.to_owned());
+        } else {
+            let content = content.trim_start();
+            if content.is_empty() {
+                lines.push(String::new());
+            } else {
+                // Closing braces that start the line sit at the outer depth.
+                let leading = on_line.iter().take_while(|t| t.tok == Tok::RCurly).count();
+                let indent = depth.saturating_sub(leading);
+                lines.push(format!("{}{content}", "  ".repeat(indent)));
             }
         }
-        // Leading closing braces were already applied before indentation.
-        delta += closes as isize;
-        depth = depth.saturating_add_signed(delta);
+        depth = (depth + opens).saturating_sub(closes);
+        at = end + 1;
     }
-    if !source.ends_with('\n') {
-        out.pop();
+    lines.join("\n")
+}
+
+/// The comments in `range`, text between tokens that holds only whitespace
+/// and comments.
+fn comment_ranges(source: &str, range: Range<usize>, out: &mut Vec<Range<usize>>) {
+    let bytes = source.as_bytes();
+    let mut i = range.start;
+    while i < range.end {
+        match (bytes[i], bytes.get(i + 1)) {
+            (b'/', Some(b'/')) => {
+                let end = source[i..range.end].find('\n').map_or(range.end, |n| i + n);
+                out.push(i..end);
+                i = end;
+            }
+            (b'/', Some(b'*')) => {
+                let start = i;
+                let mut depth = 1;
+                i += 2;
+                while i < range.end && depth > 0 {
+                    match (bytes[i], bytes.get(i + 1)) {
+                        (b'/', Some(b'*')) => (depth, i) = (depth + 1, i + 2),
+                        (b'*', Some(b'/')) => (depth, i) = (depth - 1, i + 2),
+                        _ => i += 1,
+                    }
+                }
+                out.push(start..i);
+            }
+            _ => i += 1,
+        }
     }
-    out
 }
 
 /// The modules whose bodies are open at the end of `tokens`.
@@ -500,6 +535,33 @@ mod tests {
             format(source),
             "A {\n  files a.sail\n  B { // nested\n    files \"x } y.sail\"\n  }\n}\n"
         );
+        // Strings and comments spanning lines are not layout; the text inside
+        // them, including a brace, is kept and does not indent what follows.
+        let files = |source: &str| {
+            ProjectManifest::parse(source)
+                .unwrap_or_else(|error| panic!("{source:?}: {error}"))
+                .resolve(&ProjectOptions::default())
+                .unwrap()
+                .files
+        };
+        for source in [
+            // A continued line drops its indentation when it is lexed, so the
+            // formatter must leave the indentation alone.
+            "variable P = \"abc\\\n  def.sail\"\nM { files $P }\n",
+            // A newline inside a path is part of the path.
+            "M {\n  files \"a\n    b.sail\"\n}\n",
+            "A {\n  /* { */\n  files a.sail\n}\n",
+            "A {\n  /* {\n       x */ files a.sail\n  B { files b.sail }\n}\n",
+        ] {
+            assert_eq!(format(source), source);
+            assert_eq!(files(&format(source)), files(source));
+        }
+        assert_eq!(
+            format("A {\nfiles \"a\n    b.sail\"   \n /* {\n  { */\n  B {\nfiles b.sail } }\n"),
+            "A {\n  files \"a\n    b.sail\"\n  /* {\n  { */\n  B {\n    files b.sail } }\n"
+        );
+        // Text the lexer rejects is kept as written.
+        assert_eq!(format("A {\nfiles \"oops\n}\n"), "A {\n  files \"oops\n}\n");
     }
 
     #[test]
