@@ -554,26 +554,26 @@ where
     // based on the definition kind. LSP Hover doesn't natively support
     // actions, but clients like VS Code can use custom commands.
     let mut actions = Vec::new();
+    // The action points at the declaration in *its* file — `FileId::from_raw(0)`
+    // stood here as a placeholder, which is the first file of every
+    // workspace and rarely the one that declares the hovered name. The
+    // position is the declared name, where goto-implementation and
+    // find-all-references answer for this symbol; the declaration's full
+    // span starts at its keyword.
     if let Some(dr) = decl_ref.as_ref() {
         let decl = &dr.decl;
-        match decl.kind {
+        let position = dr.file.file_text().map(|(db, ft)| crate::hover::HoverFilePosition {
+            file_id: ft.file_id(db),
+            offset: decl.name_span.map_or(decl.span.start, |span| span.start),
+        });
+        match (decl.kind, position) {
             // Val spec → "Go to implementations"
-            DeclKind::Value => {
-                actions.push(crate::hover::HoverAction::Implementation(
-                    crate::hover::HoverFilePosition {
-                        file_id: base_db::FileId::from_raw(0), // placeholder
-                        offset: decl.span.start,
-                    },
-                ));
+            (DeclKind::Value, Some(position)) => {
+                actions.push(crate::hover::HoverAction::Implementation(position));
             }
             // Function/Mapping → "Go to references"
-            DeclKind::Function | DeclKind::Mapping => {
-                actions.push(crate::hover::HoverAction::Reference(
-                    crate::hover::HoverFilePosition {
-                        file_id: base_db::FileId::from_raw(0), // placeholder
-                        offset: decl.span.start,
-                    },
-                ));
+            (DeclKind::Function | DeclKind::Mapping, Some(position)) => {
+                actions.push(crate::hover::HoverAction::Reference(position));
             }
             _ => {}
         }
@@ -2057,5 +2057,42 @@ mod keyword_and_literal_hover_tests {
     #[test]
     fn a_string_literal_has_no_hover() {
         assert_eq!(hover_at("let s : string = \"hello\"\n", "\"hello\""), None);
+    }
+}
+
+#[cfg(test)]
+mod hover_action_tests {
+    use crate::fixture;
+    use crate::hover::HoverAction;
+
+    /// The action's position used to be built with `FileId::from_raw(0)`
+    /// as a placeholder, which is the first file of every workspace and
+    /// rarely the one that declares the hovered name.
+    #[test]
+    fn a_hover_action_points_at_the_declaring_file() {
+        let a_text = "val helper : int -> int\nfunction helper(x) = x\n";
+        let b_text = "function use_it() -> int = helper(1)\n";
+        let fixture = format!("//- /a.sail\n{a_text}//- /b.sail\n{b_text}");
+        let (analysis, files) = fixture::analysis(&fixture);
+        let [(a, _), (b, _)] = files.as_slice() else { panic!("two files") };
+        let li = ide_db::line_index::LineIndex::new(b_text);
+        let at = b_text.find("helper(1)").expect("fixture");
+        let result = analysis
+            .hover(*b, li.line_col(at), &crate::hover::HoverConfig::default())
+            .expect("no cancellation")
+            .expect("no hover");
+        let position = match result.actions.as_slice() {
+            [HoverAction::Implementation(position)] | [HoverAction::Reference(position)] => {
+                position
+            }
+            other => panic!("expected one implementation/reference action, got {other:?}"),
+        };
+        assert_eq!(position.file_id, *a, "the action names the declaring file, not file 0");
+        assert_ne!(position.file_id, *b);
+        assert!(
+            a_text[position.offset..].starts_with("helper"),
+            "the action sits on the declared name: {:?}",
+            &a_text[position.offset..]
+        );
     }
 }

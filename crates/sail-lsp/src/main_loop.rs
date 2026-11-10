@@ -1935,7 +1935,7 @@ fn on_request(state: &mut GlobalState, req: Request) {
         .on_latency_sensitive::<true, request::SignatureHelpRequest>(
             handlers::handle_signature_help,
         )
-        .on_latency_sensitive::<true, request::HoverRequest>(handlers::handle_hover)
+        .on_latency_sensitive::<true, crate::hover_actions::HoverRequest>(handlers::handle_hover)
         // Semantic tokens are redrawn on every edit, so a cancelled one is
         // worth retrying rather than reporting — RA marks the same three
         // latency-sensitive, and the range request no-retry.

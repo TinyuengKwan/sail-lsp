@@ -1577,7 +1577,7 @@ pub(crate) fn handle_workspace_symbol(
 pub(crate) fn handle_hover(
     snap: GlobalStateSnapshot,
     params: HoverParams,
-) -> anyhow::Result<Option<Hover>> {
+) -> anyhow::Result<Option<crate::hover_actions::Hover>> {
     let uri = &params.text_document_position_params.text_document.uri;
     let position = params.text_document_position_params.position;
     if crate::manifest_editing::is_manifest(uri) {
@@ -1586,7 +1586,8 @@ pub(crate) fn handle_hover(
             uri,
             position,
             snap.client_caps.hover_markdown_support(),
-        ));
+        )
+        .map(|hover| crate::hover_actions::Hover { hover, actions: Vec::new() }));
     }
     let Some(file_id) = snap.analysis.file_id(uri) else {
         return Ok(None);
@@ -1599,11 +1600,56 @@ pub(crate) fn handle_hover(
         return Ok(None);
     };
     let line_index = ide_db::line_index::LineIndex::new(sf.text());
-    Ok(Some(crate::to_proto::hover(
+    Ok(Some(crate::hover_actions::hover(
         &line_index,
         &result,
         snap.client_caps.hover_markdown_support(),
+        snap.client_caps.hover_actions_support(),
+        |action| hover_action_target(&snap, action),
     )))
+}
+
+/// Where a hover action's command goes: the declaration it names, and the
+/// implementations or references the client lists for it. This is the
+/// second analysis call a hover makes, and only for a client that renders
+/// the links (rust-analyzer's `show_impl_command_link` /
+/// `show_ref_command_link` make the same ones).
+fn hover_action_target(
+    snap: &GlobalStateSnapshot,
+    action: &ide::hover::HoverAction,
+) -> Option<crate::hover_actions::ActionTarget> {
+    let (position, implementations) = match action {
+        ide::hover::HoverAction::Implementation(position) => (position, true),
+        ide::hover::HoverAction::Reference(position) => (position, false),
+        ide::hover::HoverAction::GoToType(_) => return None,
+    };
+    let uri = snap.analysis.url_for_file_id(position.file_id)?.clone();
+    let line_index = line_index_for(snap, &uri);
+    let lc = line_index.line_col(position.offset);
+    let locations = if implementations {
+        let locs = snap.analysis.goto_implementation(&uri, lc).ok()?;
+        file_locations_to_lsp(&locs, &snap.analysis)
+    } else {
+        let mut locations = Vec::new();
+        for result in snap.analysis.find_all_refs(&uri, lc, None).ok()?? {
+            for (&file_id, refs) in &result.references {
+                let Some(ref_url) = snap.analysis.url_for_file_id(file_id) else { continue };
+                let ref_index = line_index_for(snap, ref_url);
+                for (range, _category) in refs {
+                    locations.push(Location::new(
+                        ref_url.clone(),
+                        crate::to_proto::range(&ref_index, *range),
+                    ));
+                }
+            }
+        }
+        locations
+    };
+    Some(crate::hover_actions::ActionTarget {
+        uri,
+        position: crate::to_proto::position_in(&line_index, position.offset),
+        locations,
+    })
 }
 
 pub(crate) fn handle_goto_implementation(

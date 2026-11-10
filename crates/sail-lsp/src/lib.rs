@@ -51,6 +51,7 @@ mod flycheck;
 mod formatting;
 mod global_state;
 mod handlers;
+mod hover_actions;
 mod main_loop;
 mod manifest_editing;
 mod mem_docs;
