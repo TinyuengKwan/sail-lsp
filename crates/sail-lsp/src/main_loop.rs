@@ -2255,6 +2255,66 @@ mod project_reload_tests {
         assert!(names(&mut state, "f_ project:ris").is_empty(), "a name, not a substring");
     }
 
+    /// A reload keeps the previous model when a manifest stops parsing, so
+    /// a broken manifest can sit in `projects` for a long time. Renaming a
+    /// file in *another* project must still fix that project's manifest up;
+    /// the broken one is only in the way when the move touches it, and then
+    /// it is skipped and reported rather than failing the whole rename.
+    #[test]
+    fn will_rename_files_skips_projects_the_move_does_not_touch() {
+        let (sender, _messages) = crossbeam_channel::unbounded();
+        let (tasks, _receiver) = crossbeam_channel::unbounded();
+        let mut state = GlobalState::new(sender, tasks);
+        let root = std::env::temp_dir().join(format!("will-rename-broken-{}", std::process::id()));
+        let good = root.join("a").join("sail.proj");
+        let broken = root.join("b").join("sail.proj");
+        let good_uri = Url::from_file_path(&good).unwrap();
+        let broken_uri = Url::from_file_path(&broken).unwrap();
+        let texts = std::sync::Arc::make_mut(&mut state.manifest_texts);
+        texts.insert(
+            good_uri.clone(),
+            crate::mem_docs::DocumentData::new(1, "Main { files x.sail }\n".into()),
+        );
+        texts.insert(broken_uri, crate::mem_docs::DocumentData::new(1, "Main { files".into()));
+        let projects = std::sync::Arc::make_mut(&mut state.projects);
+        let x = root.join("a").join("x.sail");
+        projects.insert(
+            Url::from_directory_path(root.join("a")).unwrap(),
+            crate::reload::FolderProject {
+                manifest: good,
+                files: vec![(Url::from_file_path(&x).unwrap(), x.clone())],
+                ..Default::default()
+            },
+        );
+        projects.insert(
+            Url::from_directory_path(root.join("b")).unwrap(),
+            crate::reload::FolderProject { manifest: broken, ..Default::default() },
+        );
+        let rename = |state: &mut GlobalState, from: &std::path::Path, to: &std::path::Path| {
+            crate::handlers::request::handle_will_rename_files(
+                state.snapshot(),
+                lsp_types::RenameFilesParams {
+                    files: vec![lsp_types::FileRename {
+                        old_uri: Url::from_file_path(from).unwrap().into(),
+                        new_uri: Url::from_file_path(to).unwrap().into(),
+                    }],
+                },
+            )
+        };
+
+        let edit = rename(&mut state, &x, &root.join("a").join("y.sail"))
+            .expect("a broken manifest elsewhere does not fail the rename")
+            .expect("the good manifest is updated");
+        let json = serde_json::to_value(edit).unwrap();
+        assert_eq!(json["documentChanges"][0]["textDocument"]["uri"], good_uri.as_str());
+        assert!(json["documentChanges"][0]["edits"][0]["newText"].as_str().unwrap().contains("y"));
+
+        // A move inside the broken project's own directory cannot be fixed
+        // up there; the rename itself still goes ahead.
+        let z = root.join("b").join("z.sail");
+        assert!(rename(&mut state, &z, &root.join("b").join("w.sail")).unwrap().is_none());
+    }
+
     #[test]
     fn cache_collection_waits_for_retained_snapshots_and_applies_live_configuration() {
         let (sender, _receiver) = crossbeam_channel::unbounded();

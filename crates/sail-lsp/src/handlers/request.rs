@@ -1616,14 +1616,45 @@ pub(crate) fn handle_will_rename_files(
             ))
         })
         .collect();
+    // Whether a move can change what this manifest says: the manifest moves,
+    // something under its directory moves, or a file it lists moves.
+    let normalized: Vec<(std::path::PathBuf, std::path::PathBuf)> = moves
+        .iter()
+        .map(|(a, b)| {
+            (syntax::preprocess::normalize_path(a), syntax::preprocess::normalize_path(b))
+        })
+        .collect();
+    let moved = |path: &std::path::Path| {
+        let path = syntax::preprocess::normalize_path(path);
+        paths::renamed_path(&path, &normalized) != path
+    };
+    let touched = |project: &crate::reload::FolderProject| {
+        let dir = project.manifest.parent();
+        moved(&project.manifest)
+            || normalized.iter().any(|(old, _)| dir.is_some_and(|dir| old.starts_with(dir)))
+            || project.files.iter().chain(&project.discovered_files).any(|(_, p)| moved(p))
+    };
     let mut documents = Vec::new();
-    for project in snap.projects.values() {
+    for project in snap.projects.values().filter(|project| touched(project)) {
         let uri = Url::from_file_path(&project.manifest)
             .map_err(|_| anyhow::anyhow!("Invalid manifest path"))?;
-        let text = crate::manifest_editing::text(&snap, &uri)
-            .ok_or_else(|| anyhow::anyhow!("Cannot read {uri}"))?;
-        let parsed = project_model::ProjectManifest::parse(&text)
-            .map_err(|e| anyhow::anyhow!("Cannot safely update {uri}: {}", e.message))?;
+        let Some(text) = crate::manifest_editing::text(&snap, &uri) else {
+            log::warn!("will-rename: cannot read {uri}; its file list is not updated");
+            continue;
+        };
+        // A reload keeps the previous model when a manifest stops parsing,
+        // so a broken manifest can sit here for a while. It cannot be fixed
+        // up safely; the other projects still can, and the rename goes on.
+        let parsed = match project_model::ProjectManifest::parse(&text) {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                log::warn!(
+                    "will-rename: cannot safely update {uri}: {}; its file list is not updated",
+                    e.message
+                );
+                continue;
+            }
+        };
         let edits = parsed
             .rename_file_edits(
                 &text,
