@@ -57,7 +57,10 @@ jobs:
           opam-local-packages: sail/*.opam
       - name: Compiler dependencies
         working-directory: sail
-        run: opam install . --deps-only --yes
+        run: |
+          opam install . --deps-only --yes
+          # Upstream's unit tests use Alcotest without declaring it in opam.
+          opam install alcotest --yes
       - name: Build pinned stock compiler
         working-directory: sail
         run: opam exec -- dune build --release src/bin/sail.exe src/sail_c_backend/sail_plugin_c.cmxs

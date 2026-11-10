@@ -19,13 +19,17 @@ interface ExtensionApi {
     };
 }
 
-async function eventually(message: string, predicate: () => boolean, timeout = 20_000) {
+async function eventually(
+    message: string | (() => string),
+    predicate: () => boolean,
+    timeout = 20_000,
+) {
     const deadline = Date.now() + timeout;
     while (Date.now() < deadline) {
         if (predicate()) return;
         await new Promise((resolve) => setTimeout(resolve, 50));
     }
-    assert.fail(message);
+    assert.fail(typeof message === "function" ? message() : message);
 }
 
 suite("sail-lsp extension", () => {
@@ -497,8 +501,10 @@ suite("sail-lsp extension", () => {
         const editor = await vscode.window.showTextDocument(document);
         const oldOptions = { ...editor.options };
         const config = vscode.workspace.getConfiguration("editor", document);
-        const keys = ["formatOnType", "autoIndent"];
-        const saved = keys.map((key) => config.inspect(key)?.workspaceValue);
+        const keys = ["formatOnType", "autoIndent", "detectIndentation", "tabSize", "insertSpaces"];
+        const saved = keys.map((key) => config.inspect(key)?.workspaceLanguageValue);
+        const configure = (key: string, value: unknown) =>
+            config.update(key, value, vscode.ConfigurationTarget.Workspace, true);
         const source = "function f() = {\n  1\n}\n";
         const replace = async (text: string) => {
             const edit = new vscode.WorkspaceEdit();
@@ -513,20 +519,36 @@ suite("sail-lsp extension", () => {
             assert.ok(await vscode.workspace.applyEdit(edit));
         };
         try {
-            await config.update("formatOnType", true, vscode.ConfigurationTarget.Workspace);
-            await config.update("autoIndent", "none", vscode.ConfigurationTarget.Workspace);
+            await configure("formatOnType", true);
+            await configure("autoIndent", "none");
+            await configure("detectIndentation", false);
+            await configure("tabSize", 4);
             for (const spaces of [true, false]) {
                 await replace(source);
-                editor.options = { tabSize: 4, insertSpaces: spaces };
+                // Unlike the optimistic editor.options setter, this observation
+                // waits for the editor model to report the applied configuration.
+                await configure("insertSpaces", spaces);
+                await eventually(
+                    () => `editor options did not settle: ${JSON.stringify(editor.options)}`,
+                    () => editor.options.tabSize === 4 && editor.options.insertSpaces === spaces,
+                );
                 editor.selection = new vscode.Selection(
                     0,
                     "function f() = {".length,
                     0,
                     "function f() = {".length,
                 );
+                await vscode.commands.executeCommand("workbench.action.focusActiveEditorGroup");
                 await vscode.commands.executeCommand("type", { text: "\n" });
                 await eventually(
-                    "on-type indentation must use the editor options",
+                    () =>
+                        `on-type indentation must use the editor options: ${JSON.stringify({
+                            expected: spaces ? "    " : "\t",
+                            options: editor.options,
+                            selection: editor.selection,
+                            activeEditor: vscode.window.activeTextEditor?.document.uri.toString(),
+                            text: document.getText(),
+                        })}`,
                     () => document.lineAt(1).text === (spaces ? "    " : "\t"),
                 );
                 assert.equal(document.lineAt(2).text, "  1", "typing changed another line");
@@ -545,11 +567,7 @@ suite("sail-lsp extension", () => {
             await vscode.window.showTextDocument(document);
             editor.options = oldOptions;
             for (let index = 0; index < keys.length; index++)
-                await config.update(
-                    keys[index],
-                    saved[index],
-                    vscode.ConfigurationTarget.Workspace,
-                );
+                await configure(keys[index], saved[index]);
         }
     });
 
