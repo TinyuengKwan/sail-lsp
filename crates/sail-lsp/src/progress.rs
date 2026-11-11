@@ -31,17 +31,21 @@ impl ProgressReporter {
     /// `false`, so the one operation that *is* cancellable —
     /// `prime_caches`, which already carries a `CancellationToken` and
     /// restarts itself — could never be cancelled by the user.
+    /// `percentage` is `Some(0)` for work that will report how far it has
+    /// got, and `None` for work that cannot say — a compiler run — which
+    /// the client then shows as indeterminate rather than stuck at 0%.
     pub fn begin(
         sender: &Sender<Message>,
         token: lsp_types::ProgressToken,
         title: &str,
         cancellable: bool,
+        percentage: Option<u32>,
     ) -> Self {
         let begin = WorkDoneProgress::Begin(WorkDoneProgressBegin {
             title: title.to_string(),
             cancellable: Some(cancellable),
             message: None,
-            percentage: Some(0),
+            percentage,
         });
         send_progress(sender, &token, begin);
         Self { sender: sender.clone(), token, cancellable }

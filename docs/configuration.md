@@ -382,6 +382,15 @@ without one they affect all targets. Cancel preserves the last published
 compiler diagnostics, while clear removes them. The VS Code extension exposes
 these operations from the command palette.
 
+A client that declares `window.workDoneProgress` is also shown each run as a
+`$/progress` sequence titled `Checking <project or file>`: it begins when the
+run is submitted, reports `Running for Ns.` once a second while the compiler
+runs, and ends with the run's outcome (`Passed`, `Diagnostics: N reported`,
+`cancelled`, ...). The sequence is cancellable; the cancel button sends
+`window/workDoneProgress/cancel`, which stops that run exactly as
+`sail-lsp/cancelFlycheck` does. A client without the capability is sent no
+progress.
+
 A setting of the wrong type keeps its default and is named in a warning;
 the other settings still apply.
 

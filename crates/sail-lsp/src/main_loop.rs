@@ -473,7 +473,13 @@ impl GlobalState {
         // "Building index" progress (include graph + SourceRoots)
         let build_progress = self.supports_progress.then(|| {
             let token = self.progress_token("Building index");
-            crate::progress::ProgressReporter::begin(&self.sender, token, "Building index", false)
+            crate::progress::ProgressReporter::begin(
+                &self.sender,
+                token,
+                "Building index",
+                false,
+                Some(0),
+            )
         });
         if let Some(ref p) = build_progress {
             p.report("resolving includes...", Some(30));
@@ -505,7 +511,13 @@ impl GlobalState {
         // This is the most time-consuming startup phase — report progress.
         let indexing_progress = self.supports_progress.then(|| {
             let token = self.progress_token("Indexing");
-            crate::progress::ProgressReporter::begin(&self.sender, token, "Indexing", false)
+            crate::progress::ProgressReporter::begin(
+                &self.sender,
+                token,
+                "Indexing",
+                false,
+                Some(0),
+            )
         });
 
         // Queue prime_caches via OpQueue instead of running inline.
@@ -616,8 +628,83 @@ impl GlobalState {
                 history.invalidate();
             }
             self.flycheck_latest.remove(target);
+            self.end_flycheck_progress(target, "cancelled");
         }
         self.diagnostics.retain_check_targets(|target| !drop(target));
+    }
+
+    /// The progress token a run reports under; the generation is what the
+    /// client's `window/workDoneProgress/cancel` hands back, and what
+    /// [`Self::flycheck_target_for_progress`] resolves to a target.
+    fn flycheck_progress_name(generation: u64) -> String {
+        format!("flycheck/{generation}")
+    }
+
+    /// The target whose run reports under `token`, if it is one of ours and
+    /// the run is still the one believed.
+    pub(crate) fn flycheck_target_for_progress(
+        &self,
+        token: &lsp_types::ProgressToken,
+    ) -> Option<crate::flycheck::CheckTarget> {
+        let lsp_types::ProgressToken::String(token) = token else { return None };
+        let generation: u64 = token.strip_prefix("sail-lsp/flycheck/")?.parse().ok()?;
+        self.flycheck_latest
+            .iter()
+            .find(|(_, &g)| g == generation)
+            .map(|(target, _)| target.clone())
+    }
+
+    /// `target` as the user knows it: relative to its workspace folder.
+    fn flycheck_target_label(&self, target: &crate::flycheck::CheckTarget) -> String {
+        let path = match target {
+            crate::flycheck::CheckTarget::Project(path)
+            | crate::flycheck::CheckTarget::File(path) => path,
+        };
+        self.workspace_folders
+            .iter()
+            .filter_map(|folder| folder.to_file_path().ok())
+            .find_map(|folder| path.strip_prefix(&folder).ok().map(|rel| rel.display().to_string()))
+            .unwrap_or_else(|| path.display().to_string())
+    }
+
+    /// Start the progress sequence for the run `generation` of `target` —
+    /// rust-analyzer's `Checking` progress, titled with what is checked and
+    /// cancellable from the client's progress UI. Only for a client that
+    /// declared `window.workDoneProgress`; a run that supersedes an earlier
+    /// one ends that one's sequence first.
+    fn begin_flycheck_progress(&mut self, target: &crate::flycheck::CheckTarget, generation: u64) {
+        if !self.supports_progress {
+            return;
+        }
+        self.end_flycheck_progress(target, "superseded");
+        let token = self.progress_token(&Self::flycheck_progress_name(generation));
+        let title = format!("Checking {}", self.flycheck_target_label(target));
+        let reporter =
+            crate::progress::ProgressReporter::begin(&self.sender, token, &title, true, None);
+        self.flycheck_progress.insert(target.clone(), reporter);
+    }
+
+    /// End `target`'s progress sequence, if one is open, saying why.
+    pub(crate) fn end_flycheck_progress(
+        &mut self,
+        target: &crate::flycheck::CheckTarget,
+        message: &str,
+    ) {
+        if let Some(reporter) = self.flycheck_progress.remove(target) {
+            reporter.end(message);
+        }
+    }
+
+    /// Tell the client how long each running check has taken, on the same
+    /// tick that refreshes the status line's "Running for Ns".
+    pub(crate) fn report_flycheck_progress(&self) {
+        for (target, reporter) in &self.flycheck_progress {
+            if let Some(running) =
+                self.flycheck_history.get(target).and_then(|history| history.running_for())
+            {
+                reporter.report(&running, None);
+            }
+        }
     }
 
     /// Ask upstream Sail what it thinks of the program `saved` belongs to,
@@ -754,22 +841,29 @@ impl GlobalState {
     }
 
     pub(crate) fn cancel_flycheck(&mut self, document: Option<&lsp_types::TextDocumentIdentifier>) {
-        let targets = self.flycheck_control_targets(document);
-        for target in targets {
-            if let Some(history) = self.flycheck_history.get_mut(&target) {
-                history.invalidate();
-            }
-            if let Some(worker) = self.flycheck_workers.get(&target) {
-                worker.cancel();
-            }
-            // A cancelled process can still finish and enqueue its answer.
-            // Removing the ticket makes that answer unobservable.
-            if self.flycheck_latest.remove(&target).is_some()
-                || self.flycheck_status.contains_key(&target)
-            {
-                self.flycheck_status.insert(target, crate::flycheck::Status::Cancelled);
-            }
+        for target in self.flycheck_control_targets(document) {
+            self.cancel_flycheck_target(&target);
         }
+    }
+
+    /// Stop `target`'s run and keep what it last published. The scoped
+    /// `sail-lsp/cancelFlycheck` and the cancel button on the progress
+    /// notification both come here.
+    pub(crate) fn cancel_flycheck_target(&mut self, target: &crate::flycheck::CheckTarget) {
+        if let Some(history) = self.flycheck_history.get_mut(target) {
+            history.invalidate();
+        }
+        if let Some(worker) = self.flycheck_workers.get(target) {
+            worker.cancel();
+        }
+        // A cancelled process can still finish and enqueue its answer.
+        // Removing the ticket makes that answer unobservable.
+        if self.flycheck_latest.remove(target).is_some()
+            || self.flycheck_status.contains_key(target)
+        {
+            self.flycheck_status.insert(target.clone(), crate::flycheck::Status::Cancelled);
+        }
+        self.end_flycheck_progress(target, "cancelled");
     }
 
     pub(crate) fn clear_flycheck(&mut self, document: Option<&lsp_types::TextDocumentIdentifier>) {
@@ -787,6 +881,7 @@ impl GlobalState {
             }
             self.flycheck_latest.remove(target);
             self.flycheck_status.remove(target);
+            self.end_flycheck_progress(target, "cleared");
         }
         self.diagnostics.retain_check_targets(|target| !targets.contains(target));
     }
@@ -812,6 +907,7 @@ impl GlobalState {
             {
                 self.flycheck_status.insert(target.clone(), crate::flycheck::Status::Stale);
             }
+            self.end_flycheck_progress(target, "source changed");
         }
         self.diagnostics.retain_check_targets(|target| !targets.contains(target));
     }
@@ -920,6 +1016,7 @@ impl GlobalState {
                         crate::flycheck::Status::Skipped { message: reason.clone() },
                     );
                     self.flycheck_latest.remove(&target);
+                    self.end_flycheck_progress(&target, "skipped");
                     self.diagnostics.retain_check_targets(|t| t != &target);
                     self.log_message(
                         lsp_types::MessageType::WARNING,
@@ -943,12 +1040,14 @@ impl GlobalState {
                             crate::flycheck::Status::Failed { message: error.to_string() },
                         );
                         self.flycheck_latest.remove(&target);
+                        self.end_flycheck_progress(&target, "failed");
                         self.diagnostics.retain_check_targets(|t| t != &target);
                         continue;
                     }
                 }
             }
             self.flycheck_status.insert(target.clone(), crate::flycheck::Status::Queued);
+            self.begin_flycheck_progress(&target, generation);
             self.flycheck_workers.get_mut(&target).unwrap().submit(
                 generation,
                 &effective.flycheck,
@@ -1274,7 +1373,9 @@ fn main_loop(
             // no analysis work and does not wake an idle server.
             recv(if state.flycheck_status.values().any(|status| status.busy()) {
                 check_status_tick.clone()
-            } else { crossbeam_channel::never() }) -> _ => {},
+            } else { crossbeam_channel::never() }) -> _ => {
+                state.report_flycheck_progress();
+            },
             recv(state.pending_configuration.as_ref().map(|pending| crossbeam_channel::after(pending.deadline.saturating_duration_since(std::time::Instant::now()))).unwrap_or_else(crossbeam_channel::never)) -> _ => {
                 state.configuration_timed_out();
             }
@@ -1734,6 +1835,9 @@ fn on_task(state: &mut GlobalState, task: Task) {
             if state.flycheck_latest.get(&target) == Some(&generation) {
                 state.flycheck_history.entry(target.clone()).or_default().start(cache);
                 state.flycheck_status.insert(target, crate::flycheck::Status::Running);
+                // The debounce is over and the compiler is running: the
+                // first "Running for 0s." — the tick carries on from here.
+                state.report_flycheck_progress();
             }
         }
         Task::Flycheck { target, generation, found, status, run } => {
@@ -1757,11 +1861,13 @@ fn on_task(state: &mut GlobalState, task: Task) {
                     history.invalidate();
                 }
                 state.diagnostics.set_check_diagnostics(&target, Vec::new());
+                state.end_flycheck_progress(&target, "source changed");
                 return;
             }
             if status.problem() {
                 state.log_message(MessageType::WARNING, format!("Flycheck {target:?}: {status:?}"));
             }
+            state.end_flycheck_progress(&target, &status.to_string());
             state.flycheck_history.entry(target.clone()).or_default().finish(run, &status);
             state.flycheck_status.insert(target.clone(), status);
             // Terminal locations require a known VFS path. Structured spans
@@ -1799,6 +1905,7 @@ fn on_task(state: &mut GlobalState, task: Task) {
                         token,
                         "Priming caches",
                         true,
+                        Some(0),
                     ));
                 }
             }

@@ -259,6 +259,8 @@ pub(crate) struct ServerFixture {
     graph_changes: usize,
     /// The method of every request the server sent the client.
     server_requests: Vec<String>,
+    /// Every `$/progress` notification, in order.
+    progress: Vec<lsp_types::ProgressParams>,
     shown_documents: Vec<serde_json::Value>,
     load_failed: bool,
     capabilities: serde_json::Value,
@@ -277,6 +279,8 @@ struct ClientProfile {
     native_watch: bool,
     /// `inlayHint.resolveSupport` for the properties VS Code resolves lazily.
     inlay_hint_resolve: bool,
+    /// `window.workDoneProgress`: takes `$/progress` and the create request.
+    work_done_progress: bool,
     /// The `experimental` section, where rust-analyzer's protocol extensions
     /// are negotiated. The VS Code client's set by default, less
     /// `snippetTextEdit`, which the scenarios about snippets declare; a
@@ -291,6 +295,7 @@ impl Default for ClientProfile {
             pull_diagnostics: false,
             native_watch: false,
             inlay_hint_resolve: false,
+            work_done_progress: true,
             experimental: serde_json::json!({
                 "serverStatusNotification": true,
                 "commands": { "commands": ["sail-lsp.showReferences"] },
@@ -454,6 +459,7 @@ impl ServerFixture {
             statuses: Vec::new(),
             graph_changes: 0,
             server_requests: Vec::new(),
+            progress: Vec::new(),
             shown_documents: Vec::new(),
             load_failed: false,
             capabilities: serde_json::Value::Null,
@@ -475,6 +481,7 @@ impl ServerFixture {
             pull_diagnostics: pull,
             native_watch,
             inlay_hint_resolve,
+            work_done_progress,
             experimental,
         } = profile;
         let root_url = Url::from_directory_path(&self.root).expect("root url");
@@ -526,7 +533,7 @@ impl ServerFixture {
                 "workspaceFolders": folders,
                 "initializationOptions": initialization_options,
                 "capabilities": {
-                    "window": { "workDoneProgress": true, "showDocument": {"support":true} },
+                    "window": { "workDoneProgress": work_done_progress, "showDocument": {"support":true} },
                     "textDocument": text_document,
                     "workspace": workspace,
                     "experimental": experimental,
@@ -593,6 +600,9 @@ impl ServerFixture {
                     }
                     "sail-lsp/serverStatus" => {
                         self.statuses.push(serde_json::from_value(n.params).expect("serverStatus"));
+                    }
+                    "$/progress" => {
+                        self.progress.push(serde_json::from_value(n.params).expect("progress"));
                     }
                     _ => {}
                 },
@@ -2825,6 +2835,176 @@ exit 0
     let pid = read_pid();
     drop(server);
     assert_reaped(pid);
+}
+
+impl ServerFixture {
+    /// The `$/progress` values seen under `token`, as `(kind, message)`.
+    fn progress_of(&self, token: &lsp_types::ProgressToken) -> Vec<(String, Option<String>)> {
+        self.progress
+            .iter()
+            .filter(|p| &p.token == token)
+            .map(|p| {
+                let lsp_types::ProgressParamsValue::WorkDone(value) = &p.value;
+                match value {
+                    lsp_types::WorkDoneProgress::Begin(b) => {
+                        ("begin".to_owned(), b.message.clone())
+                    }
+                    lsp_types::WorkDoneProgress::Report(r) => {
+                        ("report".to_owned(), r.message.clone())
+                    }
+                    lsp_types::WorkDoneProgress::End(e) => ("end".to_owned(), e.message.clone()),
+                }
+            })
+            .collect()
+    }
+
+    /// The token of the one compiler-run progress sequence begun so far.
+    fn flycheck_progress_token(&self) -> Option<lsp_types::ProgressToken> {
+        self.progress.iter().find_map(|p| match (&p.token, &p.value) {
+            (
+                lsp_types::ProgressToken::String(token),
+                lsp_types::ProgressParamsValue::WorkDone(lsp_types::WorkDoneProgress::Begin(_)),
+            ) if token.starts_with("sail-lsp/flycheck/") => Some(p.token.clone()),
+            _ => None,
+        })
+    }
+
+    /// A stand-in compiler that records its PID, sleeps `seconds`, then
+    /// reports `after` on stderr and fails — or passes, for an empty `after`.
+    #[cfg(unix)]
+    fn slow_checker(&self, seconds: u32, after: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let checker = self.root.join("checker.sh");
+        let outcome = if after.is_empty() {
+            "exit 0".to_owned()
+        } else {
+            format!("printf '{after}' >&2; exit 1")
+        };
+        std::fs::write(
+            &checker,
+            format!("#!/bin/sh\necho $$ > check-pid\nsleep {seconds}\n{outcome}\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&checker, std::fs::Permissions::from_mode(0o755)).unwrap();
+        checker
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_compiler_run_reports_its_progress_until_it_ends() {
+    let mut server =
+        ServerFixture::new_project("flycheck-progress", &[("a.sail", "function f() = 0\n")]);
+    let checker = server.slow_checker(2, "");
+    server.configure(
+        serde_json::json!({"flycheck": {"enable": true, "command": checker, "debounceMs": 0}}),
+    );
+    server.wait_until("the compiler run's progress to end", |s| {
+        s.flycheck_progress_token()
+            .is_some_and(|token| s.progress_of(&token).iter().any(|(kind, _)| kind == "end"))
+    });
+    let token = server.flycheck_progress_token().unwrap();
+    let sequence = server.progress_of(&token);
+    let begin = server
+        .progress
+        .iter()
+        .find_map(|p| match &p.value {
+            lsp_types::ProgressParamsValue::WorkDone(lsp_types::WorkDoneProgress::Begin(b))
+                if p.token == token =>
+            {
+                Some(b.clone())
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(begin.title, "Checking sail.proj");
+    assert_eq!(begin.cancellable, Some(true));
+    assert_eq!(begin.percentage, None, "a compiler run cannot say how far it is");
+    assert_eq!(sequence.first().map(|(kind, _)| kind.as_str()), Some("begin"));
+    assert_eq!(sequence.last(), Some(&("end".to_owned(), Some("Passed".to_owned()))));
+    let reports: Vec<_> = sequence.iter().filter(|(kind, _)| kind == "report").collect();
+    assert!(!reports.is_empty(), "{sequence:?}");
+    assert!(
+        reports.iter().all(|(_, message)| {
+            message.as_deref().is_some_and(|m| m.starts_with("Running for ") && m.ends_with("s."))
+        }),
+        "{sequence:?}"
+    );
+    assert!(server.server_requests.iter().any(|m| m == "window/workDoneProgress/create"));
+}
+
+#[cfg(unix)]
+#[test]
+fn cancelling_the_progress_stops_the_compiler_and_drops_its_findings() {
+    let mut server =
+        ServerFixture::new_project("flycheck-progress-cancel", &[("a.sail", "function f() = 0\n")]);
+    let checker = server.slow_checker(30, "Type error:\\na.sail:1.1-2:\\n  | late finding\\n");
+    server.configure(serde_json::json!({"flycheck": {"enable": true, "command": checker, "debounceMs": 0, "timeoutMs": 60_000}}));
+    server.wait_until("the compiler run to begin", |s| s.flycheck_progress_token().is_some());
+    let pid_file = server.root.join("check-pid");
+    server.wait_until("the compiler process to start", |_| pid_file.is_file());
+    let token = server.flycheck_progress_token().unwrap();
+    let cancelled_at = Instant::now();
+    server.notify("window/workDoneProgress/cancel", serde_json::json!({ "token": token }));
+    server.wait_until("the cancelled run's progress to end", |s| {
+        s.progress_of(&token).iter().any(|(kind, _)| kind == "end")
+    });
+    assert!(
+        cancelled_at.elapsed() < Duration::from_secs(20),
+        "the end must come from the cancel, not from the compiler finishing"
+    );
+    assert_eq!(
+        server.progress_of(&token).last(),
+        Some(&("end".to_owned(), Some("cancelled".to_owned())))
+    );
+    server.wait_until("the status to say cancelled", |s| {
+        s.statuses.last().is_some_and(|s| {
+            s.message.as_deref().is_some_and(|m| m.contains("Cancelled")) && s.quiescent
+        })
+    });
+    let pid: i32 = std::fs::read_to_string(&pid_file).unwrap().trim().parse().unwrap();
+    // SAFETY: signal 0 only queries existence; the PID was written by our checker.
+    assert_eq!(unsafe { libc::kill(pid, 0) }, -1, "compiler process {pid} survived cancellation");
+    // Whatever the killed run would have said never reaches the panel.
+    server.pump(Duration::from_secs(1));
+    assert!(
+        !server.shown("a.sail").iter().any(|d| d.source.as_deref() == Some("sail")),
+        "{:?}",
+        server.shown("a.sail")
+    );
+    assert_eq!(
+        server.progress.iter().filter(|p| p.token == token).count(),
+        server.progress_of(&token).len(),
+        "nothing is reported under an ended token"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_client_without_progress_support_is_sent_no_progress() {
+    let mut server = ServerFixture::open_with_client(
+        "flycheck-no-progress",
+        &[("sail.proj", "Main { files a.sail }\n"), ("a.sail", "function f() = 0\n")],
+        Root::Real,
+        None,
+        serde_json::Value::Null,
+        ClientProfile { work_done_progress: false, ..Default::default() },
+    );
+    let checker = server.slow_checker(0, "");
+    server.configure(
+        serde_json::json!({"flycheck": {"enable": true, "command": checker, "debounceMs": 0}}),
+    );
+    server.wait_until("the check to pass", |s| {
+        s.statuses
+            .last()
+            .is_some_and(|s| s.message.as_deref().is_some_and(|m| m.contains("Passed")))
+    });
+    assert_eq!(server.progress, Vec::new(), "progress for a client that declared none");
+    assert!(
+        !server.server_requests.iter().any(|m| m == "window/workDoneProgress/create"),
+        "{:?}",
+        server.server_requests
+    );
 }
 
 #[cfg(unix)]

@@ -135,6 +135,12 @@ pub(crate) struct GlobalState {
     /// Checks asked for while a workspace scan was pending; the scan's end
     /// requests them, so a save that lands during a scan is not lost.
     pub(crate) deferred_flycheck_targets: std::collections::BTreeSet<crate::flycheck::CheckTarget>,
+    /// The progress sequence each running check reports under — one per
+    /// target, as rust-analyzer has one per `cargo check` — begun when the
+    /// run is submitted and ended wherever its ticket is dropped. Empty for
+    /// a client without `window.workDoneProgress`.
+    pub(crate) flycheck_progress:
+        std::collections::HashMap<crate::flycheck::CheckTarget, crate::progress::ProgressReporter>,
     pub(crate) loading_module_graph: Option<base_db::module_graph::ModuleGraph>,
     pub(crate) loading_source_project: Option<base_db::preprocess::SourceProject>,
     /// At most one independent preprocessing worker; newer loads replace
@@ -265,6 +271,7 @@ impl GlobalState {
             flycheck_status: Default::default(),
             flycheck_history: Default::default(),
             deferred_flycheck_targets: Default::default(),
+            flycheck_progress: Default::default(),
             module_contexts: Default::default(),
             loading_module_graph: None,
             loading_source_project: None,

@@ -595,6 +595,7 @@ impl GlobalState {
                     token,
                     "Reloading workspace",
                     false,
+                    Some(0),
                 )
             });
             if let Some(ref p) = progress {

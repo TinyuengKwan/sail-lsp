@@ -370,6 +370,13 @@ pub(crate) fn handle_work_done_progress_cancel(
     state: &mut GlobalState,
     params: lsp_types::WorkDoneProgressCancelParams,
 ) -> anyhow::Result<()> {
+    // A compiler run reports under `sail-lsp/flycheck/<generation>`, and
+    // the cancel button on it is the other way to `sail-lsp/cancelFlycheck`
+    // — rust-analyzer's `rust-analyzer/flycheck/<id>` tokens work the same.
+    if let Some(target) = state.flycheck_target_for_progress(&params.token) {
+        state.cancel_flycheck_target(&target);
+        return Ok(());
+    }
     if state.cancellable_progress.as_ref() != Some(&params.token) {
         log::debug!("progress cancel for an unknown token: {:?}", params.token);
         return Ok(());

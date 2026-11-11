@@ -67,9 +67,18 @@ impl CheckHistory {
         self.last_run = Some(report);
     }
 
+    /// How long the current run has been going, while one is.
+    ///
+    /// The status line's first sentence, and the progress notification's
+    /// whole message: a compiler run has no phases to report, so elapsed
+    /// time is what the user watches.
+    pub fn running_for(&self) -> Option<String> {
+        self.started.map(|started| format!("Running for {}s.", started.elapsed().as_secs()))
+    }
+
     pub fn summary(&self) -> String {
-        let mut text = if let Some(started) = self.started {
-            format!("Running for {}s. ", started.elapsed().as_secs())
+        let mut text = if let Some(running) = self.running_for() {
+            format!("{running} ")
         } else if let Some(run) = &self.last_run {
             format!("Last run: {:.1}s. ", run.elapsed_ms as f64 / 1000.0)
         } else {
