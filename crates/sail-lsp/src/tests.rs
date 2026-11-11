@@ -5029,3 +5029,65 @@ fn the_deprecated_effect_annotation_is_marked_deprecated_by_the_pipeline() {
     let sent = crate::to_proto::diagnostic(&line_index, &url, deprecation);
     assert_eq!(sent.tags, Some(vec![lsp_types::DiagnosticTag::DEPRECATED]));
 }
+
+/// `docs/lsp-extensions.md` describes `lsp/ext.rs`, and its header carries a
+/// hash of that file: a change to the protocol without a look at the document
+/// fails here — rust-analyzer's `check_lsp_extensions_docs` tidy check.
+///
+/// `FxHasher` rather than `DefaultHasher`, whose algorithm the standard
+/// library does not promise to keep.
+#[test]
+fn lsp_extensions_doc_is_current_with_ext_rs() {
+    use std::hash::Hasher;
+    let mut hasher = rustc_hash::FxHasher::default();
+    hasher.write(include_str!("lsp/ext.rs").as_bytes());
+    let actual = hasher.finish();
+    let doc = include_str!("../../../docs/lsp-extensions.md");
+    let expected = doc
+        .lines()
+        .find_map(|line| line.strip_prefix("lsp/ext.rs hash:"))
+        .expect("the document header carries `lsp/ext.rs hash: <hex>`")
+        .trim();
+    let expected = u64::from_str_radix(expected, 16).expect("a hexadecimal hash");
+    assert_eq!(
+        actual, expected,
+        "\nlsp/ext.rs was changed without touching docs/lsp-extensions.md.\n\n\
+         Expected hash: {expected:016x}\nActual hash:   {actual:016x}\n\n\
+         Please adjust docs/lsp-extensions.md, then set its `lsp/ext.rs hash:` line to the \
+         actual hash.\n"
+    );
+}
+
+/// Every method `lsp/ext.rs` declares has a place in the document, and the
+/// document names no method that is not declared — so the hash check above
+/// cannot be satisfied by bumping the number alone when a method is added
+/// or renamed.
+#[test]
+fn every_extension_method_is_documented() {
+    let ext = include_str!("lsp/ext.rs");
+    let doc = include_str!("../../../docs/lsp-extensions.md");
+    let declared: Vec<&str> = ext
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("const METHOD: &'static str = \""))
+        .map(|rest| rest.split('"').next().unwrap())
+        .collect();
+    assert!(declared.len() > 30, "found {} methods", declared.len());
+    for method in &declared {
+        assert!(
+            doc.contains(&format!("`{method}`")),
+            "`{method}` is not in docs/lsp-extensions.md"
+        );
+    }
+    for mentioned in doc.split('`').skip(1).step_by(2) {
+        // The two namespaces are named as such; a method has a name after
+        // the slash.
+        if (mentioned.starts_with("sail-lsp/") || mentioned.starts_with("experimental/"))
+            && !mentioned.ends_with('/')
+        {
+            assert!(
+                declared.contains(&mentioned),
+                "docs/lsp-extensions.md names `{mentioned}`, which lsp/ext.rs does not declare"
+            );
+        }
+    }
+}
