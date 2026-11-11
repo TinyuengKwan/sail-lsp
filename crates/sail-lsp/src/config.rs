@@ -382,10 +382,24 @@ pub enum SignatureDetail {
 }
 
 /// Semantic tokens settings.
+///
+/// rust-analyzer's `semanticHighlighting.*`: which classes of token the
+/// server sends, and whether it sends its own token types and modifiers or
+/// only the ones LSP defines.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct SemanticTokensConfig {
     pub enable: bool,
+    /// Send string literals and the escapes inside them.
+    pub strings: bool,
+    /// Send operators.
+    pub operators: bool,
+    /// Send punctuation — brackets, commas, semicolons.
+    pub punctuation: bool,
+    /// Send this server's own token types and modifiers (`register`,
+    /// `mutable`, ...). When off, each custom type is sent as its standard
+    /// superType, or not at all, and custom modifiers are dropped.
+    pub non_standard_tokens: bool,
 }
 
 /// A manifest variable's value. A JSON boolean is a boolean and a JSON
@@ -656,7 +670,13 @@ impl HoverConfig {
 
 impl Default for SemanticTokensConfig {
     fn default() -> Self {
-        Self { enable: true }
+        Self {
+            enable: true,
+            strings: true,
+            operators: true,
+            punctuation: false,
+            non_standard_tokens: true,
+        }
     }
 }
 

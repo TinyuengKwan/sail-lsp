@@ -3,8 +3,9 @@
 //!
 //! rust-analyzer's `lsp/semantic_tokens.rs`. The legend is declared here
 //! and nowhere else: `ide` says what a range *is* (`HlTag`, `HlMod`) and
-//! this module says which index that is on the wire, and which of those
-//! words are LSP's own and which are this server's.
+//! this module says which index that is on the wire, which of those words
+//! are LSP's own and which are this server's, and what a client that wants
+//! only standard words gets instead (`standard_fallback_type`).
 //!
 //! The cache: RA keeps the last computed `SemanticTokens` per file. When
 //! the client sends `textDocument/semanticTokens/full/delta` with a
@@ -25,7 +26,7 @@ macro_rules! define_semantic_token_types {
             $($standard:ident),*$(,)?
         }
         custom {
-            $(($custom:ident, $string:literal)),*$(,)?
+            $(($custom:ident, $string:literal) $(=> $fallback:ident)?),*$(,)?
         }
 
     ) => {
@@ -37,6 +38,18 @@ macro_rules! define_semantic_token_types {
             $(SemanticTokenType::$standard,)*
             $($custom),*
         ];
+
+        /// The standard type a client that declines non-standard tokens is
+        /// sent instead — the custom type's `superType` in package.json;
+        /// `None` drops the token.
+        pub(crate) fn standard_fallback_type(token: SemanticTokenType) -> Option<SemanticTokenType> {
+            $(
+                if token == $custom {
+                    None $(.or(Some($fallback)))?
+                } else
+            )*
+            { Some(token) }
+        }
     };
 }
 
@@ -56,13 +69,14 @@ define_semantic_token_types![
         PROPERTY,
         COMMENT,
         PARAMETER,
+        DECORATOR,
     }
 
     custom {
-        (REGISTER, "register"),
-        (BUILTIN_TYPE, "builtinType"),
-        (ATTRIBUTE, "attribute"),
-        (ESCAPE_SEQUENCE, "escapeSequence"),
+        (REGISTER, "register") => VARIABLE,
+        (BUILTIN_TYPE, "builtinType") => TYPE,
+        (ATTRIBUTE, "attribute") => DECORATOR,
+        (ESCAPE_SEQUENCE, "escapeSequence") => STRING,
         (PUNCTUATION, "punctuation"),
     }
 ];
@@ -86,6 +100,9 @@ macro_rules! define_semantic_token_modifiers {
             $(SemanticTokenModifier::$standard,)*
             $($custom),*
         ];
+
+        /// How many of the legend's modifiers, from the front, are LSP's own.
+        const STANDARD_MODIFIER_COUNT: usize = [$(stringify!($standard)),*].len();
     };
 }
 
@@ -107,6 +124,14 @@ define_semantic_token_modifiers![
 /// A set of modifiers as the legend's bitset.
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ModifierSet(pub(crate) u32);
+
+impl ModifierSet {
+    /// Drop the modifiers a client that declines non-standard tokens does
+    /// not know.
+    pub(crate) fn standard_fallback(&mut self) {
+        self.0 &= (1 << STANDARD_MODIFIER_COUNT) - 1;
+    }
+}
 
 impl std::ops::BitOrAssign<SemanticTokenModifier> for ModifierSet {
     fn bitor_assign(&mut self, rhs: SemanticTokenModifier) {

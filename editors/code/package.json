@@ -474,6 +474,30 @@
                     "default": true,
                     "markdownDescription": "Enable semantic syntax highlighting."
                 },
+                "sail-lsp.semanticTokens.strings": {
+                    "scope": "resource",
+                    "type": "boolean",
+                    "default": true,
+                    "markdownDescription": "Use semantic tokens for string literals and the escapes inside them."
+                },
+                "sail-lsp.semanticTokens.operators": {
+                    "scope": "resource",
+                    "type": "boolean",
+                    "default": true,
+                    "markdownDescription": "Use semantic tokens for operators."
+                },
+                "sail-lsp.semanticTokens.punctuation": {
+                    "scope": "resource",
+                    "type": "boolean",
+                    "default": false,
+                    "markdownDescription": "Use semantic tokens for punctuation: brackets, commas, semicolons."
+                },
+                "sail-lsp.semanticTokens.nonStandardTokens": {
+                    "scope": "resource",
+                    "type": "boolean",
+                    "default": true,
+                    "markdownDescription": "Send the server's own token types and modifiers (`register`, `builtinType`, `mutable`, ...). When off, each is replaced by the standard type it refines, or dropped."
+                },
                 "sail-lsp.workspace.projectFile": {
                     "scope": "resource",
                     "type": [

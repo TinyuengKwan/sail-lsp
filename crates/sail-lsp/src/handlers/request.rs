@@ -307,7 +307,7 @@ pub(crate) fn handle_semantic_tokens_range(
     };
     Ok(Some(SemanticTokensRangeResult::Tokens(lsp_types::SemanticTokens {
         result_id: None,
-        data: crate::to_proto::semantic_tokens(&tokens),
+        data: crate::to_proto::semantic_tokens(&tokens, &snap.config.semantic_tokens),
     })))
 }
 
@@ -373,7 +373,7 @@ pub(crate) fn handle_semantic_tokens_full(
     let ide_tokens = snap.analysis.semantic_tokens(file_id)?;
 
     // Convert to LSP tokens and cache for delta requests.
-    let lsp_tokens = crate::to_proto::semantic_tokens(&ide_tokens);
+    let lsp_tokens = crate::to_proto::semantic_tokens(&ide_tokens, &snap.config.semantic_tokens);
     let cached = snap.semantic_tokens_cache.cache_full(uri, lsp_tokens);
     Ok(Some(SemanticTokensResult::Tokens(cached)))
 }
@@ -638,7 +638,7 @@ pub(crate) fn handle_semantic_tokens_full_delta(
     let ide_tokens = snap.analysis.semantic_tokens(file_id)?;
 
     // Convert to LSP tokens.
-    let new_tokens = crate::to_proto::semantic_tokens(&ide_tokens);
+    let new_tokens = crate::to_proto::semantic_tokens(&ide_tokens, &snap.config.semantic_tokens);
 
     // Try to compute delta from cached tokens.
     if let Some(delta) =

@@ -273,6 +273,10 @@ It is the declaration's doc comment; Sail has no per-parameter documentation.
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `enable` | `bool` | `true` | Enable semantic token highlighting |
+| `strings` | `bool` | `true` | Send tokens for string literals and the escapes inside them |
+| `operators` | `bool` | `true` | Send tokens for operators |
+| `punctuation` | `bool` | `false` | Send tokens for punctuation: brackets, commas, semicolons |
+| `nonStandardTokens` | `bool` | `true` | Send the server's own token types and modifiers (`register`, `builtinType`, `attribute`, `escapeSequence`, `punctuation`; `controlFlow`, `mutable`); when off, each type is sent as the standard type it refines (or dropped) and custom modifiers are dropped |
 
 ### `flycheck`
 

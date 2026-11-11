@@ -81,6 +81,8 @@ pub(crate) use lsp::to_proto;
 mod diagnostics_check;
 #[cfg(test)]
 mod integrated_benchmarks;
+#[cfg(test)]
+mod semantic_tokens_check;
 /// The probe that enters where a client does — see its module docs for the
 /// four defects that were invisible to the five that enter at `Analysis`.
 #[cfg(test)]

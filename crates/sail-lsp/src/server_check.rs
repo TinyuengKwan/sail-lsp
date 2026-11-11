@@ -321,7 +321,7 @@ impl ServerFixture {
     /// Tests requiring complete semantic analysis declare a project explicitly.
     /// Listed Sail files form one module in the supplied order. Tests of
     /// discovery/unlinked buffers use `new` instead.
-    fn new_project(name: &str, files: &[(&str, &str)]) -> ServerFixture {
+    pub(crate) fn new_project(name: &str, files: &[(&str, &str)]) -> ServerFixture {
         if files.iter().any(|(path, _)| crate::reload::is_project_file(std::path::Path::new(path)))
         {
             return Self::new(name, files);

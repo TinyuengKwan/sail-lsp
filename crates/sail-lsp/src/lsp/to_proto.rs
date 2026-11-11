@@ -811,16 +811,36 @@ pub fn inlay_hint(
 
 use crate::lsp::semantic_tokens;
 
-/// The tokens as the protocol wants them: legend indices, delta-encoded.
+/// The tokens as the protocol wants them: legend indices, delta-encoded,
+/// and only the classes `config` asks for.
 ///
 /// rust-analyzer's `to_proto::semantic_tokens`. The result id is not set
 /// here: it is what the *client* quotes back to ask for a delta, so it has
 /// to be one this server issued and remembers — `SemanticTokensCache`
 /// hands those out.
-pub fn semantic_tokens(ranges: &HlRanges) -> Vec<lsp_types::SemanticToken> {
+pub fn semantic_tokens(
+    ranges: &HlRanges,
+    config: &crate::config::SemanticTokensConfig,
+) -> Vec<lsp_types::SemanticToken> {
     let mut builder = semantic_tokens::SemanticTokensBuilder::new();
     for range in &ranges.data {
-        let (ty, mods) = semantic_token_type_and_modifiers(range.highlight);
+        let sent = match range.highlight.tag {
+            HlTag::StringLiteral | HlTag::EscapeSequence => config.strings,
+            HlTag::Operator => config.operators,
+            HlTag::Punctuation => config.punctuation,
+            _ => true,
+        };
+        if !sent {
+            continue;
+        }
+        let (mut ty, mut mods) = semantic_token_type_and_modifiers(range.highlight);
+        if !config.non_standard_tokens {
+            ty = match semantic_tokens::standard_fallback_type(ty) {
+                Some(fallback) => fallback,
+                None => continue,
+            };
+            mods.standard_fallback();
+        }
         builder.push(
             semantic_tokens::token_range(range.line, range.col, range.length),
             semantic_tokens::type_index(ty),
