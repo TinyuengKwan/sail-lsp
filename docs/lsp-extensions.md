@@ -1,5 +1,5 @@
 <!---
-lsp/ext.rs hash: 1e4f1ac1c35e4410
+lsp/ext.rs hash: 1d664f522ab33f64
 
 If you need to change the above hash to make the test
 `lsp_extensions_doc_is_current_with_ext_rs` pass, please check whether this
@@ -495,6 +495,10 @@ interface Runnable {
     /// Why it cannot run right now; do not execute a disabled entry.
     disabled?: string;
     documents: DocumentUri[];
+    /// Where the entry belongs in the source — rust-analyzer's
+    /// `Runnable::location`: a `$[test]` function or `main`. A project
+    /// task has none and is shown at the top of the file.
+    location?: Location;
     kind: "sail-check" | "shell";
     args: FlycheckControlParams | ProcessRunnableArgs;
 }
@@ -505,14 +509,21 @@ interface ProcessRunnableArgs {
     args: string[];
     cwd: string;
     environment: { [name: string]: string };
+    /// An interpreter script the program reads from a file: `args` end
+    /// with the flag that names it (`--is`), and the client stores these
+    /// contents in a file and appends its path.
+    script?: string;
 }
 ```
 
 **Response:** `Runnable[]`. rust-analyzer's discovery shape: a `sail-check`
 runnable is run by sending `sail-lsp/runFlycheck` with its `args`; a `shell`
-one is a process the client starts. The project's test and export commands
-come from `runnables` in the settings ([runnables.md](runnables.md)).
-**Editors:** VS Code (`runnables.ts`).
+one is a process the client starts — with `script` written to a temporary
+file first, since upstream Sail has no test runner and a `$[test]` function
+is run by telling `sail`'s interpreter what to evaluate. The project's test
+and export commands come from `runnables` in the settings
+([runnables.md](runnables.md)). **Editors:** VS Code (`runnables.ts`,
+`taskRunner.ts`; `location` places the entry in the Test Explorer).
 
 ## Flycheck Control
 
@@ -539,6 +550,17 @@ rust-analyzer's `rust-analyzer/runFlycheck`, `rust-analyzer/cancelFlycheck`
 and `rust-analyzer/clearFlycheck`, with the scope widened from a document to
 an optional one. **Editors:** VS Code (`main.ts`, `runnables.ts`).
 
+### Flycheck progress
+
+Each compiler run is a `$/progress` sequence whose token is
+`flycheck/<generation>` under the `sail-lsp/` namespace, titled with the
+project or file, begun
+when the run is submitted, reporting `Running for Ns.` once a second, and
+ended when the run finishes, is cancelled or cleared, or is superseded by a
+later save. A `window/workDoneProgress/cancel` with that token cancels the
+run, as rust-analyzer's `rust-analyzer/flycheck/<id>` does. Nothing is sent
+to a client without `window.workDoneProgress`.
+
 ## Reload Workspace
 
 **Method:** `sail-lsp/reloadWorkspace` — notification, client → server,
@@ -547,6 +569,17 @@ no parameters, *main loop*
 Re-scans the workspace folders and rebuilds the project model, as
 rust-analyzer's `rust-analyzer/reloadWorkspace`. **Editors:** VS Code
 (`main.ts`).
+
+## File Watching
+
+Not an extension, but worth knowing: `workspace/didChangeWatchedFiles` is
+registered dynamically (`client/registerCapability`) for the source roots the
+project model reads — workspace folders, include search paths, the library,
+the directory of every file a project reaches outside those — when a scan
+starts and again when its model lands, unregistering the previous
+registration first. A client with `relativePatternSupport` gets
+`RelativePattern`s, others absolute globs; one without dynamic registration
+is watched for by the server itself.
 
 ## Cancel Request
 
