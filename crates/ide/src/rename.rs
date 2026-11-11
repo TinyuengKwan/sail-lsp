@@ -5,21 +5,40 @@
 //! be renamed at all, and what its current text is.
 //!
 use ide_db::line_index::{LineCol, TextRange};
+use ide_db::rename::RenameError;
 use ide_db::FileDb;
 
-/// The name under the cursor and its range, if it can be renamed.
+/// The name under the cursor and its range, or why it cannot be renamed.
+///
+/// Every refusal has a reason, as rust-analyzer's does, because the server
+/// sends it: a `null` here showed the editor's generic "cannot be renamed",
+/// which says nothing about a keyword, a pragma or an empty line.
 ///
 /// Pragmas (`$include`) and attributes (`@name`) are written with a sigil
 /// and are not names the workspace declares, so neither is renameable.
-pub fn prepare_rename(file: &dyn FileDb, position: LineCol) -> Option<(String, TextRange)> {
-    let (token, span) = file.token_at(position)?;
-    let name = ide_db::token_symbol_key(token)?;
+pub fn prepare_rename(
+    file: &dyn FileDb,
+    position: LineCol,
+) -> Result<(String, TextRange), RenameError> {
+    let Some((token, span)) = file.token_at(position) else {
+        return Err(RenameError("No references found at position".into()));
+    };
+    let Some(name) = ide_db::token_symbol_key(token).filter(|name| !name.is_empty()) else {
+        // Not a name. The token's own text says which kind of not-a-name.
+        let text = token.to_string();
+        let reason = if ide_db::keywords::is_keyword(&text) {
+            "Cannot rename a keyword"
+        } else if text.starts_with('$') {
+            "Cannot rename a pragma"
+        } else if text.starts_with('@') {
+            "Cannot rename an attribute"
+        } else {
+            "No references found at position"
+        };
+        return Err(RenameError(reason.into()));
+    };
 
-    if name.is_empty() || name.starts_with('$') || name.starts_with('@') {
-        return None;
-    }
-
-    Some((name, base_db::text_range(span.start, span.end)))
+    Ok((name, base_db::text_range(span.start, span.end)))
 }
 
 #[cfg(test)]
@@ -34,9 +53,22 @@ mod tests {
         let file = TestFile::new(source);
         let pos = file.position_at(9);
         let result = prepare_rename(&file, pos);
-        assert!(result.is_some(), "should be able to rename 'foo'");
+        assert!(result.is_ok(), "should be able to rename 'foo'");
         let (name, _range) = result.unwrap();
         assert_eq!(name, "foo");
+    }
+
+    /// Each refusal names its reason: the server sends the message, and a
+    /// `None` here reached the editor as a generic "cannot be renamed".
+    #[test]
+    fn prepare_rename_refuses_with_a_reason() {
+        let source = "$include \"lib.sail\"\nfunction foo(x) = x\n\n";
+        let file = TestFile::new(source);
+        let reason = |offset: usize| prepare_rename(&file, file.position_at(offset)).unwrap_err().0;
+        assert_eq!(reason(source.find("function").unwrap()), "Cannot rename a keyword");
+        assert_eq!(reason(1), "Cannot rename a pragma");
+        assert_eq!(reason(source.len() - 1), "No references found at position");
+        assert_eq!(reason(source.find('=').unwrap()), "No references found at position");
     }
 
     #[test]

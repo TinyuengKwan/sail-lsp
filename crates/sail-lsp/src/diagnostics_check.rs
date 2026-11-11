@@ -18,6 +18,17 @@ fn project(name: &str, source: &str) -> ServerFixture {
     server
 }
 
+/// Ask for something the server is expected to refuse, and get the refusal.
+fn ask_for_error(
+    server: &mut ServerFixture,
+    method: &str,
+    params: serde_json::Value,
+) -> lsp_server::ResponseError {
+    let id = server.request(method, params);
+    let response = server.wait_for_response(id);
+    response.error.unwrap_or_else(|| panic!("{method} was answered: {:?}", response.result))
+}
+
 fn with_code<'a>(
     diagnostics: &'a [lsp_types::Diagnostic],
     code: &str,
@@ -113,4 +124,49 @@ fn signature_help_carries_the_docs_and_follows_the_signature_info_settings() {
     assert_eq!(signature.label, "arg1: int, arg2: int");
     assert_eq!(signature.documentation, None);
     assert_eq!(answer.active_parameter, Some(1));
+}
+
+/// A rename the server will not do is refused with the ide's reason and the
+/// protocol's code for it, `RequestFailed` (-32803). `prepareRename` used to
+/// answer `null`, which editors show as a generic "cannot be renamed", and a
+/// refused `rename` went out as `InternalError`, which they show as a server
+/// failure.
+#[test]
+fn a_refused_rename_says_why_with_request_failed() {
+    let source = "function f(x : int) -> int = x\n\n";
+    let mut server = project("rename-refusals", source);
+    let uri = server.url("main.sail");
+    let at = |line: u32, character: u32| {
+        serde_json::json!({
+            "textDocument": {"uri": uri},
+            "position": {"line": line, "character": character},
+        })
+    };
+    let failed = lsp_server::ErrorCode::RequestFailed as i32;
+
+    let keyword = ask_for_error(&mut server, "textDocument/prepareRename", at(0, 2));
+    assert_eq!((keyword.code, keyword.message.as_str()), (failed, "Cannot rename a keyword"));
+
+    let blank = ask_for_error(&mut server, "textDocument/prepareRename", at(1, 0));
+    assert_eq!((blank.code, blank.message.as_str()), (failed, "No references found at position"));
+
+    let mut builtin = at(0, 15);
+    builtin["newName"] = serde_json::json!("integer");
+    let refused = ask_for_error(&mut server, "textDocument/rename", builtin);
+    assert_eq!(
+        (refused.code, refused.message.as_str()),
+        (failed, "Compiler builtin types cannot be renamed")
+    );
+
+    let mut to_keyword = at(0, 9);
+    to_keyword["newName"] = serde_json::json!("function");
+    let refused = ask_for_error(&mut server, "textDocument/rename", to_keyword);
+    assert_eq!(
+        (refused.code, refused.message.as_str()),
+        (failed, "Invalid name: `function` is a keyword")
+    );
+
+    // What can be renamed still is.
+    let prepared = server.ask("textDocument/prepareRename", at(0, 9));
+    assert_eq!(prepared["placeholder"], "f");
 }

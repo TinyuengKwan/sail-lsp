@@ -605,9 +605,12 @@ pub(crate) fn handle_prepare_rename(
     }
     let index = line_index_for(&snap, uri);
     let lc = crate::from_proto::line_col(&index, params.position);
-    let Some((placeholder, start, end)) = snap.analysis.prepare_rename(uri, lc)? else {
-        return Ok(None);
-    };
+    // rust-analyzer's `prepare_rename`: a refusal is an error with the ide's
+    // reason, which the editor shows in place of its generic "cannot be
+    // renamed". `RequestFailed` is the protocol's code for a well-formed
+    // request the server will not serve.
+    let (placeholder, start, end) =
+        snap.analysis.prepare_rename(uri, lc)?.map_err(rename_refused)?;
     Ok(Some(PrepareRenameResponse::RangeWithPlaceholder {
         range: Range::new(
             crate::to_proto::position_from_line_col(&index, start),
@@ -1307,6 +1310,16 @@ pub(crate) fn handle_references(
     }
 }
 
+/// rust-analyzer's `to_proto::rename_error`: the ide's reason for refusing
+/// a rename, as the error the client shows. rust-analyzer sends
+/// `InvalidParams` and notes it is wrong (LSP issue 1341); `RequestFailed`
+/// is what the protocol has since given a well-formed request the server
+/// declines.
+fn rename_refused(reason: String) -> anyhow::Error {
+    super::dispatch::RequestError { code: lsp_server::ErrorCode::RequestFailed, message: reason }
+        .into()
+}
+
 /// Rename a symbol across the workspace.
 /// name validation, then `find_name_in_text` for
 /// occurrence collection, returning results via `SourceChange`.
@@ -1322,11 +1335,14 @@ pub(crate) fn handle_rename(
     }
     let lc = crate::from_proto::line_col(&line_index_for(&snap, uri), position);
 
+    // The ide's refusal — a keyword as the new name, a builtin, a binding
+    // still in use — used to go out as `InternalError`, which editors show
+    // as a server failure. `None` is a position with nothing to rename.
     let source_change =
-        snap.analysis.rename(uri, lc, &params.new_name)?.map_err(|e| anyhow::anyhow!("{e}"))?;
-    let Some(source_change) = source_change else {
-        return Ok(None);
-    };
+        snap.analysis
+            .rename(uri, lc, &params.new_name)?
+            .map_err(rename_refused)?
+            .ok_or_else(|| rename_refused("No references found at position".to_owned()))?;
     let edit = crate::to_proto::workspace_edit(
         &source_change,
         &|fid| snap.analysis.url_for_file_id(fid).cloned(),

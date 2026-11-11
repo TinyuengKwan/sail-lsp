@@ -1719,18 +1719,20 @@ impl Analysis {
         &self,
         url: &url::Url,
         position: ide_db::LineCol,
-    ) -> crate::Cancellable<Option<(String, ide_db::LineCol, ide_db::LineCol)>> {
+    ) -> crate::Cancellable<Result<(String, ide_db::LineCol, ide_db::LineCol), String>> {
         self.with_db(|a| a.at_position(url, position).prepare_rename_inner(url, position))
     }
 
+    /// `Err` is the reason the editor shows, as `rename` already returns.
     fn prepare_rename_inner(
         &self,
         url: &url::Url,
         position: ide_db::LineCol,
-    ) -> Option<(String, ide_db::LineCol, ide_db::LineCol)> {
-        let sf = self.file(url)?;
-        let (name, range) = crate::rename::prepare_rename(&sf, position)?;
-        Some((
+    ) -> Result<(String, ide_db::LineCol, ide_db::LineCol), String> {
+        let sf = self.file(url).ok_or("No references found at position")?;
+        let (name, range) =
+            crate::rename::prepare_rename(&sf, position).map_err(|e| e.to_string())?;
+        Ok((
             name,
             sf.position_at(base_db::range_start(range)),
             sf.position_at(base_db::range_end(range)),
