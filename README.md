@@ -29,7 +29,8 @@ curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/TinyuengK
 
 The prebuilt server embeds the Sail standard library and Z3. See
 [installation](docs/installation.md) for Windows, source/offline installs,
-[editor setup](docs/installation.md#editors), remote sessions, upgrade, rollback,
+[editor setup](docs/installation.md#editors), [other editors](docs/editors.md),
+remote sessions, upgrade, rollback,
 uninstall and `sail-lsp doctor`. Existing LSP client configurations can continue
 to launch `sail-lsp` from PATH.
 

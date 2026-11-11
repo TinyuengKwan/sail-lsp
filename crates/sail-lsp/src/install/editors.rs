@@ -402,30 +402,46 @@ fn helix_change(path: PathBuf, server: &Path, old: &[Change]) -> Result<Change> 
     let languages = doc["language"]
         .as_array_of_tables_mut()
         .context("Helix language must be an array of tables")?;
-    let index = languages.iter().position(|t| t.get("name").and_then(Item::as_str) == Some("sail"));
-    let index = if let Some(index) = index {
-        index
-    } else {
-        let mut table = Table::new();
-        table["name"] = value("sail");
-        table["scope"] = value("source.sail");
-        let mut types = Array::new();
-        types.push("sail");
-        table["file-types"] = value(types);
-        let mut roots = Array::new();
-        roots.push("sail.proj");
-        roots.push(".git");
-        table["roots"] = value(roots);
-        languages.push(table);
-        languages.len() - 1
-    };
-    let language = languages.get_mut(index).unwrap();
-    let mut servers =
-        language.get("language-servers").and_then(Item::as_array).cloned().unwrap_or_default();
-    if !servers.iter().any(|v| v.as_str() == Some("sail-lsp-managed")) {
-        servers.insert(0, "sail-lsp-managed");
+    // Both languages the server speaks, as the VS Code extension declares
+    // them: Sail sources, and the project manifests the server answers
+    // completion, definition and diagnostics in. Helix matches file types
+    // by extension or by glob; a workspace root is a file name.
+    let mut manifest_types = Array::new();
+    for glob in ["*.sail_project", "sail.proj"] {
+        let mut entry = toml_edit::InlineTable::new();
+        entry.insert("glob", glob.into());
+        manifest_types.push(entry);
     }
-    language["language-servers"] = value(servers);
+    let mut source_types = Array::new();
+    source_types.push("sail");
+    for (name, scope, types) in [
+        ("sail", "source.sail", source_types),
+        ("sail-project", "source.sail-project", manifest_types),
+    ] {
+        let index =
+            languages.iter().position(|t| t.get("name").and_then(Item::as_str) == Some(name));
+        let index = if let Some(index) = index {
+            index
+        } else {
+            let mut table = Table::new();
+            table["name"] = value(name);
+            table["scope"] = value(scope);
+            table["file-types"] = value(types);
+            let mut roots = Array::new();
+            roots.push("sail.proj");
+            roots.push(".git");
+            table["roots"] = value(roots);
+            languages.push(table);
+            languages.len() - 1
+        };
+        let language = languages.get_mut(index).unwrap();
+        let mut servers =
+            language.get("language-servers").and_then(Item::as_array).cloned().unwrap_or_default();
+        if !servers.iter().any(|v| v.as_str() == Some("sail-lsp-managed")) {
+            servers.insert(0, "sail-lsp-managed");
+        }
+        language["language-servers"] = value(servers);
+    }
     Change::new(path, doc.to_string(), Kind::Helix { prior: original }, old)
 }
 pub(super) fn apply(changes: &mut [Change], vsix: Option<&mut Vsix>) -> Result<Vec<Change>> {
@@ -987,6 +1003,52 @@ mod tests {
         assert_eq!(installs(&before), 2);
         vsix.unwrap().undo();
         assert_eq!(log(&code_log), before);
+    }
+
+    /// Helix is told about both languages the server speaks — the manifests
+    /// too, which it would otherwise open as plain text with no server —
+    /// and an existing `sail` entry keeps its other servers ahead of ours.
+    #[test]
+    fn helix_gets_the_manifest_language_next_to_the_source_language() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("languages.toml");
+        fs::write(
+            &path,
+            "[[language]]\nname = \"sail\"\nscope = \"source.sail\"\nfile-types = [\"sail\"]\nlanguage-servers = [\"other\"]\n",
+        )
+        .unwrap();
+        let change = helix_change(path, Path::new("/opt/sail lsp/bin/sail-lsp"), &[]).unwrap();
+        let doc: toml_edit::DocumentMut = change.installed.parse().unwrap();
+        assert_eq!(
+            doc["language-server"]["sail-lsp-managed"]["command"].as_str(),
+            Some("/opt/sail lsp/bin/sail-lsp")
+        );
+        let languages = doc["language"].as_array_of_tables().unwrap();
+        let by_name = |name: &str| {
+            languages
+                .iter()
+                .find(|l| l["name"].as_str() == Some(name))
+                .unwrap_or_else(|| panic!("no {name} language in {}", change.installed))
+        };
+        let strings = |item: &toml_edit::Item| -> Vec<String> {
+            item.as_array()
+                .unwrap()
+                .iter()
+                .map(|v| {
+                    v.as_str()
+                        .or_else(|| v.as_inline_table()?.get("glob")?.as_str())
+                        .unwrap()
+                        .to_owned()
+                })
+                .collect()
+        };
+        let sail = by_name("sail");
+        assert_eq!(strings(&sail["language-servers"]), ["sail-lsp-managed", "other"]);
+        let manifests = by_name("sail-project");
+        assert_eq!(manifests["scope"].as_str(), Some("source.sail-project"));
+        assert_eq!(strings(&manifests["language-servers"]), ["sail-lsp-managed"]);
+        assert_eq!(strings(&manifests["file-types"]), ["*.sail_project", "sail.proj"]);
+        assert_eq!(strings(&manifests["roots"]), ["sail.proj", ".git"]);
     }
 
     #[test]

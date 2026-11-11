@@ -142,13 +142,20 @@ nonstandard layouts; it is a configuration root, not an editor executable.
   Existing separately configured Sail clients may also start; disable those if
   choosing this managed integration.
 * **Helix**: updates `languages.toml` using TOML parsing, adds a distinct
-  `sail-lsp-managed` server and puts it first in the Sail language's server list.
-  Existing servers and other languages are kept. Syntax grammars/themes are
-  independent of the server and are not installed by this command.
+  `sail-lsp-managed` server and puts it first in the server lists of the `sail`
+  language and of a `sail-project` language for `*.sail_project` and `sail.proj`
+  manifests, creating either language if absent. Existing servers and other
+  languages are kept. Syntax grammars/themes are independent of the server and
+  are not installed by this command.
 * **Emacs 29+**: writes a small Eglot configuration and adds a marked loader block
   to the existing init file. Reuses `sail-mode` / `sail-project-mode` if already
-  defined; otherwise provides basic derived modes. This supplies LSP integration,
-  not a full Sail syntax-highlighting package.
+  defined; otherwise provides basic derived modes, and defines `sail-lsp-*`
+  commands for the server's own requests. This supplies LSP integration, not a
+  full Sail syntax-highlighting package. lsp-mode users load
+  `editors/templates/emacs-lsp-mode.el` instead.
+
+Editors without a managed integration (vim-lsp, coc.nvim, nvim-lspconfig,
+Sublime Text, Kate) are covered in [other editors](editors.md).
 
 For VS Code Remote SSH run installation on the remote host, in the remote
 extension environment (the `code` CLI must target that environment). For Zed SSH
