@@ -206,6 +206,12 @@ pub trait FileDb: hir::callgraph::SourceFileInfo {
         None
     }
 
+    /// Whether `file` is in a library source root — the bundled Sail
+    /// library rather than the user's own sources.
+    fn is_library(&self, _file: base_db::FileId) -> bool {
+        false
+    }
+
     /// The scope tree of one body.
     ///
     /// Shared, because a feature that classifies every name in a file asks

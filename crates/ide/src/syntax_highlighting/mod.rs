@@ -199,6 +199,66 @@ mod tests {
         assert_eq!(param.tag, HlTag::Parameter);
         assert!(param.mods.contains(HlMod::Declaration), "{param:?}");
         assert_eq!(highlight(1, "p }").map(|h| h.tag), Some(HlTag::Parameter), "parameter use");
+        assert_eq!(highlight(0, "unit").map(|h| h.tag), Some(HlTag::BuiltinType));
+    }
+
+    /// `var` is mutable at its binding and at every use; a register is
+    /// mutable where it is written; a top-level `let` is read-only.
+    #[test]
+    fn mutation_is_marked_where_it_happens() {
+        let highlight = highlight_in(
+            "register R : int\nlet c = 1\nfunction f() -> int = { var x = c; x = x + 1; R = x; R.bits = 0; R + x }\n",
+            0,
+        );
+        let mutable = |line, needle| highlight(line, needle).unwrap().mods.contains(HlMod::Mutable);
+        assert!(mutable(2, "x = c"), "the var binding");
+        assert!(mutable(2, "x = x + 1"), "a write to it");
+        assert!(mutable(2, "x + 1"), "a read of it");
+        assert!(mutable(2, "x }"), "every mention of a var");
+        assert!(mutable(2, "R = x"), "a register written");
+        assert!(mutable(2, "R.bits"), "a register field written");
+        assert_eq!(highlight(2, "x }").unwrap().tag, HlTag::Variable, "the x of `R + x`");
+        assert!(!mutable(2, "R + x"), "a register read");
+        let register_read = highlight(0, "R").unwrap();
+        assert!(!register_read.mods.contains(HlMod::Mutable), "a register declared, not written");
+        assert!(register_read.mods.contains(HlMod::Static));
+        let constant = highlight(2, "c;").unwrap();
+        assert!(constant.mods.contains(HlMod::Readonly), "{constant:?}");
+        assert!(!constant.mods.contains(HlMod::Mutable));
+    }
+
+    /// Doc comments carry `documentation`; comments, attributes and
+    /// escapes are classified; punctuation is; a name from the bundled
+    /// library is `defaultLibrary`.
+    #[test]
+    fn comments_attributes_escapes_and_library_names_are_classified() {
+        let highlight = highlight_in(
+            "//- prelude\n//- /main.sail\ndefault Order dec\n$include <prelude.sail>\n\
+             /// documented\n// plain\n/* block\n   comment */\n\
+             $[name { xs = [\"a\"] }]\nfunction f(x : bits(8)) -> int = { print(\"a\\n\\x41b\"); unsigned(x) }\n",
+            0,
+        );
+        assert_eq!(highlight(2, "/// documented"), Some(HlTag::Comment | HlMod::Documentation));
+        assert_eq!(highlight(3, "// plain"), Some(HlTag::Comment.into()));
+        assert_eq!(highlight(4, "/* block"), Some(HlTag::Comment.into()));
+        assert_eq!(highlight(5, "   comment */"), Some(HlTag::Comment.into()), "a second line");
+        assert_eq!(highlight(6, "$[name"), Some(HlTag::Attribute.into()));
+        assert_eq!(highlight(6, "xs"), None, "the attribute is one token");
+        assert_eq!(highlight(7, "\"a"), Some(HlTag::StringLiteral.into()));
+        assert_eq!(highlight(7, "\\n"), Some(HlTag::EscapeSequence.into()));
+        assert_eq!(highlight(7, "\\x41"), Some(HlTag::EscapeSequence.into()));
+        assert_eq!(highlight(7, "b\""), Some(HlTag::StringLiteral.into()), "the piece after");
+        assert_eq!(highlight(7, "("), Some(HlTag::Punctuation.into()));
+        assert_eq!(
+            highlight(7, "bits"),
+            Some(HlTag::Type | HlMod::DefaultLibrary),
+            "the prelude's `type bits`, not the builtin"
+        );
+        let library = highlight(7, "unsigned").unwrap();
+        assert_eq!(library.tag, HlTag::Function);
+        assert!(library.mods.contains(HlMod::DefaultLibrary), "{library:?}");
+        let own = highlight(7, "f(").unwrap();
+        assert!(!own.mods.contains(HlMod::DefaultLibrary), "{own:?}");
     }
 
     #[test]

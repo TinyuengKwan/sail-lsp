@@ -404,6 +404,14 @@ impl<'a> FileDb for SalsaFile<'a> {
         bodies.as_ref().map(|b| b.0.as_ref())
     }
 
+    fn is_library(&self, file: base_db::FileId) -> bool {
+        use base_db::SourceDatabase as _;
+        self.db
+            .source_root_id_of(file)
+            .and_then(|root| self.db.source_root_data(root))
+            .is_some_and(|root| root.is_library)
+    }
+
     fn body_scopes(&self, callable: &hir::CallableBody) -> std::rc::Rc<hir::ExprScopes> {
         self.body_scopes
             .borrow_mut()

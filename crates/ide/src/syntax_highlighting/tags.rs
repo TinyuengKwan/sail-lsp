@@ -28,6 +28,13 @@ pub enum HlTag {
     Comment,
     Register,
     Parameter,
+    /// `int`, `bits`, `bool`, ... — a type the language supplies.
+    BuiltinType,
+    /// A `$[...]` attribute.
+    Attribute,
+    /// A `\n`-style escape inside a string literal.
+    EscapeSequence,
+    Punctuation,
 }
 
 /// A modifier on a highlighted range. The discriminant is the bit it
@@ -39,16 +46,19 @@ pub enum HlMod {
     Declaration = 0,
     /// The range declares *and* defines its name — not a `val` signature.
     Definition,
-    /// A `let` binding.
+    /// A top-level `let`: a constant.
     Readonly,
-    /// A `var` binding, or a write.
-    Modification,
     /// A doc comment.
     Documentation,
     /// A register: process-wide state.
     Static,
     /// `if`, `match`, `return`, ...
     ControlFlow,
+    /// Defined in the Sail library rather than in the user's sources.
+    DefaultLibrary,
+    /// A `var` binding, at every mention, and a register where it is
+    /// written.
+    Mutable,
 }
 
 impl HlMod {
@@ -56,10 +66,11 @@ impl HlMod {
         HlMod::Declaration,
         HlMod::Definition,
         HlMod::Readonly,
-        HlMod::Modification,
         HlMod::Documentation,
         HlMod::Static,
         HlMod::ControlFlow,
+        HlMod::DefaultLibrary,
+        HlMod::Mutable,
     ];
 
     fn mask(self) -> u32 {
@@ -157,6 +168,16 @@ pub(super) fn token_tag(token: &parser::Token, previous: Option<&parser::Token>)
         | parser::Token::Real(_)
         | parser::Token::Bin(_)
         | parser::Token::Hex(_) => HlTag::NumericLiteral,
+        parser::Token::LeftBracket
+        | parser::Token::RightBracket
+        | parser::Token::LeftSquareBracket
+        | parser::Token::RightSquareBracket
+        | parser::Token::LeftCurlyBracket
+        | parser::Token::RightCurlyBracket
+        | parser::Token::Comma
+        | parser::Token::Colon
+        | parser::Token::Semicolon
+        | parser::Token::Dot => HlTag::Punctuation,
         _ if token_is_keyword(token) => HlTag::Keyword,
         _ if matches!(
             token,

@@ -60,6 +60,10 @@ define_semantic_token_types![
 
     custom {
         (REGISTER, "register"),
+        (BUILTIN_TYPE, "builtinType"),
+        (ATTRIBUTE, "attribute"),
+        (ESCAPE_SEQUENCE, "escapeSequence"),
+        (PUNCTUATION, "punctuation"),
     }
 ];
 
@@ -90,12 +94,13 @@ define_semantic_token_modifiers![
         DECLARATION,
         DEFINITION,
         READONLY,
-        MODIFICATION,
         DOCUMENTATION,
         STATIC,
+        DEFAULT_LIBRARY,
     }
     custom {
         (CONTROL_FLOW, "controlFlow"),
+        (MUTABLE, "mutable"),
     }
 ];
 

@@ -850,16 +850,21 @@ fn semantic_token_type_and_modifiers(
         HlTag::Comment => semantic_tokens::COMMENT,
         HlTag::Register => semantic_tokens::REGISTER,
         HlTag::Parameter => semantic_tokens::PARAMETER,
+        HlTag::BuiltinType => semantic_tokens::BUILTIN_TYPE,
+        HlTag::Attribute => semantic_tokens::ATTRIBUTE,
+        HlTag::EscapeSequence => semantic_tokens::ESCAPE_SEQUENCE,
+        HlTag::Punctuation => semantic_tokens::PUNCTUATION,
     };
     for modifier in highlight.mods.iter() {
         mods |= match modifier {
             HlMod::Declaration => semantic_tokens::DECLARATION,
             HlMod::Definition => semantic_tokens::DEFINITION,
             HlMod::Readonly => semantic_tokens::READONLY,
-            HlMod::Modification => semantic_tokens::MODIFICATION,
             HlMod::Documentation => semantic_tokens::DOCUMENTATION,
             HlMod::Static => semantic_tokens::STATIC,
             HlMod::ControlFlow => semantic_tokens::CONTROL_FLOW,
+            HlMod::DefaultLibrary => semantic_tokens::DEFAULT_LIBRARY,
+            HlMod::Mutable => semantic_tokens::MUTABLE,
         };
     }
     (ty, mods)

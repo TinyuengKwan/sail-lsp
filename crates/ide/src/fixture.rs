@@ -152,6 +152,16 @@ fn analysis_inner(fixture: &str, project: bool) -> (Analysis, Vec<(FileId, Strin
         let fid = vfs.file_id_for_url(url);
         change.change_file(fid, text.clone());
     }
+    // The prelude is a library root, as the server classifies the bundled
+    // `sail-lib`: what `FileDb::is_library` answers.
+    let mut local = base_db::SourceRoot::new_local(base_db::FileSet::default());
+    let mut library = base_db::SourceRoot::new_library(base_db::FileSet::default());
+    for (i, url) in urls.iter().enumerate() {
+        let fid = vfs.lookup_file_id_by_url(url).unwrap();
+        let root = if i < fixture_start { &mut library } else { &mut local };
+        root.insert(fid, vfs.file_path(fid).clone());
+    }
+    change.set_roots(vec![local, library]);
     if project {
         let roots: Vec<_> =
             urls[fixture_start..].iter().map(|u| vfs.lookup_file_id_by_url(u).unwrap()).collect();
