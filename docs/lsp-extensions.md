@@ -1,5 +1,5 @@
 <!---
-lsp/ext.rs hash: 1d664f522ab33f64
+lsp/ext.rs hash: 4740a6f4122508d3
 
 If you need to change the above hash to make the test
 `lsp_extensions_doc_is_current_with_ext_rs` pass, please check whether this
@@ -580,6 +580,44 @@ starts and again when its model lands, unregistering the previous
 registration first. A client with `relativePatternSupport` gets
 `RelativePattern`s, others absolute globs; one without dynamic registration
 is watched for by the server itself.
+
+## Semantic Tokens
+
+Not an extension either, but the legend is this server's own. The
+`semanticTokensProvider` capability (`ext.rs::semantic_tokens_options`) is
+built from the legend declared in `crates/sail-lsp/src/lsp/semantic_tokens.rs`
+with `define_semantic_token_types!` / `define_semantic_token_modifiers!`, as
+rust-analyzer declares its own: LSP's standard words first, then this server's.
+`full`, `full/delta` and `range` are all supported.
+
+Custom token types, each with the standard type it refines (its `superType`
+in the VS Code extension's `semanticTokenTypes`, and the server's fallback):
+
+| Type | Fallback | Meaning |
+|------|----------|---------|
+| `register` | `variable` | A `register`, at its declaration and every use; always `static`, `mutable` where written |
+| `builtinType` | `type` | `bits`, `unit`, `bool`, ... when not shadowed by a library `type` |
+| `attribute` | `decorator` | A `$[..]` attribute, as one token |
+| `escapeSequence` | `string` | `\n`, `\xHH`, `\DDD` inside a string literal; the literal is cut around each |
+| `punctuation` | — | Brackets, commas, semicolons, colons, dots; dropped for a standard-only client |
+
+Custom modifiers: `controlFlow` (on `if`, `match`, `return`, ... keywords)
+and `mutable` (a `var` binding at every mention; a register where it is
+written). Standard modifiers sent: `declaration`, `definition`, `readonly` (a
+top-level `let`), `documentation` (`///` comments), `static` (registers),
+`defaultLibrary` (a name whose definition is in a library source root — the
+bundled `sail-lib`).
+
+Which classes are sent is configuration, not capability: `semanticTokens.strings`,
+`.operators`, `.punctuation` (off by default) and `.nonStandardTokens`. With
+`nonStandardTokens` off, each custom type goes out as its fallback — or not at
+all when it has none — and the custom modifiers are cleared, so a client that
+knows only LSP's legend still colours everything it can
+(`to_proto::semantic_tokens`). The VS Code extension maps every type and the
+`type.modifier` pairs that matter onto the TextMate grammar's scopes in
+`semanticTokenScopes`, and `editors/code/src/test/semanticTokens.test.ts`
+checks the legend and those contributions against each other. **Editors:**
+VS Code (`package.json`).
 
 ## Cancel Request
 
