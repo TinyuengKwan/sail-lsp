@@ -8,22 +8,28 @@
 //! knows, which is why `HoverFilePosition` exists beside `ide::FilePosition`
 //! and why `CompletionItem` was defined twice.
 
-/// A single semantic token (delta-encoded, framework-independent).
+use super::tags::Highlight;
+
+/// A highlighted range: one line of one token, and what it is.
 ///
-/// Replaces `lsp_types::SemanticToken`. Same fields — the LSP
-/// protocol defines the encoding, not the framework.
+/// rust-analyzer's `HlRange` is a `TextRange` and a `Highlight`; the
+/// protocol's delta encoding and legend indices are the server's business
+/// (`lsp/to_proto.rs`). This used to be the wire format itself — five
+/// `u32`s with the legend baked into two of them — so the server could
+/// neither drop a class of token nor substitute a standard type for a
+/// custom one without knowing which number meant what.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HlRange {
-    pub delta_line: u32,
-    pub delta_start: u32,
+    /// 0-based line.
+    pub line: u32,
+    /// 0-based UTF-8 byte column.
+    pub col: u32,
+    /// Length in bytes; never crosses a line.
     pub length: u32,
-    pub token_type: u32,
-    pub token_modifiers_bitset: u32,
+    pub highlight: Highlight,
 }
 
-/// A batch of semantic tokens.
-///
-/// Replaces `lsp_types::SemanticTokens`.
+/// The highlighted ranges of a file, in position order.
 ///
 /// It used to carry a `result_id` and be accompanied by `HlRangesDelta`
 /// and `HlRangesEdit`, for a `compute_semantic_tokens_delta` that nothing
@@ -32,36 +38,22 @@ pub struct HlRange {
 /// `lsp/semantic_tokens.rs::SemanticTokensCache` is where it is computed,
 /// which is where rust-analyzer computes it too (`diff_tokens`). The
 /// result id it hands the client is its own.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct HlRanges {
     pub data: Vec<HlRange>,
 }
 
 impl HlRanges {
-    /// Union active source views before re-encoding LSP deltas. A token
-    /// present in multiple views is emitted once, using the first active
-    /// view's classification, just like read-only position requests.
+    /// Union active source views. A token present in multiple views is
+    /// emitted once, using the first active view's classification, just
+    /// like read-only position requests.
     pub(crate) fn merge(views: impl IntoIterator<Item = Self>) -> Self {
         let mut tokens = std::collections::BTreeMap::new();
         for view in views {
-            let (mut line, mut col) = (0, 0);
             for token in view.data {
-                line += token.delta_line;
-                col =
-                    if token.delta_line == 0 { col + token.delta_start } else { token.delta_start };
-                tokens.entry((line, col)).or_insert(token);
+                tokens.entry((token.line, token.col)).or_insert(token);
             }
         }
-        let (mut previous_line, mut previous_col) = (0, 0);
-        let data = tokens
-            .into_iter()
-            .map(|((line, col), mut token)| {
-                token.delta_line = line - previous_line;
-                token.delta_start = if line == previous_line { col - previous_col } else { col };
-                (previous_line, previous_col) = (line, col);
-                token
-            })
-            .collect();
-        Self { data }
+        Self { data: tokens.into_values().collect() }
     }
 }

@@ -1,14 +1,173 @@
-//! Semantic token caching for delta requests.
-//! RA caches the last computed `SemanticTokens` per-file in
-//! `Arc<Mutex<FxHashMap<Url, SemanticTokens>>>`. When the client sends
-//! `textDocument/semanticTokens/full/delta` with a `previousResultId`,
-//! we compare the cached tokens with the freshly computed ones and
-//! return only the diff (edits).
+//! Semantic tokens: the legend, the wire encoding, and the per-file cache
+//! that delta requests diff against.
+//!
+//! rust-analyzer's `lsp/semantic_tokens.rs`. The legend is declared here
+//! and nowhere else: `ide` says what a range *is* (`HlTag`, `HlMod`) and
+//! this module says which index that is on the wire, and which of those
+//! words are LSP's own and which are this server's.
+//!
+//! The cache: RA keeps the last computed `SemanticTokens` per file. When
+//! the client sends `textDocument/semanticTokens/full/delta` with a
+//! `previousResultId`, the cached tokens are compared with the freshly
+//! computed ones and only the diff (edits) goes back.
 
 use std::sync::{Arc, Mutex};
 
-use lsp_types::{SemanticToken, SemanticTokens, SemanticTokensEdit};
+use lsp_types::{
+    Position, Range, SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokens,
+    SemanticTokensEdit,
+};
 use rustc_hash::FxHashMap;
+
+macro_rules! define_semantic_token_types {
+    (
+        standard {
+            $($standard:ident),*$(,)?
+        }
+        custom {
+            $(($custom:ident, $string:literal)),*$(,)?
+        }
+
+    ) => {
+        $(pub(crate) const $standard: SemanticTokenType = SemanticTokenType::$standard;)*
+        $(pub(crate) const $custom: SemanticTokenType = SemanticTokenType::new($string);)*
+
+        /// The token type legend, standard types first.
+        pub(crate) const SUPPORTED_TYPES: &[SemanticTokenType] = &[
+            $(SemanticTokenType::$standard,)*
+            $($custom),*
+        ];
+    };
+}
+
+define_semantic_token_types![
+    standard {
+        KEYWORD,
+        FUNCTION,
+        TYPE,
+        ENUM,
+        VARIABLE,
+        TYPE_PARAMETER,
+        STRING,
+        NUMBER,
+        OPERATOR,
+        STRUCT,
+        ENUM_MEMBER,
+        PROPERTY,
+        COMMENT,
+    }
+
+    custom {
+        (REGISTER, "register"),
+    }
+];
+
+macro_rules! define_semantic_token_modifiers {
+    (
+        standard {
+            $($standard:ident),*$(,)?
+        }
+        custom {
+            $(($custom:ident, $string:literal)),*$(,)?
+        }
+
+    ) => {
+
+        $(pub(crate) const $standard: SemanticTokenModifier = SemanticTokenModifier::$standard;)*
+        $(pub(crate) const $custom: SemanticTokenModifier = SemanticTokenModifier::new($string);)*
+
+        /// The modifier legend, standard modifiers first.
+        pub(crate) const SUPPORTED_MODIFIERS: &[SemanticTokenModifier] = &[
+            $(SemanticTokenModifier::$standard,)*
+            $($custom),*
+        ];
+    };
+}
+
+define_semantic_token_modifiers![
+    standard {
+        DECLARATION,
+        DEFINITION,
+        READONLY,
+        MODIFICATION,
+        DOCUMENTATION,
+        STATIC,
+    }
+    custom {
+        (CONTROL_FLOW, "controlFlow"),
+    }
+];
+
+/// A set of modifiers as the legend's bitset.
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ModifierSet(pub(crate) u32);
+
+impl std::ops::BitOrAssign<SemanticTokenModifier> for ModifierSet {
+    fn bitor_assign(&mut self, rhs: SemanticTokenModifier) {
+        let idx = SUPPORTED_MODIFIERS.iter().position(|it| it == &rhs).unwrap();
+        self.0 |= 1 << idx;
+    }
+}
+
+/// The legend index of a token type.
+pub(crate) fn type_index(ty: SemanticTokenType) -> u32 {
+    SUPPORTED_TYPES.iter().position(|it| *it == ty).unwrap() as u32
+}
+
+/// Delta-encodes tokens, as the protocol wants them.
+///
+/// rust-analyzer's `SemanticTokensBuilder`. Tokens are pushed in position
+/// order; a token must not cross a line.
+#[derive(Default)]
+pub(crate) struct SemanticTokensBuilder {
+    prev_line: u32,
+    prev_char: u32,
+    data: Vec<SemanticToken>,
+}
+
+impl SemanticTokensBuilder {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Push a new token onto the builder.
+    pub(crate) fn push(&mut self, range: Range, token_index: u32, modifier_bitset: u32) {
+        let mut push_line = range.start.line;
+        let mut push_char = range.start.character;
+
+        if !self.data.is_empty() {
+            push_line -= self.prev_line;
+            if push_line == 0 {
+                push_char -= self.prev_char;
+            }
+        }
+
+        // A token cannot be multiline
+        let token_len = range.end.character - range.start.character;
+
+        let token = SemanticToken {
+            delta_line: push_line,
+            delta_start: push_char,
+            length: token_len,
+            token_type: token_index,
+            token_modifiers_bitset: modifier_bitset,
+        };
+
+        self.data.push(token);
+
+        self.prev_line = range.start.line;
+        self.prev_char = range.start.character;
+    }
+
+    pub(crate) fn build(self) -> Vec<SemanticToken> {
+        self.data
+    }
+}
+
+/// `line:col` to `line:col + length`, for the builder.
+pub(crate) fn token_range(line: u32, col: u32, length: u32) -> Range {
+    Range::new(Position::new(line, col), Position::new(line, col + length))
+}
 
 /// Per-file semantic token cache.
 ///

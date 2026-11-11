@@ -5,7 +5,7 @@
 
 use ide::hover::HoverResult;
 use ide::inlay_hints::{InlayHint, InlayHintKind};
-use ide::syntax_highlighting::{HlRange, HlRanges};
+use ide::syntax_highlighting::{Highlight, HlMod, HlRanges, HlTag};
 use ide::CompletionItem;
 use ide::NavigationTarget;
 use ide_db::defs::CompletionItemKind;
@@ -809,24 +809,59 @@ pub fn inlay_hint(
     }
 }
 
-pub fn semantic_token(t: &HlRange) -> lsp_types::SemanticToken {
-    lsp_types::SemanticToken {
-        delta_line: t.delta_line,
-        delta_start: t.delta_start,
-        length: t.length,
-        token_type: t.token_type,
-        token_modifiers_bitset: t.token_modifiers_bitset,
+use crate::lsp::semantic_tokens;
+
+/// The tokens as the protocol wants them: legend indices, delta-encoded.
+///
+/// rust-analyzer's `to_proto::semantic_tokens`. The result id is not set
+/// here: it is what the *client* quotes back to ask for a delta, so it has
+/// to be one this server issued and remembers — `SemanticTokensCache`
+/// hands those out.
+pub fn semantic_tokens(ranges: &HlRanges) -> Vec<lsp_types::SemanticToken> {
+    let mut builder = semantic_tokens::SemanticTokensBuilder::new();
+    for range in &ranges.data {
+        let (ty, mods) = semantic_token_type_and_modifiers(range.highlight);
+        builder.push(
+            semantic_tokens::token_range(range.line, range.col, range.length),
+            semantic_tokens::type_index(ty),
+            mods.0,
+        );
     }
+    builder.build()
 }
 
-/// The tokens as the protocol wants them, with no result id.
-///
-/// A result id is what the *client* quotes back to ask for a delta, so it
-/// has to be one this server issued and remembers — `SemanticTokensCache`
-/// hands those out. `ide` used to mint one from the file's length and the
-/// token count, which the cache then ignored.
-pub fn semantic_tokens(t: &HlRanges) -> lsp_types::SemanticTokens {
-    lsp_types::SemanticTokens { result_id: None, data: t.data.iter().map(semantic_token).collect() }
+fn semantic_token_type_and_modifiers(
+    highlight: Highlight,
+) -> (lsp_types::SemanticTokenType, semantic_tokens::ModifierSet) {
+    let mut mods = semantic_tokens::ModifierSet::default();
+    let ty = match highlight.tag {
+        HlTag::Keyword => semantic_tokens::KEYWORD,
+        HlTag::Function => semantic_tokens::FUNCTION,
+        HlTag::Type => semantic_tokens::TYPE,
+        HlTag::Enum => semantic_tokens::ENUM,
+        HlTag::Variable => semantic_tokens::VARIABLE,
+        HlTag::TypeParameter => semantic_tokens::TYPE_PARAMETER,
+        HlTag::StringLiteral => semantic_tokens::STRING,
+        HlTag::NumericLiteral => semantic_tokens::NUMBER,
+        HlTag::Operator => semantic_tokens::OPERATOR,
+        HlTag::Struct => semantic_tokens::STRUCT,
+        HlTag::EnumMember => semantic_tokens::ENUM_MEMBER,
+        HlTag::Property => semantic_tokens::PROPERTY,
+        HlTag::Comment => semantic_tokens::COMMENT,
+        HlTag::Register => semantic_tokens::REGISTER,
+    };
+    for modifier in highlight.mods.iter() {
+        mods |= match modifier {
+            HlMod::Declaration => semantic_tokens::DECLARATION,
+            HlMod::Definition => semantic_tokens::DEFINITION,
+            HlMod::Readonly => semantic_tokens::READONLY,
+            HlMod::Modification => semantic_tokens::MODIFICATION,
+            HlMod::Documentation => semantic_tokens::DOCUMENTATION,
+            HlMod::Static => semantic_tokens::STATIC,
+            HlMod::ControlFlow => semantic_tokens::CONTROL_FLOW,
+        };
+    }
+    (ty, mods)
 }
 
 /// A fold, as the protocol wants it.

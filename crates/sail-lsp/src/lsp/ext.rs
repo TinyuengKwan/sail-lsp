@@ -25,24 +25,20 @@ pub fn lsp_symbol_kind(kind: ide_db::ide_types::SymbolKind) -> lsp_types::Symbol
     }
 }
 
-/// Build the SemanticTokensOptions from the ide token/modifier legends.
+/// Build the SemanticTokensOptions from the legend in `semantic_tokens`.
 /// This is LSP-protocol metadata, so it lives in the binary crate.
 pub fn semantic_tokens_options() -> lsp_types::SemanticTokensOptions {
     use lsp_types::{
-        SemanticTokenModifier, SemanticTokenType, SemanticTokensFullOptions, SemanticTokensLegend,
-        SemanticTokensOptions, WorkDoneProgressOptions,
+        SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions,
+        WorkDoneProgressOptions,
     };
-
-    let token_types: Vec<SemanticTokenType> =
-        ide::syntax_highlighting::TOKEN_TYPES.iter().map(|s| SemanticTokenType::new(s)).collect();
-    let token_modifiers: Vec<SemanticTokenModifier> = ide::syntax_highlighting::TOKEN_MODIFIERS
-        .iter()
-        .map(|s| SemanticTokenModifier::new(s))
-        .collect();
 
     SemanticTokensOptions {
         work_done_progress_options: WorkDoneProgressOptions { work_done_progress: Some(false) },
-        legend: SemanticTokensLegend { token_types, token_modifiers },
+        legend: SemanticTokensLegend {
+            token_types: super::semantic_tokens::SUPPORTED_TYPES.to_vec(),
+            token_modifiers: super::semantic_tokens::SUPPORTED_MODIFIERS.to_vec(),
+        },
         range: Some(true),
         full: Some(SemanticTokensFullOptions::Delta { delta: Some(true) }),
     }

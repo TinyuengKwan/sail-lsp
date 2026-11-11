@@ -305,7 +305,10 @@ pub(crate) fn handle_semantic_tokens_range(
     let Some(tokens) = snap.analysis.semantic_tokens_range(uri, range)? else {
         return Ok(None);
     };
-    Ok(Some(SemanticTokensRangeResult::Tokens(crate::to_proto::semantic_tokens(&tokens))))
+    Ok(Some(SemanticTokensRangeResult::Tokens(lsp_types::SemanticTokens {
+        result_id: None,
+        data: crate::to_proto::semantic_tokens(&tokens),
+    })))
 }
 
 /// Document highlight — highlight related symbols and keywords.
@@ -370,8 +373,7 @@ pub(crate) fn handle_semantic_tokens_full(
     let ide_tokens = snap.analysis.semantic_tokens(file_id)?;
 
     // Convert to LSP tokens and cache for delta requests.
-    let lsp_tokens: Vec<lsp_types::SemanticToken> =
-        ide_tokens.data.iter().map(crate::to_proto::semantic_token).collect();
+    let lsp_tokens = crate::to_proto::semantic_tokens(&ide_tokens);
     let cached = snap.semantic_tokens_cache.cache_full(uri, lsp_tokens);
     Ok(Some(SemanticTokensResult::Tokens(cached)))
 }
@@ -636,8 +638,7 @@ pub(crate) fn handle_semantic_tokens_full_delta(
     let ide_tokens = snap.analysis.semantic_tokens(file_id)?;
 
     // Convert to LSP tokens.
-    let new_tokens: Vec<lsp_types::SemanticToken> =
-        ide_tokens.data.iter().map(crate::to_proto::semantic_token).collect();
+    let new_tokens = crate::to_proto::semantic_tokens(&ide_tokens);
 
     // Try to compute delta from cached tokens.
     if let Some(delta) =

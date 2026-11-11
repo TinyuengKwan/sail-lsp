@@ -1,40 +1,40 @@
 //! Core highlighting algorithm.
 
-use super::tags::token_type_index;
+use super::tags::token_tag;
 use super::*;
 use hir::DefKind;
 
-/// Build a name → token type index map from ItemTree for type-driven classification.
-///
-/// resolves identifiers to `SymbolKind` for accurate coloring.
+/// Build a name → tag map from ItemTree for type-driven classification.
 ///
 /// This lets us classify identifier references (not just declarations) correctly,
 /// distinguishing structs from type aliases, enum members from enum types,
 /// registers from local variables, etc.
 pub(super) fn build_name_classification(
     file: &dyn FileDb,
-) -> std::collections::HashMap<String, u32> {
+) -> std::collections::HashMap<String, HlTag> {
     let mut map = std::collections::HashMap::new();
     let Some(item_tree) = file.item_tree() else {
         return map;
     };
     for &id in item_tree.top_level_items() {
         let kind = id.def_kind(item_tree);
-        let idx = match kind {
-            DefKind::Function | DefKind::Mapping | DefKind::ValSpec | DefKind::MappingSpec => 1, // function
-            DefKind::TypeAlias | DefKind::Newtype => 2, // type
-            DefKind::Struct => 9,                       // struct (new)
-            DefKind::Union => 2,                        // union → type
-            DefKind::Bitfield => 9,                     // bitfield → struct (visually similar)
-            DefKind::Enum => 3,                         // enum type name
-            DefKind::Register => 13,                    // register → macro (distinct color)
-            DefKind::Let => 4,                          // let → variable
-            DefKind::Var => 4,                          // var → variable
+        let tag = match kind {
+            DefKind::Function | DefKind::Mapping | DefKind::ValSpec | DefKind::MappingSpec => {
+                HlTag::Function
+            }
+            DefKind::TypeAlias | DefKind::Newtype => HlTag::Type,
+            DefKind::Struct => HlTag::Struct,
+            DefKind::Union => HlTag::Type,
+            DefKind::Bitfield => HlTag::Struct,
+            DefKind::Enum => HlTag::Enum,
+            DefKind::Register => HlTag::Register,
+            DefKind::Let => HlTag::Variable,
+            DefKind::Var => HlTag::Variable,
             _ => continue,
         };
-        map.insert(id.name(item_tree).as_str().to_string(), idx);
+        map.insert(id.name(item_tree).as_str().to_string(), tag);
     }
-    // Also classify enum members as enumMember (index 10).
+    // Also classify enum members as enumMember.
     // ItemTree entries record enum type names; we need to look at
     // the signature text for member names.
     for &id in item_tree.top_level_items() {
@@ -47,7 +47,7 @@ pub(super) fn build_name_classification(
                     for member in inner.split(',') {
                         let name = member.trim();
                         if !name.is_empty() {
-                            map.insert(name.to_string(), 10); // enumMember
+                            map.insert(name.to_string(), HlTag::EnumMember);
                         }
                     }
                 }
@@ -62,9 +62,6 @@ pub(super) fn compute_semantic_tokens_filtered(
     range: Option<&TextRange>,
 ) -> HlRanges {
     let mut result = Vec::<HlRange>::new();
-    let mut prev_line = 0_u32;
-    let mut prev_start = 0_u32;
-    let mut first = true;
 
     // The lexer is shared by all include instances, but inactive regions must
     // not contribute semantic classifications to the displayed document.
@@ -109,29 +106,16 @@ pub(super) fn compute_semantic_tokens_filtered(
     let mut prev_token: Option<&parser::Token> = None;
     for (token, span) in tokens {
         // Use ItemTree-driven classification for identifiers at reference positions
-        let tt = if let parser::Token::Id(name) = token {
-            if let Some(&cls) = name_classes.get(name.as_str()) {
-                // What the item tree says the name is, at its declaration
-                // and at every use alike.
-                cls
-            } else {
-                // Unknown name — fall back to syntactic classification
-                match token_type_index(token, prev_token) {
-                    Some(t) => t,
-                    None => {
-                        prev_token = Some(token);
-                        continue;
-                    }
-                }
-            }
-        } else {
-            match token_type_index(token, prev_token) {
-                Some(t) => t,
-                None => {
-                    prev_token = Some(token);
-                    continue;
-                }
-            }
+        let tag = match token {
+            // What the item tree says the name is, at its declaration and
+            // at every use alike; else the syntactic classification.
+            parser::Token::Id(name) => name_classes.get(name.as_str()).copied(),
+            _ => None,
+        }
+        .or_else(|| token_tag(token, prev_token));
+        let Some(tag) = tag else {
+            prev_token = Some(token);
+            continue;
         };
         let start_lc = file.position_at(span.start);
         let end_lc = file.position_at(span.end);
@@ -147,16 +131,6 @@ pub(super) fn compute_semantic_tokens_filtered(
             }
         }
 
-        let delta_line = if first { start_lc.line } else { start_lc.line - prev_line };
-        let delta_start = if first {
-            start_lc.col
-        } else if delta_line == 0 {
-            start_lc.col - prev_start
-        } else {
-            start_lc.col
-        };
-
-        // Use ParsedFile occurrence roles for accurate modifiers.
         // Falls back to the preceding keyword for names the item tree has
         // no entry for — a local binding, a parameter.
         let is_ident = matches!(token, parser::Token::Id(_));
@@ -178,10 +152,6 @@ pub(super) fn compute_semantic_tokens_filtered(
                     | Some(parser::Token::KwNewtype)
                     | Some(parser::Token::KwScattered)
             );
-        let is_definition = is_ident && defining_spans.contains(&span.start);
-        let is_mutable = matches!(prev_token, Some(parser::Token::KwVar));
-        let is_readonly = matches!(prev_token, Some(parser::Token::KwLet));
-        let is_register = tt == 13; // register type index
         let is_control_flow = matches!(
             token,
             parser::Token::KwIf
@@ -197,36 +167,32 @@ pub(super) fn compute_semantic_tokens_filtered(
                 | parser::Token::KwCatch
                 | parser::Token::KwExit
         );
-        let mut modifier = 0u32;
-        if is_decl && matches!(token, parser::Token::Id(_)) {
-            modifier |= 1;
-        } // bit 0: declaration
-        if is_definition {
-            modifier |= 2;
-        } // bit 1: definition
-        if is_readonly {
-            modifier |= 4;
-        } // bit 2: readonly
-        if is_mutable {
-            modifier |= 8;
-        } // bit 3: modification
-        if is_register {
-            modifier |= 32;
-        } // bit 5: static (for registers)
+        let mut highlight = Highlight::new(tag);
+        if is_decl && is_ident {
+            highlight |= HlMod::Declaration;
+        }
+        if is_ident && defining_spans.contains(&span.start) {
+            highlight |= HlMod::Definition;
+        }
+        if matches!(prev_token, Some(parser::Token::KwLet)) {
+            highlight |= HlMod::Readonly;
+        }
+        if matches!(prev_token, Some(parser::Token::KwVar)) {
+            highlight |= HlMod::Modification;
+        }
+        if tag == HlTag::Register {
+            highlight |= HlMod::Static;
+        }
         if is_control_flow {
-            modifier |= 64;
-        } // bit 6: controlFlow
+            highlight |= HlMod::ControlFlow;
+        }
 
         result.push(HlRange {
-            delta_line,
-            delta_start,
+            line: start_lc.line,
+            col: start_lc.col,
             length: end_lc.col - start_lc.col,
-            token_type: tt,
-            token_modifiers_bitset: modifier,
+            highlight,
         });
-        first = false;
-        prev_line = start_lc.line;
-        prev_start = start_lc.col;
         prev_token = Some(token);
     }
 

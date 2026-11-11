@@ -3,43 +3,10 @@ pub use types::*;
 mod highlight;
 pub mod html;
 mod tags;
+pub use tags::{Highlight, HlMod, HlMods, HlTag};
 
 use ide_db::line_index::TextRange;
 use ide_db::FileDb;
-
-/// The token type legend (indices into this array are used in `HlRange::token_type`).
-///
-/// Extended for Sail-specific categories: register, enumMember, property,
-/// struct, comment, builtinType.
-pub const TOKEN_TYPES: &[&str] = &[
-    "keyword",       // 0
-    "function",      // 1
-    "type",          // 2
-    "enum",          // 3
-    "variable",      // 4
-    "typeParameter", // 5
-    "string",        // 6
-    "number",        // 7
-    "operator",      // 8
-    "struct",        // 9
-    "enumMember",    // 10
-    "property",      // 11
-    "comment",       // 12
-    "macro",         // 13 — reused for register (distinct color)
-];
-
-/// The modifier legend (bit indices into `HlRange::token_modifiers_bitset`).
-///
-/// Extended for Sail-specific modifiers.
-pub const TOKEN_MODIFIERS: &[&str] = &[
-    "declaration",   // bit 0
-    "definition",    // bit 1
-    "readonly",      // bit 2
-    "modification",  // bit 3
-    "documentation", // bit 4
-    "static",        // bit 5 — for registers
-    "controlFlow",   // bit 6
-];
 
 pub fn compute_semantic_tokens(file: &dyn FileDb) -> HlRanges {
     highlight::compute_semantic_tokens_filtered(file, None)
@@ -53,7 +20,7 @@ pub fn compute_semantic_tokens_range(file: &dyn FileDb, range: &TextRange) -> Hl
 mod tests {
     use super::*;
     use parser::{Span, Token};
-    use tags::token_type_index;
+    use tags::token_tag;
 
     /// Minimal in-test stand-in for `sail_server::state::File` that
     /// implements [`FileDb`]. Keeps just enough state for the
@@ -146,8 +113,8 @@ mod tests {
     fn includes_keyword_and_number_tokens() {
         let file = TestFile::new("let x = 42");
         let tokens = compute_semantic_tokens(&file);
-        assert!(tokens.data.iter().any(|t| t.token_type == 0));
-        assert!(tokens.data.iter().any(|t| t.token_type == 7));
+        assert!(tokens.data.iter().any(|t| t.highlight.tag == HlTag::Keyword));
+        assert!(tokens.data.iter().any(|t| t.highlight.tag == HlTag::NumericLiteral));
     }
 
     #[test]
@@ -165,34 +132,25 @@ mod tests {
         let source = "enum E = { A, B }\nregister R : E\nfunction g() -> E = A\nfunction f() -> E = { R = g(); R }\n";
         let (analysis, files) = crate::fixture::analysis(&format!("//- /main.sail\n{source}"));
         let tokens = analysis.semantic_tokens(files[0].0).unwrap();
-        let (mut line, mut col) = (0u32, 0u32);
-        let mut at = std::collections::HashMap::new();
-        for t in &tokens.data {
-            if t.delta_line > 0 {
-                line += t.delta_line;
-                col = t.delta_start;
-            } else {
-                col += t.delta_start;
-            }
-            at.insert((line, col), t.token_type);
-        }
+        let at: std::collections::HashMap<_, _> =
+            tokens.data.iter().map(|t| ((t.line, t.col), t.highlight.tag)).collect();
         let type_of = |line: u32, needle: &str| {
             let col = source.lines().nth(line as usize).unwrap().rfind(needle).unwrap() as u32;
             at.get(&(line, col)).copied()
         };
-        assert_eq!(type_of(2, "A"), Some(10), "enum member");
-        assert_eq!(type_of(3, "g"), Some(1), "function");
-        assert_eq!(type_of(3, "R"), Some(13), "register");
-        assert_eq!(type_of(3, "E"), Some(3), "enum");
+        assert_eq!(type_of(2, "A"), Some(HlTag::EnumMember), "enum member");
+        assert_eq!(type_of(3, "g"), Some(HlTag::Function), "function");
+        assert_eq!(type_of(3, "R"), Some(HlTag::Register), "register");
+        assert_eq!(type_of(3, "E"), Some(HlTag::Enum), "enum");
         // And a declaration is classed the same way as its uses.
-        assert_eq!(type_of(0, "E"), Some(3), "enum declaration");
-        assert_eq!(type_of(0, "B"), Some(10), "enum member declaration");
-        assert_eq!(type_of(1, "R"), Some(13), "register declaration");
-        assert_eq!(type_of(2, "g"), Some(1), "function declaration");
+        assert_eq!(type_of(0, "E"), Some(HlTag::Enum), "enum declaration");
+        assert_eq!(type_of(0, "B"), Some(HlTag::EnumMember), "enum member declaration");
+        assert_eq!(type_of(1, "R"), Some(HlTag::Register), "register declaration");
+        assert_eq!(type_of(2, "g"), Some(HlTag::Function), "function declaration");
     }
 
     #[test]
     fn classifies_keywords_without_debug_string_hack() {
-        assert_eq!(token_type_index(&parser::Token::KwFunction, None), Some(0));
+        assert_eq!(token_tag(&parser::Token::KwFunction, None), Some(HlTag::Keyword));
     }
 }
