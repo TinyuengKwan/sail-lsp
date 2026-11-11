@@ -1027,9 +1027,48 @@ pub fn main() {
     eprintln!("[sail-lsp] starting (lsp-server backend)");
 
     let (connection, io_threads) = Connection::stdio();
-    run_server(connection);
+    // Not on the process's main thread: that one has whatever stack the OS
+    // gives it — 1 MiB on Windows — and the handlers that run on the loop
+    // thread (selection ranges, on-type formatting, join lines, on-enter)
+    // parse and recurse like the ones on the 8 MiB pool threads do.
+    // rust-analyzer's `main.rs` does the same (`with_extra_thread`).
+    with_extra_thread("LspServer", move || run_server(connection));
     io_threads.join().ok();
     eprintln!("[sail-lsp] shutdown");
+}
+
+/// Run `f` to completion on a latency-sensitive thread with
+/// [`stdx::thread::DEFAULT_STACK_SIZE`] of stack, and wait for it.
+fn with_extra_thread<T: Send + 'static>(name: &str, f: impl FnOnce() -> T + Send + 'static) -> T {
+    stdx::thread::Builder::new(stdx::thread::ThreadIntent::LatencySensitive, name)
+        .stack_size(stdx::thread::DEFAULT_STACK_SIZE)
+        .spawn(f)
+        .expect("failed to spawn the server thread")
+        .join()
+}
+
+#[cfg(test)]
+mod server_thread_tests {
+    /// Ten MiB of stack, in frames a debug build cannot shrink: more than
+    /// the pool's 8 MiB, less than the 16 MiB the server thread asks for.
+    fn recurse(levels: u32) -> u32 {
+        let frame = [levels as u8; 64 * 1024];
+        std::hint::black_box(&frame);
+        if levels == 0 {
+            return frame[0] as u32;
+        }
+        recurse(levels - 1) + 1
+    }
+
+    #[test]
+    fn the_server_thread_is_named_and_has_a_stack_deep_recursion_fits_in() {
+        let (sender, receiver) = crossbeam_channel::bounded(1);
+        super::with_extra_thread("LspServer", move || {
+            let name = std::thread::current().name().map(str::to_owned);
+            sender.send((name, recurse(160))).unwrap();
+        });
+        assert_eq!(receiver.recv().unwrap(), (Some("LspServer".to_owned()), 160));
+    }
 }
 
 /// The server itself, on a connection it is handed.

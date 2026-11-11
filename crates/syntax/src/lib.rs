@@ -302,6 +302,61 @@ mod tests {
         assert!(parse.errors().is_empty());
     }
 
+    /// Deeply nested input must not overflow the stack of the threads that
+    /// parse it. Request handlers run on `stdx::thread::Pool` threads with
+    /// an 8 MiB stack, so that is what this parses on: either the tree is
+    /// built, or the parser's own limit reports a syntax error — the one
+    /// thing it may not do is abort the process. rust-analyzer guards the
+    /// same way (`parser::limit` checks in its expression grammar).
+    #[test]
+    fn deep_nesting_parses_or_errors_without_overflowing_the_pool_stack() {
+        const POOL_STACK_SIZE: usize = 8 * 1024 * 1024;
+        let parse_on_pool_stack = |source: String| {
+            std::thread::Builder::new()
+                .stack_size(POOL_STACK_SIZE)
+                .spawn(move || {
+                    let parse = ast::SourceFile::parse(&source);
+                    assert_eq!(parse.syntax_node().text().to_string(), source, "lossless");
+                    parse.errors().iter().map(|e| e.message().to_owned()).collect::<Vec<_>>()
+                })
+                .unwrap()
+                .join()
+                .expect("parsing must not panic")
+        };
+        for (open, close) in [("(", ")"), ("{", "}")] {
+            // Well within the limit: an ordinary deep expression still parses.
+            let errors = parse_on_pool_stack(format!(
+                "function f() = {}1{}\n",
+                open.repeat(200),
+                close.repeat(200)
+            ));
+            assert_eq!(errors, Vec::<String>::new(), "200 nested {open}");
+            // Beyond it: an error names the limit; the process survives.
+            let errors = parse_on_pool_stack(format!(
+                "function f() = {}1{}\n",
+                open.repeat(2000),
+                close.repeat(2000)
+            ));
+            assert!(
+                errors.iter().any(|e| e.contains("nested more than")),
+                "2000 nested {open}: {errors:?}"
+            );
+        }
+        // Patterns and types recurse too.
+        let errors = parse_on_pool_stack(format!(
+            "function f() = match 1 {{ {}x{} => 1 }}\n",
+            "(".repeat(2000),
+            ")".repeat(2000)
+        ));
+        assert!(errors.iter().any(|e| e.contains("nested more than")), "pattern: {errors:?}");
+        let errors = parse_on_pool_stack(format!(
+            "val f : {}int{} -> unit\n",
+            "(".repeat(2000),
+            ")".repeat(2000)
+        ));
+        assert!(errors.iter().any(|e| e.contains("nested more than")), "type: {errors:?}");
+    }
+
     /// D1-3: Validate sail.ungram parses successfully.
     #[test]
     fn sail_ungram_parses() {

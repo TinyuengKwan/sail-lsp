@@ -20,7 +20,18 @@ impl<'t> Parser<'t> {
         if self.at_end() || self.at_set(&EXPR_RECOVERY_SET) {
             return None;
         }
+        // Every nested expression comes through here — an operand, a
+        // parenthesised or bracketed one, a block's statement — so this is
+        // where the depth is counted.
+        if !self.enter_nesting() {
+            return None;
+        }
+        let result = self.expr_bp_nested(r, min_bp);
+        self.exit_nesting();
+        result
+    }
 
+    fn expr_bp_nested(&mut self, r: Restrictions, min_bp: u8) -> Option<CompletedMarker> {
         let mut lhs = self.parse_lhs(r)?;
 
         loop {

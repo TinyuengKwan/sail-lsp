@@ -17,6 +17,17 @@ use crate::token_set::TokenSet;
 /// Maximum lookahead steps before the parser bails.
 pub(crate) const PARSER_STEP_LIMIT: u32 = if cfg!(debug_assertions) { 150_000 } else { 15_000_000 };
 
+/// How deep expressions, patterns and types may nest before the parser
+/// reports an error instead of recursing further.
+///
+/// Each level is a handful of stack frames, and the threads that parse have
+/// a fixed stack: 8 MiB on the request pool, 16 MiB on the main loop. Two
+/// thousand `(` overflowed the pool's, and a stack overflow is not an error
+/// the server can report — it aborts the process. Nothing in the upstream
+/// corpora comes near this; it is a guard against pathological input, and
+/// rust-analyzer's grammar carries the same kind of depth check.
+pub(crate) const NESTING_LIMIT: u32 = 256;
+
 /// Fixity context for dynamic operator precedence.
 /// Maps operator name → (left_bp, right_bp).
 pub type FixityContext = HashMap<String, (u8, u8)>;
@@ -29,6 +40,8 @@ pub struct Parser<'t> {
     pos: usize,
     pub(crate) events: Vec<Event>,
     steps: Cell<u32>,
+    /// Current nesting of recursive productions; see [`NESTING_LIMIT`].
+    depth: u32,
     /// Dynamic fixity context for user-defined operators.
     pub(crate) fixities: FixityContext,
     pub(crate) enclosing_block_end: Option<usize>,
@@ -42,6 +55,7 @@ impl<'t> Parser<'t> {
             pos: 0,
             events: Vec::new(),
             steps: Cell::new(0),
+            depth: 0,
             fixities: FixityContext::new(),
             enclosing_block_end: None,
         }
@@ -54,6 +68,7 @@ impl<'t> Parser<'t> {
             pos: 0,
             events: Vec::new(),
             steps: Cell::new(0),
+            depth: 0,
             fixities,
             enclosing_block_end: None,
         }
@@ -171,6 +186,23 @@ impl<'t> Parser<'t> {
             pos: pos as u32,
             bomb: stdx::DropBomb::new("Marker must be completed or abandoned"),
         }
+    }
+
+    /// Enter one level of a recursive production, or report that the input
+    /// nests too deeply and refuse. A caller that gets `false` parses
+    /// nothing at this level; the enclosing levels recover as they would
+    /// from any missing operand. Pair with [`Self::exit_nesting`].
+    pub(crate) fn enter_nesting(&mut self) -> bool {
+        if self.depth >= NESTING_LIMIT {
+            self.error(format!("nested more than {NESTING_LIMIT} levels deep"));
+            return false;
+        }
+        self.depth += 1;
+        true
+    }
+
+    pub(crate) fn exit_nesting(&mut self) {
+        self.depth -= 1;
     }
 
     /// Emit a parse error.

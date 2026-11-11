@@ -6,6 +6,16 @@ impl<'t> Parser<'t> {
         if kind == SK::EOF || recovery.contains(kind) {
             return None;
         }
+        if !self.enter_nesting() {
+            return None;
+        }
+        let result = self.parse_pattern_nested(recovery);
+        self.exit_nesting();
+        result
+    }
+
+    fn parse_pattern_nested(&mut self, recovery: TokenSet) -> Option<CompletedMarker> {
+        let kind = self.current();
 
         let mut lhs = match kind {
             T![_] => {

@@ -23,6 +23,14 @@ mod pool;
 pub use intent::ThreadIntent;
 pub use pool::Pool;
 
+/// The stack a thread that runs the language server's own code gets.
+///
+/// Parsing and type inference recurse, and some operating systems give the
+/// main thread 1 MiB (Windows). rust-analyzer's `stdx::thread` uses this
+/// size for every thread it spawns; the request pool here asks for 8 MiB
+/// and the main loop for this.
+pub const DEFAULT_STACK_SIZE: usize = 16 * 1024 * 1024;
+
 /// # Panics
 ///
 /// Panics if failed to spawn the thread.

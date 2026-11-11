@@ -50,11 +50,24 @@ impl<'t> Parser<'t> {
 
     /// Parse an atomic type — no infix operators (`&`, `|`, `+`, etc.).
     pub(crate) fn parse_atomic_type_expr(&mut self, recovery: TokenSet) -> Option<CompletedMarker> {
-        self.parse_type_expr_inner(recovery, false)
+        self.parse_type_expr_guarded(recovery, false)
     }
 
     pub(crate) fn parse_type_expr(&mut self, recovery: TokenSet) -> Option<CompletedMarker> {
-        self.parse_type_expr_inner(recovery, true)
+        self.parse_type_expr_guarded(recovery, true)
+    }
+
+    fn parse_type_expr_guarded(
+        &mut self,
+        recovery: TokenSet,
+        infix: bool,
+    ) -> Option<CompletedMarker> {
+        if !self.enter_nesting() {
+            return None;
+        }
+        let result = self.parse_type_expr_inner(recovery, infix);
+        self.exit_nesting();
+        result
     }
 
     /// `kopt_list` — the variables a `forall` or an existential binds.
