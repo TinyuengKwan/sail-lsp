@@ -125,28 +125,80 @@ mod tests {
         assert!(range.data.len() < full.data.len());
     }
 
+    /// The highlight of the last `needle` on `line` of the fixture's
+    /// `index`th file. A project, as the server builds one: names resolve
+    /// across its files.
+    fn highlight_in(fixture: &str, index: usize) -> impl Fn(u32, &str) -> Option<Highlight> {
+        use hir::callgraph::SourceFileInfo;
+        let (analysis, files) = crate::fixture::project_analysis(fixture);
+        let (file_id, _) = files[index];
+        let source = analysis.file_by_id(file_id).unwrap().text().to_owned();
+        let tokens = analysis.semantic_tokens(file_id).unwrap();
+        let at: std::collections::HashMap<_, _> =
+            tokens.data.iter().map(|t| ((t.line, t.col), t.highlight)).collect();
+        move |line, needle| {
+            let col = source.lines().nth(line as usize)?.rfind(needle)? as u32;
+            at.get(&(line, col)).copied()
+        }
+    }
+
     /// A name is classed by what it names, not as a variable because no
     /// declaring keyword precedes it.
     #[test]
     fn a_use_is_classed_by_its_definition() {
         let source = "enum E = { A, B }\nregister R : E\nfunction g() -> E = A\nfunction f() -> E = { R = g(); R }\n";
-        let (analysis, files) = crate::fixture::analysis(&format!("//- /main.sail\n{source}"));
-        let tokens = analysis.semantic_tokens(files[0].0).unwrap();
-        let at: std::collections::HashMap<_, _> =
-            tokens.data.iter().map(|t| ((t.line, t.col), t.highlight.tag)).collect();
-        let type_of = |line: u32, needle: &str| {
-            let col = source.lines().nth(line as usize).unwrap().rfind(needle).unwrap() as u32;
-            at.get(&(line, col)).copied()
-        };
-        assert_eq!(type_of(2, "A"), Some(HlTag::EnumMember), "enum member");
-        assert_eq!(type_of(3, "g"), Some(HlTag::Function), "function");
-        assert_eq!(type_of(3, "R"), Some(HlTag::Register), "register");
-        assert_eq!(type_of(3, "E"), Some(HlTag::Enum), "enum");
+        let highlight = highlight_in(source, 0);
+        let tag_of = |line, needle| highlight(line, needle).map(|h| h.tag);
+        assert_eq!(tag_of(2, "A"), Some(HlTag::EnumMember), "enum member");
+        assert_eq!(tag_of(3, "g"), Some(HlTag::Function), "function");
+        assert_eq!(tag_of(3, "R"), Some(HlTag::Register), "register");
+        assert_eq!(tag_of(3, "E"), Some(HlTag::Enum), "enum");
         // And a declaration is classed the same way as its uses.
-        assert_eq!(type_of(0, "E"), Some(HlTag::Enum), "enum declaration");
-        assert_eq!(type_of(0, "B"), Some(HlTag::EnumMember), "enum member declaration");
-        assert_eq!(type_of(1, "R"), Some(HlTag::Register), "register declaration");
-        assert_eq!(type_of(2, "g"), Some(HlTag::Function), "function declaration");
+        assert_eq!(tag_of(0, "E"), Some(HlTag::Enum), "enum declaration");
+        assert_eq!(tag_of(0, "B"), Some(HlTag::EnumMember), "enum member declaration");
+        assert_eq!(tag_of(1, "R"), Some(HlTag::Register), "register declaration");
+        assert_eq!(tag_of(2, "g"), Some(HlTag::Function), "function declaration");
+    }
+
+    /// A name defined in another file is what that file says it is. The
+    /// classification used to come from the current file's item tree, so
+    /// everything an included file defined was a variable here.
+    #[test]
+    fn a_name_defined_in_another_file_is_classed_by_that_definition() {
+        let highlight = highlight_in(
+            "//- /a.sail\nenum E = { A, B }\nregister R : E\nval g : unit -> E\nfunction g() = A\n\
+             //- /b.sail\nfunction f() -> E = { R = g(); R }\n",
+            1,
+        );
+        let tag_of = |line, needle| highlight(line, needle).map(|h| h.tag);
+        assert_eq!(tag_of(0, "g"), Some(HlTag::Function));
+        assert_eq!(tag_of(0, "R"), Some(HlTag::Register));
+        assert_eq!(tag_of(0, "E"), Some(HlTag::Enum));
+        assert!(highlight(0, "R").unwrap().mods.contains(HlMod::Static));
+        assert!(!highlight(0, "g").unwrap().mods.contains(HlMod::Declaration), "a use");
+    }
+
+    /// A local that shadows a top-level name is the local, at its binding
+    /// and at its uses; a parameter is a parameter.
+    #[test]
+    fn a_shadowing_local_and_a_parameter_are_classed_as_what_they_bind() {
+        let highlight = highlight_in(
+            "val x : unit -> int\nfunction f(p : int) -> int = { let x = p; x + p }\n",
+            0,
+        );
+        let binding = highlight(1, "let x").map(|_| ()).and(highlight(1, "x = p"));
+        let binding = binding.unwrap();
+        assert_eq!(binding.tag, HlTag::Variable);
+        assert!(binding.mods.contains(HlMod::Declaration), "{binding:?}");
+        assert!(binding.mods.contains(HlMod::Definition), "{binding:?}");
+        let use_ = highlight(1, "x + p").unwrap();
+        assert_eq!(use_.tag, HlTag::Variable, "the local, not the global function");
+        assert!(!use_.mods.contains(HlMod::Declaration), "{use_:?}");
+        assert_eq!(highlight(0, "x").map(|h| h.tag), Some(HlTag::Function), "the global");
+        let param = highlight(1, "p : int").unwrap();
+        assert_eq!(param.tag, HlTag::Parameter);
+        assert!(param.mods.contains(HlMod::Declaration), "{param:?}");
+        assert_eq!(highlight(1, "p }").map(|h| h.tag), Some(HlTag::Parameter), "parameter use");
     }
 
     #[test]

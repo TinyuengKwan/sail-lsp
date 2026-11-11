@@ -889,6 +889,16 @@ fn pick_medium_target_file(
     files: &Files,
     db: &ide_db::root_database::RootDatabase,
 ) -> Option<(Url, FileId, String, usize)> {
+    // `BENCH_TARGET=<file name>` names the file to measure.
+    if let Ok(name) = std::env::var("BENCH_TARGET") {
+        for (url, fid) in url_fids {
+            if url.path().ends_with(&name) {
+                let ft = files.file_text(*fid)?;
+                let text: &str = ft.text(db);
+                return Some((url.clone(), *fid, text.to_string(), text.lines().count()));
+            }
+        }
+    }
     // First pass: ideal size range with functions
     for (url, fid) in url_fids {
         if let Some(ft) = files.file_text(*fid) {

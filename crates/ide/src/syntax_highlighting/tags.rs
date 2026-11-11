@@ -27,6 +27,7 @@ pub enum HlTag {
     Property,
     Comment,
     Register,
+    Parameter,
 }
 
 /// A modifier on a highlighted range. The discriminant is the bit it

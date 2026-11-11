@@ -306,11 +306,15 @@ pub struct SalsaFile<'a> {
     input: FileText,
     // Lazily-computed line index for position_at / offset_at.
     line_index: std::cell::OnceCell<LineIndex>,
+    /// Scope trees by body, built on first request. The database caches
+    /// what goes *into* a scope tree, not the tree; a whole-file feature
+    /// asks for the same body's tree once per name in it.
+    body_scopes: std::cell::RefCell<HashMap<usize, std::rc::Rc<hir::ExprScopes>>>,
 }
 
 impl<'a> SalsaFile<'a> {
     pub fn new(db: &'a RootDatabase, input: FileText) -> Self {
-        Self { db, input, line_index: std::cell::OnceCell::new() }
+        Self { db, input, line_index: std::cell::OnceCell::new(), body_scopes: Default::default() }
     }
 
     fn line_index(&self) -> &LineIndex {
@@ -398,6 +402,16 @@ impl<'a> FileDb for SalsaFile<'a> {
     fn bodies(&self) -> Option<&hir::CallableBodies> {
         let bodies = hir::def_query::callable_bodies(self.db, self.input);
         bodies.as_ref().map(|b| b.0.as_ref())
+    }
+
+    fn body_scopes(&self, callable: &hir::CallableBody) -> std::rc::Rc<hir::ExprScopes> {
+        self.body_scopes
+            .borrow_mut()
+            .entry(callable.body_span.start)
+            .or_insert_with(|| {
+                std::rc::Rc::new(hir::Semantics::new(self.db).body_scopes(self.input, callable))
+            })
+            .clone()
     }
 }
 

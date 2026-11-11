@@ -1842,7 +1842,7 @@ fn check_assignments(
 /// that scope; merely occurring somewhere in the callable is insufficient.
 struct AssignmentLocals<'a> {
     callable: &'a hir::CallableBody,
-    scopes: hir::ExprScopes,
+    scopes: std::rc::Rc<hir::ExprScopes>,
 }
 
 impl<'a> AssignmentLocals<'a> {
@@ -1854,9 +1854,9 @@ impl<'a> AssignmentLocals<'a> {
         let scopes = if file.file_text().is_some() {
             file.body_scopes(callable)
         } else {
-            hir::ExprScopes::new_with_globals(&callable.body, |name| {
+            std::rc::Rc::new(hir::ExprScopes::new_with_globals(&callable.body, |name| {
                 globals.contains_key(name.as_str())
-            })
+            }))
         };
         Self { callable, scopes }
     }

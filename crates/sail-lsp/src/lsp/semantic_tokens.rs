@@ -55,6 +55,7 @@ define_semantic_token_types![
         ENUM_MEMBER,
         PROPERTY,
         COMMENT,
+        PARAMETER,
     }
 
     custom {

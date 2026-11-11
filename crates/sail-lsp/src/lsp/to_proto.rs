@@ -849,6 +849,7 @@ fn semantic_token_type_and_modifiers(
         HlTag::Property => semantic_tokens::PROPERTY,
         HlTag::Comment => semantic_tokens::COMMENT,
         HlTag::Register => semantic_tokens::REGISTER,
+        HlTag::Parameter => semantic_tokens::PARAMETER,
     };
     for modifier in highlight.mods.iter() {
         mods |= match modifier {

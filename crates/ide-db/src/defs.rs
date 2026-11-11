@@ -384,6 +384,17 @@ impl IdentClass {
         position: crate::line_index::LineCol,
     ) -> Option<IdentClass> {
         let (token, span) = file.token_at(position)?;
+        Self::classify_token(file, token, span)
+    }
+
+    /// What the token at `span` is. Highlighting classifies every name in
+    /// a file and already holds the token; finding it again by position
+    /// would scan the token list once per name.
+    pub fn classify_token(
+        file: &dyn crate::FileDb,
+        token: &parser::Token,
+        span: &parser::Span,
+    ) -> Option<IdentClass> {
         let name = crate::token_symbol_key(token)?;
         let key = hir::Name::new(&name);
         if name.starts_with('\'') {
@@ -454,6 +465,7 @@ impl IdentClass {
         // A pattern naming an enum member or a union constructor lowers to
         // the same `Pat::Bind` a fresh binding does, but it is a use of a
         // top-level name, not a local.
+        let enum_member = classify_enum_member(file, &name, span.start);
         let names_a_member = file
             .file_text()
             .is_none_or(|(db, ft)| hir::source_order::declarations_for(db, ft).is_none())
@@ -463,7 +475,7 @@ impl IdentClass {
                         && id.fields(tree).iter().any(|f| f.name.as_str() == name)
                 })
             })
-            || classify_enum_member(file, &name, span.start).is_some();
+            || enum_member.is_some();
         let bodies = if let Some((db, ft)) = file.file_text() {
             hir::Semantics::new(db).bodies_at_offset(ft, span.start)
         } else {
@@ -528,7 +540,7 @@ impl IdentClass {
         // the resolver has nothing to answer with and every use came back
         // `Unresolved` — including `Regno` and `Virtaddr`, which sail-riscv
         // writes on every address and register number.
-        if let Some(member) = classify_enum_member(file, &name, span.start) {
+        if let Some(member) = enum_member {
             return Some(IdentClass::NameRefClass(NameRefClass::Definition(
                 Definition::EnumVariant(member),
             )));
@@ -560,13 +572,14 @@ impl IdentClass {
         // question about this token, not about the definition.
         let declares = file.item_tree().is_some_and(|tree| {
             tree.top_level_items().iter().any(|id| {
-                !matches!(
-                    id.def_kind(tree),
-                    hir::DefKind::Instantiation
-                        | hir::DefKind::ScatteredClause
-                        | hir::DefKind::EndMarker
-                ) && id.name(tree).as_str() == name
-                    && id.name_span(tree) == *span
+                id.name_span(tree) == *span
+                    && !matches!(
+                        id.def_kind(tree),
+                        hir::DefKind::Instantiation
+                            | hir::DefKind::ScatteredClause
+                            | hir::DefKind::EndMarker
+                    )
+                    && id.name(tree).as_str() == name
             })
         });
         Some(if declares {

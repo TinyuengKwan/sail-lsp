@@ -206,11 +206,16 @@ pub trait FileDb: hir::callgraph::SourceFileInfo {
         None
     }
 
-    fn body_scopes(&self, callable: &hir::CallableBody) -> hir::ExprScopes {
+    /// The scope tree of one body.
+    ///
+    /// Shared, because a feature that classifies every name in a file asks
+    /// for the same body's scopes once per name; `SalsaFile` keeps the tree
+    /// for the life of the handle.
+    fn body_scopes(&self, callable: &hir::CallableBody) -> std::rc::Rc<hir::ExprScopes> {
         if let Some((db, file)) = self.file_text() {
-            return hir::Semantics::new(db).body_scopes(file, callable);
+            return std::rc::Rc::new(hir::Semantics::new(db).body_scopes(file, callable));
         }
-        hir::ExprScopes::new_with_globals(&callable.body, |name| {
+        std::rc::Rc::new(hir::ExprScopes::new_with_globals(&callable.body, |name| {
             self.item_tree().is_some_and(|tree| {
                 tree.top_level_items().iter().any(|item| {
                     (item.name(tree) == name
@@ -229,7 +234,7 @@ pub trait FileDb: hir::callgraph::SourceFileInfo {
                         ) && item.fields(tree).iter().any(|field| &field.name == name))
                 })
             })
-        })
+        }))
     }
 }
 
