@@ -1063,6 +1063,17 @@ fn empty_workspace_folders_use_the_clients_root_uri() {
 }
 
 #[test]
+fn the_server_asks_to_be_told_about_saves() {
+    // A bare sync kind leaves `save` unsaid, and the protocol lets a client
+    // send no `didSave` then — while the compiler check runs on save.
+    let server = ServerFixture::new("explicit-save-sync", &[("main.sail", "val x : int\n")]);
+    assert_eq!(
+        server.capabilities["textDocumentSync"],
+        serde_json::json!({ "openClose": true, "change": 2, "save": { "includeText": false } })
+    );
+}
+
+#[test]
 fn advertised_workspace_folder_changes_attach_already_open_files() {
     let source = "function bad() -> int = true\n";
     let mut server = ServerFixture::open(

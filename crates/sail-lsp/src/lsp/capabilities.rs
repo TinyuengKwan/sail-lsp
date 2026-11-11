@@ -277,9 +277,18 @@ pub(crate) fn server_capabilities(client: &ClientCapabilities) -> ServerCapabili
                 .collect(),
             work_done_progress_options: Default::default(),
         }),
-        text_document_sync: Some(TextDocumentSyncCapability::Kind(
-            TextDocumentSyncKind::INCREMENTAL,
-        )),
+        // `save` is spelled out: a client need not send `didSave` when the
+        // server only names a sync kind, and the compiler check runs on save.
+        // rust-analyzer's `text_document_sync` does the same.
+        text_document_sync: Some(TextDocumentSyncCapability::Options(TextDocumentSyncOptions {
+            open_close: Some(true),
+            change: Some(TextDocumentSyncKind::INCREMENTAL),
+            will_save: None,
+            will_save_wait_until: None,
+            save: Some(TextDocumentSyncSaveOptions::SaveOptions(SaveOptions {
+                include_text: Some(false),
+            })),
+        })),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         // Source edits carry structured/versioned WorkspaceEdits and lazy
         // resolution data, which require code-action literal support.
