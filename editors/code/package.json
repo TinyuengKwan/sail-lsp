@@ -86,7 +86,7 @@
         "test": "npm run typecheck && npm run build && node ./out/src/test/runTest.js",
         "format": "prettier --write src/",
         "format:check": "prettier --check src/",
-        "test:graph": "npm run typecheck && node --test ./out/src/test/projectGraph.test.js ./out/src/test/analysisContext.test.js ./out/src/test/installation.test.js ./out/src/test/diagnosticReport.test.js ./out/src/test/taskInvocations.test.js ./out/src/test/configuration.test.js ./out/src/test/snippets.test.js ./out/src/test/onEnterRules.test.js ./out/src/test/hoverActions.test.js ./out/src/test/tasks.test.js ./out/src/test/syntaxTree.test.js ./out/src/test/packageJson.test.js"
+        "test:graph": "npm run typecheck && node --test ./out/src/test/projectGraph.test.js ./out/src/test/analysisContext.test.js ./out/src/test/installation.test.js ./out/src/test/diagnosticReport.test.js ./out/src/test/taskInvocations.test.js ./out/src/test/configuration.test.js ./out/src/test/snippets.test.js ./out/src/test/onEnterRules.test.js ./out/src/test/hoverActions.test.js ./out/src/test/tasks.test.js ./out/src/test/syntaxTree.test.js ./out/src/test/packageJson.test.js ./out/src/test/semanticTokens.test.js"
     },
     "contributes": {
         "languages": [
@@ -126,6 +126,69 @@
                 "language": "sail-project",
                 "scopeName": "source.sail-project",
                 "path": "./syntaxes/sail-project.tmLanguage.json"
+            }
+        ],
+        "semanticTokenTypes": [
+            {
+                "id": "register",
+                "description": "Style for registers",
+                "superType": "variable"
+            },
+            {
+                "id": "builtinType",
+                "description": "Style for builtin types such as `bits` and `unit`",
+                "superType": "type"
+            },
+            {
+                "id": "attribute",
+                "description": "Style for `$[..]` attributes",
+                "superType": "decorator"
+            },
+            {
+                "id": "escapeSequence",
+                "description": "Style for escapes such as `\\n` in string literals",
+                "superType": "string"
+            },
+            {
+                "id": "punctuation",
+                "description": "Style for generic punctuation"
+            }
+        ],
+        "semanticTokenModifiers": [
+            {
+                "id": "controlFlow",
+                "description": "Style for control-flow keywords: `if`, `match`, `return`, ..."
+            },
+            {
+                "id": "mutable",
+                "description": "Style for `var` bindings at every mention, and for a register where it is written"
+            }
+        ],
+        "semanticTokenScopes": [
+            {
+                "language": "sail",
+                "scopes": {
+                    "keyword": ["keyword.other.sail"],
+                    "keyword.controlFlow": ["keyword.control.sail"],
+                    "function": ["entity.name.function.sail"],
+                    "type": ["entity.name.type.sail"],
+                    "struct": ["entity.name.type.sail"],
+                    "enum": ["entity.name.type.sail"],
+                    "builtinType": ["support.type.builtin.sail"],
+                    "typeParameter": ["variable.other.type.sail"],
+                    "register": ["variable.other.register.sail"],
+                    "variable.readonly": ["variable.other.constant.sail"],
+                    "enumMember": ["variable.other.enummember.sail"],
+                    "property": ["variable.other.property.sail"],
+                    "attribute": ["meta.preprocessor.sail"],
+                    "escapeSequence": ["constant.character.escape.sail"],
+                    "string": ["string.quoted.double.sail"],
+                    "number": ["constant.numeric.decimal.sail"],
+                    "operator": ["keyword.operator.sail"],
+                    "comment": ["comment.line.double-slash.sail"],
+                    "comment.documentation": ["comment.block.documentation.sail"],
+                    "*.mutable": ["markup.underline"]
+                }
             }
         ],
         "configurationDefaults": {
