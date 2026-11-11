@@ -204,6 +204,14 @@ impl ClientCapabilities {
         })() == Some(true)
     }
 
+    /// Whether a watcher may be a `RelativePattern` — a base URI and a glob
+    /// — rather than one absolute glob string.
+    pub(crate) fn did_change_watched_files_relative_pattern_support(&self) -> bool {
+        (|| -> Option<bool> {
+            self.0.workspace.as_ref()?.did_change_watched_files.as_ref()?.relative_pattern_support
+        })() == Some(true)
+    }
+
     /// Whether the client supports code action literals.
     pub(crate) fn code_action_literals_support(&self) -> bool {
         (|| -> Option<bool> {

@@ -416,6 +416,9 @@ impl GlobalState {
             ),
         );
         self.projects = std::sync::Arc::new(inputs.projects);
+        // The model now says what it reads — include paths, files reached
+        // outside the folders — so the watch set can follow it.
+        self.register_file_watchers();
         self.send_notification::<crate::lsp_ext::ProjectGraphChanged>(());
         self.module_contexts =
             std::sync::Arc::new(crate::reload::loaded_module_contexts(&self.projects));

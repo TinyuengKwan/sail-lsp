@@ -1058,47 +1058,54 @@ pub(crate) fn loaded_module_contexts(
 }
 
 impl GlobalState {
-    /// Register `didChangeWatchedFiles` with the client, once.
+    /// Register `didChangeWatchedFiles` with the client for everything the
+    /// loaded model reads.
     ///
     /// Only when the client offers dynamic registration; otherwise the
-    /// loader below does the watching.
+    /// loader below does the watching. Called when a scan starts and again
+    /// when its model is installed, like rust-analyzer's
+    /// `switch_workspaces`: the set follows the source roots — folders,
+    /// include paths, the library, files reached outside all of them — and
+    /// a client that already watches exactly that set is left alone. One
+    /// that watches an older set is asked to drop it before the new one is
+    /// registered. This used to register the workspace folders once, so a
+    /// folder added later, an out-of-root include path and the library were
+    /// never watched.
     pub(crate) fn register_file_watchers(&mut self) {
-        if self.registered_file_watchers {
-            return;
-        }
         if !self.client_caps.did_change_watched_files_dynamic_registration() {
-            self.start_file_watcher();
+            if !self.registered_file_watchers {
+                self.start_file_watcher();
+            }
             return;
         }
         // The client will watch; the loader still exists, to read.
         self.start_loader(Watching::No);
-        self.registered_file_watchers = true;
 
-        let watchers: Vec<lsp_types::FileSystemWatcher> = self
-            .workspace_folders
-            .iter()
-            .filter_map(|folder| folder.to_file_path().ok())
-            .flat_map(|root| {
-                let root = root.to_string_lossy().into_owned();
-                [
-                    format!("{root}/**/*.sail"),
-                    format!("{root}/**/*.sail_project"),
-                    format!("{root}/**/sail.proj"),
-                    format!("{root}/{}", crate::shared_configuration::FILE_NAME),
-                ]
-            })
-            .map(|glob_pattern| lsp_types::FileSystemWatcher {
-                glob_pattern: lsp_types::GlobPattern::String(glob_pattern),
-                kind: None,
-            })
-            .collect();
+        let watchers = self.file_watchers();
         if watchers.is_empty() {
-            self.registered_file_watchers = false;
             return;
         }
+        if self.client_file_watchers.as_ref().is_some_and(|(_, current)| *current == watchers) {
+            return;
+        }
+        self.registered_file_watchers = true;
+        if let Some((previous, _)) = self.client_file_watchers.take() {
+            self.send_request::<lsp_types::request::UnregisterCapability>(
+                lsp_types::UnregistrationParams {
+                    unregisterations: vec![lsp_types::Unregistration {
+                        id: previous,
+                        method: "workspace/didChangeWatchedFiles".to_owned(),
+                    }],
+                },
+                |_, _| (),
+            );
+        }
+        self.file_watcher_registrations += 1;
+        let id = format!("workspace/didChangeWatchedFiles/{}", self.file_watcher_registrations);
+        self.client_file_watchers = Some((id.clone(), watchers.clone()));
 
         let registration = lsp_types::Registration {
-            id: "workspace/didChangeWatchedFiles".to_owned(),
+            id,
             method: "workspace/didChangeWatchedFiles".to_owned(),
             register_options: serde_json::to_value(
                 lsp_types::DidChangeWatchedFilesRegistrationOptions { watchers },
@@ -1111,11 +1118,87 @@ impl GlobalState {
                 if let Some(err) = response.error {
                     log::warn!("the client refused to watch our files: {}", err.message);
                     // It will not tell us, so we watch them ourselves.
+                    state.client_file_watchers = None;
                     state.registered_file_watchers = false;
                     state.start_file_watcher();
                 }
             },
         );
+    }
+
+    /// The watchers for [`Self::watched_roots`]: the Sail sources, the
+    /// manifests and the shared configuration under each. A
+    /// `RelativePattern` when the client takes one, an absolute glob
+    /// otherwise — rust-analyzer's `reload.rs` makes the same choice.
+    fn file_watchers(&self) -> Vec<lsp_types::FileSystemWatcher> {
+        let relative = self.client_caps.did_change_watched_files_relative_pattern_support();
+        self.watched_roots()
+            .into_iter()
+            .flat_map(|root| {
+                [
+                    "**/*.sail",
+                    "**/*.sail_project",
+                    "**/sail.proj",
+                    crate::shared_configuration::FILE_NAME,
+                ]
+                .into_iter()
+                .map(move |pattern| {
+                    if relative {
+                        lsp_types::GlobPattern::Relative(lsp_types::RelativePattern {
+                            base_uri: lsp_types::OneOf::Right(
+                                Url::from_directory_path(&root).expect("an absolute root"),
+                            ),
+                            pattern: pattern.to_owned(),
+                        })
+                    } else {
+                        lsp_types::GlobPattern::String(format!(
+                            "{}/{pattern}",
+                            root.to_string_lossy()
+                        ))
+                    }
+                })
+            })
+            .map(|glob_pattern| lsp_types::FileSystemWatcher { glob_pattern, kind: None })
+            .collect()
+    }
+
+    /// The directories whose files the loaded model reads: the workspace
+    /// folders, the library, every include search path, and the directory
+    /// of each file a project reached outside all of those — a manifest
+    /// linked from elsewhere, a source it lists or `$include`s by a path
+    /// that leaves the folder. Sorted, and with no root inside another.
+    fn watched_roots(&self) -> Vec<PathBuf> {
+        let mut roots: Vec<PathBuf> =
+            self.workspace_folders.iter().filter_map(|folder| folder.to_file_path().ok()).collect();
+        if let Some(lib) = self.effective_sail_dir.as_ref().map(|dir| dir.join("lib")) {
+            roots.push(lib);
+        }
+        for config in
+            std::iter::once(&self.config.workspace).chain(self.projects.values().map(|p| &p.config))
+        {
+            roots.extend(include_search_paths(&self.workspace_folders, config));
+        }
+        let reached = self
+            .projects
+            .values()
+            .flat_map(|project| {
+                std::iter::once(&project.manifest)
+                    .chain(project.watch_files.iter())
+                    .chain(project.discovered_files.iter().map(|(_, path)| path))
+            })
+            .chain(self.discovery_watch_files.iter());
+        let outside: Vec<PathBuf> = reached
+            .filter(|file| !roots.iter().any(|root| file.starts_with(root)))
+            .filter_map(|file| file.parent().map(std::path::Path::to_path_buf))
+            .collect();
+        roots.extend(outside);
+        let mut roots: Vec<PathBuf> =
+            roots.iter().map(|root| syntax::preprocess::normalize_path(root)).collect();
+        roots.sort();
+        roots.dedup();
+        let all = roots.clone();
+        roots.retain(|root| !all.iter().any(|other| other != root && root.starts_with(other)));
+        roots
     }
 }
 

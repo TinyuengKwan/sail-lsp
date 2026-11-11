@@ -261,6 +261,9 @@ pub(crate) struct ServerFixture {
     server_requests: Vec<String>,
     /// Every `$/progress` notification, in order.
     progress: Vec<lsp_types::ProgressParams>,
+    /// Every `client/registerCapability` and `client/unregisterCapability`
+    /// the server sent, as `(method, params)`, in order.
+    registrations: Vec<(String, serde_json::Value)>,
     shown_documents: Vec<serde_json::Value>,
     load_failed: bool,
     capabilities: serde_json::Value,
@@ -281,6 +284,9 @@ struct ClientProfile {
     inlay_hint_resolve: bool,
     /// `window.workDoneProgress`: takes `$/progress` and the create request.
     work_done_progress: bool,
+    /// `didChangeWatchedFiles.relativePatternSupport`: a watcher may be a
+    /// base URI and a glob.
+    relative_patterns: bool,
     /// The `experimental` section, where rust-analyzer's protocol extensions
     /// are negotiated. The VS Code client's set by default, less
     /// `snippetTextEdit`, which the scenarios about snippets declare; a
@@ -296,6 +302,7 @@ impl Default for ClientProfile {
             native_watch: false,
             inlay_hint_resolve: false,
             work_done_progress: true,
+            relative_patterns: false,
             experimental: serde_json::json!({
                 "serverStatusNotification": true,
                 "commands": { "commands": ["sail-lsp.showReferences"] },
@@ -427,14 +434,16 @@ impl ServerFixture {
             std::os::unix::fs::symlink(&contents_at, &root).expect("symlink");
         }
         for (rel, text) in files {
-            let path = contents_at.join(rel);
+            let path = fixture_path(&contents_at, &base, rel);
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).expect("parent dir");
             }
             std::fs::write(path, text).expect("fixture file");
         }
-        // An empty library, so nothing but the fixture is loaded.
-        let sail_dir = base.join("no-stdlib");
+        // An empty library, so nothing but the fixture is loaded. A sibling
+        // of the workspace, as an installed one would be, so what the server
+        // does about a library outside the folders is observable.
+        let sail_dir = Self::stdlib_dir_of(&base);
         std::fs::create_dir_all(sail_dir.join("lib")).expect("empty lib dir");
         // SAFETY: the mutex above makes this the only thread setting it.
         unsafe { std::env::set_var("SAIL_DIR", &sail_dir) };
@@ -460,6 +469,7 @@ impl ServerFixture {
             graph_changes: 0,
             server_requests: Vec::new(),
             progress: Vec::new(),
+            registrations: Vec::new(),
             shown_documents: Vec::new(),
             load_failed: false,
             capabilities: serde_json::Value::Null,
@@ -482,6 +492,7 @@ impl ServerFixture {
             native_watch,
             inlay_hint_resolve,
             work_done_progress,
+            relative_patterns,
             experimental,
         } = profile;
         let root_url = Url::from_directory_path(&self.root).expect("root url");
@@ -519,7 +530,10 @@ impl ServerFixture {
             // Dynamic registration, so the server does not start
             // its own watcher: a scenario that wants the watcher
             // path says so by not asking for this.
-            "didChangeWatchedFiles": { "dynamicRegistration": !native_watch },
+            "didChangeWatchedFiles": {
+                "dynamicRegistration": !native_watch,
+                "relativePatternSupport": relative_patterns,
+            },
         });
         if pull {
             text_document["diagnostic"] = serde_json::json!({ "dynamicRegistration": false });
@@ -612,6 +626,11 @@ impl ServerFixture {
                     if r.method == "window/showDocument" {
                         self.shown_documents.push(r.params.clone());
                     }
+                    if r.method == "client/registerCapability"
+                        || r.method == "client/unregisterCapability"
+                    {
+                        self.registrations.push((r.method.clone(), r.params.clone()));
+                    }
                     let result = if r.method == "window/showDocument" {
                         serde_json::json!({"success":true})
                     } else {
@@ -650,7 +669,7 @@ impl ServerFixture {
     }
 
     pub(crate) fn url(&self, rel: &str) -> Url {
-        Url::from_file_path(self.root.join(rel)).expect("file url")
+        Url::from_file_path(self.path(rel)).expect("file url")
     }
 
     pub(crate) fn did_open(&mut self, rel: &str, text: &str) {
@@ -700,7 +719,7 @@ impl ServerFixture {
     /// A file appearing on disk, as a client watcher reports it. Any `.sail`
     /// file created in the workspace makes the server rescan.
     pub(crate) fn create_on_disk(&mut self, rel: &str, text: &str) {
-        std::fs::write(self.root.join(rel), text).expect("write");
+        std::fs::write(self.path(rel), text).expect("write");
         self.notify(
             "workspace/didChangeWatchedFiles",
             serde_json::json!({ "changes": [{ "uri": self.url(rel), "type": 1 }] }),
@@ -778,13 +797,51 @@ impl ServerFixture {
     }
 
     pub(crate) fn path(&self, rel: &str) -> PathBuf {
-        self.root.join(rel)
+        fixture_path(&self.root, &self.base, rel)
     }
 
     fn outside_dir(&self) -> PathBuf {
         let mut dir = self.base.clone().into_os_string();
         dir.push("_outside");
         PathBuf::from(dir)
+    }
+
+    /// Where the fixture's (empty) standard library lives: `$SAIL_DIR`.
+    fn stdlib_dir_of(base: &std::path::Path) -> PathBuf {
+        let mut dir = base.to_path_buf().into_os_string();
+        dir.push("_stdlib");
+        PathBuf::from(dir)
+    }
+
+    /// The watchers of the latest `workspace/didChangeWatchedFiles`
+    /// registration, as the client received them.
+    fn latest_watchers(&self) -> Vec<serde_json::Value> {
+        self.registrations
+            .iter()
+            .rev()
+            .find(|(method, _)| method == "client/registerCapability")
+            .map(|(_, params)| {
+                params["registrations"][0]["registerOptions"]["watchers"]
+                    .as_array()
+                    .expect("watchers")
+                    .clone()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The ids of every watcher registration, then every unregistration.
+    fn watcher_registration_ids(&self) -> (Vec<String>, Vec<String>) {
+        let ids = |method: &str, key: &str| {
+            self.registrations
+                .iter()
+                .filter(|(m, _)| m == method)
+                .map(|(_, params)| params[key][0]["id"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        (
+            ids("client/registerCapability", "registrations"),
+            ids("client/unregisterCapability", "unregisterations"),
+        )
     }
 
     /// A document the workspace does not contain, opened from elsewhere.
@@ -916,9 +973,21 @@ impl Drop for ServerFixture {
         }
         let _ = std::fs::remove_dir_all(&self.base);
         let _ = std::fs::remove_dir_all(self.outside_dir());
+        let _ = std::fs::remove_dir_all(Self::stdlib_dir_of(&self.base));
         // The directory is gone, so leaving the variable set would point the
         // next reader at nothing. SAFETY: the fixture's mutex is still held.
         unsafe { std::env::remove_var("SAIL_DIR") };
+    }
+}
+
+/// Where a fixture's relative path lives on disk. `no-stdlib/...` names the
+/// (empty) library the fixture points `$SAIL_DIR` at, which sits beside the
+/// workspace, not in it — so a scenario can give `$include <x.sail>`
+/// something to find without the file also being a workspace file.
+fn fixture_path(root: &std::path::Path, base: &std::path::Path, rel: &str) -> PathBuf {
+    match rel.strip_prefix("no-stdlib/") {
+        Some(in_library) => ServerFixture::stdlib_dir_of(base).join(in_library),
+        None => root.join(rel),
     }
 }
 
@@ -1070,6 +1139,114 @@ fn empty_workspace_folders_use_the_clients_root_uri() {
         .log
         .iter()
         .any(|m| m.contains("Loaded Sail project:") && m.contains("riscv.sail_project")));
+}
+
+/// A glob watcher's text, whichever form it was sent in.
+fn watcher_glob(watcher: &serde_json::Value) -> String {
+    match &watcher["globPattern"] {
+        serde_json::Value::String(glob) => glob.clone(),
+        relative => format!(
+            "{}/{}",
+            Url::parse(relative["baseUri"].as_str().unwrap())
+                .unwrap()
+                .to_file_path()
+                .unwrap()
+                .display(),
+            relative["pattern"].as_str().unwrap()
+        ),
+    }
+}
+
+#[test]
+fn watchers_follow_the_library_and_include_paths_the_loaded_model_reads() {
+    let mut server = ServerFixture::new(
+        "watch-the-model",
+        &[("sail.proj", "Main { files a.sail }\n"), ("a.sail", "val a : int\n")],
+    );
+    let stdlib = ServerFixture::stdlib_dir_of(&server.base).join("lib");
+    let covers = |watchers: &[serde_json::Value], dir: &std::path::Path| {
+        watchers.iter().map(watcher_glob).any(|glob| glob == format!("{}/**/*.sail", dir.display()))
+    };
+    let (registered, unregistered) = server.watcher_registration_ids();
+    assert_eq!(registered.len(), 1, "{:?}", server.registrations);
+    assert!(unregistered.is_empty());
+    let initial = server.latest_watchers();
+    assert!(covers(&initial, &server.root), "{initial:?}");
+    assert!(covers(&initial, &stdlib), "the library is read too: {initial:?}");
+
+    // An include path outside every folder: the model reads it now.
+    let include = server.outside_dir().join("include");
+    std::fs::create_dir_all(&include).unwrap();
+    server.configure(serde_json::json!({ "workspace": { "includePaths": [include] } }));
+    server.wait_until("the watchers to follow the include path", |s| {
+        covers(&s.latest_watchers(), &include)
+    });
+    let (registered, unregistered) = server.watcher_registration_ids();
+    assert_eq!(registered.len(), 2, "{:?}", server.registrations);
+    assert_eq!(unregistered, registered[..1], "the first registration is dropped first");
+    assert_ne!(registered[0], registered[1]);
+    let order: Vec<&str> = server.registrations.iter().map(|(m, _)| m.as_str()).collect();
+    assert_eq!(
+        order,
+        ["client/registerCapability", "client/unregisterCapability", "client/registerCapability"]
+    );
+    let latest = server.latest_watchers();
+    assert!(covers(&latest, &server.root) && covers(&latest, &stdlib), "{latest:?}");
+
+    // The same set again — a reload that changes nothing — registers nothing.
+    server.notify("sail-lsp/reloadWorkspace", serde_json::Value::Null);
+    server.wait_until_scans_settle();
+    server.pump(Duration::from_millis(200));
+    assert_eq!(server.watcher_registration_ids().0.len(), 2, "{:?}", server.registrations);
+}
+
+#[test]
+fn an_added_workspace_folder_reregisters_the_watchers_as_relative_patterns() {
+    let mut server = ServerFixture::open_with_client(
+        "watch-added-folder",
+        &[("sail.proj", "Main { files a.sail }\n"), ("a.sail", "val a : int\n")],
+        Root::Real,
+        None,
+        serde_json::Value::Null,
+        ClientProfile { relative_patterns: true, ..Default::default() },
+    );
+    let first = server.latest_watchers();
+    assert!(!first.is_empty());
+    assert!(
+        first.iter().all(|w| w["globPattern"]["baseUri"].is_string()
+            && w["globPattern"]["pattern"].as_str().is_some_and(|p| !p.starts_with('/'))),
+        "relative patterns for a client that takes them: {first:?}"
+    );
+    let (registered, _) = server.watcher_registration_ids();
+    assert_eq!(registered.len(), 1);
+
+    let other = server.outside_dir().join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    std::fs::write(other.join("sail.proj"), "Other { files b.sail }\n").unwrap();
+    std::fs::write(other.join("b.sail"), "val b : int\n").unwrap();
+    let other_url = Url::from_directory_path(&other).unwrap();
+    server.notify(
+        "workspace/didChangeWorkspaceFolders",
+        serde_json::json!({ "event": { "added": [{ "uri": other_url, "name": "other" }], "removed": [] } }),
+    );
+    server.wait_until("the watchers to cover the added folder", |s| {
+        s.latest_watchers()
+            .iter()
+            .any(|w| w["globPattern"]["baseUri"].as_str() == Some(other_url.as_str()))
+    });
+    let (registered, unregistered) = server.watcher_registration_ids();
+    assert_eq!(registered.len(), 2, "{:?}", server.registrations);
+    assert_eq!(unregistered, registered[..1]);
+    let latest = server.latest_watchers();
+    let root_url = Url::from_directory_path(&server.root).unwrap();
+    assert!(
+        latest.iter().any(|w| w["globPattern"]["baseUri"].as_str() == Some(root_url.as_str())),
+        "the first folder is still watched: {latest:?}"
+    );
+    assert!(
+        latest.iter().any(|w| w["globPattern"]["pattern"] == "**/sail.proj"),
+        "manifests are watched: {latest:?}"
+    );
 }
 
 #[test]

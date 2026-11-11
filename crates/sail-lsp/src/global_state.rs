@@ -73,6 +73,13 @@ pub(crate) struct GlobalState {
         std::collections::HashMap<lsp_server::RequestId, crate::request_batch::RequestState>,
     /// Whether the client has been asked to watch the workspace's files.
     pub(crate) registered_file_watchers: bool,
+    /// The `workspace/didChangeWatchedFiles` registration the client holds:
+    /// its id, and the watchers it was given. Compared against the set the
+    /// loaded model wants, so a switch that changes nothing registers
+    /// nothing, and one that does unregisters this first.
+    pub(crate) client_file_watchers: Option<(String, Vec<lsp_types::FileSystemWatcher>)>,
+    /// Registrations made so far; each gets its own id.
+    pub(crate) file_watcher_registrations: u32,
     /// Paths consulted by discovery, including absent include candidates.
     pub(crate) discovery_watch_files: Vec<std::path::PathBuf>,
     /// How the server reads a file it does not have, and — when the client
@@ -248,6 +255,8 @@ impl GlobalState {
             req_queue: ReqQueue::default(),
             request_states: Default::default(),
             registered_file_watchers: false,
+            client_file_watchers: None,
+            file_watcher_registrations: 0,
             discovery_watch_files: Vec::new(),
             loader: None,
             loader_receiver: None,
