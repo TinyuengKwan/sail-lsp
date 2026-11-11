@@ -1,45 +1,60 @@
 import * as vscode from "vscode";
+import { spawn } from "node:child_process";
 import type { LanguageClient } from "vscode-languageclient/node";
 import { TaskInvocations } from "./taskInvocations";
+import { scriptArguments, taskEnvironment } from "./taskRunner";
+import {
+    Runnable,
+    SAIL_PROBLEM_MATCHERS,
+    SAIL_TASK_SOURCE,
+    invocationCommand,
+    lensLine,
+    taskDefinition,
+    taskGroup,
+    testOutcome,
+} from "./tasks";
 
-type Document = { uri: string };
-type ProcessArgs = {
-    kind: "test" | "export";
-    program: string;
-    args: string[];
-    cwd: string;
-    environment: Record<string, string>;
+export type { Runnable } from "./tasks";
+
+export type Runnables = {
+    list: (uri: vscode.Uri) => Promise<Runnable[]>;
+    refresh: () => void;
+    activeTasks: () => number;
+    /** Fires when discovery may have changed: settings, manifests, projects. */
+    onDidChange: vscode.Event<void>;
+    /** The entry as discovered now, checked for execution: still the same
+     * entry, not disabled, the workspace trusted, its inputs saved. */
+    select: (uri: vscode.Uri, id: string, fingerprint: string) => Promise<Runnable>;
+    /** The VS Code task that runs a selected process entry. */
+    task: (selected: Runnable & { kind: "shell" }) => vscode.Task;
+    /** The tasks the task provider offers now; their invocations are kept
+     * until the next offer replaces them. */
+    provide: (entries: (Runnable & { kind: "shell" })[]) => vscode.Task[];
+    /** Runs a selected interpreter entry here and reads its verdict, for
+     * the Test Explorer; the task terminal cannot be read back. */
+    runTest: (
+        selected: Runnable & { kind: "shell" },
+        token: vscode.CancellationToken,
+        output: (chunk: string) => void,
+    ) => Promise<{ passed: boolean; message?: string }>;
 };
-export type Runnable = {
-    id: string;
-    label: string;
-    project: Document;
-    fingerprint: string;
-    disabled?: string;
-    documents: string[];
-} & (
-    | { kind: "sail-check"; args: { textDocument: Document } }
-    | { kind: "shell"; args: ProcessArgs }
-);
 
 /** Discover with the loaded server model; execute only on a user command. */
 export function registerRunnables(
     context: vscode.ExtensionContext,
     getClient: () => LanguageClient | undefined,
     extraEnv: () => Record<string, string>,
-): {
-    list: (uri: vscode.Uri) => Promise<Runnable[]>;
-    refresh: () => void;
-    activeTasks: () => number;
-} {
+): Runnables {
     const changed = new vscode.EventEmitter<void>();
     const running = new Set<vscode.TaskExecution>();
     const invocations = new TaskInvocations();
     const pending = new Map<string, number>();
+    const provided = new Set<string>();
     const prune = (): void =>
         invocations.prune(
             new Set([
                 ...pending.keys(),
+                ...provided,
                 ...[...running].map(
                     (execution) => execution.task.definition.sailInvocation as string,
                 ),
@@ -54,6 +69,123 @@ export function registerRunnables(
         });
     };
     const refresh = (): void => changed.fire();
+    const select = async (uri: vscode.Uri, id: string, fingerprint: string): Promise<Runnable> => {
+        if (!fingerprint) throw new Error("A project task fingerprint is required");
+        const selected = (await list(uri)).find((task) => task.id === id);
+        if (selected?.fingerprint !== fingerprint) {
+            throw new Error("The project task changed; select it again before running");
+        }
+        if (selected.disabled) throw new Error(selected.disabled);
+        if (!vscode.workspace.isTrusted) {
+            throw new Error("Trust this workspace before running Sail project commands");
+        }
+        const documents = new Set(
+            selected.documents.map((uri) => vscode.Uri.parse(uri).toString()),
+        );
+        const dirty = vscode.workspace.textDocuments.find(
+            (document) => document.isDirty && documents.has(document.uri.toString()),
+        );
+        if (dirty) throw new Error(`Save ${dirty.fileName} before running the project task`);
+        return selected;
+    };
+    const task = (selected: Runnable & { kind: "shell" }): vscode.Task => {
+        const invocation = invocations.prepare(invocationCommand(selected, extraEnv()));
+        const scope =
+            vscode.workspace.getWorkspaceFolder(vscode.Uri.parse(selected.project.uri)) ??
+            vscode.TaskScope.Workspace;
+        const result = new vscode.Task(
+            {
+                ...taskDefinition(selected),
+                id: selected.id,
+                project: selected.project.uri,
+                sailInvocation: invocation.key,
+            },
+            scope,
+            selected.label,
+            SAIL_TASK_SOURCE,
+            launcherExecution(context, invocation.file),
+            SAIL_PROBLEM_MATCHERS,
+        );
+        const group = taskGroup(selected.args.kind);
+        result.group =
+            group === "test"
+                ? vscode.TaskGroup.Test
+                : group === "build"
+                  ? vscode.TaskGroup.Build
+                  : undefined;
+        result.presentationOptions = {
+            reveal: vscode.TaskRevealKind.Always,
+            panel: vscode.TaskPanelKind.Dedicated,
+            echo: false,
+        };
+        return result;
+    };
+    const provide = (entries: (Runnable & { kind: "shell" })[]): vscode.Task[] => {
+        const tasks = entries.map(task);
+        provided.clear();
+        for (const prepared of tasks) provided.add(prepared.definition.sailInvocation as string);
+        prune();
+        return tasks;
+    };
+    /** Keeps a prepared task's invocation file until the task has started;
+     * a task that has started is kept by `running`. */
+    const hold = (prepared: vscode.Task): (() => void) => {
+        const key = prepared.definition.sailInvocation as string;
+        pending.set(key, (pending.get(key) ?? 0) + 1);
+        return () => {
+            const count = pending.get(key)! - 1;
+            if (count) pending.set(key, count);
+            else pending.delete(key);
+            prune();
+        };
+    };
+    const runTest = (
+        selected: Runnable & { kind: "shell" },
+        token: vscode.CancellationToken,
+        output: (chunk: string) => void,
+    ): Promise<{ passed: boolean; message?: string }> =>
+        new Promise((resolve) => {
+            const command = invocationCommand(selected, extraEnv());
+            const { args, cleanup } = scriptArguments(command.args, command.script);
+            let collected = "";
+            let child: ReturnType<typeof spawn>;
+            try {
+                child = spawn(command.program, args, {
+                    cwd: command.cwd,
+                    env: taskEnvironment(process.env, command.environment),
+                    stdio: ["ignore", "pipe", "pipe"],
+                });
+            } catch (error) {
+                cleanup();
+                resolve({ passed: false, message: String(error) });
+                return;
+            }
+            const read = (chunk: Buffer): void => {
+                const text = chunk.toString();
+                collected += text;
+                output(text);
+            };
+            child.stdout?.on("data", read);
+            child.stderr?.on("data", read);
+            const cancel = token.onCancellationRequested(() => child.kill());
+            child.once("error", (error) => {
+                cancel.dispose();
+                cleanup();
+                resolve({
+                    passed: false,
+                    message: `Could not start ${command.program}: ${error.message}`,
+                });
+            });
+            child.once("close", (code) => {
+                cancel.dispose();
+                cleanup();
+                resolve(
+                    token.isCancellationRequested
+                        ? { passed: false, message: "cancelled" }
+                        : testOutcome(code, collected),
+                );
+            });
+        });
     context.subscriptions.push(
         changed,
         vscode.workspace.onDidChangeConfiguration((event) => {
@@ -66,7 +198,7 @@ export function registerRunnables(
             if (document.languageId === "sail-project") refresh();
         }),
         vscode.tasks.onDidStartTask((event) => {
-            if (event.execution.task.source === "sail-lsp") running.add(event.execution);
+            if (event.execution.task.source === SAIL_TASK_SOURCE) running.add(event.execution);
         }),
         vscode.tasks.onDidEndTask((event) => {
             running.delete(event.execution);
@@ -86,21 +218,14 @@ export function registerRunnables(
                         ? vscode.Uri.parse(source)
                         : (source ?? vscode.window.activeTextEditor?.document.uri);
                 if (!uri) return undefined;
-                let selected: Runnable | undefined;
-                const candidates = await list(uri);
-                if (candidates.length === 0 && id === undefined) {
-                    void vscode.window.showInformationMessage(
-                        "No project tasks are available for this file; check the loaded project and server version.",
-                    );
-                    return undefined;
-                }
-                if (id !== undefined) {
-                    if (!fingerprint) throw new Error("A project task fingerprint is required");
-                    selected = candidates.find((task) => task.id === id);
-                    if (selected?.fingerprint !== fingerprint) {
-                        throw new Error("The project task changed; select it again before running");
+                if (id === undefined) {
+                    const candidates = await list(uri);
+                    if (candidates.length === 0) {
+                        void vscode.window.showInformationMessage(
+                            "No project tasks are available for this file; check the loaded project and server version.",
+                        );
+                        return undefined;
                     }
-                } else {
                     const item = await vscode.window.showQuickPick(
                         candidates.map((runnable) => ({
                             label: runnable.label,
@@ -114,98 +239,22 @@ export function registerRunnables(
                         },
                     );
                     if (!item) return undefined;
-                    const fresh = await list(uri);
-                    selected = fresh.find((task) => task.id === item.runnable.id);
-                    if (selected?.fingerprint !== item.runnable.fingerprint) {
-                        throw new Error("The project task changed; select it again before running");
-                    }
+                    id = item.runnable.id;
+                    fingerprint = item.runnable.fingerprint;
                 }
-                if (!selected) throw new Error("The project task is no longer available");
-                if (selected.disabled) throw new Error(selected.disabled);
-                if (!vscode.workspace.isTrusted) {
-                    throw new Error("Trust this workspace before running Sail project commands");
-                }
-                const documents = new Set(
-                    selected.documents.map((uri) => vscode.Uri.parse(uri).toString()),
-                );
-                const dirty = vscode.workspace.textDocuments.find(
-                    (document) => document.isDirty && documents.has(document.uri.toString()),
-                );
-                if (dirty)
-                    throw new Error(`Save ${dirty.fileName} before running the project task`);
+                const selected = await select(uri, id, fingerprint ?? "");
                 const client = getClient();
                 if (!client) throw new Error("The Sail server is not running");
                 if (selected.kind === "sail-check") {
                     await client.sendNotification("sail-lsp/runFlycheck", selected.args);
                     return undefined;
                 }
-                const command = selected.args;
-                const invocation = invocations.prepare({
-                    ...command,
-                    environment: { ...extraEnv(), ...command.environment },
-                });
-                pending.set(invocation.key, (pending.get(invocation.key) ?? 0) + 1);
-                const launcher = vscode.Uri.file(
-                    context.asAbsolutePath("out/taskRunner.js"),
-                ).toString();
-                const invocationUri = vscode.Uri.file(invocation.file).toString();
-                const bootstrap =
-                    "require(require('node:url').fileURLToPath(process.argv[1])).runTask(process.argv[2]);";
-                // Electron is a GUI executable on Windows: ConPTY can execute
-                // it without reporting the process events used by Tasks. A
-                // console shell keeps those events and the real exit status.
-                // Only fixed code and private path variables enter the shell;
-                // user arguments/environment are read from JSON afterwards.
-                const execution =
-                    process.platform === "win32"
-                        ? new vscode.ShellExecution(
-                              `""%SAIL_LSP_TASK_RUNTIME%" -e "${bootstrap}" "%SAIL_LSP_TASK_LAUNCHER%" "%SAIL_LSP_TASK_INVOCATION%""`,
-                              {
-                                  executable: process.env.ComSpec ?? "cmd.exe",
-                                  shellArgs: ["/d", "/v:off", "/s", "/c"],
-                                  env: {
-                                      ELECTRON_RUN_AS_NODE: "1",
-                                      SAIL_LSP_TASK_RUNTIME: process.execPath,
-                                      SAIL_LSP_TASK_LAUNCHER: launcher,
-                                      SAIL_LSP_TASK_INVOCATION: invocationUri,
-                                  },
-                              },
-                          )
-                        : new vscode.ProcessExecution(
-                              process.execPath,
-                              ["-e", bootstrap, launcher, invocationUri],
-                              { env: { ELECTRON_RUN_AS_NODE: "1" } },
-                          );
-                const scope =
-                    vscode.workspace.getWorkspaceFolder(vscode.Uri.parse(selected.project.uri)) ??
-                    vscode.TaskScope.Workspace;
-                const task = new vscode.Task(
-                    {
-                        type: "sail",
-                        id: selected.id,
-                        project: selected.project.uri,
-                        sailInvocation: invocation.key,
-                    },
-                    scope,
-                    selected.label,
-                    "sail-lsp",
-                    execution,
-                    [],
-                );
-                task.group =
-                    command.kind === "test" ? vscode.TaskGroup.Test : vscode.TaskGroup.Build;
-                task.presentationOptions = {
-                    reveal: vscode.TaskRevealKind.Always,
-                    panel: vscode.TaskPanelKind.Dedicated,
-                    echo: false,
-                };
+                const prepared = task(selected);
+                const release = hold(prepared);
                 try {
-                    return await vscode.tasks.executeTask(task);
+                    return await vscode.tasks.executeTask(prepared);
                 } finally {
-                    const count = pending.get(invocation.key)! - 1;
-                    if (count) pending.set(invocation.key, count);
-                    else pending.delete(invocation.key);
-                    prune();
+                    release();
                 }
             },
         ),
@@ -233,15 +282,72 @@ export function registerRunnables(
                         .filter((task) => !task.disabled)
                         .map(
                             (task) =>
-                                new vscode.CodeLens(new vscode.Range(0, 0, 0, 0), {
-                                    title: task.label,
-                                    command: "sail-lsp.runProjectTask",
-                                    arguments: [document.uri.toString(), task.id, task.fingerprint],
-                                }),
+                                new vscode.CodeLens(
+                                    new vscode.Range(lensLine(task), 0, lensLine(task), 0),
+                                    {
+                                        title: task.location ? `▶ ${task.label}` : task.label,
+                                        command: "sail-lsp.runProjectTask",
+                                        arguments: [
+                                            document.uri.toString(),
+                                            task.id,
+                                            task.fingerprint,
+                                        ],
+                                    },
+                                ),
                         );
                 },
             },
         ),
     );
-    return { list, refresh, activeTasks: () => running.size };
+    return {
+        list,
+        refresh,
+        activeTasks: () => running.size,
+        onDidChange: changed.event,
+        select,
+        task,
+        provide,
+        runTest,
+    };
+}
+
+/**
+ * The execution every Sail task uses: VS Code's own Node runtime starts the
+ * bundled launcher, which reads the command from a private invocation file.
+ *
+ * Electron is a GUI executable on Windows: ConPTY can execute it without
+ * reporting the process events used by Tasks. A console shell keeps those
+ * events and the real exit status. Only fixed code and private path
+ * variables enter the shell; user arguments/environment are read from JSON
+ * afterwards.
+ */
+export function launcherExecution(
+    context: vscode.ExtensionContext,
+    invocationFile: string,
+): vscode.ProcessExecution | vscode.ShellExecution {
+    const launcher = vscode.Uri.file(context.asAbsolutePath("out/taskRunner.js")).toString();
+    const invocationUri = vscode.Uri.file(invocationFile).toString();
+    const bootstrap =
+        "require(require('node:url').fileURLToPath(process.argv[1])).runTask(process.argv[2]);";
+    return process.platform === "win32"
+        ? new vscode.ShellExecution(
+              `""%SAIL_LSP_TASK_RUNTIME%" -e "${bootstrap}" "%SAIL_LSP_TASK_LAUNCHER%" "%SAIL_LSP_TASK_INVOCATION%""`,
+              {
+                  executable: process.env.ComSpec ?? "cmd.exe",
+                  shellArgs: ["/d", "/v:off", "/s", "/c"],
+                  env: {
+                      ELECTRON_RUN_AS_NODE: "1",
+                      SAIL_LSP_TASK_RUNTIME: process.execPath,
+                      SAIL_LSP_TASK_LAUNCHER: launcher,
+                      SAIL_LSP_TASK_INVOCATION: invocationUri,
+                  },
+              },
+          )
+        : new vscode.ProcessExecution(
+              process.execPath,
+              ["-e", bootstrap, launcher, invocationUri],
+              {
+                  env: { ELECTRON_RUN_AS_NODE: "1" },
+              },
+          );
 }

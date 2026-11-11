@@ -74,6 +74,8 @@ pub struct ProjectTaskConfig {
 pub enum ProjectTaskKind {
     Test,
     Export,
+    /// Runs the program's `main` in the interpreter; not a test, not a build.
+    Run,
 }
 
 /// Capacities count query results, not bytes. Zero disables that family's LRU.
@@ -758,7 +760,11 @@ mod tests {
         let properties = package["contributes"]["configuration"]["properties"].as_object().unwrap();
         let mut section = serde_json::Map::new();
         for (key, schema) in properties {
-            let (group, field) = key.strip_prefix("sail-lsp.").unwrap().split_once('.').unwrap();
+            let key = key.strip_prefix("sail-lsp.").unwrap();
+            if CLIENT_ONLY_SETTINGS.contains(&key) {
+                continue;
+            }
+            let (group, field) = key.split_once('.').unwrap();
             let group = section.entry(group).or_insert_with(|| serde_json::json!({}));
             group[field] = schema["default"].clone();
         }
@@ -768,10 +774,17 @@ mod tests {
     }
 
     /// Settings the VS Code extension consumes itself and never reads on
-    /// the server: how to start the server, how to trace it, and whether
-    /// the extension's own task-lens provider shows its lenses.
-    const CLIENT_ONLY_SETTINGS: &[&str] =
-        &["server.path", "server.extraEnv", "trace.server", "runnables.showCodeLens"];
+    /// the server: how to start the server, how to trace it, whether to
+    /// restart it when those change, and whether the extension's own
+    /// task-lens provider and Test Explorer are on.
+    const CLIENT_ONLY_SETTINGS: &[&str] = &[
+        "server.path",
+        "server.extraEnv",
+        "trace.server",
+        "restartServerOnConfigChange",
+        "runnables.showCodeLens",
+        "testExplorer",
+    ];
 
     /// `package.json` and the server's config name the same settings with
     /// the same defaults, in both directions.

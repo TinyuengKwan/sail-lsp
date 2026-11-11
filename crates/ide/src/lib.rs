@@ -65,6 +65,7 @@ pub mod references;
 #[cfg(test)]
 mod regression_tests;
 pub mod rename;
+pub mod runnables;
 pub mod signature_help;
 pub mod static_index;
 pub mod syntax_highlighting;
@@ -84,6 +85,7 @@ pub use ide_completion::{
 pub use analysis::{Analysis, AnalysisHost};
 pub use markup::Markup;
 pub use navigation_target::NavigationTarget;
+pub use runnables::{Runnable, RunnableKind};
 
 /// A position in a file: file + byte offset.
 ///

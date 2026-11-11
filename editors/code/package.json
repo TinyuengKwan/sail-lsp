@@ -1,981 +1,1283 @@
 {
-  "name": "sail-lsp",
-  "displayName": "Sail Language Server",
-  "description": "Language support for Sail with navigation, diagnostics, hover, inlay hints, and bundled sail-lsp binaries",
-  "publisher": "Lunarwwww",
-  "version": "0.2.0",
-  "type": "commonjs",
-  "license": "SEE LICENSE IN LICENSE",
-  "icon": "icon.png",
-  "preview": false,
-  "engines": {
-    "vscode": "^1.93.0"
-  },
-  "extensionKind": [
-    "workspace"
-  ],
-  "categories": [
-    "Programming Languages"
-  ],
-  "keywords": [
-    "sail",
-    "language server",
-    "lsp",
-    "isa",
-    "formal methods",
-    "risc-v",
-    "arm",
-    "semantics"
-  ],
-  "homepage": "https://github.com/TinyuengKwan/sail-lsp#readme",
-  "bugs": {
-    "url": "https://github.com/TinyuengKwan/sail-lsp/issues"
-  },
-  "galleryBanner": {
-    "color": "#132a43",
-    "theme": "dark"
-  },
-  "markdown": "github",
-  "qna": "https://github.com/TinyuengKwan/sail-lsp/discussions",
-  "activationEvents": [
-    "workspaceContains:**/*.sail",
-    "workspaceContains:*.sail_project",
-    "workspaceContains:sail.proj",
-    "onLanguage:sail-project"
-  ],
-  "main": "./out/main",
-  "capabilities": {
-    "untrustedWorkspaces": {
-      "supported": "limited",
-      "description": "The extension can analyze Sail files in restricted mode, but launching the bundled server still executes a local binary."
+    "name": "sail-lsp",
+    "displayName": "Sail Language Server",
+    "description": "Language support for Sail with navigation, diagnostics, hover, inlay hints, and bundled sail-lsp binaries",
+    "publisher": "Lunarwwww",
+    "version": "0.2.0",
+    "type": "commonjs",
+    "license": "SEE LICENSE IN LICENSE",
+    "icon": "icon.png",
+    "preview": false,
+    "engines": {
+        "vscode": "^1.93.0"
     },
-    "virtualWorkspaces": {
-      "supported": false,
-      "description": "The bundled sail-lsp server expects real filesystem access for indexing and $include resolution."
-    }
-  },
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/TinyuengKwan/sail-lsp"
-  },
-  "scripts": {
-    "vscode:prepublish": "npm run build-base -- --minify",
-    "build": "npm run build-base -- --sourcemap",
-    "build-base": "esbuild ./src/main.ts ./src/taskRunner.ts --bundle --outdir=out --external:vscode --format=cjs --platform=node --target=node20",
-    "watch": "npm run build-base -- --sourcemap --watch",
-    "package": "npx @vscode/vsce package -o sail-lsp.vsix",
-    "package:local": "node ./scripts/package-local.mjs",
-    "package:vsix:linux-x64": "npx @vscode/vsce package -o sail-lsp-linux-x64.vsix --target linux-x64",
-    "package:vsix:linux-arm64": "npx @vscode/vsce package -o sail-lsp-linux-arm64.vsix --target linux-arm64",
-    "package:vsix:win32-x64": "npx @vscode/vsce package -o sail-lsp-win32-x64.vsix --target win32-x64",
-    "package:vsix:win32-arm64": "npx @vscode/vsce package -o sail-lsp-win32-arm64.vsix --target win32-arm64",
-    "package:vsix:darwin-x64": "npx @vscode/vsce package -o sail-lsp-darwin-x64.vsix --target darwin-x64",
-    "package:vsix:darwin-arm64": "npx @vscode/vsce package -o sail-lsp-darwin-arm64.vsix --target darwin-arm64",
-    "publish:vsix": "npx @vscode/vsce publish",
-    "deploy:marketplace:linux-x64": "npx @vscode/vsce publish --packagePath sail-lsp-linux-x64.vsix",
-    "deploy:marketplace:win32-x64": "npx @vscode/vsce publish --packagePath sail-lsp-win32-x64.vsix",
-    "deploy:marketplace:darwin-arm64": "npx @vscode/vsce publish --packagePath sail-lsp-darwin-arm64.vsix",
-    "package:server:linux-x64": "node ./scripts/package-server.mjs linux x64 x86_64-unknown-linux-gnu",
-    "package:server:linux-arm64": "node ./scripts/package-server.mjs linux arm64 aarch64-unknown-linux-gnu",
-    "package:server:win32-x64": "node ./scripts/package-server.mjs windows x64 x86_64-pc-windows-msvc",
-    "package:server:win32-arm64": "node ./scripts/package-server.mjs windows arm64 aarch64-pc-windows-msvc",
-    "package:server:darwin-x64": "node ./scripts/package-server.mjs darwin x64 x86_64-apple-darwin",
-    "package:server:darwin-arm64": "node ./scripts/package-server.mjs darwin arm64 aarch64-apple-darwin",
-    "typecheck": "tsc",
-    "lint": "tsc --noEmit",
-    "test": "npm run typecheck && npm run build && node ./out/src/test/runTest.js",
-    "format": "prettier --write src/",
-    "format:check": "prettier --check src/",
-    "test:graph": "npm run typecheck && node --test ./out/src/test/projectGraph.test.js ./out/src/test/analysisContext.test.js ./out/src/test/installation.test.js ./out/src/test/diagnosticReport.test.js ./out/src/test/taskInvocations.test.js ./out/src/test/configuration.test.js ./out/src/test/snippets.test.js ./out/src/test/onEnterRules.test.js ./out/src/test/hoverActions.test.js"
-  },
-  "contributes": {
-    "languages": [
-      {
-        "id": "sail",
-        "aliases": [
-          "Sail",
-          "sail"
-        ],
-        "extensions": [
-          ".sail"
-        ],
-        "configuration": "./language-configuration.json"
-      },
-      {
-        "id": "sail-project",
-        "aliases": [
-          "Sail Project",
-          "sail-project"
-        ],
-        "extensions": [
-          ".sail_project"
-        ],
-        "filenames": [
-          "sail.proj"
-        ],
-        "configuration": "./language-configuration-project.json"
-      }
+    "extensionKind": [
+        "workspace"
     ],
-    "grammars": [
-      {
-        "language": "sail",
-        "scopeName": "source.sail",
-        "path": "./syntaxes/sail.tmLanguage.json"
-      },
-      {
-        "language": "sail-project",
-        "scopeName": "source.sail-project",
-        "path": "./syntaxes/sail-project.tmLanguage.json"
-      }
+    "categories": [
+        "Programming Languages"
     ],
-    "configurationDefaults": {
-      "[sail]": {
-        "editor.tabSize": 2,
-        "editor.insertSpaces": true
-      }
+    "keywords": [
+        "sail",
+        "language server",
+        "lsp",
+        "isa",
+        "formal methods",
+        "risc-v",
+        "arm",
+        "semantics"
+    ],
+    "homepage": "https://github.com/TinyuengKwan/sail-lsp#readme",
+    "bugs": {
+        "url": "https://github.com/TinyuengKwan/sail-lsp/issues"
     },
-    "configuration": {
-      "title": "Sail Language Server",
-      "properties": {
-        "sail-lsp.workspace.linkedProjects": {
-          "scope": "resource",
-          "type": "array",
-          "default": [],
-          "items": {
-            "oneOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "object",
-                "required": [
-                  "projectFile"
+    "galleryBanner": {
+        "color": "#132a43",
+        "theme": "dark"
+    },
+    "markdown": "github",
+    "qna": "https://github.com/TinyuengKwan/sail-lsp/discussions",
+    "activationEvents": [
+        "workspaceContains:**/*.sail",
+        "workspaceContains:*.sail_project",
+        "workspaceContains:sail.proj",
+        "onLanguage:sail-project"
+    ],
+    "main": "./out/main",
+    "capabilities": {
+        "untrustedWorkspaces": {
+            "supported": "limited",
+            "description": "The extension can analyze Sail files in restricted mode, but launching the bundled server still executes a local binary."
+        },
+        "virtualWorkspaces": {
+            "supported": false,
+            "description": "The bundled sail-lsp server expects real filesystem access for indexing and $include resolution."
+        }
+    },
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/TinyuengKwan/sail-lsp"
+    },
+    "scripts": {
+        "vscode:prepublish": "npm run build-base -- --minify",
+        "build": "npm run build-base -- --sourcemap",
+        "build-base": "esbuild ./src/main.ts ./src/taskRunner.ts --bundle --outdir=out --external:vscode --format=cjs --platform=node --target=node20",
+        "watch": "npm run build-base -- --sourcemap --watch",
+        "package": "npx @vscode/vsce package -o sail-lsp.vsix",
+        "package:local": "node ./scripts/package-local.mjs",
+        "package:vsix:linux-x64": "npx @vscode/vsce package -o sail-lsp-linux-x64.vsix --target linux-x64",
+        "package:vsix:linux-arm64": "npx @vscode/vsce package -o sail-lsp-linux-arm64.vsix --target linux-arm64",
+        "package:vsix:win32-x64": "npx @vscode/vsce package -o sail-lsp-win32-x64.vsix --target win32-x64",
+        "package:vsix:win32-arm64": "npx @vscode/vsce package -o sail-lsp-win32-arm64.vsix --target win32-arm64",
+        "package:vsix:darwin-x64": "npx @vscode/vsce package -o sail-lsp-darwin-x64.vsix --target darwin-x64",
+        "package:vsix:darwin-arm64": "npx @vscode/vsce package -o sail-lsp-darwin-arm64.vsix --target darwin-arm64",
+        "publish:vsix": "npx @vscode/vsce publish",
+        "deploy:marketplace:linux-x64": "npx @vscode/vsce publish --packagePath sail-lsp-linux-x64.vsix",
+        "deploy:marketplace:win32-x64": "npx @vscode/vsce publish --packagePath sail-lsp-win32-x64.vsix",
+        "deploy:marketplace:darwin-arm64": "npx @vscode/vsce publish --packagePath sail-lsp-darwin-arm64.vsix",
+        "package:server:linux-x64": "node ./scripts/package-server.mjs linux x64 x86_64-unknown-linux-gnu",
+        "package:server:linux-arm64": "node ./scripts/package-server.mjs linux arm64 aarch64-unknown-linux-gnu",
+        "package:server:win32-x64": "node ./scripts/package-server.mjs windows x64 x86_64-pc-windows-msvc",
+        "package:server:win32-arm64": "node ./scripts/package-server.mjs windows arm64 aarch64-pc-windows-msvc",
+        "package:server:darwin-x64": "node ./scripts/package-server.mjs darwin x64 x86_64-apple-darwin",
+        "package:server:darwin-arm64": "node ./scripts/package-server.mjs darwin arm64 aarch64-apple-darwin",
+        "typecheck": "tsc",
+        "lint": "tsc --noEmit",
+        "test": "npm run typecheck && npm run build && node ./out/src/test/runTest.js",
+        "format": "prettier --write src/",
+        "format:check": "prettier --check src/",
+        "test:graph": "npm run typecheck && node --test ./out/src/test/projectGraph.test.js ./out/src/test/analysisContext.test.js ./out/src/test/installation.test.js ./out/src/test/diagnosticReport.test.js ./out/src/test/taskInvocations.test.js ./out/src/test/configuration.test.js ./out/src/test/snippets.test.js ./out/src/test/onEnterRules.test.js ./out/src/test/hoverActions.test.js ./out/src/test/tasks.test.js ./out/src/test/syntaxTree.test.js ./out/src/test/packageJson.test.js"
+    },
+    "contributes": {
+        "languages": [
+            {
+                "id": "sail",
+                "aliases": [
+                    "Sail",
+                    "sail"
                 ],
-                "properties": {
-                  "projectFile": {
-                    "type": "string"
-                  },
-                  "projectVariables": {
-                    "type": "object",
-                    "additionalProperties": {
-                      "type": [
-                        "boolean",
+                "extensions": [
+                    ".sail"
+                ],
+                "configuration": "./language-configuration.json"
+            },
+            {
+                "id": "sail-project",
+                "aliases": [
+                    "Sail Project",
+                    "sail-project"
+                ],
+                "extensions": [
+                    ".sail_project"
+                ],
+                "filenames": [
+                    "sail.proj"
+                ],
+                "configuration": "./language-configuration-project.json"
+            }
+        ],
+        "grammars": [
+            {
+                "language": "sail",
+                "scopeName": "source.sail",
+                "path": "./syntaxes/sail.tmLanguage.json"
+            },
+            {
+                "language": "sail-project",
+                "scopeName": "source.sail-project",
+                "path": "./syntaxes/sail-project.tmLanguage.json"
+            }
+        ],
+        "configurationDefaults": {
+            "[sail]": {
+                "editor.tabSize": 2,
+                "editor.insertSpaces": true
+            }
+        },
+        "configuration": {
+            "title": "Sail Language Server",
+            "properties": {
+                "sail-lsp.workspace.linkedProjects": {
+                    "scope": "resource",
+                    "type": "array",
+                    "default": [],
+                    "items": {
+                        "oneOf": [
+                            {
+                                "type": "string"
+                            },
+                            {
+                                "type": "object",
+                                "required": [
+                                    "projectFile"
+                                ],
+                                "properties": {
+                                    "projectFile": {
+                                        "type": "string"
+                                    },
+                                    "projectVariables": {
+                                        "type": "object",
+                                        "additionalProperties": {
+                                            "type": [
+                                                "boolean",
+                                                "string"
+                                            ]
+                                        }
+                                    },
+                                    "projectModules": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "string"
+                                        }
+                                    }
+                                }
+                            }
+                        ]
+                    },
+                    "markdownDescription": "Explicit projects, relative to each workspace root or absolute. Entries can override variables and root modules. Replaces automatic discovery when nonempty."
+                },
+                "sail-lsp.workspace.activeProject": {
+                    "scope": "resource",
+                    "type": [
+                        "string",
+                        "null"
+                    ],
+                    "default": null,
+                    "markdownDescription": "Preferred manifest for analysis of files shared by multiple projects. Other projects remain loaded and checked separately."
+                },
+                "sail-lsp.flycheck.timeoutMs": {
+                    "scope": "resource",
+                    "type": "integer",
+                    "default": 600000,
+                    "minimum": 1,
+                    "markdownDescription": "Maximum time for one compiler check before terminating it."
+                },
+                "sail-lsp.flycheck.debounceMs": {
+                    "scope": "resource",
+                    "type": "integer",
+                    "default": 200,
+                    "minimum": 0,
+                    "markdownDescription": "Coalesce consecutive saves before starting a compiler check."
+                },
+                "sail-lsp.formatting.lineWidth": {
+                    "scope": "resource",
+                    "type": "integer",
+                    "default": 100,
+                    "minimum": 1,
+                    "markdownDescription": "Soft line width for Sail formatting. Existing multiline layouts and aligned instruction tables are preserved."
+                },
+                "sail-lsp.server.path": {
+                    "scope": "machine-overridable",
+                    "type": [
+                        "null",
                         "string"
-                      ]
-                    }
-                  },
-                  "projectModules": {
+                    ],
+                    "default": null,
+                    "markdownDescription": "Path to the `sail-lsp` binary. If not set, the extension looks for `sail-lsp` in `$PATH` or the bundled server."
+                },
+                "sail-lsp.server.extraEnv": {
+                    "scope": "machine-overridable",
+                    "type": [
+                        "null",
+                        "object"
+                    ],
+                    "default": null,
+                    "markdownDescription": "Extra environment variables passed to the `sail-lsp` process. Example: `{ \"SAIL_DIR\": \"/path/to/sail\" }`."
+                },
+                "sail-lsp.trace.server": {
+                    "scope": "window",
+                    "type": "string",
+                    "enum": [
+                        "off",
+                        "messages",
+                        "verbose"
+                    ],
+                    "default": "off",
+                    "markdownDescription": "Traces the communication between VS Code and the sail-lsp server.",
+                    "enumDescriptions": [
+                        "No tracing.",
+                        "Log the messages exchanged with the server.",
+                        "Log the messages with their full contents."
+                    ]
+                },
+                "sail-lsp.diagnostics.enable": {
+                    "scope": "resource",
+                    "type": "boolean",
+                    "default": true,
+                    "markdownDescription": "Enable diagnostics (parse errors, type errors, etc.)."
+                },
+                "sail-lsp.diagnostics.effectMismatch": {
+                    "scope": "resource",
+                    "type": "boolean",
+                    "default": true,
+                    "markdownDescription": "Report effect diagnostics: an impure call in a pure function (effect-violation), effect-mismatch and missing-effect-annotation."
+                },
+                "sail-lsp.diagnostics.disabled": {
+                    "scope": "resource",
                     "type": "array",
                     "items": {
-                      "type": "string"
-                    }
-                  }
+                        "type": "string"
+                    },
+                    "default": [],
+                    "markdownDescription": "List of diagnostic codes to disable (e.g., \"unused-variable\")."
+                },
+                "sail-lsp.diagnostics.disableExperimental": {
+                    "scope": "resource",
+                    "type": "boolean",
+                    "default": false,
+                    "markdownDescription": "Suppress experimental diagnostics."
+                },
+                "sail-lsp.diagnostics.warningsAsHint": {
+                    "scope": "resource",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "default": [],
+                    "markdownDescription": "Diagnostic codes to show as hints instead of warnings."
+                },
+                "sail-lsp.diagnostics.warningsAsInfo": {
+                    "scope": "resource",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "default": [],
+                    "markdownDescription": "Diagnostic codes to show as info instead of warnings."
+                },
+                "sail-lsp.diagnostics.maxDiagnosticsPerFile": {
+                    "scope": "resource",
+                    "type": "integer",
+                    "default": 128,
+                    "minimum": 0,
+                    "markdownDescription": "Maximum diagnostics per file (0 = unlimited)."
+                },
+                "sail-lsp.inlayHints.enable": {
+                    "scope": "resource",
+                    "type": "boolean",
+                    "default": true,
+                    "markdownDescription": "Enable inlay hints."
+                },
+                "sail-lsp.inlayHints.typeHints": {
+                    "scope": "resource",
+                    "type": "boolean",
+                    "default": true,
+                    "markdownDescription": "Show type hints for let bindings."
+                },
+                "sail-lsp.inlayHints.parameterHints": {
+                    "scope": "resource",
+                    "type": "boolean",
+                    "default": true,
+                    "markdownDescription": "Show parameter name hints in function calls."
+                },
+                "sail-lsp.inlayHints.chainingHints": {
+                    "scope": "resource",
+                    "type": "boolean",
+                    "default": true,
+                    "markdownDescription": "Show intermediate types in field-access chains."
+                },
+                "sail-lsp.inlayHints.enumValueHints": {
+                    "scope": "resource",
+                    "type": "boolean",
+                    "default": false,
+                    "markdownDescription": "Show numeric enum values when Sail generates an enum-to-number conversion."
+                },
+                "sail-lsp.inlayHints.implicitArgumentHints": {
+                    "scope": "resource",
+                    "type": "boolean",
+                    "default": true,
+                    "markdownDescription": "Show the inferred value of an `implicit('n)` argument at the call site, e.g. `widen(8, x)`."
+                },
+                "sail-lsp.inlayHints.effectHints": {
+                    "scope": "resource",
+                    "type": "boolean",
+                    "default": true,
+                    "markdownDescription": "Show effect annotations on function calls."
+                },
+                "sail-lsp.inlayHints.maxLength": {
+                    "scope": "resource",
+                    "type": [
+                        "null",
+                        "integer"
+                    ],
+                    "default": 25,
+                    "markdownDescription": "Maximum length of inlay hints before truncation."
+                },
+                "sail-lsp.inlayHints.closingBraceHintsMinLines": {
+                    "scope": "resource",
+                    "type": [
+                        "null",
+                        "integer"
+                    ],
+                    "default": 6,
+                    "markdownDescription": "Minimum lines for closing brace hints to appear."
+                },
+                "sail-lsp.completion.enable": {
+                    "scope": "resource",
+                    "type": "boolean",
+                    "default": true,
+                    "markdownDescription": "Enable code completion."
+                },
+                "sail-lsp.completion.addCallParenthesis": {
+                    "scope": "resource",
+                    "type": "boolean",
+                    "default": true,
+                    "markdownDescription": "Add parentheses when completing function calls."
+                },
+                "sail-lsp.completion.postfix": {
+                    "scope": "resource",
+                    "type": "boolean",
+                    "default": true,
+                    "markdownDescription": "Enable postfix completions."
+                },
+                "sail-lsp.completion.snippets": {
+                    "scope": "resource",
+                    "type": "boolean",
+                    "default": true,
+                    "markdownDescription": "Enable snippet completions."
+                },
+                "sail-lsp.completion.autoimport": {
+                    "scope": "resource",
+                    "type": "boolean",
+                    "default": false,
+                    "markdownDescription": "Enable auto-import (`$include`) on the fly."
+                },
+                "sail-lsp.completion.limit": {
+                    "scope": "resource",
+                    "type": "integer",
+                    "default": 200,
+                    "markdownDescription": "Maximum number of completion items returned."
+                },
+                "sail-lsp.completion.fullFunctionSignatures": {
+                    "scope": "resource",
+                    "type": "boolean",
+                    "default": false,
+                    "markdownDescription": "Show full function signatures in completions."
+                },
+                "sail-lsp.codeLens.enable": {
+                    "scope": "resource",
+                    "type": "boolean",
+                    "default": true,
+                    "markdownDescription": "Enable code lenses (references, implementations)."
+                },
+                "sail-lsp.codeLens.references": {
+                    "scope": "resource",
+                    "type": "boolean",
+                    "default": true,
+                    "markdownDescription": "Show reference counts as code lenses."
+                },
+                "sail-lsp.codeLens.implementations": {
+                    "scope": "resource",
+                    "type": "boolean",
+                    "default": true,
+                    "markdownDescription": "Show implementation counts as code lenses."
+                },
+                "sail-lsp.hover.docs": {
+                    "scope": "resource",
+                    "type": "boolean",
+                    "default": true,
+                    "markdownDescription": "Show documentation in hover."
+                },
+                "sail-lsp.hover.maxFieldsCount": {
+                    "scope": "resource",
+                    "type": [
+                        "integer",
+                        "null"
+                    ],
+                    "minimum": 0,
+                    "default": 10,
+                    "markdownDescription": "Maximum struct or union members in hover; null shows all."
+                },
+                "sail-lsp.hover.maxEnumVariantsCount": {
+                    "scope": "resource",
+                    "type": [
+                        "integer",
+                        "null"
+                    ],
+                    "minimum": 0,
+                    "default": 10,
+                    "markdownDescription": "Maximum enum variants in hover; null shows all."
+                },
+                "sail-lsp.hover.maxOverloadsCount": {
+                    "scope": "resource",
+                    "type": [
+                        "integer",
+                        "null"
+                    ],
+                    "minimum": 0,
+                    "default": 10,
+                    "markdownDescription": "Maximum overload alternatives in hover; null shows all."
+                },
+                "sail-lsp.semanticTokens.enable": {
+                    "scope": "resource",
+                    "type": "boolean",
+                    "default": true,
+                    "markdownDescription": "Enable semantic syntax highlighting."
+                },
+                "sail-lsp.workspace.projectFile": {
+                    "scope": "resource",
+                    "type": [
+                        "null",
+                        "string"
+                    ],
+                    "default": null,
+                    "markdownDescription": "Project manifest path, relative to each workspace folder or absolute. Auto-detection prefers root `sail.proj`, then a single root `*.sail_project`; otherwise checks immediate child directories for a unique project (excluding hidden directories). Files outside a loaded project receive syntax diagnostics and an unlinked-file warning."
+                },
+                "sail-lsp.workspace.projectVariables": {
+                    "scope": "resource",
+                    "type": "object",
+                    "default": {},
+                    "additionalProperties": {
+                        "type": [
+                            "boolean",
+                            "string"
+                        ]
+                    },
+                    "markdownDescription": "Override variables in the Sail project manifest (for example `RMEM: true`)."
+                },
+                "sail-lsp.workspace.projectModules": {
+                    "scope": "resource",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "default": [],
+                    "markdownDescription": "Root modules to load with the modules they transitively require (a child requires its parent; a parent does not bring its children), as `sail `--project` P A` does. Empty selects all modules."
+                },
+                "sail-lsp.workspace.generatedFiles": {
+                    "scope": "resource",
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "string"
+                    },
+                    "default": {},
+                    "markdownDescription": "Map manifest `__virtual` filenames to generated Sail files. Paths are absolute or relative to the workspace root. The producer owns the contents."
+                },
+                "sail-lsp.workspace.target": {
+                    "scope": "resource",
+                    "type": [
+                        "null",
+                        "string"
+                    ],
+                    "default": null,
+                    "markdownDescription": "Compilation target for `$iftarget` directives (e.g., \"c\", \"ocaml\")."
+                },
+                "sail-lsp.workspace.includePaths": {
+                    "scope": "resource",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "default": [],
+                    "markdownDescription": "Additional include paths for `$include` resolution."
+                },
+                "sail-lsp.workspace.strictBitvector": {
+                    "scope": "resource",
+                    "type": "boolean",
+                    "default": false,
+                    "markdownDescription": "Match Sail's `--strict-bitvector` mode: vector lengths must be natural numbers."
+                },
+                "sail-lsp.workspace.primeCachesNumThreads": {
+                    "scope": "window",
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 0,
+                    "markdownDescription": "Threads used to pre-warm caches after loading. 0 uses half of the machine's cores."
+                },
+                "sail-lsp.flycheck.enable": {
+                    "scope": "resource",
+                    "type": "boolean",
+                    "default": false,
+                    "markdownDescription": "Run the upstream Sail compiler on save and after project/configuration reload. Projects use their manifest, variables and selected roots; standalone files are checked individually."
+                },
+                "sail-lsp.flycheck.command": {
+                    "scope": "resource",
+                    "type": "string",
+                    "default": "sail",
+                    "markdownDescription": "The Sail compiler binary flycheck runs."
+                },
+                "sail-lsp.flycheck.extraArgs": {
+                    "scope": "resource",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "default": [],
+                    "markdownDescription": "Extra arguments passed to the Sail compiler (for example `--config` or `--strict-bitvector`)."
+                },
+                "sail-lsp.cache.parseCapacity": {
+                    "scope": "window",
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 0,
+                    "markdownDescription": "Retained raw and semantic parse query results. 0 disables this family’s LRU."
+                },
+                "sail-lsp.cache.environmentCapacity": {
+                    "scope": "window",
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 0,
+                    "markdownDescription": "Retained per-file type environment query results. 0 disables this family’s LRU."
+                },
+                "sail-lsp.cache.inferenceCapacity": {
+                    "scope": "window",
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 0,
+                    "markdownDescription": "Retained results per inference query (body, adapter and file diagnostics). 0 disables this family’s LRU."
+                },
+                "sail-lsp.cache.bodyCapacity": {
+                    "scope": "window",
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 512,
+                    "markdownDescription": "Retained results per callable body/source-map query. 0 disables this family’s LRU."
+                },
+                "sail-lsp.cache.memoryLimitMb": {
+                    "scope": "window",
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 0,
+                    "markdownDescription": "Soft process RSS high-water mark in MiB. Above it, idle cache collection reduces query capacities; 0 disables automatic pressure control. Inputs and live snapshots can prevent reaching this target."
+                },
+                "sail-lsp.runnables.showCodeLens": {
+                    "scope": "resource",
+                    "type": "boolean",
+                    "default": true,
+                    "markdownDescription": "Show loaded-project check, test and export tasks above Sail documents, and a run lens above every `$[test]` function and `main`."
+                },
+                "sail-lsp.testExplorer": {
+                    "scope": "window",
+                    "type": "boolean",
+                    "default": false,
+                    "markdownDescription": "List the `$[test]` functions of open Sail files in the Test Explorer and run them in the Sail interpreter (`sail <project arguments> --is <script>`). Upstream Sail has no test runner: a test passes when the interpreter evaluates it to `Result = ()` without printing `Error:`."
+                },
+                "sail-lsp.restartServerOnConfigChange": {
+                    "scope": "window",
+                    "type": "boolean",
+                    "default": false,
+                    "markdownDescription": "Restart the server automatically when a setting that only takes effect at start changes (`sail-lsp.server.path`, `sail-lsp.server.extraEnv`, `sail-lsp.trace.server`), instead of asking."
+                },
+                "sail-lsp.runnables.timeoutMs": {
+                    "scope": "resource",
+                    "type": "integer",
+                    "default": 300000,
+                    "minimum": 1,
+                    "markdownDescription": "Timeout in milliseconds for project tasks run through standard LSP source actions. Native VS Code tasks use the task terminal and are cancelled separately."
+                },
+                "sail-lsp.runnables.tasks": {
+                    "scope": "resource",
+                    "type": "array",
+                    "default": [],
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                            "label",
+                            "kind",
+                            "command",
+                            "args"
+                        ],
+                        "properties": {
+                            "label": {
+                                "type": "string"
+                            },
+                            "kind": {
+                                "type": "string",
+                                "enum": [
+                                    "test",
+                                    "export",
+                                    "run"
+                                ]
+                            },
+                            "command": {
+                                "type": "string",
+                                "minLength": 1
+                            },
+                            "args": {
+                                "type": "array",
+                                "items": {
+                                    "type": "string"
+                                }
+                            },
+                            "environment": {
+                                "type": "object",
+                                "additionalProperties": {
+                                    "type": "string"
+                                }
+                            },
+                            "project": {
+                                "type": "string",
+                                "description": "Manifest path relative to the workspace root, or absolute. Omit to expose the task for every loaded project."
+                            }
+                        }
+                    },
+                    "markdownDescription": "Explicit project test/export tasks. Commands run as processes in the manifest directory. Pass `${projectArgs}` as a whole argument, or `${projectContext}` in an argument/environment value. Other placeholders: `${sail}`, `${project}`, `${projectDir}`, `${workspaceRoot}`."
+                },
+                "sail-lsp.completion.customTemplates": {
+                    "scope": "resource",
+                    "type": "array",
+                    "default": [],
+                    "maxItems": 128,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                            "body"
+                        ],
+                        "anyOf": [
+                            {
+                                "required": [
+                                    "prefix"
+                                ]
+                            },
+                            {
+                                "required": [
+                                    "postfix"
+                                ]
+                            }
+                        ],
+                        "properties": {
+                            "prefix": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 128
+                            },
+                            "postfix": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 128
+                            },
+                            "body": {
+                                "type": "string",
+                                "maxLength": 65536
+                            },
+                            "description": {
+                                "type": "string"
+                            },
+                            "scope": {
+                                "type": "string",
+                                "enum": [
+                                    "item",
+                                    "expr",
+                                    "type"
+                                ],
+                                "default": "expr"
+                            }
+                        }
+                    },
+                    "markdownDescription": "Custom prefix/postfix templates using LSP snippet syntax. Postfix bodies may use `${receiver}`."
+                },
+                "sail-lsp.completion.termSearch": {
+                    "scope": "resource",
+                    "type": "boolean",
+                    "default": false,
+                    "markdownDescription": "Suggest type-directed expressions composed from visible callables and local values. Search is bounded and does not invoke SMT."
+                },
+                "sail-lsp.completion.termSearchFuel": {
+                    "scope": "resource",
+                    "type": "integer",
+                    "default": 1000,
+                    "minimum": 0,
+                    "maximum": 10000,
+                    "markdownDescription": "Maximum work units for type-directed completion; zero disables search. Maximum composition depth is three calls."
+                },
+                "sail-lsp.flycheck.diagnosticFormat": {
+                    "scope": "resource",
+                    "type": "string",
+                    "enum": [
+                        "auto",
+                        "text",
+                        "json"
+                    ],
+                    "default": "auto",
+                    "markdownDescription": "Compiler output format: auto negotiates editor diagnostic protocol v1 and falls back to terminal text; json requires protocol v1; text disables probing.",
+                    "enumDescriptions": [
+                        "Negotiate editor diagnostic protocol v1 and fall back to terminal text.",
+                        "Terminal text only; no probing.",
+                        "Editor diagnostic protocol v1; fails on a compiler without it."
+                    ]
+                },
+                "sail-lsp.flycheck.cache": {
+                    "scope": "resource",
+                    "type": "string",
+                    "enum": [
+                        "managed",
+                        "compiler",
+                        "disabled"
+                    ],
+                    "default": "managed",
+                    "markdownDescription": "Manage a persistent compiler memo cache per project and toolchain, use Sail defaults, or disable memoization. Explicit memo flags in extraArgs take precedence.",
+                    "enumDescriptions": [
+                        "A persistent compiler memo cache per project and toolchain, managed by the server.",
+                        "The compiler's own defaults.",
+                        "No memoization."
+                    ]
+                },
+                "sail-lsp.flycheck.cacheDirectory": {
+                    "scope": "resource",
+                    "type": [
+                        "string",
+                        "null"
+                    ],
+                    "default": null,
+                    "markdownDescription": "Managed compiler cache root. Null uses the OS user cache directory; relative paths use the compiler working directory."
+                },
+                "sail-lsp.flycheck.ignore": {
+                    "scope": "resource",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "default": [],
+                    "markdownDescription": "Compiler diagnostic codes to hide. Also accepts * and severity:error/warning/information/hint. Presentation does not change compiler success."
+                },
+                "sail-lsp.flycheck.warningsAsHint": {
+                    "scope": "resource",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "default": [],
+                    "markdownDescription": "Compiler diagnostic codes or severity selectors to display as hints. Native diagnostics and compiler success are unchanged."
+                },
+                "sail-lsp.flycheck.warningsAsInfo": {
+                    "scope": "resource",
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "default": [],
+                    "markdownDescription": "Compiler diagnostic codes or severity selectors to display as information. Native diagnostics and compiler success are unchanged."
                 }
-              }
-            ]
-          },
-          "description": "Explicit projects, relative to each workspace root or absolute. Entries can override variables and root modules. Replaces automatic discovery when nonempty."
-        },
-        "sail-lsp.workspace.activeProject": {
-          "scope": "resource",
-          "type": [
-            "string",
-            "null"
-          ],
-          "default": null,
-          "description": "Preferred manifest for analysis of files shared by multiple projects. Other projects remain loaded and checked separately."
-        },
-        "sail-lsp.flycheck.timeoutMs": {
-          "scope": "resource",
-          "type": "integer",
-          "default": 600000,
-          "minimum": 1,
-          "description": "Maximum time for one compiler check before terminating it."
-        },
-        "sail-lsp.flycheck.debounceMs": {
-          "scope": "resource",
-          "type": "integer",
-          "default": 200,
-          "minimum": 0,
-          "description": "Coalesce consecutive saves before starting a compiler check."
-        },
-        "sail-lsp.formatting.lineWidth": {
-          "scope": "resource",
-          "type": "integer",
-          "default": 100,
-          "minimum": 1,
-          "description": "Soft line width for Sail formatting. Existing multiline layouts and aligned instruction tables are preserved."
-        },
-        "sail-lsp.server.path": {
-          "type": [
-            "null",
-            "string"
-          ],
-          "default": null,
-          "markdownDescription": "Path to the `sail-lsp` binary. If not set, the extension looks for `sail-lsp` in `$PATH` or the bundled server."
-        },
-        "sail-lsp.server.extraEnv": {
-          "type": [
-            "null",
-            "object"
-          ],
-          "default": null,
-          "markdownDescription": "Extra environment variables passed to the `sail-lsp` process. Example: `{ \"SAIL_DIR\": \"/path/to/sail\" }`."
-        },
-        "sail-lsp.trace.server": {
-          "type": "string",
-          "enum": [
-            "off",
-            "messages",
-            "verbose"
-          ],
-          "default": "off",
-          "description": "Traces the communication between VS Code and the sail-lsp server."
-        },
-        "sail-lsp.diagnostics.enable": {
-          "scope": "resource",
-          "type": "boolean",
-          "default": true,
-          "description": "Enable diagnostics (parse errors, type errors, etc.)."
-        },
-        "sail-lsp.diagnostics.effectMismatch": {
-          "scope": "resource",
-          "type": "boolean",
-          "default": true,
-          "description": "Report effect diagnostics: an impure call in a pure function (effect-violation), effect-mismatch and missing-effect-annotation."
-        },
-        "sail-lsp.diagnostics.disabled": {
-          "scope": "resource",
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "description": "List of diagnostic codes to disable (e.g., \"unused-variable\")."
-        },
-        "sail-lsp.diagnostics.disableExperimental": {
-          "scope": "resource",
-          "type": "boolean",
-          "default": false,
-          "description": "Suppress experimental diagnostics."
-        },
-        "sail-lsp.diagnostics.warningsAsHint": {
-          "scope": "resource",
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "description": "Diagnostic codes to show as hints instead of warnings."
-        },
-        "sail-lsp.diagnostics.warningsAsInfo": {
-          "scope": "resource",
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "description": "Diagnostic codes to show as info instead of warnings."
-        },
-        "sail-lsp.diagnostics.maxDiagnosticsPerFile": {
-          "scope": "resource",
-          "type": "integer",
-          "default": 128,
-          "minimum": 0,
-          "description": "Maximum diagnostics per file (0 = unlimited)."
-        },
-        "sail-lsp.inlayHints.enable": {
-          "scope": "resource",
-          "type": "boolean",
-          "default": true,
-          "description": "Enable inlay hints."
-        },
-        "sail-lsp.inlayHints.typeHints": {
-          "scope": "resource",
-          "type": "boolean",
-          "default": true,
-          "description": "Show type hints for let bindings."
-        },
-        "sail-lsp.inlayHints.parameterHints": {
-          "scope": "resource",
-          "type": "boolean",
-          "default": true,
-          "description": "Show parameter name hints in function calls."
-        },
-        "sail-lsp.inlayHints.chainingHints": {
-          "type": "boolean",
-          "default": true,
-          "description": "Show intermediate types in field-access chains."
-        },
-        "sail-lsp.inlayHints.enumValueHints": {
-          "type": "boolean",
-          "default": false,
-          "description": "Show numeric enum values when Sail generates an enum-to-number conversion."
-        },
-        "sail-lsp.inlayHints.implicitArgumentHints": {
-          "scope": "resource",
-          "type": "boolean",
-          "default": true,
-          "markdownDescription": "Show the inferred value of an `implicit('n)` argument at the call site, e.g. `widen(8, x)`."
-        },
-        "sail-lsp.inlayHints.effectHints": {
-          "scope": "resource",
-          "type": "boolean",
-          "default": true,
-          "description": "Show effect annotations on function calls."
-        },
-        "sail-lsp.inlayHints.maxLength": {
-          "scope": "resource",
-          "type": [
-            "null",
-            "integer"
-          ],
-          "default": 25,
-          "description": "Maximum length of inlay hints before truncation."
-        },
-        "sail-lsp.inlayHints.closingBraceHintsMinLines": {
-          "scope": "resource",
-          "type": [
-            "null",
-            "integer"
-          ],
-          "default": 6,
-          "description": "Minimum lines for closing brace hints to appear."
-        },
-        "sail-lsp.completion.enable": {
-          "scope": "resource",
-          "type": "boolean",
-          "default": true,
-          "description": "Enable code completion."
-        },
-        "sail-lsp.completion.addCallParenthesis": {
-          "scope": "resource",
-          "type": "boolean",
-          "default": true,
-          "description": "Add parentheses when completing function calls."
-        },
-        "sail-lsp.completion.postfix": {
-          "scope": "resource",
-          "type": "boolean",
-          "default": true,
-          "description": "Enable postfix completions."
-        },
-        "sail-lsp.completion.snippets": {
-          "scope": "resource",
-          "type": "boolean",
-          "default": true,
-          "description": "Enable snippet completions."
-        },
-        "sail-lsp.completion.autoimport": {
-          "scope": "resource",
-          "type": "boolean",
-          "default": false,
-          "description": "Enable auto-import ($include) on the fly."
-        },
-        "sail-lsp.completion.limit": {
-          "scope": "resource",
-          "type": "integer",
-          "default": 200,
-          "description": "Maximum number of completion items returned."
-        },
-        "sail-lsp.completion.fullFunctionSignatures": {
-          "scope": "resource",
-          "type": "boolean",
-          "default": false,
-          "description": "Show full function signatures in completions."
-        },
-        "sail-lsp.codeLens.enable": {
-          "scope": "resource",
-          "type": "boolean",
-          "default": true,
-          "description": "Enable code lenses (references, implementations)."
-        },
-        "sail-lsp.codeLens.references": {
-          "scope": "resource",
-          "type": "boolean",
-          "default": true,
-          "description": "Show reference counts as code lenses."
-        },
-        "sail-lsp.codeLens.implementations": {
-          "scope": "resource",
-          "type": "boolean",
-          "default": true,
-          "description": "Show implementation counts as code lenses."
-        },
-        "sail-lsp.hover.docs": {
-          "scope": "resource",
-          "type": "boolean",
-          "default": true,
-          "description": "Show documentation in hover."
-        },
-        "sail-lsp.hover.maxFieldsCount": {
-          "scope": "resource",
-          "type": [
-            "integer",
-            "null"
-          ],
-          "minimum": 0,
-          "default": 10,
-          "description": "Maximum struct or union members in hover; null shows all."
-        },
-        "sail-lsp.hover.maxEnumVariantsCount": {
-          "scope": "resource",
-          "type": [
-            "integer",
-            "null"
-          ],
-          "minimum": 0,
-          "default": 10,
-          "description": "Maximum enum variants in hover; null shows all."
-        },
-        "sail-lsp.hover.maxOverloadsCount": {
-          "scope": "resource",
-          "type": [
-            "integer",
-            "null"
-          ],
-          "minimum": 0,
-          "default": 10,
-          "description": "Maximum overload alternatives in hover; null shows all."
-        },
-        "sail-lsp.semanticTokens.enable": {
-          "scope": "resource",
-          "type": "boolean",
-          "default": true,
-          "description": "Enable semantic syntax highlighting."
-        },
-        "sail-lsp.workspace.projectFile": {
-          "scope": "resource",
-          "type": [
-            "null",
-            "string"
-          ],
-          "default": null,
-          "description": "Project manifest path, relative to each workspace folder or absolute. Auto-detection prefers root sail.proj, then a single root *.sail_project; otherwise checks immediate child directories for a unique project (excluding hidden directories). Files outside a loaded project receive syntax diagnostics and an unlinked-file warning."
-        },
-        "sail-lsp.workspace.projectVariables": {
-          "scope": "resource",
-          "type": "object",
-          "default": {},
-          "additionalProperties": {
-            "type": [
-              "boolean",
-              "string"
-            ]
-          },
-          "description": "Override variables in the Sail project manifest (for example RMEM: true)."
-        },
-        "sail-lsp.workspace.projectModules": {
-          "scope": "resource",
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "description": "Root modules to load with the modules they transitively require (a child requires its parent; a parent does not bring its children), as `sail --project P A` does. Empty selects all modules."
-        },
-        "sail-lsp.workspace.generatedFiles": {
-          "scope": "resource",
-          "type": "object",
-          "additionalProperties": {
-            "type": "string"
-          },
-          "default": {},
-          "description": "Map manifest __virtual filenames to generated Sail files. Paths are absolute or relative to the workspace root. The producer owns the contents."
-        },
-        "sail-lsp.workspace.target": {
-          "scope": "resource",
-          "type": [
-            "null",
-            "string"
-          ],
-          "default": null,
-          "description": "Compilation target for $iftarget directives (e.g., \"c\", \"ocaml\")."
-        },
-        "sail-lsp.workspace.includePaths": {
-          "scope": "resource",
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "description": "Additional include paths for $include resolution."
-        },
-        "sail-lsp.workspace.strictBitvector": {
-          "scope": "resource",
-          "type": "boolean",
-          "default": false,
-          "description": "Match Sail's --strict-bitvector mode: vector lengths must be natural numbers."
-        },
-        "sail-lsp.workspace.primeCachesNumThreads": {
-          "type": "integer",
-          "minimum": 0,
-          "default": 0,
-          "description": "Threads used to pre-warm caches after loading. 0 uses half of the machine's cores."
-        },
-        "sail-lsp.flycheck.enable": {
-          "scope": "resource",
-          "type": "boolean",
-          "default": false,
-          "description": "Run the upstream Sail compiler on save and after project/configuration reload. Projects use their manifest, variables and selected roots; standalone files are checked individually."
-        },
-        "sail-lsp.flycheck.command": {
-          "scope": "resource",
-          "type": "string",
-          "default": "sail",
-          "description": "The Sail compiler binary flycheck runs."
-        },
-        "sail-lsp.flycheck.extraArgs": {
-          "scope": "resource",
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "description": "Extra arguments passed to the Sail compiler (for example --config or --strict-bitvector)."
-        },
-        "sail-lsp.cache.parseCapacity": {
-          "type": "integer",
-          "minimum": 0,
-          "default": 0,
-          "description": "Retained raw and semantic parse query results. 0 disables this family’s LRU."
-        },
-        "sail-lsp.cache.environmentCapacity": {
-          "type": "integer",
-          "minimum": 0,
-          "default": 0,
-          "description": "Retained per-file type environment query results. 0 disables this family’s LRU."
-        },
-        "sail-lsp.cache.inferenceCapacity": {
-          "type": "integer",
-          "minimum": 0,
-          "default": 0,
-          "description": "Retained results per inference query (body, adapter and file diagnostics). 0 disables this family’s LRU."
-        },
-        "sail-lsp.cache.bodyCapacity": {
-          "type": "integer",
-          "minimum": 0,
-          "default": 512,
-          "description": "Retained results per callable body/source-map query. 0 disables this family’s LRU."
-        },
-        "sail-lsp.cache.memoryLimitMb": {
-          "type": "integer",
-          "minimum": 0,
-          "default": 0,
-          "description": "Soft process RSS high-water mark in MiB. Above it, idle cache collection reduces query capacities; 0 disables automatic pressure control. Inputs and live snapshots can prevent reaching this target."
-        },
-        "sail-lsp.runnables.showCodeLens": {
-          "scope": "resource",
-          "type": "boolean",
-          "default": true,
-          "description": "Show loaded-project check, test and export tasks above Sail documents."
-        },
-        "sail-lsp.runnables.timeoutMs": {
-          "scope": "resource",
-          "type": "integer",
-          "default": 300000,
-          "minimum": 1,
-          "description": "Timeout in milliseconds for project tasks run through standard LSP source actions. Native VS Code tasks use the task terminal and are cancelled separately."
-        },
-        "sail-lsp.runnables.tasks": {
-          "scope": "resource",
-          "type": "array",
-          "default": [],
-          "description": "Explicit project test/export tasks. Commands run as processes in the manifest directory. Pass ${projectArgs} as a whole argument, or ${projectContext} in an argument/environment value. Other placeholders: ${sail}, ${project}, ${projectDir}, ${workspaceRoot}.",
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "label",
-              "kind",
-              "command",
-              "args"
-            ],
-            "properties": {
-              "label": {
-                "type": "string"
-              },
-              "kind": {
-                "type": "string",
-                "enum": [
-                  "test",
-                  "export"
-                ]
-              },
-              "command": {
-                "type": "string",
-                "minLength": 1
-              },
-              "args": {
-                "type": "array",
-                "items": {
-                  "type": "string"
-                }
-              },
-              "environment": {
-                "type": "object",
-                "additionalProperties": {
-                  "type": "string"
-                }
-              },
-              "project": {
-                "type": "string",
-                "description": "Manifest path relative to the workspace root, or absolute. Omit to expose the task for every loaded project."
-              }
             }
-          }
         },
-        "sail-lsp.completion.customTemplates": {
-          "scope": "resource",
-          "type": "array",
-          "default": [],
-          "maxItems": 128,
-          "description": "Custom prefix/postfix templates using LSP snippet syntax. Postfix bodies may use ${receiver}.",
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "body"
-            ],
-            "anyOf": [
-              {
+        "commands": [
+            {
+                "command": "sail-lsp.selectProject",
+                "title": "Select Analysis Project",
+                "category": "Sail"
+            },
+            {
+                "command": "sail-lsp.showProjectGraph",
+                "title": "Show Module Dependencies",
+                "category": "Sail"
+            },
+            {
+                "command": "sail-lsp.recheck",
+                "title": "Recheck Projects",
+                "category": "Sail"
+            },
+            {
+                "command": "sail-lsp.recheckProject",
+                "title": "Recheck Current Project",
+                "category": "Sail"
+            },
+            {
+                "command": "sail-lsp.cancelFlycheck",
+                "title": "Cancel Flycheck for Current Project",
+                "category": "Sail"
+            },
+            {
+                "command": "sail-lsp.clearFlycheck",
+                "title": "Clear Flycheck Diagnostics for Current Project",
+                "category": "Sail"
+            },
+            {
+                "command": "sail-lsp.reload",
+                "title": "Reload Workspace",
+                "category": "Sail"
+            },
+            {
+                "command": "sail-lsp.restartServer",
+                "title": "Restart Server",
+                "category": "Sail"
+            },
+            {
+                "command": "sail-lsp.exportDiagnosticReport",
+                "title": "Export Diagnostic Report",
+                "category": "Sail"
+            },
+            {
+                "command": "sail-lsp.analyzerStatus",
+                "title": "Show Server Status",
+                "category": "Sail"
+            },
+            {
+                "command": "sail-lsp.expandInclude",
+                "title": "Preview Preprocessed Source",
+                "category": "Sail"
+            },
+            {
+                "command": "sail-lsp.explainFormatting",
+                "title": "Explain Formatting",
+                "category": "Sail"
+            },
+            {
+                "command": "sail-lsp.explainAnalysis",
+                "title": "Explain Analysis at Cursor",
+                "category": "Sail"
+            },
+            {
+                "command": "sail-lsp.openProjectManifest",
+                "title": "Open Project Manifest",
+                "category": "Sail"
+            },
+            {
+                "command": "sail-lsp.structuralSearch",
+                "title": "Structural Search",
+                "category": "Sail"
+            },
+            {
+                "command": "sail-lsp.parentModule",
+                "title": "Go to Parent Module",
+                "category": "Sail"
+            },
+            {
+                "command": "sail-lsp.showSyntaxTree",
+                "title": "Show Syntax Tree",
+                "category": "Sail"
+            },
+            {
+                "command": "sail-lsp.viewHir",
+                "title": "View HIR",
+                "category": "Sail"
+            },
+            {
+                "command": "sail-lsp.viewItemTree",
+                "title": "View Item Tree",
+                "category": "Sail"
+            },
+            {
+                "command": "sail-lsp.viewIncludeGraph",
+                "title": "View Include Graph",
+                "category": "Sail"
+            },
+            {
+                "command": "sail-lsp.serverVersion",
+                "title": "Show Server Version",
+                "category": "Sail"
+            },
+            {
+                "command": "sail-lsp.toggleInlayHints",
+                "title": "Toggle Inlay Hints",
+                "category": "Sail"
+            },
+            {
+                "command": "sail-lsp.matchingBrace",
+                "title": "Find Matching Brace",
+                "category": "Sail"
+            },
+            {
+                "command": "sail-lsp.joinLines",
+                "title": "Join Lines",
+                "category": "Sail"
+            },
+            {
+                "command": "sail-lsp.onEnter",
+                "title": "Enhanced Enter Key",
+                "category": "Sail"
+            },
+            {
+                "command": "sail-lsp.moveItemUp",
+                "title": "Move Item Up",
+                "category": "Sail"
+            },
+            {
+                "command": "sail-lsp.moveItemDown",
+                "title": "Move Item Down",
+                "category": "Sail"
+            },
+            {
+                "command": "sail-lsp.hoverRefCommandProxy",
+                "title": "Run Hover Action",
+                "category": "Sail"
+            },
+            {
+                "command": "sail-lsp.selectIncludeContext",
+                "title": "Select Include Context",
+                "category": "Sail"
+            },
+            {
+                "command": "sail-lsp.structuralReplace",
+                "title": "Structural Replace",
+                "category": "Sail"
+            },
+            {
+                "command": "sail-lsp.applyStructuralReplace",
+                "title": "Apply Structural Replace",
+                "category": "Sail"
+            },
+            {
+                "command": "sail-lsp.cancelStructuralReplace",
+                "title": "Cancel Structural Replace",
+                "category": "Sail"
+            },
+            {
+                "command": "sail-lsp.runProjectTask",
+                "title": "Run Project Task",
+                "category": "Sail"
+            },
+            {
+                "command": "sail-lsp.cancelProjectTasks",
+                "title": "Cancel All Sail Tasks",
+                "category": "Sail"
+            },
+            {
+                "command": "sail-lsp.syntaxTreeReveal",
+                "title": "Reveal Syntax Tree Node in Source",
+                "category": "Sail"
+            }
+        ],
+        "taskDefinitions": [
+            {
+                "type": "sail",
                 "required": [
-                  "prefix"
-                ]
-              },
-              {
-                "required": [
-                  "postfix"
-                ]
-              }
-            ],
-            "properties": {
-              "prefix": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 128
-              },
-              "postfix": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 128
-              },
-              "body": {
-                "type": "string",
-                "maxLength": 65536
-              },
-              "description": {
-                "type": "string"
-              },
-              "scope": {
-                "type": "string",
-                "enum": [
-                  "item",
-                  "expr",
-                  "type"
+                    "command"
                 ],
-                "default": "expr"
-              }
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The program to run, usually the Sail compiler."
+                    },
+                    "args": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "Arguments passed to the program as given; no shell interprets them."
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "description": "Working directory; the workspace folder when omitted."
+                    },
+                    "env": {
+                        "type": "object",
+                        "additionalProperties": {
+                            "type": "string"
+                        },
+                        "description": "Environment variables set for the program."
+                    },
+                    "script": {
+                        "type": "string",
+                        "description": "Contents of a Sail interpreter script. It is stored in a file whose path is appended to the arguments, so end them with `--is`."
+                    }
+                }
             }
-          }
+        ],
+        "problemMatchers": [
+            {
+                "name": "sail",
+                "label": "Sail compiler errors",
+                "owner": "sail",
+                "source": "sail",
+                "fileLocation": [
+                    "autoDetect",
+                    "${cwd}"
+                ],
+                "severity": "error",
+                "pattern": [
+                    {
+                        "regexp": "^(?:\\u001b\\[[0-9;]*m)*(?:Type|Syntax|Lexical) error(?:\\u001b\\[[0-9;]*m)*:$"
+                    },
+                    {
+                        "regexp": "^(?:\\u001b\\[[0-9;]*m)*([^:\\u001b]+)(?:\\u001b\\[[0-9;]*m)*:(\\d+)\\.(\\d+)-(?:(\\d+)\\.)?(\\d+):$",
+                        "file": 1,
+                        "line": 2,
+                        "column": 3,
+                        "endLine": 4,
+                        "endColumn": 5
+                    },
+                    {
+                        "regexp": "^.*$"
+                    },
+                    {
+                        "regexp": "^.*$"
+                    },
+                    {
+                        "regexp": "^\\s*(?:\\u001b\\[[0-9;]*m)*\\s*\\|(?:\\u001b\\[[0-9;]*m)*\\s?(.*)$",
+                        "message": 1
+                    }
+                ]
+            },
+            {
+                "name": "sail-warning",
+                "label": "Sail compiler warnings",
+                "owner": "sail",
+                "source": "sail",
+                "fileLocation": [
+                    "autoDetect",
+                    "${cwd}"
+                ],
+                "severity": "warning",
+                "pattern": {
+                    "regexp": "^(?:\\u001b\\[[0-9;]*m)*Warning(?:\\u001b\\[[0-9;]*m)*: (.*) at ([^:]+):(\\d+)\\.(\\d+)-(?:(\\d+)\\.)?(\\d+):$",
+                    "message": 1,
+                    "file": 2,
+                    "line": 3,
+                    "column": 4,
+                    "endLine": 5,
+                    "endColumn": 6
+                }
+            }
+        ],
+        "keybindings": [
+            {
+                "command": "sail-lsp.joinLines",
+                "key": "ctrl+shift+j",
+                "when": "editorTextFocus && editorLangId == sail"
+            },
+            {
+                "command": "sail-lsp.onEnter",
+                "key": "enter",
+                "when": "editorTextFocus && !suggestWidgetVisible && editorLangId == sail"
+            }
+        ],
+        "views": {
+            "explorer": [
+                {
+                    "id": "sail-lsp.projectGraph",
+                    "name": "Sail Module Dependencies"
+                }
+            ]
         },
-        "sail-lsp.completion.termSearch": {
-          "scope": "resource",
-          "type": "boolean",
-          "default": false,
-          "description": "Suggest type-directed expressions composed from visible callables and local values. Search is bounded and does not invoke SMT."
+        "viewsWelcome": [
+            {
+                "view": "sail-lsp.projectGraph",
+                "contents": "[Load module dependencies](command:sail-lsp.showProjectGraph)"
+            }
+        ],
+        "menus": {
+            "commandPalette": [
+                {
+                    "command": "sail-lsp.selectProject",
+                    "when": "inSailProject"
+                },
+                {
+                    "command": "sail-lsp.showProjectGraph",
+                    "when": "inSailProject"
+                },
+                {
+                    "command": "sail-lsp.recheck",
+                    "when": "inSailProject"
+                },
+                {
+                    "command": "sail-lsp.recheckProject",
+                    "when": "editorLangId == sail || editorLangId == sail-project"
+                },
+                {
+                    "command": "sail-lsp.cancelFlycheck",
+                    "when": "editorLangId == sail || editorLangId == sail-project"
+                },
+                {
+                    "command": "sail-lsp.clearFlycheck",
+                    "when": "editorLangId == sail || editorLangId == sail-project"
+                },
+                {
+                    "command": "sail-lsp.reload",
+                    "when": "inSailProject"
+                },
+                {
+                    "command": "sail-lsp.expandInclude",
+                    "when": "editorLangId == sail || editorLangId == sail-project"
+                },
+                {
+                    "command": "sail-lsp.explainFormatting",
+                    "when": "editorLangId == sail || editorLangId == sail-project"
+                },
+                {
+                    "command": "sail-lsp.explainAnalysis",
+                    "when": "editorLangId == sail || editorLangId == sail-project"
+                },
+                {
+                    "command": "sail-lsp.openProjectManifest",
+                    "when": "editorLangId == sail || editorLangId == sail-project"
+                },
+                {
+                    "command": "sail-lsp.structuralSearch",
+                    "when": "editorLangId == sail || editorLangId == sail-project"
+                },
+                {
+                    "command": "sail-lsp.parentModule",
+                    "when": "editorLangId == sail || editorLangId == sail-project"
+                },
+                {
+                    "command": "sail-lsp.showSyntaxTree",
+                    "when": "editorLangId == sail || editorLangId == sail-project"
+                },
+                {
+                    "command": "sail-lsp.viewHir",
+                    "when": "editorLangId == sail || editorLangId == sail-project"
+                },
+                {
+                    "command": "sail-lsp.viewItemTree",
+                    "when": "editorLangId == sail || editorLangId == sail-project"
+                },
+                {
+                    "command": "sail-lsp.viewIncludeGraph",
+                    "when": "editorLangId == sail || editorLangId == sail-project"
+                },
+                {
+                    "command": "sail-lsp.matchingBrace",
+                    "when": "editorLangId == sail || editorLangId == sail-project"
+                },
+                {
+                    "command": "sail-lsp.joinLines",
+                    "when": "editorLangId == sail || editorLangId == sail-project"
+                },
+                {
+                    "command": "sail-lsp.onEnter",
+                    "when": "false"
+                },
+                {
+                    "command": "sail-lsp.moveItemUp",
+                    "when": "editorLangId == sail || editorLangId == sail-project"
+                },
+                {
+                    "command": "sail-lsp.moveItemDown",
+                    "when": "editorLangId == sail || editorLangId == sail-project"
+                },
+                {
+                    "command": "sail-lsp.hoverRefCommandProxy",
+                    "when": "false"
+                },
+                {
+                    "command": "sail-lsp.selectIncludeContext",
+                    "when": "editorLangId == sail || editorLangId == sail-project"
+                },
+                {
+                    "command": "sail-lsp.structuralReplace",
+                    "when": "editorLangId == sail || editorLangId == sail-project"
+                },
+                {
+                    "command": "sail-lsp.applyStructuralReplace",
+                    "when": "false"
+                },
+                {
+                    "command": "sail-lsp.cancelStructuralReplace",
+                    "when": "false"
+                },
+                {
+                    "command": "sail-lsp.runProjectTask",
+                    "when": "editorLangId == sail || editorLangId == sail-project"
+                },
+                {
+                    "command": "sail-lsp.syntaxTreeReveal",
+                    "when": "false"
+                }
+            ],
+            "view/title": [
+                {
+                    "command": "sail-lsp.showProjectGraph",
+                    "when": "view == sail-lsp.projectGraph",
+                    "group": "navigation"
+                }
+            ]
         },
-        "sail-lsp.completion.termSearchFuel": {
-          "scope": "resource",
-          "type": "integer",
-          "default": 1000,
-          "minimum": 0,
-          "maximum": 10000,
-          "description": "Maximum work units for type-directed completion; zero disables search. Maximum composition depth is three calls."
-        },
-        "sail-lsp.flycheck.diagnosticFormat": {
-          "scope": "resource",
-          "type": "string",
-          "enum": [
-            "auto",
-            "text",
-            "json"
-          ],
-          "default": "auto",
-          "description": "Compiler output format: auto negotiates editor diagnostic protocol v1 and falls back to terminal text; json requires protocol v1; text disables probing."
-        },
-        "sail-lsp.flycheck.cache": {
-          "scope": "resource",
-          "type": "string",
-          "enum": [
-            "managed",
-            "compiler",
-            "disabled"
-          ],
-          "default": "managed",
-          "description": "Manage a persistent compiler memo cache per project and toolchain, use Sail defaults, or disable memoization. Explicit memo flags in extraArgs take precedence."
-        },
-        "sail-lsp.flycheck.cacheDirectory": {
-          "scope": "resource",
-          "type": [
-            "string",
-            "null"
-          ],
-          "default": null,
-          "description": "Managed compiler cache root. Null uses the OS user cache directory; relative paths use the compiler working directory."
-        },
-        "sail-lsp.flycheck.ignore": {
-          "scope": "resource",
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "description": "Compiler diagnostic codes to hide. Also accepts * and severity:error/warning/information/hint. Presentation does not change compiler success."
-        },
-        "sail-lsp.flycheck.warningsAsHint": {
-          "scope": "resource",
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "description": "Compiler diagnostic codes or severity selectors to display as hints. Native diagnostics and compiler success are unchanged."
-        },
-        "sail-lsp.flycheck.warningsAsInfo": {
-          "scope": "resource",
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "description": "Compiler diagnostic codes or severity selectors to display as information. Native diagnostics and compiler success are unchanged."
-        }
-      }
+        "walkthroughs": [
+            {
+                "id": "sail-lsp.gettingStarted",
+                "title": "Get started with Sail",
+                "description": "Open a Sail project, read the status bar, and find the commands.",
+                "steps": [
+                    {
+                        "id": "install",
+                        "title": "Install the server",
+                        "description": "The extension starts the bundled `sail-lsp`, a managed installation (`sail-lsp install --editor vscode`), or the binary named by `sail-lsp.server.path`.\n[Open settings](command:workbench.action.openSettings?%5B%22sail-lsp.server%22%5D)",
+                        "media": {
+                            "markdown": "walkthrough/install.md"
+                        }
+                    },
+                    {
+                        "id": "project",
+                        "title": "Open a project",
+                        "description": "A folder with a `sail.proj` or a single `*.sail_project` manifest is loaded on its own; set `sail-lsp.workspace.projectFile` to pick one, or `linkedProjects` for several. A `.sail` file outside every project gets an unlinked-file warning with a fix that adds it.\n[Open the manifest](command:sail-lsp.openProjectManifest)",
+                        "media": {
+                            "markdown": "walkthrough/project.md"
+                        },
+                        "completionEvents": [
+                            "onContext:inSailProject"
+                        ]
+                    },
+                    {
+                        "id": "status",
+                        "title": "Read the status bar",
+                        "description": "The **Sail** item shows whether the server is loading, ready, or failed; hover for the last message, click for the full status report.\n[Show status](command:sail-lsp.analyzerStatus)",
+                        "media": {
+                            "markdown": "walkthrough/status.md"
+                        },
+                        "completionEvents": [
+                            "onCommand:sail-lsp.analyzerStatus"
+                        ]
+                    },
+                    {
+                        "id": "commands",
+                        "title": "Find the commands",
+                        "description": "Everything is under the **Sail** category of the Command Palette: project tasks and tests, structural search, module dependencies, the syntax tree and HIR views.\n[Run a project task](command:sail-lsp.runProjectTask)",
+                        "media": {
+                            "markdown": "walkthrough/commands.md"
+                        },
+                        "completionEvents": [
+                            "onCommand:sail-lsp.runProjectTask"
+                        ]
+                    }
+                ]
+            }
+        ]
     },
-    "commands": [
-      {
-        "command": "sail-lsp.selectProject",
-        "title": "Select Analysis Project",
-        "category": "Sail"
-      },
-      {
-        "command": "sail-lsp.showProjectGraph",
-        "title": "Show Module Dependencies",
-        "category": "Sail"
-      },
-      {
-        "command": "sail-lsp.recheck",
-        "title": "Recheck Projects",
-        "category": "Sail"
-      },
-      {
-        "command": "sail-lsp.recheckProject",
-        "title": "Recheck Current Project",
-        "category": "Sail"
-      },
-      {
-        "command": "sail-lsp.cancelFlycheck",
-        "title": "Cancel Flycheck for Current Project",
-        "category": "Sail"
-      },
-      {
-        "command": "sail-lsp.clearFlycheck",
-        "title": "Clear Flycheck Diagnostics for Current Project",
-        "category": "Sail"
-      },
-      {
-        "command": "sail-lsp.reload",
-        "title": "Reload Workspace",
-        "category": "Sail"
-      },
-      {
-        "command": "sail-lsp.restartServer",
-        "title": "Restart Server",
-        "category": "Sail"
-      },
-      {
-        "command": "sail-lsp.exportDiagnosticReport",
-        "title": "Sail: Export Diagnostic Report",
-        "category": "Sail"
-      },
-      {
-        "command": "sail-lsp.analyzerStatus",
-        "title": "Show Server Status",
-        "category": "Sail"
-      },
-      {
-        "command": "sail-lsp.expandInclude",
-        "title": "Preview Preprocessed Source",
-        "category": "Sail"
-      },
-      {
-        "command": "sail-lsp.explainFormatting",
-        "title": "Explain Formatting",
-        "category": "Sail"
-      },
-      {
-        "command": "sail-lsp.explainAnalysis",
-        "title": "Explain Analysis at Cursor",
-        "category": "Sail"
-      },
-      {
-        "command": "sail-lsp.openProjectManifest",
-        "title": "Open Project Manifest",
-        "category": "Sail"
-      },
-      {
-        "command": "sail-lsp.structuralSearch",
-        "title": "Structural Search",
-        "category": "Sail"
-      },
-      {
-        "command": "sail-lsp.parentModule",
-        "title": "Go to Parent Module",
-        "category": "Sail"
-      },
-      {
-        "command": "sail-lsp.showSyntaxTree",
-        "title": "Show Syntax Tree",
-        "category": "Sail"
-      },
-      {
-        "command": "sail-lsp.viewHir",
-        "title": "View HIR",
-        "category": "Sail"
-      },
-      {
-        "command": "sail-lsp.viewItemTree",
-        "title": "View Item Tree",
-        "category": "Sail"
-      },
-      {
-        "command": "sail-lsp.viewIncludeGraph",
-        "title": "View Include Graph",
-        "category": "Sail"
-      },
-      {
-        "command": "sail-lsp.serverVersion",
-        "title": "Show Server Version",
-        "category": "Sail"
-      },
-      {
-        "command": "sail-lsp.toggleInlayHints",
-        "title": "Toggle Inlay Hints",
-        "category": "Sail"
-      },
-      {
-        "command": "sail-lsp.matchingBrace",
-        "title": "Find Matching Brace",
-        "category": "Sail"
-      },
-      {
-        "command": "sail-lsp.joinLines",
-        "title": "Join Lines",
-        "category": "Sail"
-      },
-      {
-        "command": "sail-lsp.onEnter",
-        "title": "Enhanced Enter Key",
-        "category": "Sail"
-      },
-      {
-        "command": "sail-lsp.moveItemUp",
-        "title": "Move Item Up",
-        "category": "Sail"
-      },
-      {
-        "command": "sail-lsp.moveItemDown",
-        "title": "Move Item Down",
-        "category": "Sail"
-      },
-      {
-        "command": "sail-lsp.hoverRefCommandProxy",
-        "title": "Run Hover Action",
-        "category": "Sail"
-      },
-      {
-        "command": "sail-lsp.selectIncludeContext",
-        "title": "Sail: Select Include Context"
-      },
-      {
-        "command": "sail-lsp.structuralReplace",
-        "title": "Sail: Structural Replace"
-      },
-      {
-        "command": "sail-lsp.applyStructuralReplace",
-        "title": "Sail: Apply Structural Replace"
-      },
-      {
-        "command": "sail-lsp.cancelStructuralReplace",
-        "title": "Sail: Cancel Structural Replace"
-      },
-      {
-        "command": "sail-lsp.runProjectTask",
-        "title": "Run Project Task",
-        "category": "Sail"
-      },
-      {
-        "command": "sail-lsp.cancelProjectTasks",
-        "title": "Cancel All Sail Tasks",
-        "category": "Sail"
-      }
-    ],
-    "keybindings": [
-      {
-        "command": "sail-lsp.joinLines",
-        "key": "ctrl+shift+j",
-        "when": "editorTextFocus && editorLangId == sail"
-      },
-      {
-        "command": "sail-lsp.onEnter",
-        "key": "enter",
-        "when": "editorTextFocus && !suggestWidgetVisible && editorLangId == sail"
-      }
-    ],
-    "views": {
-      "explorer": [
-        {
-          "id": "sail-lsp.projectGraph",
-          "name": "Sail Module Dependencies"
-        }
-      ]
+    "dependencies": {
+        "vscode-languageclient": "^9.0.1"
     },
-    "viewsWelcome": [
-      {
-        "view": "sail-lsp.projectGraph",
-        "contents": "[Load module dependencies](command:sail-lsp.showProjectGraph)"
-      }
-    ],
-    "menus": {
-      "commandPalette": [
-        {
-          "command": "sail-lsp.hoverRefCommandProxy",
-          "when": "false"
-        }
-      ],
-      "view/title": [
-        {
-          "command": "sail-lsp.showProjectGraph",
-          "when": "view == sail-lsp.projectGraph",
-          "group": "navigation"
-        }
-      ]
+    "devDependencies": {
+        "@types/mocha": "^10.0.10",
+        "@types/node": "~22.13.4",
+        "@types/vscode": "~1.93.0",
+        "@vscode/test-electron": "^3.1.0",
+        "@vscode/vsce": "^3.2.0",
+        "esbuild": "^0.25.0",
+        "glob": "^11.0.3",
+        "mocha": "^11.1.0",
+        "prettier": "^3.5.0",
+        "typescript": "^5.7.0"
     }
-  },
-  "dependencies": {
-    "vscode-languageclient": "^9.0.1"
-  },
-  "devDependencies": {
-    "@types/mocha": "^10.0.10",
-    "@types/node": "~22.13.4",
-    "@types/vscode": "~1.93.0",
-    "@vscode/test-electron": "^3.1.0",
-    "@vscode/vsce": "^3.2.0",
-    "esbuild": "^0.25.0",
-    "glob": "^11.0.3",
-    "mocha": "^11.1.0",
-    "prettier": "^3.5.0",
-    "typescript": "^5.7.0"
-  }
 }

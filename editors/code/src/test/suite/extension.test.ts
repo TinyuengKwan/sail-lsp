@@ -16,7 +16,25 @@ interface ExtensionApi {
         projectGraph(): readonly ProjectGraphEntry[];
         ssr: { pending(): number; stale(): boolean };
         runnables: { list(uri: vscode.Uri): Promise<Runnable[]>; activeTasks(): number };
+        testExplorer: {
+            tests(): string[];
+            run(ids: string[]): Promise<Record<string, "passed" | "failed" | "errored">>;
+        };
     };
+}
+
+/** The upstream compiler, when the machine has one; interpreter runs need it. */
+function sailOnPath(): string | undefined {
+    for (const dir of (process.env["PATH"] ?? "").split(path.delimiter)) {
+        const candidate = path.join(dir, process.platform === "win32" ? "sail.exe" : "sail");
+        try {
+            fs.accessSync(candidate, fs.constants.X_OK);
+            return candidate;
+        } catch {
+            // continue
+        }
+    }
+    return undefined;
 }
 
 async function eventually(
@@ -28,6 +46,20 @@ async function eventually(
     while (Date.now() < deadline) {
         if (predicate()) return;
         await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.fail(typeof message === "function" ? message() : message);
+}
+
+/** `eventually` for a check that must be awaited and not overlapped. */
+async function settles(
+    message: string | (() => string),
+    check: () => Promise<boolean>,
+    timeout = 20_000,
+) {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+        if (await check()) return;
+        await new Promise((resolve) => setTimeout(resolve, 200));
     }
     assert.fail(typeof message === "function" ? message() : message);
 }
@@ -258,6 +290,301 @@ suite("sail-lsp extension", () => {
                     vscode.ConfigurationTarget.Workspace,
                 );
             fs.rmSync(temp, { recursive: true, force: true });
+        }
+    });
+
+    test("test functions get run lenses, the Test Explorer lists and runs them, and sail tasks are offered", async () => {
+        const extension = vscode.extensions.getExtension<ExtensionApi>("Lunarwwww.sail-lsp")!;
+        const api = await extension.activate();
+        await eventually("server ready", () => api.test.status()?.quiescent === true);
+        const root = vscode.workspace.workspaceFolders![0].uri;
+        const uri = vscode.Uri.joinPath(root, "sample.sail");
+        const document = await vscode.workspace.openTextDocument(uri);
+        const original = document.getText();
+        const source =
+            "val helper : unit -> unit\nfunction helper() = ()\n$[test]\nfunction test_first() -> unit = helper()\n$[test]\nfunction test_second() -> unit = ()\nfunction main() -> unit = test_first()\n";
+        const replace = async (text: string) => {
+            const edit = new vscode.WorkspaceEdit();
+            edit.replace(
+                uri,
+                new vscode.Range(
+                    document.positionAt(0),
+                    document.positionAt(document.getText().length),
+                ),
+                text,
+            );
+            assert.ok(await vscode.workspace.applyEdit(edit));
+        };
+        const config = vscode.workspace.getConfiguration("sail-lsp");
+        const keys = ["testExplorer", "runnables.tasks"];
+        const saved = keys.map((key) => config.inspect(key)?.workspaceValue);
+        const temp = fs.mkdtempSync(path.join(os.tmpdir(), "sail tasks "));
+        const lenses = async () =>
+            (await vscode.commands.executeCommand<vscode.CodeLens[]>(
+                "vscode.executeCodeLensProvider",
+                uri,
+            )) ?? [];
+        try {
+            await replace(source);
+            await document.save();
+            await vscode.window.showTextDocument(document);
+            await config.update(
+                "runnables.tasks",
+                [
+                    {
+                        label: "Export C",
+                        kind: "export",
+                        command: "${sail}",
+                        args: ["-c", "${projectArgs}"],
+                    },
+                ],
+                vscode.ConfigurationTarget.Workspace,
+            );
+            // A run lens on each `$[test]` function and on `main`, where it is.
+            let placed: vscode.CodeLens[] = [];
+            await settles(
+                () => `run lenses missing: ${JSON.stringify(placed.map((l) => l.command?.title))}`,
+                async () => {
+                    placed = (await lenses()).filter(
+                        (lens) =>
+                            lens.command?.command === "sail-lsp.runProjectTask" &&
+                            lens.command.title.startsWith("▶"),
+                    );
+                    return placed.length === 3;
+                },
+            );
+            assert.deepEqual(
+                placed.map((lens) => [lens.command!.title, lens.range.start.line]),
+                [
+                    ["▶ Run test test_first", 3],
+                    ["▶ Run test test_second", 5],
+                    ["▶ Run main", 6],
+                ],
+            );
+            // The Test Explorer, once enabled, lists the tests of the open file
+            // and not `main`.
+            await config.update("testExplorer", true, vscode.ConfigurationTarget.Workspace);
+            await eventually(
+                () => `tests not listed: ${JSON.stringify(api.test.testExplorer.tests())}`,
+                () => api.test.testExplorer.tests().length === 2,
+            );
+            const ids = api.test.testExplorer.tests().sort();
+            assert.ok(
+                ids[0].endsWith("#run-test_first") && ids[1].endsWith("#run-test_second"),
+                ids.join(),
+            );
+            if (sailOnPath()) {
+                // The verdict is the interpreter's: both evaluate to `()`.
+                const verdicts = await api.test.testExplorer.run([]);
+                assert.deepEqual(
+                    Object.values(verdicts),
+                    ["passed", "passed"],
+                    JSON.stringify(verdicts),
+                );
+            } else {
+                console.log("no `sail` on PATH: not running the tests");
+            }
+            // The task system sees the project task and the entries of the
+            // open file, as `type: "sail"` tasks with the Sail problem matchers.
+            let tasks: vscode.Task[] = [];
+            await settles(
+                () => `sail tasks missing: ${JSON.stringify(tasks.map((t) => t.name))}`,
+                async () => {
+                    tasks = await vscode.tasks.fetchTasks({ type: "sail" });
+                    return (
+                        tasks.some((task) => task.name.startsWith("Export C")) &&
+                        tasks.some((task) => task.name === "Run test test_first") &&
+                        tasks.some((task) => task.name === "Run main")
+                    );
+                },
+            );
+            const exportTask = tasks.find((task) => task.name.startsWith("Export C"))!;
+            assert.equal(exportTask.definition.type, "sail");
+            assert.equal(typeof exportTask.definition.command, "string");
+            assert.deepEqual(exportTask.problemMatchers, ["$sail", "$sail-warning"]);
+            assert.equal(exportTask.group, vscode.TaskGroup.Build);
+            const testTask = tasks.find((task) => task.name === "Run test test_first")!;
+            assert.equal(testTask.definition.script, "test_first()\n:run\n:quit\n");
+            assert.equal(testTask.group, vscode.TaskGroup.Test);
+            // The fixture's `tasks.json` entry is resolved by the provider and
+            // runs as written, with VS Code's variables substituted.
+            const output = path.join(process.env.SAIL_LSP_TEST_TMP!, "sail-lsp-user-task.json");
+            fs.rmSync(output, { force: true });
+            const written = tasks.find((task) => task.name === "user task");
+            assert.ok(
+                written?.execution,
+                `tasks.json entry not resolved: ${tasks.map((t) => t.name)}`,
+            );
+            const exited = new Promise<number | undefined>((resolve) => {
+                const subscription = vscode.tasks.onDidEndTaskProcess((event) => {
+                    if (event.execution.task.name === "user task") {
+                        subscription.dispose();
+                        resolve(event.exitCode);
+                    }
+                });
+            });
+            await vscode.tasks.executeTask(written);
+            assert.equal(await exited, 0);
+            const probe = JSON.parse(fs.readFileSync(output, "utf8"));
+            assert.deepEqual(probe.args, ["written in tasks.json"]);
+            assert.equal(path.relative(probe.cwd, root.fsPath), "");
+            fs.rmSync(output, { force: true });
+        } finally {
+            for (let index = 0; index < keys.length; index++)
+                await config.update(
+                    keys[index],
+                    saved[index],
+                    vscode.ConfigurationTarget.Workspace,
+                );
+            await replace(original);
+            await document.save();
+            await vscode.window.showTextDocument(document);
+            fs.rmSync(temp, { recursive: true, force: true });
+        }
+    });
+
+    test("changing server.path asks for a restart, and a restart recovers from a failed start", async () => {
+        const extension = vscode.extensions.getExtension<ExtensionApi>("Lunarwwww.sail-lsp")!;
+        const api = await extension.activate();
+        await eventually("server ready", () => api.test.status()?.quiescent === true);
+        const root = vscode.workspace.workspaceFolders![0].uri;
+        const uri = vscode.Uri.joinPath(root, "sample.sail");
+        const config = vscode.workspace.getConfiguration("sail-lsp");
+        const savedPath = config.inspect("server.path")?.workspaceValue;
+        const prompts: string[] = [];
+        const original = vscode.window.showInformationMessage;
+        // The prompt, answered as a user clicking "Restart now" would.
+        (vscode.window as { showInformationMessage: unknown }).showInformationMessage = (
+            message: string,
+            ...items: string[]
+        ) => {
+            prompts.push(message);
+            return Promise.resolve(items.find((item) => item === "Restart now"));
+        };
+        try {
+            await config.update(
+                "server.path",
+                path.join(os.tmpdir(), "sail-lsp-missing-binary"),
+                vscode.ConfigurationTarget.Workspace,
+            );
+            await eventually(
+                () => `no restart prompt: ${JSON.stringify(prompts)}`,
+                () => prompts.some((message) => message.includes('"sail-lsp.server.path"')),
+            );
+            // The restart re-resolves the binary: this one cannot start.
+            await eventually(
+                () => `start did not fail: ${JSON.stringify(api.test.status())}`,
+                () =>
+                    api.test.status()?.health === "error" &&
+                    api.test.status()?.message === "The server failed to start.",
+            );
+            assert.deepEqual(await api.test.runnables.list(uri), [], "no client, no runnables");
+            // Restoring the path prompts again, and the restart creates a new
+            // client although the previous start failed.
+            await config.update("server.path", savedPath, vscode.ConfigurationTarget.Workspace);
+            await eventually("no second prompt", () => prompts.length >= 2);
+            await eventually(
+                () => `server did not come back: ${JSON.stringify(api.test.status())}`,
+                () => api.test.status()?.quiescent === true && api.test.status()?.health === "ok",
+            );
+            await settles(
+                "the recreated client answers no runnables",
+                async () => (await api.test.runnables.list(uri)).length >= 1,
+            );
+        } finally {
+            (vscode.window as { showInformationMessage: unknown }).showInformationMessage =
+                original;
+            await config.update("server.path", savedPath, vscode.ConfigurationTarget.Workspace);
+            if (api.test.status()?.health !== "ok") {
+                await vscode.commands.executeCommand("sail-lsp.restartServer");
+            }
+            await eventually("server not restored", () => api.test.status()?.quiescent === true);
+        }
+    });
+
+    test("syntax tree and item tree views follow the source and reveal the node under the cursor", async () => {
+        const extension = vscode.extensions.getExtension<ExtensionApi>("Lunarwwww.sail-lsp")!;
+        const api = await extension.activate();
+        await eventually("server ready", () => api.test.status()?.quiescent === true);
+        await closeRestoredEditors();
+        const uri = vscode.Uri.joinPath(vscode.workspace.workspaceFolders![0].uri, "sample.sail");
+        const document = await vscode.workspace.openTextDocument(uri);
+        const original = document.getText();
+        try {
+            await vscode.window.showTextDocument(document);
+            // Views open beside the source and leave the focus on it.
+            const shown = async (scheme: string) => {
+                let found: vscode.TextDocument | undefined;
+                await eventually(`no ${scheme} view is visible`, () => {
+                    found = vscode.window.visibleTextEditors.find(
+                        (editor) => editor.document.uri.scheme === scheme,
+                    )?.document;
+                    return found !== undefined;
+                });
+                return found!;
+            };
+            await vscode.commands.executeCommand("sail-lsp.showSyntaxTree");
+            const tree = await shown("sail-lsp-syntax-tree");
+            assert.equal(tree.uri.query, uri.toString());
+            assert.match(tree.getText(), /^SOURCE_FILE@0\.\.\d+\n/);
+            const before = tree.getText();
+            await vscode.window.showTextDocument(document);
+            await vscode.commands.executeCommand("sail-lsp.viewItemTree");
+            const items = await shown("sail-lsp-item-tree");
+            const itemsBefore = items.getText();
+            assert.ok(itemsBefore.includes("structural_sample"), itemsBefore);
+            // An edit to the source reaches both views without reopening them.
+            const editor = await vscode.window.showTextDocument(document);
+            await editor.edit((edit) =>
+                edit.insert(document.positionAt(original.length), "val added_later : int\n"),
+            );
+            await eventually(
+                () => `syntax tree view did not follow the edit: ${tree.getText()}`,
+                () => tree.getText() !== before && tree.getText().includes('"added_later"'),
+            );
+            await eventually(
+                () => `item tree view did not follow the edit: ${items.getText()}`,
+                () => items.getText() !== itemsBefore && items.getText().includes("added_later"),
+            );
+            // A node line reveals its range in the source.
+            const lines = tree.getText().split("\n");
+            const line = lines.findIndex(
+                (text) => text.includes("IDENT@") && text.endsWith('"structural_sample"'),
+            );
+            assert.notEqual(line, -1, tree.getText());
+            assert.equal(
+                await vscode.commands.executeCommand(
+                    "sail-lsp.syntaxTreeReveal",
+                    tree.uri.toString(),
+                    line,
+                ),
+                true,
+            );
+            const source = vscode.window.visibleTextEditors.find(
+                (candidate) => candidate.document.uri.toString() === uri.toString(),
+            )!;
+            assert.equal(source.document.getText(source.selection), "structural_sample");
+            assert.equal(
+                await vscode.commands.executeCommand(
+                    "sail-lsp.syntaxTreeReveal",
+                    tree.uri.toString(),
+                    0,
+                ),
+                true,
+            );
+            assert.equal(source.document.getText(source.selection), document.getText());
+        } finally {
+            const editor = await vscode.window.showTextDocument(document);
+            await editor.edit((edit) =>
+                edit.replace(
+                    new vscode.Range(
+                        document.positionAt(0),
+                        document.positionAt(document.getText().length),
+                    ),
+                    original,
+                ),
+            );
+            await document.save();
         }
     });
 

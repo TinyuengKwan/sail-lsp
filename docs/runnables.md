@@ -13,6 +13,38 @@ isolation. Explicit checks work with `flycheck.enable=false`; that setting
 controls automatic checks. Pending reloads and unsaved inputs still prevent a
 check from presenting previous disk contents as current.
 
+## `$[test]` functions and `main`
+
+Upstream Sail has no test runner. `$[test]` marks a `unit -> unit` function
+(Sail 0.20.2 rejects any other type), and the only consumer in the compiler is
+the C backend, which emits `SAIL_TESTS`/`SAIL_TEST_NAMES` arrays for a host
+harness to iterate. What the compiler itself can do with such a function is
+evaluate it in its interpreter, and that is what the per-function entries run:
+
+```sh
+sail <project arguments> --is <script>     # script: test_name()\n:run\n:quit\n
+```
+
+Every `$[test]` function of a file in a loaded project gets a `Run test name`
+entry and the `main` function a `Run main` entry, each placed at its
+definition (`location`), with the project's own compiler arguments and the
+interpreter script as `script`. VS Code shows a `▶` lens above each (also
+behind `runnables.showCodeLens`) and offers them as tasks. The interpreter
+exits 0 whatever happened: it prints `Result = ()` when the function evaluated
+and `Error: <reason>` when an assertion failed or an exception escaped. A
+function that does not type-check is reported as a type error on the `REPL`
+pseudo-file.
+
+With `sail-lsp.testExplorer` (off by default), the `$[test]` functions of open
+files appear in VS Code's Test Explorer. Running them starts the interpreter
+from the extension — the task terminal cannot be read back — and reads the
+verdict from its output: passed on `Result = ()`, failed on `Error:`, a type
+error or a non-zero exit. Output is attached to the test. There is no
+`experimental/testing` protocol: nothing upstream exists for the server to
+drive.
+
+## Explicit test and export tasks
+
 Sail has no universal test discovery/build convention. Declare the existing
 test scripts and exports you want under `sail-lsp.runnables.tasks`, for example:
 
@@ -91,13 +123,53 @@ workspace trust and unsaved related documents before launch. Output, failures
 and termination use its normal task terminal. Discovery and edits never execute
 tasks automatically.
 
+## VS Code tasks
+
+Every process entry is also a task of `type: "sail"` (**Terminal: Run Task**,
+`vscode.tasks.fetchTasks({ type: "sail" })`): the project tasks of every loaded
+project and the `$[test]`/`main` entries of the open Sail files. Its definition
+is what it runs — `command`, `args`, `cwd` and, for an interpreter entry,
+`script` — so a `tasks.json` customization matches by those; the environment
+is not part of the definition and stays in the private invocation file. Tests
+are in the `test` group, exports in `build`.
+
+`tasks.json` entries of the same type run as written:
+
+```json
+{
+  "type": "sail",
+  "label": "Export C",
+  "command": "sail",
+  "args": ["-c", "--project", "model.sail_project", "-o", "${workspaceFolder}/out/model"],
+  "cwd": "${workspaceFolder}/model",
+  "env": { "SAIL_DIR": "/opt/sail" }
+}
+```
+
+`command`, `args`, `cwd` and `env` go through VS Code's variable substitution
+and run as a process. An entry with `script` is an interpreter run: the script
+is stored in a file whose path is appended to `args`, so end them with `--is`;
+such an entry runs through the launcher and its values are not substituted.
+
+Two problem matchers read the compiler's output into the Problems view and are
+attached to every Sail task: `$sail` for the five-line `Type error:` /
+`Syntax error:` / `Lexical error:` blocks (header, `file:line.col-col:`, the
+source line, the caret line, the `| message` line) and `$sail-warning` for the
+one-line `Warning: <message> at file:line.col-col:` header. Sail counts columns
+from zero and VS Code from one, so a mark starts one character early. Colour
+codes are tolerated; `--no-color` is not needed.
+
+## Other clients
+
 Other editors can request `experimental/runnables` with `textDocument` and an
 optional `position`. Advertised kinds are `sail-check` and `shell`. The latter
-has structured `program`/`args`/`cwd`/`environment` and should run as an argv
-process. The former supplies the scope for `sail-lsp/runFlycheck`, cancelled
-with `sail-lsp/cancelFlycheck`. Entries include stable IDs, fingerprints,
-related documents and optional disabled reasons; clients should revalidate
-and check unsaved inputs before execution.
+has structured `program`/`args`/`cwd`/`environment`, an optional `script` to
+store in a file whose path is appended to `args`, and an optional `location`
+in the source; it should run as an argv process. The former supplies the scope
+for `sail-lsp/runFlycheck`, cancelled with `sail-lsp/cancelFlycheck`. Entries
+include stable IDs, fingerprints, related documents and optional disabled
+reasons; clients should revalidate and check unsaved inputs before execution.
+A fingerprint does not change when an entry merely moves in the file.
 
 
 ## Standard LSP clients

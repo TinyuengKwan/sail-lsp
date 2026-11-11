@@ -33,3 +33,13 @@ export function explicitSettings(
     }
     return result;
 }
+
+/** Settings the extension reads when it starts the server and nowhere else,
+ * so a change to one takes effect through a restart — rust-analyzer's
+ * `requiresServerReloadOpts`. */
+export const SERVER_RESTART_SETTINGS = ["server.path", "server.extraEnv", "trace.server"];
+
+/** The first setting a configuration change touched that needs a restart. */
+export function settingRequiringRestart(affects: (key: string) => boolean): string | undefined {
+    return SERVER_RESTART_SETTINGS.find(affects);
+}

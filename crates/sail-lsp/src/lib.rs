@@ -80,6 +80,8 @@ mod integrated_benchmarks;
 /// The probe that enters where a client does — see its module docs for the
 /// four defects that were invisible to the five that enter at `Analysis`.
 #[cfg(test)]
+mod runnables_check;
+#[cfg(test)]
 mod server_check;
 #[cfg(test)]
 mod tests;

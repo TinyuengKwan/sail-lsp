@@ -578,6 +578,11 @@ pub struct Runnable {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disabled: Option<String>,
     pub documents: Vec<lsp_types::Url>,
+    /// Where the entry belongs in the source — rust-analyzer's
+    /// `Runnable::location`: a `$[test]` function or `main`. A project task
+    /// has none and is shown at the top of the file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<lsp_types::Location>,
     #[serde(flatten)]
     pub command: RunnableCommand,
 }
@@ -599,6 +604,13 @@ pub struct ProcessRunnableArgs {
     pub args: Vec<String>,
     pub cwd: std::path::PathBuf,
     pub environment: std::collections::BTreeMap<String, String>,
+    /// An interpreter script the program reads from a file: `args` end with
+    /// the flag that names it (`--is`), and the client stores these contents
+    /// in a file and appends its path. Upstream Sail has no test runner;
+    /// running a `$[test]` function means evaluating it in `sail`'s
+    /// interpreter, and the script is what the interpreter is told to do.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub script: Option<String>,
 }
 
 pub enum CancelFlycheck {}

@@ -9,7 +9,7 @@ import * as vscode from "vscode";
 import * as path from "path";
 import * as os from "os";
 import * as fs from "fs";
-import { explicitSettings } from "./configuration";
+import { explicitSettings, settingRequiringRestart } from "./configuration";
 import {
     ExperimentalFeatures,
     codeActionMiddleware,
@@ -19,6 +19,9 @@ import {
 import { managedServerPath } from "./installation";
 import { registerDiagnosticReport } from "./diagnosticReport";
 import { registerRunnables } from "./runnables";
+import { registerTaskProvider } from "./taskProvider";
+import { registerTestExplorer, TestExplorer } from "./testExplorer";
+import { registerViews } from "./views";
 import { registerEditingCommands } from "./editing";
 import { configureLanguage } from "./languageConfiguration";
 import { ProjectGraphEntry, GraphNode, graphChildren, isCycle } from "./projectGraph";
@@ -63,17 +66,6 @@ const OpenProjectManifestRequest = new RequestType<TextDocumentParams, unknown, 
 const ParentModuleRequest = new RequestType<TextDocumentParams, unknown[], void>(
     "sail-lsp/parentModule",
 );
-const ViewSyntaxTreeRequest = new RequestType<TextDocumentParams, string, void>(
-    "sail-lsp/viewSyntaxTree",
-);
-const ViewHirRequest = new RequestType<
-    TextDocumentParams & { position: vscode.Position },
-    string,
-    void
->("sail-lsp/viewHir");
-const ViewItemTreeRequest = new RequestType<TextDocumentParams, string, void>(
-    "sail-lsp/viewItemTree",
-);
 const ViewIncludeGraphRequest = new RequestType<TextDocumentParams, string, void>(
     "sail-lsp/viewIncludeGraph",
 );
@@ -98,6 +90,8 @@ const CancelFlycheckNotification = new NotificationType<FlycheckScope>("sail-lsp
 const ClearFlycheckNotification = new NotificationType<FlycheckScope>("sail-lsp/clearFlycheck");
 
 let client: LanguageClient | undefined;
+let serverPath: string | undefined;
+let startupError: string | undefined;
 const explanationLinks = new Map<string, vscode.DocumentLink[]>();
 const analysisDocuments = new Map<string, string>();
 let previewSequence = 0;
@@ -122,10 +116,11 @@ export interface ExtensionApi {
         projectGraph(): readonly ProjectGraphEntry[];
         ssr: { pending(): number; stale(): boolean };
         runnables: ReturnType<typeof registerRunnables>;
+        testExplorer: TestExplorer;
     };
 }
 
-export async function activate(context: vscode.ExtensionContext): Promise<ExtensionApi | void> {
+export async function activate(context: vscode.ExtensionContext): Promise<ExtensionApi> {
     configureLanguage(context);
     outputChannel = vscode.window.createOutputChannel("Sail Language Server");
     context.subscriptions.push(outputChannel);
@@ -164,21 +159,87 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     statusBar.show();
     context.subscriptions.push(statusBar);
 
-    let startupError: string | undefined;
-    let serverPath: string | undefined;
     registerDiagnosticReport(
         context,
         () => client,
         () => ({ serverPath, startupError }),
     );
+
+    // Everything registered here outlives the client: it reaches the
+    // current one through `() => client`, so a restart replaces the client
+    // and nothing else.
+    const runnables = registerRunnables(context, () => client, getExtraEnv);
+    const testExplorer = registerTestExplorer(context, runnables);
+    context.subscriptions.push(
+        registerTaskProvider(context, runnables, () => projectGraph.map((p) => p.manifest)),
+    );
+    const ssr = registerStructuralReplace(context, () => client);
+    registerCommands(context);
+    registerViews(context, () => client);
+    registerEditingCommands(context, () => client);
+    registerHoverCommandProxy(context);
+    context.subscriptions.push(
+        vscode.commands.registerCommand("sail-lsp.restartServer", async () => {
+            outputChannel.appendLine("[sail-lsp] restarting server...");
+            await stopClient();
+            if (await startClient(context, () => runnables.refresh())) {
+                outputChannel.appendLine("[sail-lsp] server restarted");
+            }
+        }),
+        // rust-analyzer's `Config.onDidChangeConfiguration`: a setting read
+        // only when the server starts takes effect through a restart, asked
+        // for unless `restartServerOnConfigChange` says to just do it.
+        vscode.workspace.onDidChangeConfiguration(async (event) => {
+            const key = settingRequiringRestart((key) =>
+                event.affectsConfiguration(`sail-lsp.${key}`),
+            );
+            if (!key) return;
+            const automatic = vscode.workspace
+                .getConfiguration("sail-lsp")
+                .get<boolean>("restartServerOnConfigChange", false);
+            if (!automatic) {
+                const answer = await vscode.window.showInformationMessage(
+                    `Changing "sail-lsp.${key}" requires a server restart`,
+                    "Restart now",
+                );
+                if (answer !== "Restart now") return;
+            }
+            await vscode.commands.executeCommand("sail-lsp.restartServer");
+        }),
+        { dispose: () => void stopClient() },
+    );
+
+    await startClient(context, () => runnables.refresh());
+    return {
+        test: {
+            status: () => latestStatus,
+            projectGraph: () => projectGraph,
+            ssr,
+            runnables,
+            testExplorer,
+        },
+    };
+}
+
+/**
+ * Resolves the server binary and starts a client on it, as rust-analyzer's
+ * `Ctx.start` does on every (re)start: the path and `server.extraEnv` are
+ * read now, not remembered from the first start, and a failed start leaves
+ * no client behind, so the next restart tries again from scratch.
+ */
+async function startClient(
+    context: vscode.ExtensionContext,
+    onStarted: () => void,
+): Promise<boolean> {
     serverPath = getServerPath(context);
     if (!serverPath) {
         startupError =
             "The server binary could not be resolved; check server.path or the managed installation";
+        showStatus({ health: "error", quiescent: true, message: startupError });
         showMissingServerError();
-        return;
+        return false;
     }
-
+    activationErrorShown = false;
     outputChannel.appendLine(`[sail-lsp] using server: ${serverPath}`);
 
     // RA pattern: server options define how to start the LSP server.
@@ -225,54 +286,56 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
         synchronize: { configurationSection: "sail-lsp" },
     };
 
-    client = new LanguageClient("sail-lsp", "Sail Language Server", serverOptions, clientOptions);
-    client.registerFeature(new ExperimentalFeatures());
-    const runnables = registerRunnables(context, () => client, getExtraEnv);
-    client.onNotification("sail-lsp/serverStatus", (status: ServerStatus) => showStatus(status));
-    client.onNotification("sail-lsp/projectGraphChanged", () => {
+    const created = new LanguageClient(
+        "sail-lsp",
+        "Sail Language Server",
+        serverOptions,
+        clientOptions,
+    );
+    created.registerFeature(new ExperimentalFeatures());
+    created.onNotification("sail-lsp/serverStatus", (status: ServerStatus) => showStatus(status));
+    created.onNotification("sail-lsp/projectGraphChanged", () => {
         refreshProjectGraph();
         refreshIncludeContext();
-        runnables.refresh();
+        onStarted();
     });
-
-    client.onDidChangeState((event) => {
+    created.onDidChangeState((event) => {
         outputChannel.appendLine(`[sail-lsp] client state ${event.oldState} -> ${event.newState}`);
     });
-
-    // Register commands
-    const ssr = registerStructuralReplace(context, () => client);
-    registerCommands(context);
-    registerEditingCommands(context, () => client);
-    registerHoverCommandProxy(context);
-
-    // Start the client (and server)
+    client = created;
+    showStatus({ health: "ok", quiescent: false, message: "Sail: starting" });
     try {
-        await client.start();
+        await created.start();
     } catch (error) {
         client = undefined;
-        showStatus({ health: "error", quiescent: true, message: "The server failed to start." });
+        await created.dispose().catch(() => undefined);
         const message = error instanceof Error ? error.message : String(error);
         startupError = message;
+        showStatus({ health: "error", quiescent: true, message: "The server failed to start." });
         outputChannel.appendLine(`[sail-lsp] failed to start: ${message}`);
         void vscode.window.showErrorMessage(`Failed to start sail-lsp: ${message}`);
-        return;
+        return false;
     }
+    startupError = undefined;
     outputChannel.appendLine("[sail-lsp] server started");
-    return {
-        test: {
-            status: () => latestStatus,
-            projectGraph: () => projectGraph,
-            ssr,
-            runnables,
-        },
-    };
+    refreshProjectGraph();
+    refreshIncludeContext();
+    onStarted();
+    return true;
+}
+
+async function stopClient(): Promise<void> {
+    const current = client;
+    if (!current) return;
+    client = undefined;
+    await current.stop().catch((error: unknown) => {
+        outputChannel.appendLine(`[sail-lsp] stop failed: ${String(error)}`);
+    });
+    await current.dispose().catch(() => undefined);
 }
 
 export async function deactivate(): Promise<void> {
-    if (client) {
-        await client.stop();
-        client = undefined;
-    }
+    await stopClient();
 }
 
 // ── Server binary resolution ─────────────────────────────────────
@@ -477,6 +540,13 @@ function registerCommands(context: vscode.ExtensionContext): void {
             .then((projects) => {
                 if (client !== currentClient || request !== graphRequest) return;
                 projectGraph = projects ?? [];
+                // rust-analyzer's `inRustProject`: the `when` of the editor
+                // commands in the palette.
+                void vscode.commands.executeCommand(
+                    "setContext",
+                    "inSailProject",
+                    projectGraph.length > 0,
+                );
                 changed.fire(undefined);
             })
             .catch((error: unknown) => {
@@ -551,15 +621,6 @@ function registerCommands(context: vscode.ExtensionContext): void {
         }),
     );
     context.subscriptions.push(
-        vscode.commands.registerCommand("sail-lsp.restartServer", async () => {
-            if (client) {
-                outputChannel.appendLine("[sail-lsp] restarting server...");
-                await client.stop();
-                await client.start();
-                outputChannel.appendLine("[sail-lsp] server restarted");
-            }
-        }),
-
         vscode.commands.registerCommand("sail-lsp.selectProject", async () => {
             const projects = await client?.sendRequest(ProjectGraphRequest);
             if (!projects?.length) {
@@ -686,13 +747,7 @@ function registerCommands(context: vscode.ExtensionContext): void {
         }),
 
         vscode.commands.registerCommand("sail-lsp.serverVersion", () => {
-            if (client) {
-                void vscode.window.showInformationMessage(
-                    `sail-lsp server: ${getServerPath(context) ?? "unknown"}`,
-                );
-            } else {
-                void vscode.window.showWarningMessage("sail-lsp server is not running");
-            }
+            void vscode.window.showInformationMessage(versionInfo(context));
         }),
 
         vscode.commands.registerCommand("sail-lsp.toggleInlayHints", () => {
@@ -981,46 +1036,6 @@ function registerCommands(context: vscode.ExtensionContext): void {
             }
         }),
 
-        vscode.commands.registerCommand("sail-lsp.showSyntaxTree", async () => {
-            if (!client) return;
-            const editor = vscode.window.activeTextEditor;
-            if (!editor) return;
-
-            const content = await client.sendRequest(ViewSyntaxTreeRequest, {
-                textDocument: {
-                    uri: editor.document.uri.toString(),
-                },
-            });
-            await showVirtualTextDocument(content);
-        }),
-
-        vscode.commands.registerCommand("sail-lsp.viewHir", async () => {
-            if (!client) return;
-            const editor = vscode.window.activeTextEditor;
-            if (!editor) return;
-
-            const content = await client.sendRequest(ViewHirRequest, {
-                textDocument: {
-                    uri: editor.document.uri.toString(),
-                },
-                position: editor.selection.active,
-            });
-            await showVirtualTextDocument(content);
-        }),
-
-        vscode.commands.registerCommand("sail-lsp.viewItemTree", async () => {
-            if (!client) return;
-            const editor = vscode.window.activeTextEditor;
-            if (!editor) return;
-
-            const content = await client.sendRequest(ViewItemTreeRequest, {
-                textDocument: {
-                    uri: editor.document.uri.toString(),
-                },
-            });
-            await showVirtualTextDocument(content);
-        }),
-
         // The `$include` graph of the loaded workspace, as text — the file
         // level below the module dependencies view.
         vscode.commands.registerCommand("sail-lsp.viewIncludeGraph", async () => {
@@ -1036,6 +1051,17 @@ function registerCommands(context: vscode.ExtensionContext): void {
             await showVirtualTextDocument(content);
         }),
     );
+}
+
+/** rust-analyzer's `serverVersion`: the extension's version, the server's
+ * as `initialize` reported it, and the binary that was started. */
+function versionInfo(context: vscode.ExtensionContext): string {
+    const extension = String(context.extension.packageJSON.version);
+    const server = client?.initializeResult?.serverInfo?.version;
+    const state = client
+        ? `server ${server ?? "of unknown version"} (${serverPath ?? "unknown binary"})`
+        : `server not running${startupError ? `: ${startupError}` : ""}`;
+    return `sail-lsp extension ${extension}, ${state}`;
 }
 
 function flycheckScope(): { textDocument?: { uri: string } } {

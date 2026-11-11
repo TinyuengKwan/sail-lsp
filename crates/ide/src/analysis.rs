@@ -1300,6 +1300,15 @@ impl Analysis {
         Some(crate::view_item_tree::view_item_tree(&sf))
     }
 
+    /// The `$[test]` functions and `main` of a file, each with where it is —
+    /// rust-analyzer's `Analysis::runnables`. The server attaches the
+    /// interpreter command line; see `ide::runnables`.
+    pub fn runnables(&self, file_id: FileId) -> crate::Cancellable<Vec<crate::Runnable>> {
+        self.with_db(|a| {
+            a.file_by_id(file_id).map(|file| crate::runnables::runnables(&file)).unwrap_or_default()
+        })
+    }
+
     /// The syntax tree, for the debugging command.
     pub fn view_syntax_tree(&self, url: &url::Url) -> Option<String> {
         let sf = self.file(url)?;

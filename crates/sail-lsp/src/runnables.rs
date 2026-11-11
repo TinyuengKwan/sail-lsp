@@ -70,20 +70,7 @@ fn process(
     let mut args = Vec::new();
     for arg in &task.args {
         if arg == "${projectArgs}" {
-            let (mut selection, _) = crate::flycheck::command_line(
-                &crate::flycheck::CheckTarget::Project(project.manifest.clone()),
-                &project.config,
-                &[],
-            ).map_err(|reason| format!("{reason}; use a task adapter accepting ${{projectContext}} for this configuration"))?;
-            let check = selection
-                .iter()
-                .position(|arg| arg == "--just-check")
-                .ok_or("Missing compiler check flag")?;
-            selection.remove(check);
-            if selection.iter().any(|a| a.contains('\0')) {
-                return Err("Project arguments cannot contain NUL".into());
-            }
-            args.extend(selection);
+            args.extend(project_arguments(project)?);
         } else {
             args.push(scalar(arg, &bindings)?);
         }
@@ -102,7 +89,90 @@ fn process(
             Ok((name.clone(), scalar(value, &bindings)?))
         })
         .collect::<Result<_, String>>()?;
-    Ok(ProcessRunnableArgs { kind: task.kind, program, args, cwd, environment })
+    Ok(ProcessRunnableArgs { kind: task.kind, program, args, cwd, environment, script: None })
+}
+
+/// The compiler's view of the project — manifest, variables, selected
+/// roots, strict mode — as `flycheck` passes it, less `--just-check`.
+fn project_arguments(project: &FolderProject) -> Result<Vec<String>, String> {
+    let (mut selection, _) = crate::flycheck::command_line(
+        &crate::flycheck::CheckTarget::Project(project.manifest.clone()),
+        &project.config,
+        &[],
+    )
+    .map_err(|reason| {
+        format!("{reason}; use a task adapter accepting ${{projectContext}} for this configuration")
+    })?;
+    let check = selection
+        .iter()
+        .position(|arg| arg == "--just-check")
+        .ok_or("Missing compiler check flag")?;
+    selection.remove(check);
+    if selection.iter().any(|a| a.contains('\0')) {
+        return Err("Project arguments cannot contain NUL".into());
+    }
+    Ok(selection)
+}
+
+/// One entry per `$[test]` function and `main` in `source`, run through the
+/// compiler's interpreter: `sail <project args> --is <script>`. See
+/// `ide::runnables` for why that is the command.
+fn interpreter_entries(
+    snap: &GlobalStateSnapshot,
+    source: &Url,
+    key: &Url,
+    project: &FolderProject,
+    compiler: &str,
+) -> anyhow::Result<Vec<(Runnable, Option<String>)>> {
+    let Some(file_id) = snap.analysis.file_id(source) else {
+        return Ok(Vec::new());
+    };
+    let found = snap.analysis.runnables(file_id)?;
+    if found.is_empty() {
+        return Ok(Vec::new());
+    }
+    let line_index = snap
+        .analysis
+        .file_line_index(file_id)
+        .unwrap_or_else(|| ide_db::line_index::LineIndex::new(""));
+    let cwd =
+        project.manifest.parent().ok_or_else(|| anyhow::anyhow!("manifest has no directory"))?;
+    let arguments = project_arguments(project);
+    Ok(found
+        .into_iter()
+        .map(|runnable| {
+            let (args, problem) = match &arguments {
+                Ok(args) => (args.iter().cloned().chain(["--is".to_owned()]).collect(), None),
+                Err(reason) => (Vec::new(), Some(reason.clone())),
+            };
+            let entry = Runnable {
+                id: format!("{key}#run-{}", runnable.nav.name),
+                label: runnable.label(),
+                project: TextDocumentIdentifier::new(
+                    Url::from_file_path(&project.manifest).unwrap(),
+                ),
+                fingerprint: String::new(),
+                disabled: None,
+                documents: Vec::new(),
+                location: Some(lsp_types::Location::new(
+                    source.clone(),
+                    crate::to_proto::range(&line_index, runnable.nav.full_range),
+                )),
+                command: RunnableCommand::Process(ProcessRunnableArgs {
+                    kind: match runnable.kind {
+                        ide::RunnableKind::Test => crate::config::ProjectTaskKind::Test,
+                        ide::RunnableKind::Main => crate::config::ProjectTaskKind::Run,
+                    },
+                    program: compiler.to_owned(),
+                    args,
+                    cwd: cwd.to_path_buf(),
+                    environment: BTreeMap::new(),
+                    script: Some(runnable.interpreter_script()),
+                }),
+            };
+            (entry, problem)
+        })
+        .collect())
 }
 
 fn unavailable(snap: &GlobalStateSnapshot, project: &FolderProject, uri: &Url) -> Option<String> {
@@ -170,6 +240,7 @@ pub(crate) fn discover(snap: &GlobalStateSnapshot, source: &Url) -> anyhow::Resu
             fingerprint: String::new(),
             disabled: disabled.clone(),
             documents: documents.clone(),
+            location: None,
             command: RunnableCommand::Check(FlycheckControlParams {
                 text_document: Some(identifier.clone()),
             }),
@@ -196,6 +267,7 @@ pub(crate) fn discover(snap: &GlobalStateSnapshot, source: &Url) -> anyhow::Resu
                         args: Vec::new(),
                         cwd: project.manifest.parent().unwrap().to_path_buf(),
                         environment: BTreeMap::new(),
+                        script: None,
                     },
                     Some(reason),
                 ),
@@ -207,13 +279,25 @@ pub(crate) fn discover(snap: &GlobalStateSnapshot, source: &Url) -> anyhow::Resu
                 fingerprint: String::new(),
                 disabled: disabled.clone().or(problem),
                 documents: documents.clone(),
+                location: None,
                 command: RunnableCommand::Process(command),
             });
         }
+        for (mut entry, problem) in
+            interpreter_entries(snap, source, key, project, &config.flycheck.command)?
+        {
+            entry.documents = documents.clone();
+            entry.disabled = disabled.clone().or(problem);
+            entries.push(entry);
+        }
         for mut runnable in entries {
+            // Where an entry sits moves with every edit above it; what it
+            // runs does not, and a lens clicked after such an edit must
+            // still run.
+            let placed = Runnable { location: None, ..runnable.clone() };
             runnable.fingerprint = crate::code_action_helpers::source_fingerprint(
                 &json!({
-                    "runnable": runnable, "configuration": project.config,
+                    "runnable": placed, "configuration": project.config,
                     "compiler": config.flycheck, "manifest": project.manifest_text,
                 })
                 .to_string(),

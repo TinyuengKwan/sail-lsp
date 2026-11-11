@@ -42,7 +42,8 @@ pub struct HoverResult {
 /// }
 /// ```
 ///
-/// No Runnable variant (Sail has no test runner integration).
+/// No Runnable variant: the `$[test]` and `main` entries live in
+/// `ide::runnables` and reach the editor as lenses, not as hover actions.
 #[derive(Clone, Debug)]
 pub enum HoverAction {
     /// "Go to implementations" (for val specs, scattered defs).

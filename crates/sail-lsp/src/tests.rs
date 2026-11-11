@@ -3586,6 +3586,7 @@ fn every_protocol_extension_has_a_client() {
         include_str!("../../../editors/code/src/ssr.ts"),
         include_str!("../../../editors/code/src/runnables.ts"),
         include_str!("../../../editors/code/src/diagnosticReport.ts"),
+        include_str!("../../../editors/code/src/views.ts"),
     ]
     .concat();
     let methods: Vec<&str> = ext
@@ -3834,6 +3835,7 @@ fn a_feature_the_ide_offers_can_be_asked_for() {
         include_str!("reload.rs"),
         include_str!("diagnostics.rs"),
         include_str!("global_state.rs"),
+        include_str!("runnables.rs"),
     ]
     .concat();
 

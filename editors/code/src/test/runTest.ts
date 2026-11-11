@@ -1,3 +1,4 @@
+import * as os from "node:os";
 import * as path from "node:path";
 import process from "node:process";
 import { runTests } from "@vscode/test-electron";
@@ -11,6 +12,7 @@ async function main(): Promise<void> {
         extensionTestsPath,
         extensionTestsEnv: {
             SAIL_LSP_TEST_NODE: process.execPath,
+            SAIL_LSP_TEST_TMP: os.tmpdir(),
             SAIL_LSP_TEST_SERVER:
                 process.env.SAIL_LSP_TEST_SERVER ??
                 path.resolve(

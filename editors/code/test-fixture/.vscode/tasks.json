@@ -1,0 +1,17 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "type": "sail",
+      "label": "user task",
+      "command": "${env:SAIL_LSP_TEST_NODE}",
+      "args": [
+        "${workspaceFolder}/tools/task-probe.mjs",
+        "ok",
+        "${env:SAIL_LSP_TEST_TMP}/sail-lsp-user-task.json",
+        "{}",
+        "written in tasks.json"
+      ]
+    }
+  ]
+}

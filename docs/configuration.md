@@ -77,6 +77,13 @@ Settings are exposed as `sail-lsp.*` in VS Code's settings UI. Example
 }
 ```
 
+Three settings are the extension's alone and never reach the server:
+`sail-lsp.server.path`, `sail-lsp.server.extraEnv` and `sail-lsp.trace.server`
+are read when the server starts, so changing one prompts for a restart
+(`sail-lsp.restartServerOnConfigChange` restarts without asking);
+`sail-lsp.runnables.showCodeLens` and `sail-lsp.testExplorer` control the
+extension's lenses and Test Explorer ([project tasks](runnables.md)).
+
 ## Neovim
 
 For the managed integration (Neovim 0.11+), configure its server name:
@@ -90,6 +97,39 @@ vim.lsp.config("sail_lsp_managed", {
     },
   },
 })
+```
+
+Without the managed file, `vim.lsp.config("sail_lsp", { cmd = { "sail-lsp" },
+filetypes = { "sail", "sail_project" }, settings = { ["sail-lsp"] = { ... } } })`
+is the same thing under your own name; see [other editors](editors.md).
+
+## Helix
+
+The `sail-lsp` section is the language server's `config`:
+
+```toml
+[language-server.sail-lsp-managed]
+command = "/path/to/sail-lsp"
+config = { sail-lsp = { diagnostics = { enable = true }, completion = { limit = 100 } } }
+```
+
+## Emacs
+
+Eglot reads `eglot-workspace-configuration`, per project in `.dir-locals.el`:
+
+```elisp
+((nil . ((eglot-workspace-configuration
+          . (:sail-lsp (:diagnostics (:enable t) :completion (:limit 100)))))))
+```
+
+lsp-mode sends the `sail-lsp` section it builds from registered custom
+settings as initialization options; `editors/templates/emacs-lsp-mode.el`
+registers two and shows the pattern:
+
+```elisp
+(lsp-register-custom-settings
+ '(("sail-lsp.diagnostics.disabled" lsp-sail-lsp-diagnostics-disabled)
+   ("sail-lsp.completion.limit" lsp-sail-lsp-completion-limit)))
 ```
 
 ## Configuration reference

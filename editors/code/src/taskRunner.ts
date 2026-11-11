@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { constants } from "node:os";
+import { constants, tmpdir } from "node:os";
+import { join } from "node:path";
 
 const launcherVariables = new Set([
     "ELECTRON_RUN_AS_NODE",
@@ -30,6 +31,23 @@ export function taskEnvironment(
     return result;
 }
 
+/** An interpreter script lives in a file for as long as the process that
+ * reads it runs; `--is` takes a path and the interpreter reads it only once
+ * the project has type-checked. */
+export function scriptArguments(
+    args: string[],
+    script: string | undefined,
+): { args: string[]; cleanup: () => void } {
+    if (script === undefined) return { args, cleanup: () => {} };
+    const directory = mkdtempSync(join(tmpdir(), "sail-lsp-script-"));
+    const file = join(directory, "run.isail");
+    writeFileSync(file, script, { mode: 0o600 });
+    return {
+        args: [...args, file],
+        cleanup: () => rmSync(directory, { recursive: true, force: true }),
+    };
+}
+
 /** Invoked by VS Code's bundled Node runtime. Arguments and environment are
  * read after task variable resolution, then passed directly to the child. */
 export function runTask(uri: string): void {
@@ -40,6 +58,7 @@ export function runTask(uri: string): void {
             args: string[];
             cwd: string;
             environment: Record<string, string>;
+            script?: string;
         };
     };
     try {
@@ -53,7 +72,8 @@ export function runTask(uri: string): void {
             !spec.command.environment ||
             typeof spec.command.environment !== "object" ||
             Array.isArray(spec.command.environment) ||
-            !Object.values(spec.command.environment).every((value) => typeof value === "string")
+            !Object.values(spec.command.environment).every((value) => typeof value === "string") ||
+            (spec.command.script !== undefined && typeof spec.command.script !== "string")
         ) {
             throw new Error("invalid invocation");
         }
@@ -66,16 +86,19 @@ export function runTask(uri: string): void {
     }
     const environment = taskEnvironment(process.env, spec.command.environment);
     try {
-        const child = spawn(spec.command.program, spec.command.args, {
+        const { args, cleanup } = scriptArguments(spec.command.args, spec.command.script);
+        const child = spawn(spec.command.program, args, {
             cwd: spec.command.cwd,
             env: environment,
             stdio: "inherit",
         });
         child.once("error", (error) => {
+            cleanup();
             console.error(`Could not start Sail project task: ${error.message}`);
             process.exitCode = 1;
         });
         child.once("exit", (code, signal) => {
+            cleanup();
             if (code !== null) {
                 process.exitCode = code;
             } else {
