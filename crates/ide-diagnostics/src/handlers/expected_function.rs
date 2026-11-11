@@ -6,6 +6,23 @@ use hir::display::HirDisplay;
 
 use crate::{DiagnosticsContext, ExpectedFunction};
 
+// Diagnostic: expected-function
+//
+// Not produced: the parser forms a call only when the callee is a name —
+// `f(1)(2)` parses as the call `f(1)` followed by a stray `(2)` — so the
+// inference branch that pushes `InferenceDiagnostic::ExpectedFunction` for a
+// non-name callee is one no program reaches.
+//
+// This diagnostic would be triggered when a call's callee is an expression
+// that is not a name — the result of another call, say — so there is no
+// signature to check the arguments against. A name bound to a non-function is
+// `type-error`; a `function` defined against a mapping's `val` is
+// `not-a-function-type`, from the item walker.
+//
+// ```sail
+// val f : int -> int
+// function g() -> int = f(1)(2)
+// ```
 pub(crate) fn expected_function(ctx: &DiagnosticsContext<'_>, d: &ExpectedFunction) -> Diagnostic {
     Diagnostic::new(
         DiagnosticCode::SailError("expected-function"),

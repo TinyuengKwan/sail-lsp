@@ -1,7 +1,5 @@
 //! Handler for `AnyDiagnostic::ConcatTypeMismatch`.
 //!
-//! Diagnostic: concat-type-mismatch
-//!
 //! Sail-specific: triggered when concatenation (`@`) operands are not
 //! compatible vector types.
 
@@ -10,6 +8,15 @@ use hir::diagnostics::DiagnosticCode;
 
 use crate::{ConcatTypeMismatch, DiagnosticsContext};
 
+// Diagnostic: type-error
+//
+// This diagnostic is triggered when an operand of the concatenation operator
+// `@` is not a vector: an integer, a boolean or a user type that is not a
+// bitvector alias.
+//
+// ```sail
+// function f(x : bits(4), n : int) -> bits(8) = x @ n
+// ```
 pub(crate) fn concat_type_mismatch(
     _ctx: &DiagnosticsContext<'_>,
     d: &ConcatTypeMismatch,

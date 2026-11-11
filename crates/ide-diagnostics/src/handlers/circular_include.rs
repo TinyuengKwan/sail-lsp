@@ -5,6 +5,14 @@ use hir::diagnostics::DiagnosticCode;
 
 use crate::{CircularInclude, DiagnosticsContext};
 
+// Diagnostic: circular-include
+//
+// This diagnostic is triggered when a chain of `$include` directives leads
+// back to the file that started it. Every file in the cycle is reported.
+//
+// ```sail
+// $include "main.sail"
+// ```
 pub(crate) fn circular_include(_ctx: &DiagnosticsContext<'_>, d: &CircularInclude) -> Diagnostic {
     Diagnostic::new(
         DiagnosticCode::SailError("circular-include"),

@@ -15,6 +15,16 @@ use hir::diagnostics::{DiagnosticCode, Severity};
 
 use crate::{DiagnosticsContext, UnnecessaryMutability};
 
+// Diagnostic: unmodified-mutable-variable
+//
+// Not produced: nothing constructs `AnyDiagnostic::UnnecessaryMutability` yet.
+//
+// This diagnostic would be triggered when a `var` is never assigned after its
+// initialization, so it could be a `let`, which a quick fix makes it.
+//
+// ```sail
+// function f() -> int = { var x : int = 1; x }
+// ```
 pub(crate) fn unnecessary_mutability(
     _ctx: &DiagnosticsContext<'_>,
     d: &UnnecessaryMutability,

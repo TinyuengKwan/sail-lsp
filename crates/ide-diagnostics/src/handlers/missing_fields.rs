@@ -8,6 +8,19 @@ use ide_db::text_edit::TextEdit;
 
 use crate::{DiagnosticsContext, MissingFields};
 
+// Diagnostic: missing-fields
+//
+// This diagnostic is triggered when a struct pattern names its struct and
+// leaves out fields the struct declares without a `_` to stand for them, or
+// when a struct literal that names its struct leaves out fields. (A literal
+// that does not name its struct is checked by the item walker instead, as
+// `missing-struct-fields`.) A quick fix on a literal inserts the missing
+// fields with placeholder values.
+//
+// ```sail
+// struct S = { x : int, y : bool }
+// function f(s : S) -> unit = match s { struct S { x } => () }
+// ```
 pub(crate) fn missing_fields(ctx: &DiagnosticsContext<'_>, d: &MissingFields) -> Diagnostic {
     let fields_str = d.missing.join(", ");
 

@@ -14,6 +14,15 @@ use syntax::ast::{self, AstNode};
 
 use crate::{DiagnosticsContext, RemoveUnnecessaryElse};
 
+// Diagnostic: remove-unnecessary-else
+//
+// This diagnostic is triggered when an `if` whose `then` branch always diverges
+// — it returns, throws or exits — still has an `else`. What the `else` guards
+// can be written after the `if` at the same level, which a quick fix does.
+//
+// ```sail
+// function f(c : bool) -> int = { if c then return 1 else 2 }
+// ```
 /// (`remove_unnecessary_else.rs:21-41`).
 pub(crate) fn remove_unnecessary_else(
     ctx: &DiagnosticsContext<'_>,

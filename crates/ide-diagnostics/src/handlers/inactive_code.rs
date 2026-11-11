@@ -10,6 +10,18 @@ use hir::diagnostics::{DiagnosticCode, Severity};
 
 use crate::{DiagnosticsContext, InactiveCode};
 
+// Diagnostic: inactive-code
+//
+// This diagnostic is triggered for a region the preprocessor did not take — an
+// `$ifdef`, `$ifndef` or `$iftarget` whose condition is false for the current
+// configuration, or the `$else` of one that is true. It is a hint, so the
+// editor fades the region rather than flagging it.
+//
+// ```sail
+// $ifdef NEVER_DEFINED
+// val hidden : unit -> unit
+// $endif
+// ```
 pub(crate) fn inactive_code(_ctx: &DiagnosticsContext<'_>, d: &InactiveCode) -> Diagnostic {
     let message = if d.in_else {
         format!("code is inactive: `{}` is true, this is its `$else` branch", d.directive)

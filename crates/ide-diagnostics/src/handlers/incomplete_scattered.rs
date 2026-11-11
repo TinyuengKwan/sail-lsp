@@ -7,6 +7,20 @@ use hir::diagnostics::{DiagnosticCode, Severity};
 
 use crate::{DiagnosticsContext, IncompleteScattered};
 
+// Diagnostic: incomplete-scattered
+//
+// Not produced: nothing constructs `AnyDiagnostic::IncompleteScattered` yet;
+// the per-file name-resolution finding of the same name is dropped because an
+// `end` may be in another file.
+//
+// This diagnostic would be triggered when a `scattered` definition has no
+// `end`, or has clauses but no declaration. As a hint it marks a definition
+// that is merely still open; as an error, one the project closes nowhere.
+//
+// ```sail
+// scattered function exec
+// function clause exec(x) = x
+// ```
 pub(crate) fn incomplete_scattered(
     _ctx: &DiagnosticsContext<'_>,
     d: &IncompleteScattered,

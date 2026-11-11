@@ -10,12 +10,27 @@ use ide_db::text_edit::TextEdit;
 
 use crate::{DeprecatedSyntax, DiagnosticsContext};
 
+// Diagnostic: deprecated-syntax
+//
+// Not produced: nothing constructs `AnyDiagnostic::DeprecatedSyntax` yet. The
+// one deprecation the server does report, `deprecated-effect-annotation`, comes
+// from the item-tree pass in `parse.rs` and is disabled by default.
+//
+// This diagnostic would be triggered for syntax newer Sail accepts but no
+// longer uses, such as an `effect { ... }` set on a `val`. It carries the
+// `Deprecated` tag, so the editor strikes the construct through, and a quick
+// fix removes it.
+//
+// ```sail
+// val f : unit -> unit effect {wmv}
+// ```
 pub(crate) fn deprecated_syntax(_ctx: &DiagnosticsContext<'_>, d: &DeprecatedSyntax) -> Diagnostic {
     Diagnostic::new(
         DiagnosticCode::SailLint("deprecated-syntax", Severity::Warning),
         &d.message,
         crate::node_file_range(&d.node),
     )
+    .with_deprecated(true)
     .with_fixes(fixes(d))
 }
 

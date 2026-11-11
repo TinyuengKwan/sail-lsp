@@ -10,6 +10,21 @@ use hir::diagnostics::DiagnosticCode;
 
 use crate::{DiagnosticsContext, EffectViolation};
 
+// Diagnostic: effect-violation
+//
+// Not produced: nothing constructs `is_declared_pure: true` yet, so no function
+// body is checked in a pure context.
+//
+// This diagnostic would be triggered when a function declared pure reads or
+// writes a register, throws, or calls a function that does. Upstream Sail
+// dropped explicit effect annotations, and every type scheme here is built as
+// not declared pure.
+//
+// ```sail
+// register R : int
+// val f : unit -> int
+// function f() = R
+// ```
 /// Sail-specific: effect purity violation diagnostic.
 pub(crate) fn effect_violation(_ctx: &DiagnosticsContext<'_>, d: &EffectViolation) -> Diagnostic {
     // Check if the violating effect has associated outcomes (FunctionEffects::outcomes).

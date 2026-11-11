@@ -4,6 +4,7 @@ version = "0.2.0"
 authors = ["Tinyueng Kwan <kwantinyueng@gmail.com>"]
 edition = "2021"
 license = "MIT"
+repository = "https://github.com/TinyuengKwan/sail-lsp"
 
 [features]
 default = ["z3-solver"]

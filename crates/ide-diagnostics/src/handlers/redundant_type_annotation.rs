@@ -7,6 +7,17 @@ use hir::diagnostics::{DiagnosticCode, Severity};
 
 use crate::{DiagnosticsContext, RedundantTypeAnnotation};
 
+// Diagnostic: redundant-type-annotation
+//
+// Not produced: nothing constructs `AnyDiagnostic::RedundantTypeAnnotation`
+// yet.
+//
+// This diagnostic would be triggered when a `let` writes a type annotation that
+// is exactly the type its initializer already has.
+//
+// ```sail
+// function f() -> int = { let x : int = 1 : int; x }
+// ```
 pub(crate) fn redundant_type_annotation(
     _ctx: &DiagnosticsContext<'_>,
     d: &RedundantTypeAnnotation,

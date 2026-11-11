@@ -6,6 +6,17 @@ use hir::display::HirDisplay;
 
 use crate::{DiagnosticsContext, InvalidSliceAssign};
 
+// Diagnostic: invalid-slice-assign
+//
+// Not produced: nothing constructs `AnyDiagnostic::InvalidSliceAssign` yet.
+//
+// This diagnostic would be triggered when a vector slice is assigned a value of
+// a different width than the slice.
+//
+// ```sail
+// register R : bits(8)
+// function f() -> unit = { R[7 .. 4] = 0x000 }
+// ```
 pub(crate) fn invalid_slice_assign(
     ctx: &DiagnosticsContext<'_>,
     d: &InvalidSliceAssign,

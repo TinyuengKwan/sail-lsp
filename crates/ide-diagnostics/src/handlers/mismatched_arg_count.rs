@@ -8,6 +8,17 @@ use hir::diagnostics::DiagnosticCode;
 
 use crate::{DiagnosticsContext, MismatchedArgCount};
 
+// Diagnostic: mismatched-arg-count
+//
+// This diagnostic is triggered when a call passes a different number of
+// arguments than the callee's signature declares. An unfinished call — one
+// whose `)` has not been typed yet — is not reported.
+//
+// ```sail
+// val takes_two : (int, int) -> int
+// function takes_two(x, y) = x
+// function test() -> int = takes_two(1)
+// ```
 pub(crate) fn mismatched_arg_count(
     _ctx: &DiagnosticsContext<'_>,
     d: &MismatchedArgCount,

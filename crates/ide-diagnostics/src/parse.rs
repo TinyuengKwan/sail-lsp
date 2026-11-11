@@ -31,12 +31,18 @@ pub fn compute_parse_diagnostics(file: &dyn FileDb) -> Vec<HirDiagnostic> {
                 if let Some(pos) = def_text.find("effect") {
                     let abs_pos = span.start + pos;
                     let end_pos = abs_pos + 6;
-                    collector.diagnostics.push(HirDiagnostic::new(
-                        DiagnosticCode::SailLint("deprecated-effect-annotation", Severity::Warning),
-                        "Explicit effect annotations are deprecated. They are no longer used and can be removed.".to_string(),
-                        base_db::text_range(abs_pos, end_pos),
-                        Severity::Warning,
-                    ));
+                    collector.diagnostics.push(
+                        HirDiagnostic::new(
+                            DiagnosticCode::SailLint(
+                                "deprecated-effect-annotation",
+                                Severity::Warning,
+                            ),
+                            "Explicit effect annotations are deprecated. They are no longer used and can be removed.".to_string(),
+                            base_db::text_range(abs_pos, end_pos),
+                            Severity::Warning,
+                        )
+                        .with_tags(vec![hir::diagnostics::DiagnosticTag::Deprecated]),
+                    );
                 }
             }
 

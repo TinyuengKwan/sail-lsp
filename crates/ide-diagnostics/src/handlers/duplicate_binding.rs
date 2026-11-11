@@ -7,6 +7,15 @@ use hir::diagnostics::DiagnosticCode;
 
 use crate::{DiagnosticsContext, DuplicateBindingDiag};
 
+// Diagnostic: duplicate-definition
+//
+// This diagnostic is triggered when one pattern binds the same name twice — in
+// a tuple, a constructor's payload or a struct pattern — so the second binding
+// has nothing to be.
+//
+// ```sail
+// function f(p : (int, int)) -> int = match p { (x, x) => x }
+// ```
 pub(crate) fn duplicate_binding(
     ctx: &DiagnosticsContext<'_>,
     d: &DuplicateBindingDiag,

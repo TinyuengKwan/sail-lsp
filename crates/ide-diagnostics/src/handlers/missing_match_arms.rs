@@ -1,7 +1,5 @@
 //! Handler for `AnyDiagnostic::IncompleteMatch`.
 //!
-//! Diagnostic: missing-match-arm
-//!
 //! This diagnostic is triggered if `match` block is missing one or more
 //! match arms.
 //!
@@ -14,9 +12,17 @@ use hir::diagnostics::{DiagnosticCode, Severity};
 
 use crate::{DiagnosticsContext, IncompleteMatch};
 
-// Diagnostic: missing-match-arm
+// Diagnostic: incomplete-match
 //
-// This diagnostic is triggered if `match` block is missing one or more match arms.
+// This diagnostic is triggered when a `match` does not cover every value its
+// scrutinee can take: an enum member, a union constructor or a literal is
+// missing and no wildcard arm catches it. The missing cases are listed in the
+// message.
+//
+// ```sail
+// enum E = {A, B, C}
+// function g(e : E) -> int = match e { A => 1, B => 2 }
+// ```
 pub(crate) fn missing_match_arms(_ctx: &DiagnosticsContext<'_>, d: &IncompleteMatch) -> Diagnostic {
     let message = if d.missing_arms.is_empty() {
         "non-exhaustive match".to_string()

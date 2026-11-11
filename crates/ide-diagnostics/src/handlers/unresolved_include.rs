@@ -5,6 +5,15 @@ use hir::diagnostics::DiagnosticCode;
 
 use crate::{DiagnosticsContext, UnresolvedInclude};
 
+// Diagnostic: unresolved-include
+//
+// This diagnostic is triggered when an `$include` names a file that is not
+// in the project: not on disk at the path written, and not a library header
+// the configured Sail installation provides.
+//
+// ```sail
+// $include "missing.sail"
+// ```
 pub(crate) fn unresolved_include(
     _ctx: &DiagnosticsContext<'_>,
     d: &UnresolvedInclude,

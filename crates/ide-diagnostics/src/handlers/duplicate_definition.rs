@@ -6,6 +6,17 @@ use hir::diagnostics::DiagnosticCode;
 
 use crate::{DiagnosticsContext, DuplicateDefinition};
 
+// Diagnostic: duplicate-definition
+//
+// This diagnostic is triggered when a name is declared twice in one project at
+// the top level — two types, two enums, two functions with no `scattered` or
+// `overload` between them. The second declaration is the one reported, with the
+// first as related information.
+//
+// ```sail
+// type T = int
+// type T = bool
+// ```
 pub(crate) fn duplicate_definition(
     _ctx: &DiagnosticsContext<'_>,
     d: &DuplicateDefinition,

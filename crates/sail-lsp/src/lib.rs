@@ -75,6 +75,10 @@ pub(crate) use lsp::ext as lsp_ext;
 pub(crate) use lsp::from_proto;
 pub(crate) use lsp::to_proto;
 
+/// What arrives on the wire — the fields of a diagnostic, a signature, a
+/// refused rename — through the same server `server_check` drives.
+#[cfg(test)]
+mod diagnostics_check;
 #[cfg(test)]
 mod integrated_benchmarks;
 /// The probe that enters where a client does — see its module docs for the

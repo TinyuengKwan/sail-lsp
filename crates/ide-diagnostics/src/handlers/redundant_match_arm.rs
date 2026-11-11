@@ -1,7 +1,5 @@
 //! Handler for `AnyDiagnostic::RedundantMatchArm`.
 //!
-//! Diagnostic: redundant-match-arm
-//!
 //! An arm whose pattern an earlier arm already covers can never run.
 
 use crate::Diagnostic;
@@ -9,6 +7,15 @@ use hir::diagnostics::{DiagnosticCode, Severity};
 
 use crate::{DiagnosticsContext, RedundantMatchArm};
 
+// Diagnostic: redundant-match-arm
+//
+// This diagnostic is triggered when a `match` arm's pattern is already covered
+// by the arms before it, so the arm can never run.
+//
+// ```sail
+// enum E = {A, B}
+// function g(e : E) -> int = match e { A => 1, _ => 2, B => 3 }
+// ```
 pub(crate) fn redundant_match_arm(
     _ctx: &DiagnosticsContext<'_>,
     d: &RedundantMatchArm,

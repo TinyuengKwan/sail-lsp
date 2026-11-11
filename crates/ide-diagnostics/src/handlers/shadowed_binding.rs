@@ -9,6 +9,16 @@ use hir::diagnostics::{DiagnosticCode, Severity};
 
 use crate::{DiagnosticsContext, ShadowedBinding};
 
+// Diagnostic: shadowed-binding
+//
+// Not produced: nothing constructs `AnyDiagnostic::ShadowedBinding` yet.
+//
+// This diagnostic would be triggered when a `let` binds a name an enclosing
+// scope already binds, hiding the outer binding for the rest of the block.
+//
+// ```sail
+// function f(x : int) -> int = { let x = 2; x }
+// ```
 pub(crate) fn shadowed_binding(_ctx: &DiagnosticsContext<'_>, d: &ShadowedBinding) -> Diagnostic {
     Diagnostic::new(
         DiagnosticCode::SailLint("shadowed-binding", Severity::Warning),

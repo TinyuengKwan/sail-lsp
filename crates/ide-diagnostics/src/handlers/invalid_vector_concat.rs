@@ -5,6 +5,18 @@ use hir::diagnostics::DiagnosticCode;
 
 use crate::{DiagnosticsContext, InvalidVectorConcat};
 
+// Diagnostic: invalid-vector-concat
+//
+// Not produced: nothing constructs `AnyDiagnostic::InvalidVectorConcat` yet; a
+// non-vector operand of `@` is reported as `type-error` by the concatenation
+// check.
+//
+// This diagnostic would be triggered when a vector concatenation `@` is applied
+// to something that is not a vector.
+//
+// ```sail
+// function f() -> bits(8) = 0x0 @ true
+// ```
 pub(crate) fn invalid_vector_concat(
     _ctx: &DiagnosticsContext<'_>,
     d: &InvalidVectorConcat,

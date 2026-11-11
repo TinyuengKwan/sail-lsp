@@ -10,6 +10,16 @@ use hir::diagnostics::DiagnosticCode;
 
 use crate::{DiagnosticsContext, MismatchedParamCount};
 
+// Diagnostic: mismatched-param-count
+//
+// This diagnostic is triggered when a function definition binds fewer
+// parameters than its `val` specification declares. One parameter against
+// several is not reported: it binds the whole argument tuple.
+//
+// ```sail
+// val f : (int, int, int) -> int
+// function f(x, y) = x
+// ```
 pub(crate) fn mismatched_param_count(
     _ctx: &DiagnosticsContext<'_>,
     d: &MismatchedParamCount,

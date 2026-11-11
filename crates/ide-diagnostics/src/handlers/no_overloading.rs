@@ -1,7 +1,5 @@
 //! Handler for `AnyDiagnostic::NoOverloading`.
 //!
-//! Diagnostic: no-overloading
-//!
 //! Sail-specific: triggered when no overload candidate matches a
 //! function call. Conceptually.
 
@@ -10,6 +8,15 @@ use hir::diagnostics::DiagnosticCode;
 
 use crate::{DiagnosticsContext, NoOverloading};
 
+// Diagnostic: type-error
+//
+// This diagnostic is triggered when a call names an `overload` and none of its
+// members accepts the arguments given, or when the callee is a name no function
+// declares — upstream's `No possible overloading` and `Function not found`.
+//
+// ```sail
+// function g() -> unit = nope(1)
+// ```
 pub(crate) fn no_overloading(_ctx: &DiagnosticsContext<'_>, d: &NoOverloading) -> Diagnostic {
     Diagnostic::new(
         DiagnosticCode::SailError("type-error"),

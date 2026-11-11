@@ -31,6 +31,8 @@ pub mod bitfield_layout;
 pub mod call_hierarchy;
 pub mod calls;
 pub mod completion;
+#[cfg(test)]
+mod diagnostics_docs;
 pub mod doc_links;
 pub mod expand_include;
 pub mod extend_selection;

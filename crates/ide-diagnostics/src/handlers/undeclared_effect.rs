@@ -7,6 +7,19 @@ use hir::diagnostics::DiagnosticCode;
 
 use crate::{DiagnosticsContext, UndeclaredEffect};
 
+// Diagnostic: undeclared-effect
+//
+// Not produced: nothing constructs `AnyDiagnostic::UndeclaredEffect` yet.
+//
+// This diagnostic would be triggered when a function performs an effect — a
+// register write, say — that its `val` specification's effect set does not
+// declare.
+//
+// ```sail
+// register R : int
+// val f : unit -> unit effect {rreg}
+// function f() = R = 1
+// ```
 pub(crate) fn undeclared_effect(_ctx: &DiagnosticsContext<'_>, d: &UndeclaredEffect) -> Diagnostic {
     Diagnostic::new(
         DiagnosticCode::SailError("undeclared-effect"),

@@ -12,6 +12,18 @@ use ide_db::text_edit::TextEdit;
 
 use crate::{DiagnosticsContext, UnusedImport};
 
+// Diagnostic: unused-import
+//
+// Not produced: nothing constructs `AnyDiagnostic::UnusedImport` yet.
+//
+// This diagnostic would be triggered when an `$include` brings in a file none
+// of whose declarations the including file uses. A quick fix removes the
+// directive.
+//
+// ```sail
+// $include "helpers.sail"
+// function f() -> int = 1
+// ```
 pub(crate) fn unused_import(_ctx: &DiagnosticsContext<'_>, d: &UnusedImport) -> Diagnostic {
     Diagnostic::new(
         DiagnosticCode::SailLint("unused-import", Severity::Warning),

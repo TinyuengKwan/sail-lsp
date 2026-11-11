@@ -4919,3 +4919,113 @@ fn callable_semantic_fingerprint_tracks_operator_grouping() {
         "same tokens with different grouping must invalidate inference"
     );
 }
+
+/// What a native diagnostic says about itself on the wire, which is what
+/// an editor filters, groups and links by.
+///
+/// `source` was absent — flycheck's relayed findings said `sail`, the
+/// server's own said nothing — and no `codeDescription` was sent, while
+/// `diagnostics.disabled` asked users for codes no page listed.
+#[test]
+fn a_native_diagnostic_names_its_source_and_links_its_code_to_the_docs() {
+    let line_index = ide_db::line_index::LineIndex::new("function f() -> int = { let x = 1; 2 }\n");
+    let url = lsp_types::Url::parse("file:///main.sail").unwrap();
+    let diag = ide_diagnostics::Diagnostic::new(
+        hir::diagnostics::DiagnosticCode::SailLint(
+            "unused-variable",
+            hir::diagnostics::Severity::Warning,
+        ),
+        "unused variable `x`",
+        hir::FileRange {
+            file_id: base_db::FileId::from_raw(0),
+            range: base_db::text_range(28, 29),
+        },
+    );
+    let sent = crate::to_proto::diagnostic(&line_index, &url, &diag);
+    assert_eq!(sent.source.as_deref(), Some("sail-lsp"));
+    let href = sent.code_description.expect("a link to the code's documentation").href;
+    assert_eq!(href.as_str(), format!("{}#unused-variable", crate::to_proto::DIAGNOSTICS_DOCS_URL));
+    assert!(
+        href.as_str().starts_with("https://github.com/")
+            && href.as_str().contains("/docs/diagnostics.md#"),
+        "{href}"
+    );
+}
+
+/// `diagnostics.warningsAsHint` lowers a warning to `WeakWarning`, which went
+/// out as WARNING — so the setting changed nothing a client could see. It is
+/// HINT now, as rust-analyzer maps it; a plain warning is still a warning.
+#[test]
+fn a_weak_warning_is_sent_as_a_hint() {
+    use hir::diagnostics::Severity;
+    use lsp_types::DiagnosticSeverity;
+    assert_eq!(
+        crate::to_proto::diagnostic_severity(Severity::WeakWarning),
+        DiagnosticSeverity::HINT
+    );
+    assert_eq!(crate::to_proto::diagnostic_severity(Severity::Hint), DiagnosticSeverity::HINT);
+    assert_eq!(
+        crate::to_proto::diagnostic_severity(Severity::Warning),
+        DiagnosticSeverity::WARNING
+    );
+    assert_eq!(
+        crate::to_proto::diagnostic_severity(Severity::Information),
+        DiagnosticSeverity::INFORMATION
+    );
+}
+
+/// A deprecation is tagged `Deprecated` so the editor strikes the construct
+/// through; only `Unnecessary` was ever sent. Both tags travel together when
+/// a diagnostic is both.
+#[test]
+fn a_deprecated_diagnostic_carries_the_deprecated_tag() {
+    let line_index = ide_db::line_index::LineIndex::new("val f : unit -> unit effect {wmv}\n");
+    let url = lsp_types::Url::parse("file:///main.sail").unwrap();
+    let range = hir::FileRange {
+        file_id: base_db::FileId::from_raw(0),
+        range: base_db::text_range(21, 27),
+    };
+    let code = hir::diagnostics::DiagnosticCode::SailLint(
+        "deprecated-effect-annotation",
+        hir::diagnostics::Severity::Warning,
+    );
+    let deprecated =
+        ide_diagnostics::Diagnostic::new(code.clone(), "deprecated", range).with_deprecated(true);
+    let sent = crate::to_proto::diagnostic(&line_index, &url, &deprecated);
+    assert_eq!(sent.tags, Some(vec![lsp_types::DiagnosticTag::DEPRECATED]));
+
+    let both = ide_diagnostics::Diagnostic::new(code.clone(), "deprecated and unused", range)
+        .with_unused(true)
+        .with_deprecated(true);
+    let sent = crate::to_proto::diagnostic(&line_index, &url, &both);
+    assert_eq!(
+        sent.tags,
+        Some(vec![lsp_types::DiagnosticTag::UNNECESSARY, lsp_types::DiagnosticTag::DEPRECATED])
+    );
+
+    let neither = ide_diagnostics::Diagnostic::new(code, "plain", range);
+    assert_eq!(crate::to_proto::diagnostic(&line_index, &url, &neither).tags, None);
+}
+
+/// The item-tree pass that reports `deprecated-effect-annotation` marks it
+/// deprecated, so the tag reaches the wire from the real pipeline and not
+/// only from a diagnostic built by hand.
+#[test]
+fn the_deprecated_effect_annotation_is_marked_deprecated_by_the_pipeline() {
+    use ide_db::FileDb;
+    let source = "val f : unit -> unit effect {wmv}\nfunction f() = ()\n";
+    let file = ide_db::test_utils::TestFile::new(source);
+    let (db, ft) = file.file_text().unwrap();
+    let mut config = ide_diagnostics::DiagnosticsConfig::new();
+    config.disabled.clear();
+    let diags = ide_diagnostics::syntax_diagnostics(db, &config, &file, ft);
+    let deprecation = diags
+        .iter()
+        .find(|d| d.code.as_str() == "deprecated-effect-annotation")
+        .expect("the effect set is reported once it is not disabled");
+    assert!(deprecation.deprecated, "{deprecation:?}");
+    let line_index = ide_db::line_index::LineIndex::new(source);
+    let url = lsp_types::Url::parse("file:///main.sail").unwrap();
+    let sent = crate::to_proto::diagnostic(&line_index, &url, deprecation);
+    assert_eq!(sent.tags, Some(vec![lsp_types::DiagnosticTag::DEPRECATED]));
+}

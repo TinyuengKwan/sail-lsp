@@ -5,6 +5,16 @@ use hir::diagnostics::{DiagnosticCode, Severity};
 
 use crate::{DiagnosticsContext, InconsistentHexCasing};
 
+// Diagnostic: inconsistent-hex-casing
+//
+// Not produced: nothing constructs `AnyDiagnostic::InconsistentHexCasing` yet.
+//
+// This diagnostic would be triggered when a hexadecimal literal mixes upper-
+// and lower-case digits.
+//
+// ```sail
+// let x = 0xAbCd
+// ```
 pub(crate) fn inconsistent_hex_casing(
     _ctx: &DiagnosticsContext<'_>,
     d: &InconsistentHexCasing,

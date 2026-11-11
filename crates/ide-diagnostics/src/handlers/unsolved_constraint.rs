@@ -7,6 +7,17 @@ use hir::diagnostics::{DiagnosticCode, Severity};
 
 use crate::{DiagnosticsContext, UnsolvedConstraint};
 
+// Diagnostic: unsolved-constraint
+//
+// This diagnostic is triggered when a type-level constraint — a bound on a
+// width or an integer type variable — cannot be shown to hold at a call or a
+// binding. When the solver could not decide the constraint rather than refute
+// it, the finding says so and the server marks the analysis as unknown.
+//
+// ```sail
+// val q : forall 'n, 'n >= 0. int('n) -> bits('n)
+// function f(n : int) -> unit = { let _ = q(n); () }
+// ```
 /// Sail-specific: unsolved numeric constraint diagnostic.
 pub(crate) fn unsolved_constraint(
     _ctx: &DiagnosticsContext<'_>,

@@ -8,6 +8,16 @@ use hir::diagnostics::DiagnosticCode;
 
 use crate::{DiagnosticsContext, UnresolvedIdent};
 
+// Diagnostic: unresolved-ident
+//
+// This diagnostic is triggered when a name is used in an expression and nothing
+// in scope — no binding, parameter, register, `let`, enum member or declaration
+// in the project — declares it.
+//
+// ```sail
+// val g : int -> int
+// function f() -> int = g(zzz)
+// ```
 /// `fn(ctx, d: &hir::UnresolvedIdent) -> Diagnostic`
 pub(crate) fn unresolved_ident(_ctx: &DiagnosticsContext<'_>, d: &UnresolvedIdent) -> Diagnostic {
     Diagnostic::new(

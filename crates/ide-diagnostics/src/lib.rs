@@ -178,6 +178,9 @@ pub struct Diagnostic {
     pub range: hir::FileRange,
     pub severity: Severity,
     pub unused: bool,
+    /// The construct is still accepted and should not be written any more;
+    /// the editor strikes it through (`DiagnosticTag::DEPRECATED`).
+    pub deprecated: bool,
     pub experimental: bool,
     /// Stable reason for an undecided proof, independent of rendered text.
     pub unknown_reason: Option<&'static str>,
@@ -212,6 +215,7 @@ impl Diagnostic {
             range: range.into(),
             severity,
             unused: false,
+            deprecated: false,
             experimental: false,
             unknown_reason: None,
             fixes: None,
@@ -251,6 +255,12 @@ impl Diagnostic {
     /// Mark as unused (adds Unnecessary tag).
     pub fn with_unused(mut self, unused: bool) -> Self {
         self.unused = unused;
+        self
+    }
+
+    /// Mark as deprecated (adds the Deprecated tag).
+    pub fn with_deprecated(mut self, deprecated: bool) -> Self {
+        self.deprecated = deprecated;
         self
     }
 
@@ -872,6 +882,8 @@ fn is_cross_file_false_positive(d: &AnyDiagnostic, ws: &WorkspaceNames) -> bool 
 /// Convert `hir::diagnostics::Diagnostic` to `ide_diagnostics::Diagnostic`.
 fn hir_diag_to_ide(d: &hir::diagnostics::Diagnostic, file: base_db::FileId) -> Diagnostic {
     let unused = d.tags.iter().any(|t| matches!(t, hir::diagnostics::DiagnosticTag::Unnecessary));
+    let deprecated =
+        d.tags.iter().any(|t| matches!(t, hir::diagnostics::DiagnosticTag::Deprecated));
     let related = d
         .related
         .iter()
@@ -883,6 +895,7 @@ fn hir_diag_to_ide(d: &hir::diagnostics::Diagnostic, file: base_db::FileId) -> D
     Diagnostic::new(d.code.clone(), d.message.clone(), d.range)
         .with_severity(d.severity)
         .with_unused(unused)
+        .with_deprecated(deprecated)
         .with_related(related)
 }
 

@@ -6,6 +6,16 @@ use hir::display::HirDisplay;
 
 use crate::{DiagnosticsContext, InvalidStringPattern};
 
+// Diagnostic: invalid-string-pattern
+//
+// Not produced: nothing constructs `AnyDiagnostic::InvalidStringPattern` yet.
+//
+// This diagnostic would be triggered when a string-append pattern `"a" ^ rest`
+// has an operand that is not a string literal or a string binding.
+//
+// ```sail
+// function f(s : string) -> int = match s { "a" ^ 1 => 0, _ => 1 }
+// ```
 pub(crate) fn invalid_string_pattern(
     ctx: &DiagnosticsContext<'_>,
     d: &InvalidStringPattern,

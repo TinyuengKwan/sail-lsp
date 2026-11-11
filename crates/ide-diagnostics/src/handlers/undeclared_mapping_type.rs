@@ -5,6 +5,16 @@ use hir::diagnostics::DiagnosticCode;
 
 use crate::{DiagnosticsContext, UndeclaredMappingType};
 
+// Diagnostic: undeclared-mapping-type
+//
+// Not produced: nothing constructs `AnyDiagnostic::UndeclaredMappingType` yet.
+//
+// This diagnostic would be triggered when a `mapping` is defined without a
+// `val` specification or an inline type giving its two sides.
+//
+// ```sail
+// mapping m = { 0b0 <-> true }
+// ```
 pub(crate) fn undeclared_mapping_type(
     _ctx: &DiagnosticsContext<'_>,
     d: &UndeclaredMappingType,

@@ -1,7 +1,5 @@
 //! Handler for `AnyDiagnostic::TypeMismatch`.
 //!
-//! Diagnostic: type-mismatch
-//!
 //! This diagnostic is triggered when an expression has a different type
 //! than expected.
 
@@ -62,9 +60,17 @@ fn shapes_line_up(expected: &str, actual: &str) -> bool {
     shape(expected) == shape(actual)
 }
 
-// Diagnostic: type-mismatch
+// Diagnostic: type-error
 //
-// This diagnostic is triggered when two types that should match don't.
+// This diagnostic is triggered when an expression's type is not the one its
+// context expects. Two shapes that line up but whose constraint does not hold
+// say `X is not a subtype of Y`; two shapes that never met say `Type mismatch
+// between Y and X`, as upstream Sail does.
+//
+// ```sail
+// val g : unit -> bool
+// function f() -> int = 4 * g()
+// ```
 pub(crate) fn type_mismatch(ctx: &DiagnosticsContext<'_>, d: &TypeMismatch) -> Option<Diagnostic> {
     // Skip unknown/error types.
     if d.expected.is_error() || d.actual.is_error() {

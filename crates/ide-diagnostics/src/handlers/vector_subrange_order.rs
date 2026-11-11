@@ -7,6 +7,20 @@ use hir::diagnostics::DiagnosticCode;
 
 use crate::{DiagnosticsContext, VectorSubrangeOrder};
 
+// Diagnostic: type-error
+//
+// This diagnostic is triggered when a vector subrange `v[hi .. lo]` writes its
+// indices against the default order: with `default Order dec` the first index
+// must be the greater one.
+//
+// ```sail
+// default Order dec
+// val unsigned : forall 'n. bits('n) -> int
+// union ast = { I : bits(16) }
+// function f(x : ast) -> int = match x {
+//   I(imm[0 .. 2] @ rest[12 .. 0]) => unsigned(imm) + unsigned(rest)
+// }
+// ```
 pub(crate) fn vector_subrange_order(
     _ctx: &DiagnosticsContext<'_>,
     d: &VectorSubrangeOrder,

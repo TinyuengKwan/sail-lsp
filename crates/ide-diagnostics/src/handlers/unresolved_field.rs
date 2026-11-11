@@ -6,6 +6,15 @@ use hir::display::HirDisplay;
 
 use crate::{DiagnosticsContext, UnresolvedField};
 
+// Diagnostic: unresolved-field
+//
+// This diagnostic is triggered when a field is read, written or matched on a
+// struct or bitfield that does not declare it.
+//
+// ```sail
+// struct Record = { a : bits(32) }
+// function test(r : Record) -> bits(32) = r.zzz
+// ```
 pub(crate) fn unresolved_field(ctx: &DiagnosticsContext<'_>, d: &UnresolvedField) -> Diagnostic {
     let mut range = crate::node_file_range(&d.node);
     if !d.receiver_is_not_a_record {

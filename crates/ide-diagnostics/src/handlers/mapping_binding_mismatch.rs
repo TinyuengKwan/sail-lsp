@@ -1,7 +1,5 @@
 //! Handler for `AnyDiagnostic::MappingBindingMismatch`.
 //!
-//! Diagnostic: mapping-binding-mismatch
-//!
 //! Sail-specific: triggered when a bidirectional mapping clause has
 //! bindings that don't appear on both sides.
 
@@ -10,6 +8,19 @@ use hir::diagnostics::DiagnosticCode;
 
 use crate::{DiagnosticsContext, MappingBindingMismatch};
 
+// Diagnostic: type-error
+//
+// Not produced: nothing constructs
+// `InferenceDiagnostic::MappingBindingMismatch` yet.
+//
+// This diagnostic would be triggered when a bidirectional `mapping` clause
+// binds a name on one side of `<->` and never mentions it on the other, so one
+// direction of the mapping has no value for it. Such a clause is reported
+// today as the `type-error` the unbound side causes.
+//
+// ```sail
+// mapping m : bits(2) <-> bits(2) = { 0b0 @ x <-> 0b00 }
+// ```
 pub(crate) fn mapping_binding_mismatch(
     _ctx: &DiagnosticsContext<'_>,
     d: &MappingBindingMismatch,

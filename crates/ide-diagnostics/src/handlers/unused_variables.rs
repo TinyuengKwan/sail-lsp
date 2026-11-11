@@ -8,6 +8,14 @@ use hir::diagnostics::{DiagnosticCode, Severity};
 
 use crate::{DiagnosticsContext, UnusedVariable};
 
+// Diagnostic: unused-variable
+//
+// This diagnostic is triggered when a `let`/`var` binding or a function
+// parameter is never read in its scope. A quick fix prefixes the name with `_`.
+//
+// ```sail
+// function f() -> int = { let x = 1; 2 }
+// ```
 pub(crate) fn unused_variables(_ctx: &DiagnosticsContext<'_>, d: &UnusedVariable) -> Diagnostic {
     Diagnostic::new(
         DiagnosticCode::SailLint("unused-variable", Severity::Warning),

@@ -10,6 +10,20 @@ use hir::diagnostics::{DiagnosticCode, Severity};
 
 use crate::{DiagnosticsContext, MissingEffectAnnotation};
 
+// Diagnostic: missing-effect-annotation
+//
+// Not produced: nothing constructs `AnyDiagnostic::MissingEffectAnnotation`
+// yet.
+//
+// This diagnostic would be triggered when a function with side effects has no
+// effect annotation. Upstream Sail has dropped explicit effect sets, so there
+// is nothing a fix could add.
+//
+// ```sail
+// register R : int
+// val f : unit -> int
+// function f() = R
+// ```
 pub(crate) fn missing_effect_annotation(
     _ctx: &DiagnosticsContext<'_>,
     d: &MissingEffectAnnotation,

@@ -329,17 +329,34 @@ pub fn snippet_workspace_edit(
     changes
 }
 
+/// Where every diagnostic code is described, one heading per code.
+///
+/// The page is generated from the `// Diagnostic:` comments in
+/// `ide-diagnostics`' handlers (`docs/diagnostics.md`), so `#<code>` is the
+/// anchor GitHub gives its heading. The repository is the one `Cargo.toml`
+/// names, so a fork that moves the docs moves the link.
+pub const DIAGNOSTICS_DOCS_URL: &str =
+    concat!(env!("CARGO_PKG_REPOSITORY"), "/blob/main/docs/diagnostics.md");
+
+/// What this server's own findings are attributed to. A compiler finding
+/// relayed by flycheck says `sail`; an editor groups and filters by this.
+pub const DIAGNOSTIC_SOURCE: &str = "sail-lsp";
+
 pub fn diagnostic_severity(sev: Severity) -> lsp_types::DiagnosticSeverity {
     match sev {
         Severity::Error => lsp_types::DiagnosticSeverity::ERROR,
-        Severity::Warning | Severity::WeakWarning => lsp_types::DiagnosticSeverity::WARNING,
+        Severity::Warning => lsp_types::DiagnosticSeverity::WARNING,
         Severity::Information => lsp_types::DiagnosticSeverity::INFORMATION,
-        Severity::Hint => lsp_types::DiagnosticSeverity::HINT,
+        // rust-analyzer's mapping. `WeakWarning` is what
+        // `diagnostics.warningsAsHint` produces, and it went out as WARNING,
+        // so the setting changed nothing a client could see.
+        Severity::WeakWarning | Severity::Hint => lsp_types::DiagnosticSeverity::HINT,
     }
 }
 
 /// Convert IDE diagnostic to LSP wire format.
-/// Maps `Diagnostic.unused` to `DiagnosticTag::UNNECESSARY`.
+/// Maps `Diagnostic.unused` to `DiagnosticTag::UNNECESSARY` and
+/// `Diagnostic.deprecated` to `DiagnosticTag::DEPRECATED`.
 pub fn diagnostic(
     line_index: &LineIndex,
     url: &lsp_types::Url,
@@ -348,6 +365,9 @@ pub fn diagnostic(
     let mut tags = Vec::new();
     if d.unused {
         tags.push(lsp_types::DiagnosticTag::UNNECESSARY);
+    }
+    if d.deprecated {
+        tags.push(lsp_types::DiagnosticTag::DEPRECATED);
     }
     // Secondary places, each with what it contributes. Upstream draws a
     // caret at every one; this used to be appended to the message as
@@ -367,13 +387,19 @@ pub fn diagnostic(
         range: range(line_index, d.range.range),
         severity: Some(diagnostic_severity(d.severity)),
         code: Some(lsp_types::NumberOrString::String(d.code.as_str().to_string())),
+        code_description: lsp_types::Url::parse(&format!(
+            "{DIAGNOSTICS_DOCS_URL}#{}",
+            d.code.as_str()
+        ))
+        .ok()
+        .map(|href| lsp_types::CodeDescription { href }),
+        source: Some(DIAGNOSTIC_SOURCE.to_owned()),
         message: d.message.clone(),
         data: d
             .unknown_reason
             .map(|reason| serde_json::json!({"analysis": {"status":"unknown", "reason":reason}})),
         tags: if tags.is_empty() { None } else { Some(tags) },
         related_information: (!related.is_empty()).then_some(related),
-        ..Default::default()
     }
 }
 

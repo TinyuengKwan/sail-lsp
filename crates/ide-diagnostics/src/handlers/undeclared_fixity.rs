@@ -30,6 +30,17 @@ use syntax::SyntaxKind as SK;
 const BUILT_IN: &[&str] =
     &["+", "-", "*", "<", ">", "<=", ">=", "::", "@", "in", "^", "|", "&", "==", "!=", "/", "%"];
 
+// Diagnostic: undeclared-fixity
+//
+// This diagnostic is triggered when an infix operator is used without an
+// `infix`, `infixl` or `infixr` declaration giving it a precedence, and it is
+// not one of the operators upstream Sail's grammar hardcodes. Upstream refuses
+// such a program; the parser here still builds a tree.
+//
+// ```sail
+// val operator =% : (int, int) -> int
+// function f() -> int = 1 =% 2
+// ```
 pub(crate) fn undeclared_fixity(db: &dyn salsa::Database, file: &dyn FileDb) -> Vec<Diagnostic> {
     let Some(root) = file.syntax() else { return Vec::new() };
     let declared = base_db::WorkspaceFixities::try_get(db).map(|f| f.fixities(db).clone());

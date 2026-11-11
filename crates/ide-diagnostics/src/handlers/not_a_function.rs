@@ -1,7 +1,5 @@
 //! Handler for `AnyDiagnostic::NotAFunction`.
 //!
-//! Diagnostic: type-error
-//!
 //! `let x : int = 3` then `x(1)`. The name is bound, and to something that
 //! is not callable — upstream looks the callee up in the function namespace
 //! alone and says "Function x not found. Did you mean f?".
@@ -15,6 +13,14 @@ use hir::diagnostics::DiagnosticCode;
 
 use crate::{DiagnosticsContext, NotAFunction};
 
+// Diagnostic: type-error
+//
+// This diagnostic is triggered when a call's callee is a name that is bound —
+// to a local, a register or a constant — but not to anything callable.
+//
+// ```sail
+// function f() -> unit = { let x : int = 1; let _ = x(1); () }
+// ```
 pub(crate) fn not_a_function(_ctx: &DiagnosticsContext<'_>, d: &NotAFunction) -> Diagnostic {
     Diagnostic::new(
         DiagnosticCode::SailError("type-error"),

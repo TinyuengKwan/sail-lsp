@@ -7,6 +7,21 @@ use hir::diagnostics::DiagnosticCode;
 
 use crate::{DiagnosticsContext, EffectMismatchInOverride};
 
+// Diagnostic: effect-mismatch
+//
+// Not produced: nothing constructs `AnyDiagnostic::EffectMismatchInOverride`
+// yet.
+//
+// This diagnostic would be triggered when the `forwards` and `backwards`
+// clauses of a mapping have different effects.
+//
+// ```sail
+// register R : int
+// mapping m : int <-> int = {
+//   forwards x => x,
+//   backwards x => { R = x; x }
+// }
+// ```
 pub(crate) fn effect_mismatch_in_override(
     _ctx: &DiagnosticsContext<'_>,
     d: &EffectMismatchInOverride,

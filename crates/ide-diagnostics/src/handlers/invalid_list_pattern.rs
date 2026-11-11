@@ -6,6 +6,16 @@ use hir::display::HirDisplay;
 
 use crate::{DiagnosticsContext, InvalidListPattern};
 
+// Diagnostic: invalid-list-pattern
+//
+// Not produced: nothing constructs `AnyDiagnostic::InvalidListPattern` yet.
+//
+// This diagnostic would be triggered when a cons pattern `x :: xs` is written
+// where the scrutinee is not a list, or its tail is not itself a list pattern.
+//
+// ```sail
+// function f(l : list(int)) -> int = match l { x :: 1 => x, _ => 0 }
+// ```
 pub(crate) fn invalid_list_pattern(
     ctx: &DiagnosticsContext<'_>,
     d: &InvalidListPattern,

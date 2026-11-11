@@ -9,6 +9,15 @@ use ide_db::text_edit::TextEdit;
 
 use crate::{DiagnosticsContext, UnreachableCode};
 
+// Diagnostic: unreachable-code
+//
+// This diagnostic is triggered when a statement follows one that always
+// diverges — a `return`, `throw` or `exit` — in the same block, so it can never
+// run. A quick fix removes it.
+//
+// ```sail
+// function f() -> int = { return 1; 2 }
+// ```
 pub(crate) fn unreachable_code(_ctx: &DiagnosticsContext<'_>, d: &UnreachableCode) -> Diagnostic {
     let mut diag = Diagnostic::new(
         DiagnosticCode::SailLint("unreachable-code", Severity::Hint),

@@ -14,6 +14,15 @@ use syntax::ast::{self, AstNode};
 
 use crate::{DiagnosticsContext, RemoveTrailingReturn};
 
+// Diagnostic: remove-trailing-return
+//
+// This diagnostic is triggered when a function body ends in `return e`: the
+// last expression of a body is its value, so the `return` says nothing. A quick
+// fix removes the keyword.
+//
+// ```sail
+// function f() -> int = { let x : int = 3; return x }
+// ```
 /// (`remove_trailing_return.rs:12-37`).
 pub(crate) fn remove_trailing_return(
     ctx: &DiagnosticsContext<'_>,

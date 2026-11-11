@@ -565,7 +565,7 @@ impl ServerFixture {
         });
     }
 
-    fn request(&mut self, method: &str, params: serde_json::Value) -> i32 {
+    pub(crate) fn request(&mut self, method: &str, params: serde_json::Value) -> i32 {
         let id = self.next_id;
         self.next_id += 1;
         self.client
@@ -663,7 +663,7 @@ impl ServerFixture {
         panic!("waited {PATIENCE:?} for {what}; log so far: {:?}", self.log);
     }
 
-    fn wait_for_response(&mut self, id: i32) -> Response {
+    pub(crate) fn wait_for_response(&mut self, id: i32) -> Response {
         self.wait_until("a response", |f| f.responses.contains_key(&id));
         self.responses.remove(&id).expect("response")
     }

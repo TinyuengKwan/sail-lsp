@@ -1,7 +1,5 @@
 //! Handler for `AnyDiagnostic::NonContiguousSubrange`.
 //!
-//! Diagnostic: non-contiguous-subrange
-//!
 //! Sail-specific: triggered when vector subrange patterns have gaps
 //! between their bit ranges.
 
@@ -10,6 +8,21 @@ use hir::diagnostics::DiagnosticCode;
 
 use crate::{DiagnosticsContext, NonContiguousSubrange};
 
+// Diagnostic: type-error
+//
+// This diagnostic is triggered when a vector-concatenation pattern binds one
+// name through several subranges that do not join up — `imm[15 .. 6] @ imm[4 ..
+// 0]` leaves bit 5 undefined — or whose lowest subrange does not start at bit
+// 0.
+//
+// ```sail
+// default Order dec
+// val unsigned : forall 'n. bits('n) -> int
+// union ast = { I : bits(16) }
+// function g(x : ast) -> int = match x {
+//   I(imm[15 .. 6] @ imm[4 .. 0] @ rest[0 .. 0]) => unsigned(imm) + unsigned(rest)
+// }
+// ```
 pub(crate) fn non_contiguous_subrange(
     _ctx: &DiagnosticsContext<'_>,
     d: &NonContiguousSubrange,

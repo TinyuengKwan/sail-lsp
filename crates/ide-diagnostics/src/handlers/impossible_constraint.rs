@@ -5,6 +5,17 @@ use hir::diagnostics::DiagnosticCode;
 
 use crate::{DiagnosticsContext, ImpossibleConstraint};
 
+// Diagnostic: impossible-constraint
+//
+// Not produced: nothing constructs `AnyDiagnostic::ImpossibleConstraint` yet; a
+// constraint the solver refutes is reported as `unsolved-constraint`.
+//
+// This diagnostic would be triggered when a declaration's constraints can never
+// all hold, so no value has the type it describes.
+//
+// ```sail
+// val f : forall 'n, 'n > 0 & 'n < 0. int('n) -> unit
+// ```
 pub(crate) fn impossible_constraint(
     _ctx: &DiagnosticsContext<'_>,
     d: &ImpossibleConstraint,

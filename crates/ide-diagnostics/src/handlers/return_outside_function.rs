@@ -5,6 +5,16 @@ use hir::diagnostics::DiagnosticCode;
 
 use crate::{DiagnosticsContext, ReturnOutsideFunction};
 
+// Diagnostic: return-outside-function
+//
+// Not produced: nothing constructs `AnyDiagnostic::ReturnOutsideFunction` yet.
+//
+// This diagnostic would be triggered when `return` appears where there is no
+// function to return from, such as a top-level `let`.
+//
+// ```sail
+// let x = return 1
+// ```
 pub(crate) fn return_outside_function(
     _ctx: &DiagnosticsContext<'_>,
     d: &ReturnOutsideFunction,
