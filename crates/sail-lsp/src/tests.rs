@@ -5091,3 +5091,146 @@ fn every_extension_method_is_documented() {
         }
     }
 }
+
+/// A signature with these parameter labels and this documentation, as the
+/// ide hands it over.
+fn signature(
+    label: &str,
+    parameters: &[&str],
+    documentation: Option<&str>,
+) -> ide_db::ide_types::SignatureHelp {
+    ide_db::ide_types::SignatureHelp {
+        signatures: vec![ide_db::ide_types::SignatureInfo {
+            label: label.to_owned(),
+            documentation: documentation.map(str::to_owned),
+            parameters: parameters
+                .iter()
+                .map(|p| ide_db::ide_types::ParameterInfo { label: (*p).to_owned() })
+                .collect(),
+        }],
+        active_signature: Some(0),
+        active_parameter: Some(1),
+    }
+}
+
+const FULL: crate::to_proto::SignatureHelpConfig =
+    crate::to_proto::SignatureHelpConfig { params_only: false, docs: true };
+
+fn parameter_labels(help: &lsp_types::SignatureHelp) -> Vec<lsp_types::ParameterLabel> {
+    help.signatures[0].parameters.as_ref().unwrap().iter().map(|p| p.label.clone()).collect()
+}
+
+/// A client that declared `labelOffsetSupport` gets each parameter as
+/// `[start, end]` into the label; one that did not gets the text. The
+/// offsets are UTF-16 units, as every position on the wire is.
+#[test]
+fn signature_parameters_are_offsets_only_for_a_client_that_takes_them() {
+    use lsp_types::ParameterLabel::{LabelOffsets, Simple};
+    let help = signature("function é(x : int, y : int) -> int", &["x : int", "y : int"], None);
+    let offsets = crate::to_proto::signature_help(&help, FULL, true, false);
+    // `é` is two bytes and one UTF-16 unit: `x` is byte 12, column 11.
+    assert_eq!(parameter_labels(&offsets), [LabelOffsets([11, 18]), LabelOffsets([20, 27])]);
+    assert_eq!(offsets.active_parameter, Some(1));
+    assert_eq!(offsets.active_signature, Some(0));
+
+    let text = crate::to_proto::signature_help(&help, FULL, false, false);
+    assert_eq!(
+        parameter_labels(&text),
+        [Simple("x : int".to_owned()), Simple("y : int".to_owned())]
+    );
+}
+
+/// Two parameters of one name are two places in the label; sent as text,
+/// the client would highlight the first for both.
+#[test]
+fn a_repeated_parameter_name_gets_its_own_offsets() {
+    use lsp_types::ParameterLabel::LabelOffsets;
+    let help = signature("function f(a : int, a : int) -> int", &["a : int", "a : int"], None);
+    let sent = crate::to_proto::signature_help(&help, FULL, true, false);
+    assert_eq!(parameter_labels(&sent), [LabelOffsets([11, 18]), LabelOffsets([20, 27])]);
+}
+
+/// A `val`'s parameters are named `arg1: int` by the ide and appear nowhere
+/// in its label, so they go as text even to a client that takes offsets;
+/// an offset into text that is not there would highlight nothing.
+#[test]
+fn a_parameter_absent_from_the_label_is_sent_as_text() {
+    use lsp_types::ParameterLabel::Simple;
+    let help = signature("val f : (int, int) -> int", &["arg1: int", "arg2: int"], None);
+    let sent = crate::to_proto::signature_help(&help, FULL, true, false);
+    assert_eq!(
+        parameter_labels(&sent),
+        [Simple("arg1: int".to_owned()), Simple("arg2: int".to_owned())]
+    );
+}
+
+/// `signatureInfo.detail = "parameters"` sends the parameter list as the
+/// label, with offsets into *that* label when the client takes them.
+#[test]
+fn parameters_only_detail_sends_the_parameter_list_as_the_label() {
+    use lsp_types::ParameterLabel::{LabelOffsets, Simple};
+    let params_only = crate::to_proto::SignatureHelpConfig { params_only: true, docs: true };
+    let help = signature("val f : (int, int) -> int", &["arg1: int", "arg2: int"], None);
+    let sent = crate::to_proto::signature_help(&help, params_only, true, false);
+    assert_eq!(sent.signatures[0].label, "arg1: int, arg2: int");
+    assert_eq!(parameter_labels(&sent), [LabelOffsets([0, 9]), LabelOffsets([11, 20])]);
+    let text = crate::to_proto::signature_help(&help, params_only, false, false);
+    assert_eq!(text.signatures[0].label, "arg1: int, arg2: int");
+    assert_eq!(
+        parameter_labels(&text),
+        [Simple("arg1: int".to_owned()), Simple("arg2: int".to_owned())]
+    );
+}
+
+/// The declaration's documentation is Markdown for a client whose
+/// `documentationFormat` lists it, plain text otherwise, and absent when
+/// `signatureInfo.documentation` is off.
+#[test]
+fn signature_documentation_follows_the_client_format_and_the_setting() {
+    let help = signature("val f : int -> int", &["arg1: int"], Some("Doubles `x`."));
+    let markdown = crate::to_proto::signature_help(&help, FULL, false, true);
+    assert_eq!(
+        markdown.signatures[0].documentation,
+        Some(lsp_types::Documentation::MarkupContent(lsp_types::MarkupContent {
+            kind: lsp_types::MarkupKind::Markdown,
+            value: "Doubles `x`.".to_owned(),
+        }))
+    );
+    let plain = crate::to_proto::signature_help(&help, FULL, false, false);
+    assert_eq!(
+        plain.signatures[0].documentation,
+        Some(lsp_types::Documentation::String("Doubles `x`.".to_owned()))
+    );
+    let silent = crate::to_proto::SignatureHelpConfig { params_only: false, docs: false };
+    let none = crate::to_proto::signature_help(&help, silent, false, true);
+    assert_eq!(none.signatures[0].documentation, None);
+}
+
+/// The client capability behind the offsets and the format, read as
+/// rust-analyzer reads them.
+#[test]
+fn signature_help_client_capabilities_are_read_from_signature_information() {
+    let caps = |signature_help: serde_json::Value| {
+        crate::lsp::capabilities::ClientCapabilities(
+            serde_json::from_value(serde_json::json!({
+                "textDocument": { "signatureHelp": signature_help }
+            }))
+            .unwrap(),
+        )
+    };
+    let full = caps(serde_json::json!({ "signatureInformation": {
+        "documentationFormat": ["markdown", "plaintext"],
+        "parameterInformation": { "labelOffsetSupport": true },
+    }}));
+    assert!(full.signature_help_label_offsets());
+    assert!(full.signature_help_markdown_support());
+    let plain = caps(serde_json::json!({ "signatureInformation": {
+        "documentationFormat": ["plaintext"],
+        "parameterInformation": { "labelOffsetSupport": false },
+    }}));
+    assert!(!plain.signature_help_label_offsets());
+    assert!(!plain.signature_help_markdown_support());
+    let silent = crate::lsp::capabilities::ClientCapabilities::default();
+    assert!(!silent.signature_help_label_offsets());
+    assert!(!silent.signature_help_markdown_support());
+}

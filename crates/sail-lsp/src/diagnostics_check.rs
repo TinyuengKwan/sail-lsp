@@ -64,3 +64,53 @@ fn a_published_diagnostic_is_attributed_linked_tagged_and_resettable() {
     assert_eq!(unused.tags, Some(vec![lsp_types::DiagnosticTag::UNNECESSARY]));
     assert_eq!(unused.source.as_deref(), Some("sail-lsp"));
 }
+
+/// Signature help over the wire: the declaration's doc comment travels as
+/// its documentation, parameters go as text to a client that declared no
+/// `labelOffsetSupport` (the fixture's), and the `signatureInfo` settings
+/// narrow it to the parameter list and drop the documentation.
+///
+/// A settings change is not itself a recomputation, so the file is edited
+/// after configuring.
+#[test]
+fn signature_help_carries_the_docs_and_follows_the_signature_info_settings() {
+    let source = "/// Adds two numbers.\nval add : (int, int) -> int\n\
+                  function add(x : int, y : int) -> int = x + y\nfunction g() -> int = add(1, 2)\n";
+    let mut server = project("signature-info-settings", source);
+    let at_second_argument = serde_json::json!({
+        "textDocument": {"uri": server.url("main.sail")},
+        "position": {"line": 3, "character": 29},
+    });
+    let answer: lsp_types::SignatureHelp = serde_json::from_value(
+        server.ask("textDocument/signatureHelp", at_second_argument.clone()),
+    )
+    .unwrap();
+    assert_eq!(answer.active_parameter, Some(1));
+    let [signature] = answer.signatures.as_slice() else { panic!("{answer:?}") };
+    assert_eq!(signature.label, "val add : (int, int) -> int");
+    assert_eq!(
+        signature.documentation,
+        Some(lsp_types::Documentation::String("Adds two numbers.".to_owned()))
+    );
+    let labels: Vec<_> =
+        signature.parameters.as_ref().unwrap().iter().map(|p| p.label.clone()).collect();
+    assert_eq!(
+        labels,
+        [
+            lsp_types::ParameterLabel::Simple("arg1: int".to_owned()),
+            lsp_types::ParameterLabel::Simple("arg2: int".to_owned()),
+        ]
+    );
+
+    server.configure(
+        serde_json::json!({"signatureInfo": {"detail": "parameters", "documentation": false}}),
+    );
+    server.did_change_appending("main.sail", 4, "val after : int\n");
+    let answer: lsp_types::SignatureHelp =
+        serde_json::from_value(server.ask("textDocument/signatureHelp", at_second_argument))
+            .unwrap();
+    let [signature] = answer.signatures.as_slice() else { panic!("{answer:?}") };
+    assert_eq!(signature.label, "arg1: int, arg2: int");
+    assert_eq!(signature.documentation, None);
+    assert_eq!(answer.active_parameter, Some(1));
+}

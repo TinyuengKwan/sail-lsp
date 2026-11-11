@@ -32,6 +32,8 @@ pub struct SailLspConfig {
     pub code_lens: CodeLensConfig,
     /// Hover configuration.
     pub hover: HoverConfig,
+    /// Signature help configuration.
+    pub signature_info: SignatureInfoConfig,
     /// Semantic tokens configuration.
     pub semantic_tokens: SemanticTokensConfig,
     /// Workspace configuration.
@@ -361,6 +363,24 @@ pub struct HoverConfig {
     pub max_overloads_count: Option<usize>,
 }
 
+/// Signature help settings — rust-analyzer's `signatureInfo`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SignatureInfoConfig {
+    /// The whole signature as declared, or its parameter list alone.
+    pub detail: SignatureDetail,
+    /// Show the callable's documentation.
+    pub documentation: bool,
+}
+
+/// How much of a signature the signature help shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SignatureDetail {
+    Full,
+    Parameters,
+}
+
 /// Semantic tokens settings.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -637,6 +657,22 @@ impl HoverConfig {
 impl Default for SemanticTokensConfig {
     fn default() -> Self {
         Self { enable: true }
+    }
+}
+
+impl Default for SignatureInfoConfig {
+    fn default() -> Self {
+        Self { detail: SignatureDetail::Full, documentation: true }
+    }
+}
+
+impl SignatureInfoConfig {
+    /// What the wire conversion needs to know.
+    pub fn to_proto_config(&self) -> crate::to_proto::SignatureHelpConfig {
+        crate::to_proto::SignatureHelpConfig {
+            params_only: self.detail == SignatureDetail::Parameters,
+            docs: self.documentation,
+        }
     }
 }
 

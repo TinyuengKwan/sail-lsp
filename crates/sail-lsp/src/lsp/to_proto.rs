@@ -431,6 +431,117 @@ pub fn diagnostic_with_analysis(
     converted
 }
 
+/// What `signatureInfo` in the settings says about a signature.
+#[derive(Debug, Clone, Copy)]
+pub struct SignatureHelpConfig {
+    /// The parameter list alone, rather than the signature as declared.
+    pub params_only: bool,
+    /// Whether the declaration's documentation is sent.
+    pub docs: bool,
+}
+
+/// rust-analyzer's `signature_help`, over every overload the ide found.
+///
+/// `label_offsets` is the client's
+/// `signatureInformation.parameterInformation.labelOffsetSupport`: a
+/// parameter is then `[start, end]` in UTF-16 units of the label, which is
+/// how two parameters of one name are told apart — as text, the client
+/// matches the first occurrence for both. A parameter the label does not
+/// contain (a `val`'s unnamed `arg1: int`) is sent as text whatever the
+/// client said. `markdown` is the client's `documentationFormat`.
+pub fn signature_help(
+    help: &ide_db::ide_types::SignatureHelp,
+    config: SignatureHelpConfig,
+    label_offsets: bool,
+    markdown: bool,
+) -> lsp_types::SignatureHelp {
+    let signatures = help
+        .signatures
+        .iter()
+        .map(|sig| {
+            let labels: Vec<&str> = sig.parameters.iter().map(|p| p.label.as_str()).collect();
+            let (label, parameters) = if config.params_only {
+                let mut label = String::new();
+                let mut parameters = Vec::new();
+                for (index, parameter) in labels.iter().enumerate() {
+                    if index > 0 {
+                        label.push_str(", ");
+                    }
+                    let start = utf16_len(&label);
+                    label.push_str(parameter);
+                    let end = utf16_len(&label);
+                    parameters.push(lsp_types::ParameterInformation {
+                        label: if label_offsets {
+                            lsp_types::ParameterLabel::LabelOffsets([start, end])
+                        } else {
+                            lsp_types::ParameterLabel::Simple((*parameter).to_owned())
+                        },
+                        documentation: None,
+                    });
+                }
+                (label, parameters)
+            } else {
+                (sig.label.clone(), parameter_labels(&sig.label, &labels, label_offsets))
+            };
+            let documentation = sig.documentation.as_ref().filter(|_| config.docs).map(|doc| {
+                if markdown {
+                    lsp_types::Documentation::MarkupContent(lsp_types::MarkupContent {
+                        kind: lsp_types::MarkupKind::Markdown,
+                        value: doc.clone(),
+                    })
+                } else {
+                    lsp_types::Documentation::String(doc.clone())
+                }
+            });
+            lsp_types::SignatureInformation {
+                label,
+                documentation,
+                parameters: Some(parameters),
+                active_parameter: None,
+            }
+        })
+        .collect();
+    lsp_types::SignatureHelp {
+        signatures,
+        active_signature: help.active_signature.map(|v| v as u32),
+        active_parameter: help.active_parameter.map(|v| v as u32),
+    }
+}
+
+/// Each parameter's place in `signature`, searched left to right from where
+/// the one before it ended, so a repeated name is found at its own place.
+fn parameter_labels(
+    signature: &str,
+    labels: &[&str],
+    offsets: bool,
+) -> Vec<lsp_types::ParameterInformation> {
+    let mut cursor = 0;
+    labels
+        .iter()
+        .map(|parameter| {
+            let found = offsets
+                .then(|| signature[cursor..].find(parameter).map(|at| cursor + at))
+                .flatten();
+            let label = match found {
+                Some(start) => {
+                    let end = start + parameter.len();
+                    cursor = end;
+                    lsp_types::ParameterLabel::LabelOffsets([
+                        utf16_len(&signature[..start]),
+                        utf16_len(&signature[..end]),
+                    ])
+                }
+                None => lsp_types::ParameterLabel::Simple((*parameter).to_owned()),
+            };
+            lsp_types::ParameterInformation { label, documentation: None }
+        })
+        .collect()
+}
+
+fn utf16_len(text: &str) -> u32 {
+    text.chars().map(|c| c.len_utf16() as u32).sum()
+}
+
 pub fn completion_item_kind(kind: CompletionItemKind) -> lsp_types::CompletionItemKind {
     match kind {
         CompletionItemKind::Function => lsp_types::CompletionItemKind::FUNCTION,

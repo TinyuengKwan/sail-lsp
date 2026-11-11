@@ -187,6 +187,48 @@ impl ClientCapabilities {
         })() == Some(true)
     }
 
+    /// Whether the client takes a parameter's label as `[start, end]`
+    /// offsets into the signature —
+    /// `signatureHelp.signatureInformation.parameterInformation.labelOffsetSupport`,
+    /// as rust-analyzer's `signature_help_label_offsets` reads it.
+    ///
+    /// A label sent as text is matched by the client against the signature,
+    /// so two parameters of one name highlight the same one. Offsets say
+    /// which.
+    pub(crate) fn signature_help_label_offsets(&self) -> bool {
+        (|| -> Option<bool> {
+            self.0
+                .text_document
+                .as_ref()?
+                .signature_help
+                .as_ref()?
+                .signature_information
+                .as_ref()?
+                .parameter_information
+                .as_ref()?
+                .label_offset_support
+        })() == Some(true)
+    }
+
+    /// Whether the client takes Markdown in a signature's documentation —
+    /// `signatureHelp.signatureInformation.documentationFormat`, answered
+    /// apart from hover and completion as those two are from each other.
+    pub(crate) fn signature_help_markdown_support(&self) -> bool {
+        (|| -> Option<bool> {
+            let formats = self
+                .0
+                .text_document
+                .as_ref()?
+                .signature_help
+                .as_ref()?
+                .signature_information
+                .as_ref()?
+                .documentation_format
+                .as_ref()?;
+            Some(formats.contains(&lsp_types::MarkupKind::Markdown))
+        })() == Some(true)
+    }
+
     /// Whether the client supports `workspace/configuration` requests.
     pub(crate) fn workspace_configuration_support(&self) -> bool {
         (|| -> Option<bool> { self.0.workspace.as_ref()?.configuration })() == Some(true)

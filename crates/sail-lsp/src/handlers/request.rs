@@ -1169,29 +1169,12 @@ pub(crate) fn handle_signature_help(
     let Some(ide_help) = snap.analysis.signature_help(file_id, lc)? else {
         return Ok(None);
     };
-    let lsp_help = SignatureHelp {
-        signatures: ide_help
-            .signatures
-            .into_iter()
-            .map(|s| SignatureInformation {
-                label: s.label,
-                documentation: s.documentation.map(Documentation::String),
-                parameters: Some(
-                    s.parameters
-                        .into_iter()
-                        .map(|p| ParameterInformation {
-                            label: ParameterLabel::Simple(p.label),
-                            documentation: None,
-                        })
-                        .collect(),
-                ),
-                active_parameter: None,
-            })
-            .collect(),
-        active_signature: ide_help.active_signature.map(|v| v as u32),
-        active_parameter: ide_help.active_parameter.map(|v| v as u32),
-    };
-    Ok(Some(lsp_help))
+    Ok(Some(crate::to_proto::signature_help(
+        &ide_help,
+        snap.config.signature_info.to_proto_config(),
+        snap.client_caps.signature_help_label_offsets(),
+        snap.client_caps.signature_help_markdown_support(),
+    )))
 }
 
 /// Semantic-first resolution with index fallback.

@@ -254,6 +254,20 @@ VS Code extension itself; `runnables.showCodeLens` is its setting alone.
 | `maxEnumVariantsCount` | `integer or null` | `10` | Maximum enum variants shown; `null` shows all |
 | `maxOverloadsCount` | `integer or null` | `10` | Maximum overload alternatives shown; `null` shows all |
 
+### `signatureInfo`
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `detail` | `"full"` or `"parameters"` | `"full"` | The whole signature as declared, or its parameter list alone |
+| `documentation` | `bool` | `true` | Show the callable's documentation |
+
+A parameter is sent as `[start, end]` offsets into the label when the client
+declares `signatureHelp.signatureInformation.parameterInformation.labelOffsetSupport`
+— so two parameters of the same name are told apart — and as its text
+otherwise. The documentation is Markdown when the client lists it under
+`signatureHelp.signatureInformation.documentationFormat`, plain text otherwise.
+It is the declaration's doc comment; Sail has no per-parameter documentation.
+
 ### `semanticTokens`
 
 | Key | Type | Default | Description |

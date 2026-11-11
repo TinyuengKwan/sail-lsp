@@ -448,6 +448,26 @@
                     "default": 10,
                     "markdownDescription": "Maximum overload alternatives in hover; null shows all."
                 },
+                "sail-lsp.signatureInfo.detail": {
+                    "scope": "resource",
+                    "type": "string",
+                    "enum": [
+                        "full",
+                        "parameters"
+                    ],
+                    "default": "full",
+                    "markdownDescription": "How much of a callable's signature the signature help shows.",
+                    "enumDescriptions": [
+                        "The whole signature, as declared.",
+                        "The parameter list alone."
+                    ]
+                },
+                "sail-lsp.signatureInfo.documentation": {
+                    "scope": "resource",
+                    "type": "boolean",
+                    "default": true,
+                    "markdownDescription": "Show the callable's documentation in signature help."
+                },
                 "sail-lsp.semanticTokens.enable": {
                     "scope": "resource",
                     "type": "boolean",
