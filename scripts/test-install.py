@@ -63,6 +63,7 @@ def lsp_smoke(binary, directory, *, command=None, workspace_uri=None):
                 while True:
                     line = process.stdout.readline()
                     if not line:
+                        messages.put(RuntimeError("LSP server closed stdout before the expected response"))
                         return
                     if line == b"\r\n":
                         break
@@ -72,7 +73,9 @@ def lsp_smoke(binary, directory, *, command=None, workspace_uri=None):
         except BaseException as error:
             messages.put(error)
     def drain():
-        stderr.append(process.stderr.read().decode(errors="replace"))
+        for line in iter(process.stderr.readline, b""):
+            stderr.append(line.decode(errors="replace"))
+            del stderr[:-40]
     reader = threading.Thread(target=read_protocol, daemon=True)
     errors = threading.Thread(target=drain, daemon=True)
     reader.start(); errors.start()
@@ -83,28 +86,34 @@ def lsp_smoke(binary, directory, *, command=None, workspace_uri=None):
         data = json.dumps(value).encode()
         process.stdin.write(f"Content-Length: {len(data)}\r\n\r\n".encode()+data)
         process.stdin.flush()
-    def until(predicate):
+    def until(predicate, description):
         deadline = time.monotonic()+45
+        observed = []
         while time.monotonic() < deadline:
-            message = messages.get(timeout=max(0.1, deadline-time.monotonic()))
+            try:
+                message = messages.get(timeout=max(0.1, deadline-time.monotonic()))
+            except queue.Empty:
+                break
             if isinstance(message, BaseException):
-                raise message
+                raise AssertionError(f"Waiting for {description}: {message}; stderr: {''.join(stderr)}") from message
+            observed.append(message.get("method", f"response {message.get('id')}"))
+            del observed[:-10]
             if "method" in message and "id" in message:
                 response = json.dumps({"jsonrpc":"2.0", "id":message["id"], "result":None}).encode()
                 process.stdin.write(f"Content-Length: {len(response)}\r\n\r\n".encode()+response);process.stdin.flush()
             if predicate(message):
                 return message
-        raise AssertionError("LSP response timeout")
+        raise AssertionError(f"Timed out waiting for {description}; process status: {process.poll()}; last messages: {observed}; stderr: {''.join(stderr)}")
     try:
-        send("initialize", {"processId":None,"capabilities":{},"workspaceFolders":[{"uri":uri,"name":"install-test"}]}, 1)
-        assert until(lambda m:m.get("id")==1)["result"]["capabilities"]["hoverProvider"]
+        send("initialize", {"processId":None,"capabilities":{"experimental":{"serverStatusNotification":True}},"workspaceFolders":[{"uri":uri,"name":"install-test"}]}, 1)
+        assert until(lambda m:m.get("id")==1, "initialize response")["result"]["capabilities"]["hoverProvider"]
         send("initialized", {})
         send("textDocument/didOpen", {"textDocument":{"uri":file_uri,"languageId":"sail","version":1,"text":source}})
-        until(lambda m:m.get("method")=="sail-lsp/serverStatus" and m["params"].get("quiescent"))
+        until(lambda m:m.get("method")=="sail-lsp/serverStatus" and m["params"].get("quiescent"), "quiescent server status")
         send("textDocument/hover", {"textDocument":{"uri":file_uri},"position":{"line":0,"character":11}}, 2)
-        result = until(lambda m:m.get("id")==2)
+        result = until(lambda m:m.get("id")==2, "hover response")
         assert result.get("result") and "answer" in json.dumps(result), result
-        send("shutdown", None, 3);assert "error" not in until(lambda m:m.get("id")==3)
+        send("shutdown", None, 3);assert "error" not in until(lambda m:m.get("id")==3, "shutdown response")
         send("exit", None);process.wait(timeout=10)
         assert process.returncode==0, stderr
     finally:

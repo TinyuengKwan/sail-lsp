@@ -1401,6 +1401,24 @@ fn alias_parameter_kinds(alias: &syntax::SyntaxNode) -> Option<Vec<Option<hir::K
             errors.is_empty().then_some(root)
         });
     let body = body_root.as_ref().unwrap_or(alias);
+    // An identity synonym with a written result kind constrains its bare
+    // parameter too: `type K('n) -> Int = 'n` means K takes an Int. Without
+    // this evidence K(bool) escaped argument checking even though Sail
+    // infers the parameter's kind from the result annotation.
+    if let Some(kind) = declared_type_kind(alias) {
+        let rhs: Vec<_> = alias
+            .descendants_with_tokens()
+            .filter_map(|el| el.into_token())
+            .skip_while(|token| token.kind() != SK::EQ)
+            .skip(1)
+            .filter(|token| !token.kind().is_trivia())
+            .collect();
+        if let [variable] = rhs.as_slice() {
+            if variable.kind() == SK::TY_VAR {
+                inferred.insert(variable.text().to_owned(), Some(kind));
+            }
+        }
+    }
     // Tuple components and function parameter/return types require Type.
     // Do not infer across a binder boundary or from a constructor argument,
     // whose expected kind is handled separately below.

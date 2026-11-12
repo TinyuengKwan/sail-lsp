@@ -397,6 +397,7 @@ impl ServerFixture {
     /// A workspace whose client registers no file watcher, so the server
     /// watches the folder itself — the path a client without
     /// `didChangeWatchedFiles.dynamicRegistration` takes.
+    #[cfg(unix)]
     fn new_native_watching(name: &str, files: &[(&str, &str)]) -> ServerFixture {
         Self::open_with_client(
             name,
@@ -3092,6 +3093,7 @@ exit 0
 
 impl ServerFixture {
     /// The `$/progress` values seen under `token`, as `(kind, message)`.
+    #[cfg(unix)]
     fn progress_of(&self, token: &lsp_types::ProgressToken) -> Vec<(String, Option<String>)> {
         self.progress
             .iter()
@@ -3112,6 +3114,7 @@ impl ServerFixture {
     }
 
     /// The token of the one compiler-run progress sequence begun so far.
+    #[cfg(unix)]
     fn flycheck_progress_token(&self) -> Option<lsp_types::ProgressToken> {
         self.progress.iter().find_map(|p| match (&p.token, &p.value) {
             (

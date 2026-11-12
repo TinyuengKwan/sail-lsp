@@ -6,6 +6,26 @@ type Preview = {
     edit: ProtocolEdit;
     documents: { uri: string; version: number | null; text: string }[];
 };
+
+/** Render against the opened document, whose URI can spell the same path differently. */
+export function replacementPreviews(
+    edit: vscode.WorkspaceEdit,
+    sources: { base: Preview["documents"][number]; document: vscode.TextDocument }[],
+) {
+    return sources.map(({ base, document }) => {
+        const entries = edit.get(document.uri);
+        let after = base.text;
+        for (const e of [...entries].sort(
+            (a, b) => document.offsetAt(b.range.start) - document.offsetAt(a.range.start),
+        ))
+            after =
+                after.slice(0, document.offsetAt(e.range.start)) +
+                e.newText +
+                after.slice(document.offsetAt(e.range.end));
+        return { uri: document.uri, before: base.text, after, count: entries.length };
+    });
+}
+
 export function registerStructuralReplace(
     context: vscode.ExtensionContext,
     getClient: () => LanguageClient | undefined,
@@ -149,7 +169,7 @@ export function registerStructuralReplace(
                             throw new Error(
                                 "A source changed while SSR was running. Run Structural Replace again.",
                             );
-                        return { document: doc, version: doc.version };
+                        return { base, document: doc, version: doc.version };
                     }),
                 );
                 if (request !== sequence) return 0;
@@ -181,21 +201,12 @@ export function registerStructuralReplace(
                 );
                 const links: string[] = [];
                 let count = 0;
-                for (const base of preview.documents) {
-                    const uri = vscode.Uri.parse(base.uri),
-                        entries = edit.get(uri);
-                    const index = sources.find(
-                        (s) => s.document.uri.toString() === base.uri,
-                    )!.document;
-                    let after = base.text;
-                    for (const e of [...entries].sort(
-                        (a, b) => index.offsetAt(b.range.start) - index.offsetAt(a.range.start),
-                    ))
-                        after =
-                            after.slice(0, index.offsetAt(e.range.start)) +
-                            e.newText +
-                            after.slice(index.offsetAt(e.range.end));
-                    count += entries.length;
+                // Keep each protocol source paired with the document we opened.
+                // Its URI may have a different spelling in VS Code, notably
+                // for a Windows drive colon or percent-encoded characters.
+                for (const preview of replacementPreviews(edit, sources)) {
+                    const { uri, before, after } = preview;
+                    count += preview.count;
                     const beforeUri = vscode.Uri.from({
                         scheme: "sail-ssr",
                         path: `/${request}/before/${count}.sail`,
@@ -204,10 +215,10 @@ export function registerStructuralReplace(
                         scheme: "sail-ssr",
                         path: `/${request}/after/${count}.sail`,
                     });
-                    contents.set(beforeUri.toString(), base.text);
+                    contents.set(beforeUri.toString(), before);
                     contents.set(afterUri.toString(), after);
                     links.push(
-                        `<li><a href="${escape(link("vscode.diff", [beforeUri, afterUri, uri.fsPath]))}">${escape(uri.fsPath)}</a> (${entries.length})</li>`,
+                        `<li><a href="${escape(link("vscode.diff", [beforeUri, afterUri, uri.fsPath]))}">${escape(uri.fsPath)}</a> (${preview.count})</li>`,
                     );
                 }
                 panel.webview.html = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline';"><h2>${count} replacements in ${sources.length} files</h2><p><a href="${link("sail-lsp.applyStructuralReplace", [])}">Apply all</a> · <a href="${link("sail-lsp.cancelStructuralReplace", [])}">Cancel</a></p><ul>${links.join("")}</ul>`;

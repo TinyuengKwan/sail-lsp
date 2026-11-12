@@ -80,6 +80,29 @@ async function closeRestoredEditors() {
     );
 }
 
+/** Await the workbench selection and keyboard focus before issuing typing commands. */
+async function focusSource(document: vscode.TextDocument, position: vscode.Position) {
+    const editor = await vscode.window.showTextDocument(document, {
+        preserveFocus: false,
+        preview: false,
+        selection: new vscode.Range(position, position),
+    });
+    await vscode.commands.executeCommand("workbench.action.focusActiveEditorGroup");
+    await eventually(
+        () =>
+            `source cursor did not settle: ${JSON.stringify({
+                uri: document.uri.toString(),
+                selection: editor.selection,
+                active: vscode.window.activeTextEditor?.document.uri.toString(),
+            })}`,
+        () =>
+            vscode.window.activeTextEditor === editor &&
+            editor.selection.isEmpty &&
+            editor.selection.active.isEqual(position),
+    );
+    return editor;
+}
+
 suite("sail-lsp extension", () => {
     test("project tasks execute argv/context, expose failure, cancel and reject stale or dirty runs", async () => {
         const extension = vscode.extensions.getExtension<ExtensionApi>("Lunarwwww.sail-lsp")!;
@@ -624,9 +647,7 @@ suite("sail-lsp extension", () => {
         const document = await vscode.workspace.openTextDocument(uri);
         const original = document.getText();
         const show = async () => {
-            const editor = await vscode.window.showTextDocument(document);
-            editor.selection = new vscode.Selection(1, 37, 1, 37);
-            return editor;
+            return focusSource(document, new vscode.Position(1, 37));
         };
         try {
             await show();
@@ -652,7 +673,9 @@ suite("sail-lsp extension", () => {
             );
             assert.ok(document.getText().includes("= 42"));
             await vscode.commands.executeCommand("sail-lsp.cancelStructuralReplace");
+            await vscode.window.showTextDocument(document);
             await vscode.commands.executeCommand("workbench.action.files.revert");
+            await eventually("SSR source did not revert", () => document.getText() === original);
             await show();
             assert.equal(
                 await vscode.commands.executeCommand("sail-lsp.structuralReplace", "42 ==>> true"),
@@ -672,7 +695,63 @@ suite("sail-lsp extension", () => {
             await vscode.commands.executeCommand("sail-lsp.cancelStructuralReplace");
             await vscode.window.showTextDocument(document);
             await vscode.commands.executeCommand("workbench.action.files.revert");
+            await eventually("SSR source was not restored", () => document.getText() === original);
             assert.equal(document.getText(), original);
+        }
+    });
+
+    test("SSR preview applies edits to a quoted project source", async () => {
+        const extension = vscode.extensions.getExtension<ExtensionApi>("Lunarwwww.sail-lsp")!;
+        const api = await extension.activate();
+        await eventually("server ready", () => api.test.status()?.quiescent === true);
+        // Exercise a project member whose path needs quoting in the manifest.
+        const uri = vscode.Uri.joinPath(
+            vscode.workspace.workspaceFolders![0].uri,
+            "ssr'quoted.sail",
+        );
+        const source = "function quoted() -> int = 19283\n";
+        const manifestUri = vscode.Uri.joinPath(
+            vscode.workspace.workspaceFolders![0].uri,
+            "sail.proj",
+        );
+        const manifest = await vscode.workspace.fs.readFile(manifestUri);
+        await vscode.workspace.fs.writeFile(uri, Buffer.from(source));
+        const document = await vscode.workspace.openTextDocument(uri);
+        try {
+            await vscode.workspace.fs.writeFile(
+                manifestUri,
+                Buffer.concat([manifest, Buffer.from('\nQuoted { files "ssr\'quoted.sail" }\n')]),
+            );
+            await eventually("quoted source was not loaded into the project", () =>
+                JSON.stringify(api.test.projectGraph()).includes("quoted.sail"),
+            );
+            await vscode.window.showTextDocument(document, {
+                selection: new vscode.Range(0, 0, 0, 0),
+            });
+            assert.equal(
+                await vscode.commands.executeCommand(
+                    "sail-lsp.structuralReplace",
+                    "19283 ==>> 19284",
+                ),
+                1,
+                "the preview must resolve the edited document through its parsed URI",
+            );
+            assert.equal(document.getText(), source, "a preview must not edit the source");
+            assert.equal(
+                await vscode.commands.executeCommand("sail-lsp.applyStructuralReplace"),
+                true,
+            );
+            assert.equal(document.getText(), source.replace("19283", "(19284)"));
+        } finally {
+            await vscode.commands.executeCommand("sail-lsp.cancelStructuralReplace");
+            await vscode.window.showTextDocument(document);
+            await vscode.commands.executeCommand("workbench.action.revertAndCloseActiveEditor");
+            await vscode.workspace.fs.writeFile(manifestUri, manifest);
+            await vscode.workspace.fs.delete(uri);
+            await eventually(
+                "quoted source was not removed from the project",
+                () => !JSON.stringify(api.test.projectGraph()).includes("quoted.sail"),
+            );
         }
     });
 
@@ -1076,14 +1155,14 @@ suite("sail-lsp extension", () => {
             );
             assert.ok(await vscode.workspace.applyEdit(edit));
         };
-        const select = (position: vscode.Position) => {
-            editor.selection = new vscode.Selection(position, position);
+        const select = async (position: vscode.Position) => {
+            editor = await focusSource(document, position);
         };
         let editor: vscode.TextEditor;
         try {
             await replace(source);
             editor = await vscode.window.showTextDocument(document);
-            select(document.positionAt(source.indexOf("{")));
+            await select(document.positionAt(source.indexOf("{")));
             await vscode.commands.executeCommand("sail-lsp.matchingBrace");
             assert.deepEqual(
                 [editor.selection.active.line, editor.selection.active.character],
@@ -1096,7 +1175,7 @@ suite("sail-lsp extension", () => {
                 assert.notEqual(line, -1, `${JSON.stringify(text)} is not a line of ${lines}`);
                 return line;
             };
-            select(new vscode.Position(0, 0));
+            await select(new vscode.Position(0, 0));
             await vscode.commands.executeCommand("sail-lsp.moveItemDown");
             await eventually(
                 () => `item not moved: ${document.getText()}`,
@@ -1109,7 +1188,7 @@ suite("sail-lsp extension", () => {
                 },
             );
             const opening = lineOf("function a() -> int = {");
-            select(new vscode.Position(opening, 0));
+            await select(new vscode.Position(opening, 0));
             await vscode.commands.executeCommand("sail-lsp.joinLines");
             await eventually(
                 () => `lines not joined: ${document.getText()}`,
@@ -1121,7 +1200,7 @@ suite("sail-lsp extension", () => {
             // Enter after a doc comment continues it; after plain code it is
             // a newline and nothing else.
             const doc = lineOf("/// doc");
-            select(document.lineAt(doc).range.end);
+            await select(document.lineAt(doc).range.end);
             await vscode.commands.executeCommand("sail-lsp.onEnter");
             await eventually(
                 () => `doc comment not continued: ${JSON.stringify(document.getText())}`,
@@ -1132,7 +1211,7 @@ suite("sail-lsp extension", () => {
             );
             const before = document.lineCount;
             const plain = lineOf("function b() -> int = 2");
-            select(document.lineAt(plain).range.end);
+            await select(document.lineAt(plain).range.end);
             await vscode.commands.executeCommand("sail-lsp.onEnter");
             await eventually(
                 () => `newline not typed: ${JSON.stringify(document.getText())}`,
@@ -1249,18 +1328,7 @@ suite("sail-lsp extension", () => {
             assert.ok(await vscode.workspace.applyEdit(edit));
         };
         const typeAt = async (position: vscode.Position, text: string) => {
-            const editor = await vscode.window.showTextDocument(document, {
-                preserveFocus: false,
-                preview: false,
-                selection: new vscode.Range(position, position),
-            });
-            await eventually(
-                () => `cursor did not settle: ${JSON.stringify(editor.selection)}`,
-                () =>
-                    vscode.window.activeTextEditor === editor &&
-                    editor.selection.isEmpty &&
-                    editor.selection.active.isEqual(position),
-            );
+            await focusSource(document, position);
             const version = document.version;
             await vscode.commands.executeCommand("type", { text });
             await eventually(
