@@ -386,7 +386,7 @@ pub enum SignatureDetail {
 /// rust-analyzer's `semanticHighlighting.*`: which classes of token the
 /// server sends, and whether it sends its own token types and modifiers or
 /// only the ones LSP defines.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct SemanticTokensConfig {
     pub enable: bool,

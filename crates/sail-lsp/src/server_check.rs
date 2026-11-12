@@ -957,6 +957,82 @@ impl ServerFixture {
     }
 }
 
+#[test]
+fn semantic_token_configuration_refreshes_idle_documents() {
+    let source = "register R : string\nfunction f() -> string = \"hello\"\n";
+    for root in [Root::Real, Root::Detached] {
+        let mut server = ServerFixture::open("semantic-refresh", &[("a.sail", source)], root);
+        server.did_open("a.sail", source);
+        let params = serde_json::json!({"textDocument": {"uri": server.url("a.sail")}});
+        let mut before = server.ask("textDocument/semanticTokens/full", params.clone());
+        server.pump(Duration::from_millis(50));
+        server.wait_until("initial indexing to finish", |s| {
+            s.statuses.last().is_some_and(|status| status.quiescent)
+        });
+        let refreshes = |s: &ServerFixture| {
+            s.server_requests
+                .iter()
+                .filter(|method| *method == "workspace/semanticTokens/refresh")
+                .count()
+        };
+        let mut settings = serde_json::json!({"semanticTokens": {
+            "strings": true, "operators": true, "punctuation": false, "nonStandardTokens": true
+        }});
+        for (key, value) in [
+            ("strings", false),
+            ("operators", false),
+            ("punctuation", true),
+            ("nonStandardTokens", false),
+        ] {
+            let previous = refreshes(&server);
+            settings["semanticTokens"][key] = value.into();
+            server.configure(settings.clone());
+            server.wait_until("semantic tokens refresh after changing a display setting", |s| {
+                refreshes(s) > previous
+            });
+            let after = server.ask("textDocument/semanticTokens/full", params.clone());
+            assert_ne!(
+                before["data"], after["data"],
+                "{key}: the refreshed tokens must use the new setting"
+            );
+            before = after;
+        }
+        server.pump(Duration::from_millis(50));
+        let previous = refreshes(&server);
+        server.configure(settings);
+        server.pump(Duration::from_millis(100));
+        assert_eq!(refreshes(&server), previous, "unchanged settings must not refresh tokens");
+    }
+}
+
+#[test]
+fn repository_semantic_token_settings_refresh_idle_documents() {
+    let source = "function f() -> string = \"hello\"\n";
+    let mut server = ServerFixture::new_project("scoped-semantic-refresh", &[("a.sail", source)]);
+    server.did_open("a.sail", source);
+    let params = serde_json::json!({"textDocument": {"uri": server.url("a.sail")}});
+    let before = server.ask("textDocument/semanticTokens/full", params.clone());
+    server.pump(Duration::from_millis(50));
+    server.wait_until("initial indexing to finish", |s| {
+        s.statuses.last().is_some_and(|status| status.quiescent)
+    });
+    let previous = server
+        .server_requests
+        .iter()
+        .filter(|method| *method == "workspace/semanticTokens/refresh")
+        .count();
+    server.create_on_disk(".sail-lsp.toml", "[semanticTokens]\nstrings = false\n");
+    server.wait_until("semantic tokens refresh after repository settings change", |s| {
+        s.server_requests
+            .iter()
+            .filter(|method| *method == "workspace/semanticTokens/refresh")
+            .count()
+            > previous
+    });
+    let after = server.ask("textDocument/semanticTokens/full", params);
+    assert_ne!(before["data"], after["data"]);
+}
+
 impl Drop for ServerFixture {
     fn drop(&mut self) {
         let _ = self.client.sender.send(Message::Request(Request {

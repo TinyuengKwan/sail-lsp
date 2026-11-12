@@ -588,12 +588,23 @@ impl GlobalState {
         if report.reported_unknowns.is_empty() {
             self.pull_unknowns.remove(&report.uri);
         } else {
-            self.pull_unknowns.insert(report.uri, report.reported_unknowns);
+            self.pull_unknowns.insert(report.uri.clone(), report.reported_unknowns);
+        }
+        match report.failure {
+            Some(message) => {
+                self.pull_failures
+                    .insert(report.uri, crate::analysis_health::Failure { generation, message });
+            }
+            None => {
+                self.pull_failures.remove(&report.uri);
+            }
         }
         let health = std::sync::Arc::make_mut(&mut self.analysis_health);
-        match report.failure {
-            Some(message) => health.failed("semanticDiagnostics", generation, message),
-            None => health.recovered("semanticDiagnostics"),
+        if let Some(failure) = self.pull_failures.values().max_by_key(|failure| failure.generation)
+        {
+            health.failures.insert("semanticDiagnostics".into(), failure.clone());
+        } else {
+            health.recovered("semanticDiagnostics");
         }
         health.reported_unknowns.clear();
         for (reason, count) in self.pull_unknowns.values().flatten() {
@@ -1450,7 +1461,9 @@ fn main_loop(
             }
 
             let client_refresh = became_quiescent || state_changed || diagnostics_refresh;
-            if client_refresh {
+            let semantic_tokens_refresh =
+                std::mem::take(&mut state.semantic_tokens_refresh_requested);
+            if client_refresh || semantic_tokens_refresh {
                 // A refresh has nothing to come back, so its response is
                 // logged and dropped — but it goes through the queue, so an
                 // answer to something else is never mistaken for it.
@@ -1462,6 +1475,8 @@ fn main_loop(
                 // dead code, and never called.
                 state.semantic_tokens_cache.clear();
                 state.send_request::<lsp_types::request::SemanticTokensRefresh>((), noop_response);
+            }
+            if client_refresh {
                 state.send_request::<lsp_types::request::CodeLensRefresh>((), noop_response);
                 state
                     .send_request::<lsp_types::request::InlayHintRefreshRequest>((), noop_response);
@@ -2472,7 +2487,19 @@ mod project_reload_tests {
                     .is_some_and(|s| s.contains("semanticDiagnostics failed: inference fault"))
         });
         assert!(logged, "the failure reaches the client's log");
+        on_task(&mut state, report(&url, &[], None));
+        assert_eq!(
+            state.analysis_health.failures["semanticDiagnostics"].message, "inference fault",
+            "a clean file cannot recover another file's failure"
+        );
+        on_task(&mut state, report(&url, &[], Some("another inference fault")));
         on_task(&mut state, report(&other, &[], None));
+        assert_eq!(
+            state.analysis_health.failures["semanticDiagnostics"].message,
+            "another inference fault",
+            "recovering one of two failed files must keep the other failure"
+        );
+        on_task(&mut state, report(&url, &[], None));
         assert!(state.analysis_health.failures.is_empty());
     }
 

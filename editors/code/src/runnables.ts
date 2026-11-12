@@ -1,8 +1,7 @@
 import * as vscode from "vscode";
-import { spawn } from "node:child_process";
 import type { LanguageClient } from "vscode-languageclient/node";
 import { TaskInvocations } from "./taskInvocations";
-import { scriptArguments, taskEnvironment } from "./taskRunner";
+import { runTestProcess } from "./testProcess";
 import {
     Runnable,
     SAIL_PROBLEM_MATCHERS,
@@ -11,7 +10,6 @@ import {
     lensLine,
     taskDefinition,
     taskGroup,
-    testOutcome,
 } from "./tasks";
 
 export type { Runnable } from "./tasks";
@@ -47,6 +45,7 @@ export function registerRunnables(
 ): Runnables {
     const changed = new vscode.EventEmitter<void>();
     const running = new Set<vscode.TaskExecution>();
+    const runningTests = new Set<AbortController>();
     const invocations = new TaskInvocations();
     const pending = new Map<string, number>();
     const provided = new Set<string>();
@@ -139,53 +138,26 @@ export function registerRunnables(
             prune();
         };
     };
-    const runTest = (
+    const runTest = async (
         selected: Runnable & { kind: "shell" },
         token: vscode.CancellationToken,
         output: (chunk: string) => void,
-    ): Promise<{ passed: boolean; message?: string }> =>
-        new Promise((resolve) => {
-            const command = invocationCommand(selected, extraEnv());
-            const { args, cleanup } = scriptArguments(command.args, command.script);
-            let collected = "";
-            let child: ReturnType<typeof spawn>;
-            try {
-                child = spawn(command.program, args, {
-                    cwd: command.cwd,
-                    env: taskEnvironment(process.env, command.environment),
-                    stdio: ["ignore", "pipe", "pipe"],
-                });
-            } catch (error) {
-                cleanup();
-                resolve({ passed: false, message: String(error) });
-                return;
-            }
-            const read = (chunk: Buffer): void => {
-                const text = chunk.toString();
-                collected += text;
-                output(text);
-            };
-            child.stdout?.on("data", read);
-            child.stderr?.on("data", read);
-            const cancel = token.onCancellationRequested(() => child.kill());
-            child.once("error", (error) => {
-                cancel.dispose();
-                cleanup();
-                resolve({
-                    passed: false,
-                    message: `Could not start ${command.program}: ${error.message}`,
-                });
-            });
-            child.once("close", (code) => {
-                cancel.dispose();
-                cleanup();
-                resolve(
-                    token.isCancellationRequested
-                        ? { passed: false, message: "cancelled" }
-                        : testOutcome(code, collected),
-                );
-            });
-        });
+    ): Promise<{ passed: boolean; message?: string }> => {
+        const controller = new AbortController();
+        runningTests.add(controller);
+        const cancel = token.onCancellationRequested(() => controller.abort());
+        if (token.isCancellationRequested) controller.abort();
+        try {
+            return await runTestProcess(
+                invocationCommand(selected, extraEnv()),
+                controller.signal,
+                output,
+            );
+        } finally {
+            cancel.dispose();
+            runningTests.delete(controller);
+        }
+    };
     context.subscriptions.push(
         changed,
         vscode.workspace.onDidChangeConfiguration((event) => {
@@ -207,6 +179,7 @@ export function registerRunnables(
         {
             dispose: () => {
                 for (const execution of running) execution.terminate();
+                for (const test of runningTests) test.abort();
                 invocations.dispose();
             },
         },

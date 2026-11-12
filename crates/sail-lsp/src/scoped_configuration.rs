@@ -237,6 +237,12 @@ impl GlobalState {
             c.completion.autoimport
                 && !self.scoped_configs.get(root).is_some_and(|old| old.completion.autoimport)
         });
+        self.semantic_tokens_refresh_requested |= scopes.iter().any(|(root, config)| {
+            !self
+                .scoped_configs
+                .get(root)
+                .is_some_and(|old| old.semantic_tokens == config.semantic_tokens)
+        });
         self.scoped_configs = Arc::new(scopes);
         if changed {
             self.diagnostics.mark_all_changed();

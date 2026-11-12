@@ -789,7 +789,11 @@ suite("sail-lsp extension", () => {
         const unlinked = await vscode.workspace.openTextDocument(unlinkedUri);
         await vscode.window.showTextDocument(unlinked);
         await eventually("unlinked-file diagnostic was not published", () =>
-            vscode.languages.getDiagnostics(unlinkedUri).some((d) => d.code === "unlinked-file"),
+            vscode.languages
+                .getDiagnostics(unlinkedUri)
+                .some(
+                    (d) => (typeof d.code === "object" ? d.code.value : d.code) === "unlinked-file",
+                ),
         );
         const actions = await vscode.commands.executeCommand<
             (vscode.CodeAction | vscode.Command)[]

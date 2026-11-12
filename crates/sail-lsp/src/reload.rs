@@ -509,6 +509,8 @@ impl GlobalState {
 
     pub(crate) fn update_configuration(&mut self, new_config: SailLspConfig) {
         let old_config = std::mem::replace(&mut self.config, new_config);
+        self.semantic_tokens_refresh_requested |=
+            self.config.semantic_tokens != old_config.semantic_tokens;
         if self.config.completion.autoimport && !old_config.completion.autoimport {
             self.prime_caches_queue.request_op("autoimport enabled".into(), ());
         }

@@ -86,7 +86,7 @@
         "test": "npm run typecheck && npm run build && node ./out/src/test/runTest.js",
         "format": "prettier --write src/",
         "format:check": "prettier --check src/",
-        "test:graph": "npm run typecheck && node --test ./out/src/test/projectGraph.test.js ./out/src/test/analysisContext.test.js ./out/src/test/installation.test.js ./out/src/test/diagnosticReport.test.js ./out/src/test/taskInvocations.test.js ./out/src/test/configuration.test.js ./out/src/test/snippets.test.js ./out/src/test/onEnterRules.test.js ./out/src/test/hoverActions.test.js ./out/src/test/tasks.test.js ./out/src/test/syntaxTree.test.js ./out/src/test/packageJson.test.js ./out/src/test/semanticTokens.test.js"
+        "test:graph": "npm run typecheck && node --test ./out/src/test/projectGraph.test.js ./out/src/test/analysisContext.test.js ./out/src/test/installation.test.js ./out/src/test/diagnosticReport.test.js ./out/src/test/taskInvocations.test.js ./out/src/test/configuration.test.js ./out/src/test/snippets.test.js ./out/src/test/onEnterRules.test.js ./out/src/test/hoverActions.test.js ./out/src/test/tasks.test.js ./out/src/test/syntaxTree.test.js ./out/src/test/packageJson.test.js ./out/src/test/semanticTokens.test.js ./out/src/test/testProcess.test.js"
     },
     "contributes": {
         "languages": [

@@ -45,6 +45,50 @@ function documentChanged(document: vscode.TextDocument): Promise<boolean> {
     });
 }
 
+async function applySnippetEdits(
+    client: lc.LanguageClient,
+    editor: vscode.TextEditor,
+    version: number,
+    edits: SnippetTextEdit[],
+): Promise<void> {
+    if (editor.document.isClosed || editor.document.version !== version) return;
+    const edit = new vscode.WorkspaceEdit();
+    edit.set(editor.document.uri, asTextEdits(client, edits, editor.document));
+    await vscode.workspace.applyEdit(edit);
+}
+
+export async function moveItem(
+    client: lc.LanguageClient,
+    editor: vscode.TextEditor,
+    direction: "Up" | "Down",
+): Promise<void> {
+    const version = editor.document.version;
+    const edits = await client.sendRequest(MoveItemRequest, {
+        textDocument: client.code2ProtocolConverter.asTextDocumentIdentifier(editor.document),
+        range: client.code2ProtocolConverter.asRange(editor.selection),
+        direction,
+    });
+    if (edits.length) await applySnippetEdits(client, editor, version, edits);
+}
+
+export async function joinLines(
+    client: lc.LanguageClient,
+    editor: vscode.TextEditor,
+): Promise<void> {
+    const version = editor.document.version;
+    const edits = await client.sendRequest(JoinLinesRequest, {
+        textDocument: client.code2ProtocolConverter.asTextDocumentIdentifier(editor.document),
+        ranges: editor.selections.map((selection) =>
+            client.code2ProtocolConverter.asRange(selection),
+        ),
+    });
+    const converted = await client.protocol2CodeConverter.asTextEdits(edits);
+    if (editor.document.isClosed || editor.document.version !== version) return;
+    await editor.edit((builder) => {
+        for (const edit of converted) builder.replace(edit.range, edit.newText);
+    });
+}
+
 export function registerEditingCommands(
     context: vscode.ExtensionContext,
     getClient: () => lc.LanguageClient | undefined,
@@ -60,25 +104,10 @@ export function registerEditingCommands(
             return undefined;
         return { client, editor };
     };
-    const applySnippetEdits = async (
-        client: lc.LanguageClient,
-        editor: vscode.TextEditor,
-        edits: SnippetTextEdit[],
-    ): Promise<void> => {
-        const edit = new vscode.WorkspaceEdit();
-        edit.set(editor.document.uri, asTextEdits(client, edits, editor.document));
-        await vscode.workspace.applyEdit(edit);
-    };
-    const moveItem = async (direction: "Up" | "Down"): Promise<void> => {
+    const move = async (direction: "Up" | "Down"): Promise<void> => {
         const found = target("moveItem");
         if (!found) return;
-        const { client, editor } = found;
-        const edits = await client.sendRequest(MoveItemRequest, {
-            textDocument: client.code2ProtocolConverter.asTextDocumentIdentifier(editor.document),
-            range: client.code2ProtocolConverter.asRange(editor.selection),
-            direction,
-        });
-        if (edits.length) await applySnippetEdits(client, editor, edits);
+        await moveItem(found.client, found.editor, direction);
     };
     // Unlike rust-analyzer's, this server's `onEnter` is asked once the
     // newline is in the buffer: it looks at the fresh line and the one
@@ -116,7 +145,7 @@ export function registerEditingCommands(
             .catch(() => null);
         // Typed-ahead text would be edited around a stale position.
         if (!edits?.length || editor.document.version !== version) return;
-        await applySnippetEdits(client, editor, edits);
+        await applySnippetEdits(client, editor, version, edits);
     };
     context.subscriptions.push(
         vscode.commands.registerCommand("sail-lsp.matchingBrace", async () => {
@@ -146,22 +175,10 @@ export function registerEditingCommands(
         vscode.commands.registerCommand("sail-lsp.joinLines", async () => {
             const found = target("joinLines");
             if (!found) return;
-            const { client, editor } = found;
-            const edits = await client.sendRequest(JoinLinesRequest, {
-                textDocument: client.code2ProtocolConverter.asTextDocumentIdentifier(
-                    editor.document,
-                ),
-                ranges: editor.selections.map((selection) =>
-                    client.code2ProtocolConverter.asRange(selection),
-                ),
-            });
-            const converted = await client.protocol2CodeConverter.asTextEdits(edits);
-            await editor.edit((builder) => {
-                for (const edit of converted) builder.replace(edit.range, edit.newText);
-            });
+            await joinLines(found.client, found.editor);
         }),
         vscode.commands.registerCommand("sail-lsp.onEnter", onEnter),
-        vscode.commands.registerCommand("sail-lsp.moveItemUp", () => moveItem("Up")),
-        vscode.commands.registerCommand("sail-lsp.moveItemDown", () => moveItem("Down")),
+        vscode.commands.registerCommand("sail-lsp.moveItemUp", () => move("Up")),
+        vscode.commands.registerCommand("sail-lsp.moveItemDown", () => move("Down")),
     );
 }

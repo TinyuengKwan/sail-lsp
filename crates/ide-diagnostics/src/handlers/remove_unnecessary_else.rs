@@ -101,21 +101,62 @@ fn fixes(ctx: &DiagnosticsContext<'_>, d: &RemoveUnnecessaryElse) -> Option<Vec<
 /// replaced by `indent`.
 fn reindent_block(block: &ast::BlockExpr, indent: &str) -> String {
     let text = block.syntax().text().to_string();
+    let tokens = parser::tokenize(&text);
+    // The recovery lexer stops a regular string at an unescaped newline,
+    // which upstream Sail accepts. Keep the original block when a literal
+    // is incomplete in this tree: removing `else` still works, while its
+    // contents cannot safely be treated as layout.
+    if tokens.iter().any(|(token, span)| match token {
+        parser::Token::String(_) => {
+            let literal = &text[span.start..span.end];
+            literal.len() < 2
+                || !literal.ends_with('"')
+                || literal[..literal.len() - 1]
+                    .bytes()
+                    .rev()
+                    .take_while(|&byte| byte == b'\\')
+                    .count()
+                    % 2
+                    != 0
+        }
+        parser::Token::MultilineString(_) => !text[span.start..span.end].ends_with("\"\"\""),
+        _ => false,
+    }) {
+        return text;
+    }
     let inner =
         text.strip_prefix('{').and_then(|text| text.strip_suffix('}')).unwrap_or(&text).trim();
-    let block_indent = inner
-        .lines()
+    let strings: Vec<_> = tokens
+        .into_iter()
+        .filter_map(|(token, span)| {
+            matches!(token, parser::Token::String(_) | parser::Token::MultilineString(_))
+                .then_some(span)
+        })
+        .collect();
+    let in_string = |offset| strings.iter().any(|span| span.start < offset && offset < span.end);
+    let mut offset = text.find(inner).unwrap_or(0);
+    let lines: Vec<_> = inner
+        .split('\n')
+        .map(|line| {
+            let start = offset;
+            offset += line.len() + 1;
+            (start, line)
+        })
+        .collect();
+    let block_indent = lines
+        .iter()
         .skip(1)
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| line.len() - line.trim_start().len())
+        .filter(|(start, line)| !in_string(*start) && !line.trim().is_empty())
+        .map(|(_, line)| line.len() - line.trim_start().len())
         .min()
         .unwrap_or(0);
-    inner
-        .lines()
+    lines
+        .into_iter()
         .enumerate()
-        .map(|(i, line)| {
-            if i == 0 || line.trim().is_empty() {
-                line.trim_end().to_owned()
+        .map(|(i, (start, line))| {
+            let line = if in_string(start + line.len()) { line } else { line.trim_end() };
+            if i == 0 || in_string(start) || line.trim().is_empty() {
+                line.to_owned()
             } else {
                 let stripped = &line[block_indent.min(line.len() - line.trim_start().len())..];
                 format!("{indent}{stripped}")
@@ -142,7 +183,7 @@ mod tests {
 
 #[cfg(test)]
 mod fix_tests {
-    use crate::tests::check_fix;
+    use crate::tests::{apply_fix, check_fix};
 
     #[test]
     fn unwraps_the_else_block_into_the_enclosing_block() {
@@ -151,6 +192,36 @@ mod fix_tests {
             "remove-unnecessary-else",
             "remove_unnecessary_else",
             "val f : int -> int\nfunction f(x) = {\n  if x > 0 then return 1;\n  let y = 2;\n  y\n}\n",
+        );
+    }
+
+    #[test]
+    fn preserves_multiline_string_indentation_and_trailing_spaces() {
+        let result = apply_fix(
+            "function f(c : bool) -> string = {\n  if c then return \"\" else {\n    let text = \"hello   \n       world  \n  end\";\n    text\n  }\n}\n",
+            "remove-unnecessary-else",
+            "remove_unnecessary_else",
+        );
+        assert_eq!(result, "function f(c : bool) -> string = {\n  if c then return \"\";\n  {\n    let text = \"hello   \n       world  \n  end\";\n    text\n  }\n}\n");
+    }
+
+    #[test]
+    fn preserves_crlf_inside_a_multiline_string() {
+        let result = apply_fix(
+            "function f(c : bool) -> string = {\n  if c then return \"\" else {\n    \"hello\r\n       world\"\n  }\n}\n",
+            "remove-unnecessary-else",
+            "remove_unnecessary_else",
+        );
+        assert_eq!(result, "function f(c : bool) -> string = {\n  if c then return \"\";\n  {\n    \"hello\r\n       world\"\n  }\n}\n");
+    }
+
+    #[test]
+    fn reindents_code_without_changing_escaped_newline_strings() {
+        check_fix(
+            "function f(c : bool) -> string = {\n  if c then return \"\" else {\n    let text = \"hello\\\n       world\";\n    text\n  }\n}\n",
+            "remove-unnecessary-else",
+            "remove_unnecessary_else",
+            "function f(c : bool) -> string = {\n  if c then return \"\";\n  let text = \"hello\\\n       world\";\n  text\n}\n",
         );
     }
 

@@ -169,6 +169,18 @@ fn diagnostic_with_code<'a>(
 /// the result with `after`. The fixed text must still parse, and the
 /// diagnostic must be gone from it.
 pub(crate) fn check_fix(before: &str, code: &str, fix_id: &str, after: &str) {
+    let result = apply_fix(before, code, fix_id);
+    assert_eq!(result, after);
+    assert!(syntax::parse_text(&result).1.is_empty(), "{result}");
+    let (_, remaining) = resolved_diagnostics(&result);
+    assert!(
+        !remaining.iter().any(|d| d.code.as_str() == code),
+        "`{code}` survives its own fix:\n{result}"
+    );
+}
+
+/// Apply a diagnostic fix, including to text the recovery parser cannot fully parse.
+pub(crate) fn apply_fix(before: &str, code: &str, fix_id: &str) -> String {
     let (_, diagnostics) = resolved_diagnostics(before);
     let diagnostic = diagnostic_with_code(&diagnostics, code);
     let fixes = diagnostic.fixes.as_deref().unwrap_or_default();
@@ -188,13 +200,7 @@ pub(crate) fn check_fix(before: &str, code: &str, fix_id: &str, after: &str) {
             &edit.new_text,
         );
     }
-    assert_eq!(result, after);
-    assert!(syntax::parse_text(&result).1.is_empty(), "{result}");
-    let (_, remaining) = resolved_diagnostics(&result);
-    assert!(
-        !remaining.iter().any(|d| d.code.as_str() == code),
-        "`{code}` survives its own fix:\n{result}"
-    );
+    result
 }
 
 /// Check that the diagnostic `code` is produced and offers no fix.

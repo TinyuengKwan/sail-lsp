@@ -583,57 +583,61 @@ fn undo_one(change: &Change) -> Result<()> {
                     table.remove("sail-lsp-managed");
                 }
             }
-            if let Some(languages) = doc.get_mut("language").and_then(Item::as_array_of_tables_mut)
-            {
-                for language in languages.iter_mut() {
-                    if language.get("name").and_then(Item::as_str) == Some("sail") {
-                        let previous = original
-                            .get("language")
-                            .and_then(Item::as_array_of_tables)
-                            .and_then(|a| {
-                                a.iter()
-                                    .find(|t| t.get("name").and_then(Item::as_str) == Some("sail"))
-                            })
-                            .and_then(|t| t.get("language-servers"));
-                        if let Some(servers) =
-                            language.get_mut("language-servers").and_then(Item::as_array_mut)
-                        {
-                            servers.retain(|v| v.as_str() != Some("sail-lsp-managed"));
-                            if servers.is_empty() {
-                                if let Some(previous) = previous {
-                                    language["language-servers"] = previous.clone();
-                                } else {
-                                    language.remove("language-servers");
+            for name in ["sail", "sail-project"] {
+                if let Some(languages) =
+                    doc.get_mut("language").and_then(Item::as_array_of_tables_mut)
+                {
+                    for language in languages.iter_mut() {
+                        if language.get("name").and_then(Item::as_str) == Some(name) {
+                            let previous = original
+                                .get("language")
+                                .and_then(Item::as_array_of_tables)
+                                .and_then(|a| {
+                                    a.iter().find(|t| {
+                                        t.get("name").and_then(Item::as_str) == Some(name)
+                                    })
+                                })
+                                .and_then(|t| t.get("language-servers"));
+                            if let Some(servers) =
+                                language.get_mut("language-servers").and_then(Item::as_array_mut)
+                            {
+                                servers.retain(|v| v.as_str() != Some("sail-lsp-managed"));
+                                if servers.is_empty() {
+                                    if let Some(previous) = previous {
+                                        language["language-servers"] = previous.clone();
+                                    } else {
+                                        language.remove("language-servers");
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            }
-            // Remove a Sail table created by us only if every remaining field
-            // still matches the generated table. Keep user additions and edits.
-            let had_sail =
-                original.get("language").and_then(Item::as_array_of_tables).is_some_and(|a| {
-                    a.iter().any(|t| t.get("name").and_then(Item::as_str) == Some("sail"))
-                });
-            if !had_sail {
-                let generated = expected
-                    .get("language")
-                    .and_then(Item::as_array_of_tables)
-                    .and_then(|a| {
-                        a.iter().find(|t| t.get("name").and_then(Item::as_str) == Some("sail"))
-                    })
-                    .cloned();
-                if let (Some(languages), Some(mut generated)) =
-                    (doc.get_mut("language").and_then(Item::as_array_of_tables_mut), generated)
-                {
-                    generated.remove("language-servers");
-                    languages.retain(|t| {
-                        t.get("name").and_then(Item::as_str) != Some("sail")
-                            || t.to_string() != generated.to_string()
+                // Remove a language table created by us only if every remaining field
+                // still matches the generated table. Keep user additions and edits.
+                let had_language =
+                    original.get("language").and_then(Item::as_array_of_tables).is_some_and(|a| {
+                        a.iter().any(|t| t.get("name").and_then(Item::as_str) == Some(name))
                     });
-                    if languages.is_empty() {
-                        doc.remove("language");
+                if !had_language {
+                    let generated = expected
+                        .get("language")
+                        .and_then(Item::as_array_of_tables)
+                        .and_then(|a| {
+                            a.iter().find(|t| t.get("name").and_then(Item::as_str) == Some(name))
+                        })
+                        .cloned();
+                    if let (Some(languages), Some(mut generated)) =
+                        (doc.get_mut("language").and_then(Item::as_array_of_tables_mut), generated)
+                    {
+                        generated.remove("language-servers");
+                        languages.retain(|t| {
+                            t.get("name").and_then(Item::as_str) != Some(name)
+                                || t.to_string() != generated.to_string()
+                        });
+                        if languages.is_empty() {
+                            doc.remove("language");
+                        }
                     }
                 }
             }
@@ -1049,6 +1053,47 @@ mod tests {
         assert_eq!(strings(&manifests["language-servers"]), ["sail-lsp-managed"]);
         assert_eq!(strings(&manifests["file-types"]), ["*.sail_project", "sail.proj"]);
         assert_eq!(strings(&manifests["roots"]), ["sail.proj", ".git"]);
+    }
+
+    #[test]
+    fn helix_uninstall_removes_both_generated_languages() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("languages.toml");
+        let mut changes =
+            vec![helix_change(path.clone(), Path::new("/sail/bin/sail-lsp"), &[]).unwrap()];
+        apply(&mut changes, None).unwrap();
+        undo_one(&changes[0]).unwrap();
+        assert!(
+            read(&path).unwrap().is_none(),
+            "{}",
+            fs::read_to_string(&path).unwrap_or_default()
+        );
+    }
+
+    #[test]
+    fn helix_uninstall_preserves_existing_languages_and_manifest_customizations() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("languages.toml");
+        let original = "[[language]]\nname = \"sail\"\nlanguage-servers = [\"other\"]\n\n[[language]]\nname = \"sail-project\"\nlanguage-servers = [\"manifest-server\"]\n";
+        fs::write(&path, original).unwrap();
+        let mut changes =
+            vec![helix_change(path.clone(), Path::new("/sail/bin/sail-lsp"), &[]).unwrap()];
+        apply(&mut changes, None).unwrap();
+        let mut installed: toml_edit::DocumentMut =
+            fs::read_to_string(&path).unwrap().parse().unwrap();
+        installed["language"].as_array_of_tables_mut().unwrap().get_mut(1).unwrap()["formatter"]
+            ["command"] = toml_edit::value("my-formatter");
+        fs::write(&path, installed.to_string()).unwrap();
+        undo_one(&changes[0]).unwrap();
+        let restored = fs::read_to_string(&path).unwrap();
+        assert!(!restored.contains("sail-lsp-managed"), "{restored}");
+        let doc: toml_edit::DocumentMut = restored.parse().unwrap();
+        let languages = doc["language"].as_array_of_tables().unwrap();
+        assert_eq!(languages.len(), 2);
+        assert_eq!(languages.get(0).unwrap()["language-servers"][0].as_str(), Some("other"));
+        let manifest = languages.get(1).unwrap();
+        assert_eq!(manifest["language-servers"][0].as_str(), Some("manifest-server"));
+        assert_eq!(manifest["formatter"]["command"].as_str(), Some("my-formatter"));
     }
 
     #[test]

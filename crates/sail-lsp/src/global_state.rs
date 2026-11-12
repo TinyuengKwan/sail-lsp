@@ -173,6 +173,9 @@ pub(crate) struct GlobalState {
     /// `analysis_health.reported_unknowns` is their sum for a pulling client.
     pub(crate) pull_unknowns:
         std::collections::HashMap<Url, std::collections::BTreeMap<String, usize>>,
+    /// A successful pull recovers only the file it describes.
+    pub(crate) pull_failures: std::collections::BTreeMap<Url, crate::analysis_health::Failure>,
+    pub(crate) semantic_tokens_refresh_requested: bool,
     /// Per-file semantic token cache for delta requests.
     pub(crate) semantic_tokens_cache: crate::lsp::semantic_tokens::SemanticTokensCache,
 
@@ -298,6 +301,8 @@ impl GlobalState {
             diagnostics: crate::diagnostics::DiagnosticCollection::default(),
             analysis_health: Default::default(),
             pull_unknowns: Default::default(),
+            pull_failures: Default::default(),
+            semantic_tokens_refresh_requested: false,
             semantic_tokens_cache: crate::lsp::semantic_tokens::SemanticTokensCache::new(),
             fetch_workspaces_queue: crate::op_queue::OpQueue::default(),
             pending_reload_scope: None,
