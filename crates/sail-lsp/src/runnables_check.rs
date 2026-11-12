@@ -51,7 +51,10 @@ fn test_functions_and_main_are_interpreter_runnables_placed_in_the_source() {
     assert!(args.contains(&"--project") && args.contains(&"sail.proj"), "{args:?}");
     assert!(!args.contains(&"--just-check"), "{args:?}");
     assert_eq!(test["args"]["script"], "test_helper()\n:run\n:quit\n");
-    assert_eq!(test["args"]["cwd"], server.path("").to_str().unwrap().trim_end_matches('/'));
+    assert_eq!(
+        std::path::Path::new(test["args"]["cwd"].as_str().unwrap()),
+        server.path("").as_path()
+    );
     assert_eq!(test["location"]["uri"], uri.to_string());
     assert_eq!(test["location"]["range"]["start"]["line"], 3);
     assert_eq!(entries[2]["location"]["range"]["start"]["line"], 5);

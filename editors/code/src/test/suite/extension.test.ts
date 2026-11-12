@@ -1130,8 +1130,10 @@ suite("sail-lsp extension", () => {
                     document.lineAt(4).text.startsWith("val helper : _ -> "),
             );
         } finally {
+            await vscode.commands.executeCommand("leaveSnippet");
             await replace(original);
             await vscode.window.showTextDocument(document);
+            await vscode.commands.executeCommand("workbench.action.revertAndCloseActiveEditor");
         }
     });
 
@@ -1139,6 +1141,7 @@ suite("sail-lsp extension", () => {
         const extension = vscode.extensions.getExtension<ExtensionApi>("Lunarwwww.sail-lsp")!;
         const api = await extension.activate();
         await eventually("server ready", () => api.test.status()?.quiescent === true);
+        await closeRestoredEditors();
         const uri = vscode.Uri.joinPath(vscode.workspace.workspaceFolders![0].uri, "sample.sail");
         const document = await vscode.workspace.openTextDocument(uri);
         const original = document.getText();
@@ -1159,6 +1162,8 @@ suite("sail-lsp extension", () => {
             editor = await focusSource(document, position);
         };
         let editor: vscode.TextEditor;
+        let observeEnter: vscode.Disposable | undefined;
+        const enterChanges: unknown[] = [];
         try {
             await replace(source);
             editor = await vscode.window.showTextDocument(document);
@@ -1201,9 +1206,19 @@ suite("sail-lsp extension", () => {
             // a newline and nothing else.
             const doc = lineOf("/// doc");
             await select(document.lineAt(doc).range.end);
+            observeEnter = vscode.workspace.onDidChangeTextDocument((event) => {
+                if (event.document === document)
+                    enterChanges.push({ version: document.version, changes: event.contentChanges });
+            });
             await vscode.commands.executeCommand("sail-lsp.onEnter");
             await eventually(
-                () => `doc comment not continued: ${JSON.stringify(document.getText())}`,
+                () =>
+                    `doc comment not continued: ${JSON.stringify({
+                        text: document.getText(),
+                        version: document.version,
+                        selection: editor.selection,
+                        changes: enterChanges,
+                    })}`,
                 () =>
                     document.lineAt(doc).text === "/// doc" &&
                     document.lineAt(doc + 1).text === "/// " &&
@@ -1220,8 +1235,11 @@ suite("sail-lsp extension", () => {
             await new Promise((resolve) => setTimeout(resolve, 300));
             assert.equal(document.lineAt(plain + 1).text, "", "plain code gained a continuation");
         } finally {
+            observeEnter?.dispose();
+            await vscode.commands.executeCommand("leaveSnippet");
             await replace(original);
             await vscode.window.showTextDocument(document);
+            await vscode.commands.executeCommand("workbench.action.revertAndCloseActiveEditor");
         }
     });
 
@@ -1300,6 +1318,7 @@ suite("sail-lsp extension", () => {
             );
             await replace(original);
             await vscode.window.showTextDocument(document);
+            await vscode.commands.executeCommand("workbench.action.revertAndCloseActiveEditor");
         }
     });
 
@@ -1307,6 +1326,7 @@ suite("sail-lsp extension", () => {
         const extension = vscode.extensions.getExtension<ExtensionApi>("Lunarwwww.sail-lsp")!;
         const api = await extension.activate();
         await eventually("server ready", () => api.test.status()?.quiescent === true);
+        await closeRestoredEditors();
         // A document first opened now: VS Code applies Enter rules registered
         // at activation to models created after it.
         const uri = vscode.Uri.joinPath(vscode.workspace.workspaceFolders![0].uri, "nested.sail");
@@ -1332,7 +1352,15 @@ suite("sail-lsp extension", () => {
             const version = document.version;
             await vscode.commands.executeCommand("type", { text });
             await eventually(
-                "typing did not change the document",
+                () =>
+                    `typing did not change the document: ${JSON.stringify({
+                        typed: text,
+                        before: version,
+                        after: document.version,
+                        text: document.getText(),
+                        selection: vscode.window.activeTextEditor?.selection,
+                        active: vscode.window.activeTextEditor?.document.uri.toString(),
+                    })}`,
                 () => document.version > version,
             );
         };

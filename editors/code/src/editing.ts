@@ -30,15 +30,24 @@ const MoveItemRequest = new lc.RequestType<
     void
 >("experimental/moveItem");
 
-/** Whether `document` changes within the next moment — the typed newline arriving. */
-function documentChanged(document: vscode.TextDocument): Promise<boolean> {
+/** Wait for this Enter's newline, rather than an older or unrelated editor change. */
+export function waitForNewline(
+    document: vscode.TextDocument,
+    selection: vscode.Selection,
+): Promise<boolean> {
+    const version = document.version;
     return new Promise((resolve) => {
         const subscription = vscode.workspace.onDidChangeTextDocument((event) => {
-            if (event.document !== document) return;
+            if (event.document !== document || event.document.version <= version) return;
+            clearTimeout(timer);
             subscription.dispose();
-            resolve(true);
+            resolve(
+                event.contentChanges.some(
+                    (change) => change.range.isEqual(selection) && /[\r\n]/.test(change.text),
+                ),
+            );
         });
-        setTimeout(() => {
+        const timer = setTimeout(() => {
             subscription.dispose();
             resolve(false);
         }, 1000);
@@ -121,7 +130,7 @@ export function registerEditingCommands(
             found?.editor.selections.length === 1 ? found.editor.selection : undefined;
         // `default:type` resolves before the change reaches this side, so
         // the fresh line is awaited, and found from where the cursor was.
-        const typed = selection && found && documentChanged(found.editor.document);
+        const typed = selection && found && waitForNewline(found.editor.document, selection);
         await vscode.commands.executeCommand("default:type", { text: "\n" });
         if (!found || !selection || !typed) return;
         const { client, editor } = found;

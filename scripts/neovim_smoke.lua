@@ -14,6 +14,15 @@ local function run()
   local template = table.concat(vim.fn.readfile(repo .. "/editors/templates/neovim.lua"), "\n")
   template = template:gsub("@SERVER_JSON@", function() return vim.json.encode(server) end)
   assert(loadstring(template))()
+  local status, status_updates = nil, 0
+  vim.lsp.config("sail_lsp_managed", {
+    capabilities = { experimental = { serverStatusNotification = true } },
+    handlers = {
+      ["sail-lsp/serverStatus"] = function(_, value)
+        status, status_updates = value, status_updates + 1
+      end,
+    },
+  })
   vim.cmd("filetype plugin on")
   vim.cmd.cd(vim.fn.fnameescape(root))
   vim.cmd.edit(vim.fn.fnameescape(root .. "/nested/child.sail"))
@@ -69,8 +78,12 @@ local function run()
   vim.cmd.SailProject()
   wait("manifest navigation",function()return vim.api.nvim_buf_get_name(0) == root .. "/model.sail_project" end)
   vim.api.nvim_set_current_buf(source_buffer)
+  local previous_status_updates = status_updates
   vim.cmd.SailSelectProject()
   wait("project selection",function()return client.settings["sail-lsp"].workspace and client.settings["sail-lsp"].workspace.activeProject ~= nil end)
+  wait("selected project reload", function()
+    return status_updates > previous_status_updates and status and status.quiescent
+  end)
   local discovered = false
   vim.ui.select = function(items, _, callback)
     for _,item in ipairs(items) do if item.action and item.action.title:find("Check",1,true) then discovered = true end end

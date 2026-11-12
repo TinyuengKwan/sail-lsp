@@ -1,7 +1,7 @@
 import * as assert from "node:assert/strict";
 import * as vscode from "vscode";
 import type * as lc from "vscode-languageclient/node";
-import { joinLines, moveItem } from "../../editing";
+import { joinLines, moveItem, waitForNewline } from "../../editing";
 
 function deferred<T>() {
     let resolve!: (value: T) => void;
@@ -10,6 +10,32 @@ function deferred<T>() {
 }
 
 suite("editing request versions", () => {
+    for (const change of ["newline", "typed-ahead", "unrelated-newline"] as const) {
+        test(`Enter waits for its own newline: ${change}`, async () => {
+            const document = await vscode.workspace.openTextDocument({
+                language: "sail",
+                content: "/// doc\nfunction f() = 1\n",
+            });
+            const editor = await vscode.window.showTextDocument(document);
+            try {
+                const at = document.lineAt(0).range.end;
+                const typed = waitForNewline(document, new vscode.Selection(at, at));
+                assert.ok(
+                    await editor.edit((edit) =>
+                        edit.insert(
+                            change === "unrelated-newline" ? new vscode.Position(1, 0) : at,
+                            change === "typed-ahead" ? "x" : "\n",
+                        ),
+                    ),
+                );
+                assert.equal(await typed, change === "newline");
+            } finally {
+                await vscode.window.showTextDocument(document);
+                await vscode.commands.executeCommand("workbench.action.revertAndCloseActiveEditor");
+            }
+        });
+    }
+
     const source = "function first() = 1\nfunction second() = 2\n";
     for (const command of ["joinLines", "moveItem"] as const) {
         for (const changeDuringRequest of [false, true]) {
